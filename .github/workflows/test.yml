@@ -1,0 +1,36 @@
+name: P2P TAP VPN CI/CD Workflow
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Build & E2E Test Suite
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        go-version: ['1.22', '1.23']
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: false
+
+      - name: Install Dependencies
+        run: go mod download
+
+      - name: Run Unit & E2E Integration Tests (IPv4/IPv6 Ping, Strategies, Deduplication)
+        run: go test -v ./...
+
+      - name: Cross-Compile Build Verification
+        run: |
+          go build -v -o p2ptap_test_bin ./cmd/p2ptap

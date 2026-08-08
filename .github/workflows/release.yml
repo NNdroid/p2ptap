@@ -1,0 +1,341 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v1.0.20260805). Leave empty for auto-generated.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Determine Version
+        id: version
+        run: |
+          echo "[DEBUG] User input version: '${{ github.event.inputs.version }}'"
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=v1.0.$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
+          fi
+      - name: Print Version
+        run: |
+          echo "Building version ${{ steps.version.outputs.version }}"
+          echo "[DEBUG] Github SHA: ${GITHUB_SHA}"
+
+  build-linux:
+    name: Build Linux (${{ matrix.goarch }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, "386", arm64, arm, mipsle, mips, mips64le, riscv64, loong64]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+
+      - name: Build Linux Binaries
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -x # 开启指令回显以输出更多 debug 信息
+          LDFLAGS="-s -w -X p2ptap/pkg/version.Version=${VERSION} -X p2ptap/pkg/version.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X p2ptap/pkg/version.GitCommit=${GITHUB_SHA}"
+          STAGE="p2ptap-linux-${GOARCH}"
+          mkdir -p "dist/${STAGE}"
+          go build -ldflags="${LDFLAGS}" -o "dist/${STAGE}/p2ptap" ./cmd/p2ptap
+          go build -ldflags="${LDFLAGS}" -o "dist/${STAGE}/p2ptap-boot" ./cmd/p2ptap-boot
+          cp scripts/start.sh "dist/${STAGE}/"
+          cd dist && zip -r "${STAGE}.zip" "${STAGE}" && cd ..
+          echo "[DEBUG] Linux build completed for ${GOARCH}, listing dist directory:"
+          ls -la dist/
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-${{ matrix.goarch }}
+          path: dist/*.zip
+
+  build-windows:
+    name: Build Windows (${{ matrix.goarch }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, "386", arm64]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+
+      - name: Build Windows Binaries
+        env:
+          GOOS: windows
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -x
+          LDFLAGS="-s -w -X p2ptap/pkg/version.Version=${VERSION} -X p2ptap/pkg/version.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X p2ptap/pkg/version.GitCommit=${GITHUB_SHA}"
+          STAGE="p2ptap-windows-${GOARCH}"
+          mkdir -p "dist/${STAGE}"
+          go build -ldflags="${LDFLAGS}" -o "dist/${STAGE}/p2ptap.exe" ./cmd/p2ptap
+          go build -ldflags="${LDFLAGS}" -o "dist/${STAGE}/p2ptap-boot.exe" ./cmd/p2ptap-boot
+          go build -ldflags="${LDFLAGS} -H windowsgui" -o "dist/${STAGE}/p2ptap-tray.exe" ./cmd/p2ptap-tray
+          cp scripts/start.bat "dist/${STAGE}/"
+          if [ -f "scripts/wintun/${GOARCH}/wintun.dll" ]; then
+            cp "scripts/wintun/${GOARCH}/wintun.dll" "dist/${STAGE}/"
+          else
+            echo "[DEBUG] wintun.dll not found for ${GOARCH}"
+          fi
+          cd dist && zip -r "${STAGE}.zip" "${STAGE}" && cd ..
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-${{ matrix.goarch }}
+          path: dist/*.zip
+
+  build-macos:
+    name: Build macOS (${{ matrix.goarch }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+
+      - name: Build macOS Binaries
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -x
+          LDFLAGS="-s -w -X p2ptap/pkg/version.Version=${VERSION} -X p2ptap/pkg/version.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X p2ptap/pkg/version.GitCommit=${GITHUB_SHA}"
+          STAGE="p2ptap-darwin-${GOARCH}"
+          mkdir -p "dist/${STAGE}"
+          go build -ldflags="${LDFLAGS}" -o "dist/${STAGE}/p2ptap" ./cmd/p2ptap
+          go build -ldflags="${LDFLAGS}" -o "dist/${STAGE}/p2ptap-boot" ./cmd/p2ptap-boot
+          cp scripts/start.sh "dist/${STAGE}/"
+          cd dist && zip -r "${STAGE}.zip" "${STAGE}" && cd ..
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-darwin-${{ matrix.goarch }}
+          path: dist/*.zip
+
+  build-openwrt:
+    name: Build OpenWrt Packages (${{ matrix.goarch }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            openwrt_arch: x86_64
+          - goarch: "386"
+            openwrt_arch: i386_pentium4
+          - goarch: arm64
+            openwrt_arch: aarch64_generic
+          - goarch: arm
+            openwrt_arch: arm_cortex-a7_neon-vfpv4
+          - goarch: riscv64
+            openwrt_arch: riscv64_generic
+          - goarch: loong64
+            openwrt_arch: loongarch64_generic
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+
+      - name: Prepare OpenWrt Package Directory & Auto Compute PKG_MIRROR_HASH
+        run: |
+          set -x # 打印执行的每一行命令，方便 debug
+          echo "[DEBUG] Starting OpenWrt package preparation..."
+          mkdir -p package
+          cp -r openwrt/package/* package/
+          echo "[DEBUG] Disabling CGO..."
+          sed -i '/include \$(INCLUDE_DIR)\/package.mk/a GO_PKG_CGO_ENABLED:=0' "${GITHUB_WORKSPACE}/openwrt/package/p2ptap/Makefile"
+          sed -i '/include \$(INCLUDE_DIR)\/package.mk/a GO_PKG_CGO_ENABLED:=0' "${GITHUB_WORKSPACE}/package/p2ptap/Makefile"
+          RAW_VER="${{ needs.prepare.outputs.version }}"
+          VER_NUM=$(echo "$RAW_VER" | sed 's/^v//')
+          
+          if [ -n "$VER_NUM" ]; then
+            echo "[DEBUG] Injecting dynamic OpenWrt PKG_VERSION: ${VER_NUM}"
+            sed -i "s/PKG_VERSION:=.*/PKG_VERSION:=${VER_NUM}/" "${GITHUB_WORKSPACE}/openwrt/package/p2ptap/Makefile"
+            sed -i "s/PKG_VERSION:=.*/PKG_VERSION:=${VER_NUM}/" "${GITHUB_WORKSPACE}/openwrt/package/luci-app-p2ptap/Makefile"
+            sed -i "s/PKG_VERSION:=.*/PKG_VERSION:=${VER_NUM}/" "${GITHUB_WORKSPACE}/package/p2ptap/Makefile"
+            sed -i "s/PKG_VERSION:=.*/PKG_VERSION:=${VER_NUM}/" "${GITHUB_WORKSPACE}/package/luci-app-p2ptap/Makefile"
+          fi
+          
+          sudo apt-get update -qq && sudo apt-get install -y -qq zstd
+          WORK_DIR=$(mktemp -d)
+          echo "[DEBUG] Working directory created: $WORK_DIR"
+          cd "$WORK_DIR"
+          
+          git clone "${GITHUB_WORKSPACE}" repo >/dev/null 2>&1 || true
+          if [ -d repo ]; then
+            echo "[DEBUG] Repo cloned successfully, calculating hash..."
+            cd repo
+            TAR_TS=$(git log -1 --no-show-signature --format='@%ct')
+            git archive --format=tar HEAD > ../archive.tar
+            cd ..
+            mkdir "p2ptap-${VER_NUM}"
+            tar -C "p2ptap-${VER_NUM}" -xf archive.tar
+            HASH=$(tar --numeric-owner --owner=0 --group=0 --mode=a-s --sort=name --mtime="$TAR_TS" -c "p2ptap-${VER_NUM}" | zstd -T0 --ultra -20 -c | sha256sum | awk '{print $1}')
+            
+            if [ -n "$HASH" ]; then
+              echo "[DEBUG] Auto calculated OpenWrt zstd PKG_MIRROR_HASH: ${HASH}"
+              sed -i "s/PKG_MIRROR_HASH:=.*/PKG_MIRROR_HASH:=${HASH}/" "${GITHUB_WORKSPACE}/openwrt/package/p2ptap/Makefile"
+              sed -i "s/PKG_MIRROR_HASH:=.*/PKG_MIRROR_HASH:=${HASH}/" "${GITHUB_WORKSPACE}/package/p2ptap/Makefile"
+            else
+              echo "[DEBUG] WARNING: Failed to calculate PKG_MIRROR_HASH!"
+            fi
+          else
+            echo "[DEBUG] WARNING: Repo directory not found!"
+          fi
+          
+          cd "${GITHUB_WORKSPACE}"
+          rm -rf "$WORK_DIR"
+          echo "[DEBUG] Finished OpenWrt package preparation. Listing package directory:"
+          ls -la package/
+
+      - name: Build OpenWrt Packages (OpenWrt 24.10 SDK)
+        uses: openwrt/gh-action-sdk@v7
+        continue-on-error: true
+        env:
+          ARCH: ${{ matrix.openwrt_arch }}
+          SDK_VER: 24.10.0
+          PACKAGES: p2ptap luci-app-p2ptap
+          V: s
+
+      - name: Copy & Tag OpenWrt Packages
+        run: |
+          set -x # 开启指令回显以详细追踪脚本行为
+          echo "[DEBUG] Starting to copy and tag OpenWrt packages..."
+          
+          echo "[DEBUG] Checking what was actually generated in bin/:"
+          ls -laR bin/ || echo "[DEBUG] 'bin/' directory does not exist or is empty!"
+          
+          # 创建 dist 目录，修复复制时报错 No such file or directory 的问题
+          mkdir -p dist
+          echo "[DEBUG] 'dist' directory created."
+          
+          GOARCH="${{ matrix.goarch }}"
+          OW_ARCH="${{ matrix.openwrt_arch }}"
+          
+          find bin/packages/ -type f \( -name "*p2ptap*.ipk" -o -name "*p2ptap*.apk" \) | while read -r pkg; do
+            filename=$(basename "$pkg")
+            ext="${filename##*.}"
+            base="${filename%.*}"
+            
+            echo "[DEBUG] Processing file: $filename (ext: $ext, base: $base)"
+            
+            if [[ "$filename" != *"$GOARCH"* && "$filename" != *"$OW_ARCH"* ]]; then
+              new_name="${base}_${GOARCH}.${ext}"
+              echo "[DEBUG] Name mutated for architecture tagging."
+            else
+              new_name="$filename"
+              echo "[DEBUG] Name retained (architecture tag already present)."
+            fi
+            
+            cp "$pkg" "dist/${new_name}"
+            echo "[+] Package copied & tagged: dist/${new_name}"
+          done
+          touch dist/.placeholder
+          
+          echo "[DEBUG] Listing final contents of dist/ directory:"
+          ls -la dist/ || true
+
+      - name: Upload OpenWrt Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-pkgs-${{ matrix.goarch }}
+          path: |
+            dist/*.ipk
+            dist/*.apk
+            dist/*.zip
+            dist/.placeholder
+          if-no-files-found: ignore
+
+  release:
+    name: Create GitHub Release
+    needs: [prepare, build-linux, build-windows, build-macos, build-openwrt]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*'
+          path: release-assets
+          merge-multiple: true
+
+      - name: List Release Assets
+        run: |
+          rm -f release-assets/.placeholder
+          echo "[DEBUG] Inspecting merged release assets:"
+          ls -la release-assets/
+          find release-assets -type f | sort
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.version }}
+          name: "p2ptap ${{ needs.prepare.outputs.version }}"
+          body: |
+            ## p2ptap ${{ needs.prepare.outputs.version }}
+            
+            ### OpenWrt Packages
+            - **`.ipk`** — For OpenWrt 19.07 ~ 23.05 (opkg package manager)
+            - **`.apk`** — For OpenWrt 24.10+ (apk package manager)
+
+            Install on OpenWrt:
+            ```bash
+            # Legacy OpenWrt (opkg)
+            opkg install p2ptap_*.ipk
+
+            # Latest OpenWrt 24.10+ (apk)
+            apk add --allow-untrusted p2ptap_*.apk
+            ```
+          files: |
+            release-assets/*
+          draft: false
+          prerelease: false

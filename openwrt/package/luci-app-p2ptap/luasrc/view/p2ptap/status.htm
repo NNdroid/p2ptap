@@ -1,0 +1,15 @@
+<script type="text/javascript">//<![CDATA[
+	XHR.poll(5, '<%=luci.dispatcher.build_url("admin", "services", "p2ptap", "status")%>', null,
+		function(x, st)
+		{
+			var tb = document.getElementById('p2ptap_status');
+			if (st && st.running) {
+				tb.innerHTML = '<span style="color:green; font-weight:bold;"><%:运行中 (Running)%></span>';
+			} else {
+				tb.innerHTML = '<span style="color:red; font-weight:bold;"><%:未运行 (Stopped)%></span>';
+			}
+		}
+	);
+//]]></script>
+
+<div id="p2ptap_status"><em><%:正在获取运行状态...%></em></div>

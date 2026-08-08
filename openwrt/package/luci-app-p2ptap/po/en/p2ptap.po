@@ -1,0 +1,420 @@
+# p2ptap LuCI i18n — English (en)
+# Copyright (C) 2024-2026
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-p2ptap 1.0.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-08 00:00+0800\n"
+"PO-Revision-Date: 2026-08-08 00:00+0800\n"
+"Last-Translator: \n"
+"Language-Team: English\n"
+"Language: en\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: luasrc/controller/p2ptap.lua:8
+msgid "p2ptap"
+msgstr "p2ptap"
+
+#: luasrc/model/cbi/p2ptap.lua:3
+msgid "p2ptap 控制台"
+msgstr "p2ptap Console"
+
+#: luasrc/model/cbi/p2ptap.lua:4
+msgid "基于 go-libp2p 的二层 P2P TAP 点对点虚拟局域网。支持全功能参数配置、网络传输调优、流量混淆、出口网关模式、一键服务控制及内置 WebUI 管理入口。"
+msgstr "A Layer-2 P2P TAP virtual LAN based on go-libp2p. Supports full parameter configuration, transport tuning, traffic obfuscation, exit-gateway mode, one-click service control, and built-in WebUI management."
+
+#: luasrc/model/cbi/p2ptap.lua:9
+msgid "运行状态"
+msgstr "Running Status"
+
+#: luasrc/model/cbi/p2ptap.lua:11
+msgid "服务运行状态"
+msgstr "Service Running Status"
+
+#: luasrc/model/cbi/p2ptap.lua:17
+msgid "基础与网络配置"
+msgstr "Basic & Network Configuration"
+
+#: luasrc/model/cbi/p2ptap.lua:19
+msgid "基本配置"
+msgstr "Basic Settings"
+
+#: luasrc/model/cbi/p2ptap.lua:20
+msgid "虚拟网卡与IP拓扑"
+msgstr "Virtual NIC & IP Topology"
+
+#: luasrc/model/cbi/p2ptap.lua:21
+msgid "节点与监听配置"
+msgstr "Node & Listen Configuration"
+
+#: luasrc/model/cbi/p2ptap.lua:24
+msgid "启用 p2ptap 服务"
+msgstr "Enable p2ptap Service"
+
+#: luasrc/model/cbi/p2ptap.lua:27
+msgid "节点名称 (Node Name)"
+msgstr "Node Name"
+
+#: luasrc/model/cbi/p2ptap.lua:30
+msgid "网络中标识本路由器的名称，留空默认使用系统 Hostname。"
+msgstr "Name to identify this router in the network. Leave empty to use the system hostname."
+
+#: luasrc/model/cbi/p2ptap.lua:32
+msgid "日志记录级别 (Log Level)"
+msgstr "Log Level"
+
+#: luasrc/model/cbi/p2ptap.lua:33
+msgid "调试 (Debug)"
+msgstr "Debug"
+
+#: luasrc/model/cbi/p2ptap.lua:34
+msgid "信息 (Info)"
+msgstr "Info"
+
+#: luasrc/model/cbi/p2ptap.lua:35
+msgid "警告 (Warn)"
+msgstr "Warn"
+
+#: luasrc/model/cbi/p2ptap.lua:36
+msgid "错误 (Error)"
+msgstr "Error"
+
+#: luasrc/model/cbi/p2ptap.lua:39
+msgid "预共享密钥 (PSK)"
+msgstr "Pre-Shared Key (PSK)"
+
+#: luasrc/model/cbi/p2ptap.lua:42
+msgid "设置 64 位 Hex 秘钥形成私有隔离加密网络。只与相同 PSK 的节点组网。留空则仅通过 mDNS + Static Peers 发现节点。"
+msgstr "A 64-character hex key that forms a private, isolated encrypted network. Only nodes with the same PSK will form a mesh. Leave empty to rely on mDNS + Static Peers for node discovery."
+
+#: luasrc/model/cbi/p2ptap.lua:46
+msgid "PSK 必须为 64 位的十六进制(Hex)字符序列！"
+msgstr "PSK must be a 64-character hexadecimal (Hex) sequence!"
+
+#: luasrc/model/cbi/p2ptap.lua:52
+msgid "身份私钥文件路径 (Node Key File)"
+msgstr "Node Key File"
+
+#: luasrc/model/cbi/p2ptap.lua:57
+msgid "传输多径策略 (Transport Strategy)"
+msgstr "Transport Strategy"
+
+#: luasrc/model/cbi/p2ptap.lua:58
+msgid "最优路径 (Best Path - 低延迟自动优选)"
+msgstr "Best Path — Low-latency auto-optimal"
+
+#: luasrc/model/cbi/p2ptap.lua:59
+msgid "多径双发 (Redundant - 极速双发抗丢包)"
+msgstr "Redundant — High-speed dual-send for loss resistance"
+
+#: luasrc/model/cbi/p2ptap.lua:60
+msgid "自动退避 (Fallback - 稳定保底)"
+msgstr "Fallback — Stable safety net"
+
+#: luasrc/model/cbi/p2ptap.lua:64
+msgid "TAP 虚拟网卡名称"
+msgstr "TAP Interface Name"
+
+#: luasrc/model/cbi/p2ptap.lua:68
+msgid "虚拟 IPv4 地址/掩码 (TAP IPv4 CIDR)"
+msgstr "Virtual IPv4 Address / Netmask (CIDR)"
+
+#: luasrc/model/cbi/p2ptap.lua:71
+msgid "例如 10.0.0.1/24。同局域网各节点 IP 地址必须在同一网段且保持唯一。"
+msgstr "Example: 10.0.0.1/24. All node IPs within the same LAN must be in the same subnet and remain unique."
+
+#: luasrc/model/cbi/p2ptap.lua:73
+msgid "虚拟 IPv6 地址/前缀 (TAP IPv6 CIDR)"
+msgstr "Virtual IPv6 Address / Prefix (CIDR)"
+
+#: luasrc/model/cbi/p2ptap.lua:75
+msgid "例如 fd00::1/64。提供原生二层 IPv6 组网能力。"
+msgstr "Example: fd00::1/64. Provides native Layer-2 IPv6 networking."
+
+#: luasrc/model/cbi/p2ptap.lua:79
+msgid "IPv6 地址格式错误！必须为带前缀格式 (如 fd00::1/64)"
+msgstr "Invalid IPv6 address format! Must include a prefix (e.g. fd00::1/64)"
+
+#: luasrc/model/cbi/p2ptap.lua:85
+msgid "TAP 网卡 MAC 地址 (TAP MAC)"
+msgstr "TAP MAC Address"
+
+#: luasrc/model/cbi/p2ptap.lua:88
+msgid "虚拟网卡的二层 MAC 地址。如留空将自动随机生成并持久化。"
+msgstr "Layer-2 MAC address for the virtual interface. Leave empty to auto-generate and persist a random MAC."
+
+#: luasrc/model/cbi/p2ptap.lua:90
+msgid "接口最大传输单元 (MTU)"
+msgstr "Interface MTU"
+
+#: luasrc/model/cbi/p2ptap.lua:93
+msgid "推荐默认 1500 (范围: 68-9000)。"
+msgstr "Default 1500 recommended (range: 68–9000)."
+
+#: luasrc/model/cbi/p2ptap.lua:95
+msgid "启用 mDNS 局域网节点发现"
+msgstr "Enable mDNS LAN Node Discovery"
+
+#: luasrc/model/cbi/p2ptap.lua:97
+msgid "本地局域网内自动发现其他 P2P 节点。"
+msgstr "Automatically discover other P2P nodes on the local LAN."
+
+#: luasrc/model/cbi/p2ptap.lua:99
+msgid "TAP 驱动类型 (Driver Type)"
+msgstr "TAP Driver Type"
+
+#: luasrc/model/cbi/p2ptap.lua:100
+msgid "自动检测 (Auto)"
+msgstr "Auto"
+
+#: luasrc/model/cbi/p2ptap.lua:101
+msgid "TAP 驱动 (Linux/macOS)"
+msgstr "TAP Driver (Linux/macOS)"
+
+#: luasrc/model/cbi/p2ptap.lua:102
+msgid "WinTun 驱动 (Windows)"
+msgstr "WinTun Driver (Windows)"
+
+#: luasrc/model/cbi/p2ptap.lua:104
+msgid "Windows 系统推荐 wintun，其他系统使用 auto 即可。"
+msgstr "Use wintun on Windows; auto is recommended for other systems."
+
+#: luasrc/model/cbi/p2ptap.lua:107
+msgid "引导节点列表 (Bootstrap Peers)"
+msgstr "Bootstrap Peers"
+
+#: luasrc/model/cbi/p2ptap.lua:109
+msgid "公共或私有的 P2P 引导节点 Multiaddr 列表。多行输入，每行一条。"
+msgstr "Public or private P2P bootstrap node Multiaddr list, one per line."
+
+#: luasrc/model/cbi/p2ptap.lua:111
+msgid "静态直连节点 (Static Peers)"
+msgstr "Static Peers"
+
+#: luasrc/model/cbi/p2ptap.lua:113
+msgid "手动指定直连对端节点的 Multiaddr。"
+msgstr "Manually specify Multiaddr entries for direct peer connections."
+
+#: luasrc/model/cbi/p2ptap.lua:115
+msgid "本地 P2P 监听地址 (Listen Multiaddrs)"
+msgstr "Listen Multiaddrs"
+
+#: luasrc/model/cbi/p2ptap.lua:117
+msgid "本地监听的多地址 Multiaddr 列表。支持 QUIC/WebRTC/WebTransport/TCP。"
+msgstr "Local listen Multiaddr list. Supports QUIC/WebRTC/WebTransport/TCP."
+
+#: luasrc/model/cbi/p2ptap.lua:122
+msgid "传输协议高级设置"
+msgstr "Transport Protocol Advanced Settings"
+
+#: luasrc/model/cbi/p2ptap.lua:125
+msgid "启用 QUIC v1 传输协议"
+msgstr "Enable QUIC v1 Transport"
+
+#: luasrc/model/cbi/p2ptap.lua:128
+msgid "启用 WebRTC Direct 穿透协议"
+msgstr "Enable WebRTC Direct NAT Traversal"
+
+#: luasrc/model/cbi/p2ptap.lua:130
+msgid "基于浏览器/原生 WebRTC 的 NAT 穿透传输层。"
+msgstr "NAT traversal transport layer based on browser/native WebRTC."
+
+#: luasrc/model/cbi/p2ptap.lua:132
+msgid "启用 WebTransport 协议"
+msgstr "Enable WebTransport"
+
+#: luasrc/model/cbi/p2ptap.lua:134
+msgid "基于 HTTP/3 QUIC 的新型传输协议。"
+msgstr "New-generation transport protocol based on HTTP/3 QUIC."
+
+#: luasrc/model/cbi/p2ptap.lua:136
+msgid "启用 TCP 复用协议"
+msgstr "Enable TCP Multiplexing"
+
+#: luasrc/model/cbi/p2ptap.lua:139
+msgid "启用 TCP Brutal 拥塞控制"
+msgstr "Enable TCP Brutal Congestion Control"
+
+#: luasrc/model/cbi/p2ptap.lua:141
+msgid "高吞吐场景的激进 TCP 拥塞算法。需内核支持。"
+msgstr "Aggressive TCP congestion algorithm for high-throughput scenarios. Requires kernel support."
+
+#: luasrc/model/cbi/p2ptap.lua:143
+msgid "TCP Brutal 速率上限"
+msgstr "TCP Brutal Rate Limit"
+
+#: luasrc/model/cbi/p2ptap.lua:145
+msgid "例如 100Mbps / 1Gbps。启用 TCP Brutal 后生效。"
+msgstr "Example: 100Mbps / 1Gbps. Takes effect when TCP Brutal is enabled."
+
+#: luasrc/model/cbi/p2ptap.lua:151
+msgid "流量混淆与数据填充"
+msgstr "Traffic Obfuscation & Padding"
+
+#: luasrc/model/cbi/p2ptap.lua:154
+msgid "启用二层数据包流量混淆"
+msgstr "Enable Layer-2 Packet Obfuscation"
+
+#: luasrc/model/cbi/p2ptap.lua:157
+msgid "混淆填充模式 (Mode)"
+msgstr "Obfuscation Padding Mode"
+
+#: luasrc/model/cbi/p2ptap.lua:158
+msgid "固定对齐 (Fixed Padding)"
+msgstr "Fixed Padding"
+
+#: luasrc/model/cbi/p2ptap.lua:159
+msgid "分块对齐 (Block Padding)"
+msgstr "Block Padding"
+
+#: luasrc/model/cbi/p2ptap.lua:160
+msgid "随机填充 (Random Padding)"
+msgstr "Random Padding"
+
+#: luasrc/model/cbi/p2ptap.lua:161
+msgid "动态自适应 (Dynamic)"
+msgstr "Dynamic"
+
+#: luasrc/model/cbi/p2ptap.lua:162
+msgid "全自动 (Auto - 智能检测)"
+msgstr "Auto — Intelligent Detection"
+
+#: luasrc/model/cbi/p2ptap.lua:166
+msgid "固定填充包长 (Fixed Size)"
+msgstr "Fixed Size"
+
+#: luasrc/model/cbi/p2ptap.lua:169
+msgid "所有数据包对齐到的目标字节长度。仅 fixed 模式。"
+msgstr "Target byte length to which all packets are aligned. Fixed mode only."
+
+#: luasrc/model/cbi/p2ptap.lua:172
+msgid "分块填充对齐粒度 (Block Size)"
+msgstr "Block Size"
+
+#: luasrc/model/cbi/p2ptap.lua:175
+msgid "数据包按此字节数向上对齐。仅 block 模式。"
+msgstr "Packets are padded up to the nearest multiple of this value. Block mode only."
+
+#: luasrc/model/cbi/p2ptap.lua:178
+msgid "随机抖动范围 (Jitter Range, ±N bytes)"
+msgstr "Jitter Range (±N bytes)"
+
+#: luasrc/model/cbi/p2ptap.lua:181
+msgid "在填充基础上附加 ±N 字节随机抖动。0 = 关闭抖动。"
+msgstr "Extra random ±N bytes of jitter on top of padding. 0 = disable jitter."
+
+#: luasrc/model/cbi/p2ptap.lua:184
+msgid "最小帧尺寸 (Min Size)"
+msgstr "Min Size"
+
+#: luasrc/model/cbi/p2ptap.lua:187
+msgid "dynamic 模式下的最小帧尺寸。"
+msgstr "Minimum frame size in dynamic mode."
+
+#: luasrc/model/cbi/p2ptap.lua:190
+msgid "最大帧尺寸 (Max Size)"
+msgstr "Max Size"
+
+#: luasrc/model/cbi/p2ptap.lua:193
+msgid "dynamic 模式下的最大帧尺寸。"
+msgstr "Maximum frame size in dynamic mode."
+
+#: luasrc/model/cbi/p2ptap.lua:197
+msgid "自动检测间隔 (Auto Detect Interval, 秒)"
+msgstr "Auto Detect Interval (seconds)"
+
+#: luasrc/model/cbi/p2ptap.lua:200
+msgid "Auto 模式下重新评估混淆策略的间隔秒数。"
+msgstr "Interval in seconds to re-evaluate obfuscation strategy in Auto mode."
+
+#: luasrc/model/cbi/p2ptap.lua:203
+msgid "自动切换阈值 (Auto Threshold Bytes)"
+msgstr "Auto Threshold (Bytes)"
+
+#: luasrc/model/cbi/p2ptap.lua:206
+msgid "Auto 模式下累计传输超过此字节数后触发重评估。默认 1MB。"
+msgstr "In Auto mode, trigger re-evaluation after cumulative transfer exceeds this byte count. Default: 1 MB."
+
+#: luasrc/model/cbi/p2ptap.lua:209
+msgid "允许自动切换模式 (Allow Mode Switch)"
+msgstr "Allow Mode Switch"
+
+#: luasrc/model/cbi/p2ptap.lua:211
+msgid "Auto 模式下允许引擎自动切换混淆策略。启用后可能产生短暂抖动。"
+msgstr "In Auto mode, allow the engine to switch obfuscation strategies automatically. May cause brief jitter when enabled."
+
+#: luasrc/model/cbi/p2ptap.lua:217
+msgid "出口网关 (Exit Node)"
+msgstr "Exit Node"
+
+#: luasrc/model/cbi/p2ptap.lua:220
+msgid "启用出口网关模式 (Enable Exit Node)"
+msgstr "Enable Exit Node"
+
+#: luasrc/model/cbi/p2ptap.lua:222
+msgid "启用后本节点允许对端节点通过本机访问外部网络。相当于 P2P VPN 网关。"
+msgstr "When enabled, peer nodes can access the external network through this node. Acts as a P2P VPN gateway."
+
+#: luasrc/model/cbi/p2ptap.lua:224
+msgid "启用 NAT 伪装 (NAT Masquerade)"
+msgstr "Enable NAT Masquerade"
+
+#: luasrc/model/cbi/p2ptap.lua:226
+msgid "为转发的出站流量自动添加 SNAT 规则 (iptables MASQUERADE)。"
+msgstr "Automatically add SNAT rules (iptables MASQUERADE) for forwarded outbound traffic."
+
+#: luasrc/model/cbi/p2ptap.lua:229
+msgid "出口物理网卡 (WAN Interface)"
+msgstr "WAN Interface"
+
+#: luasrc/model/cbi/p2ptap.lua:232
+msgid "提供外部网络出口的物理网卡名称，如 eth0 / wan / pppoe-wan。填写 'auto' 自动检测默认路由网卡。"
+msgstr "Physical interface providing external network access, e.g. eth0 / wan / pppoe-wan. Enter 'auto' to auto-detect the default route interface."
+
+#: luasrc/model/cbi/p2ptap.lua:238
+msgid "WebUI 控制台"
+msgstr "WebUI Console"
+
+#: luasrc/model/cbi/p2ptap.lua:241
+msgid "启用内置 WebUI Dashboard"
+msgstr "Enable Built-in WebUI Dashboard"
+
+#: luasrc/model/cbi/p2ptap.lua:244
+msgid "WebUI 监听 IPv4 地址"
+msgstr "WebUI Listen IPv4 Address"
+
+#: luasrc/model/cbi/p2ptap.lua:247
+msgid "WebUI Dashboard 绑定的 IPv4 监听地址，0.0.0.0 表示监听所有接口。"
+msgstr "IPv4 listen address for the WebUI Dashboard. Use 0.0.0.0 to listen on all interfaces."
+
+#: luasrc/model/cbi/p2ptap.lua:249
+msgid "WebUI 监听 IPv6 地址"
+msgstr "WebUI Listen IPv6 Address"
+
+#: luasrc/model/cbi/p2ptap.lua:252
+msgid "WebUI Dashboard 绑定的 IPv6 监听地址，:: 表示监听所有接口。"
+msgstr "IPv6 listen address for the WebUI Dashboard. Use :: to listen on all interfaces."
+
+#: luasrc/model/cbi/p2ptap.lua:254
+msgid "WebUI 监听端口 (Port)"
+msgstr "WebUI Listen Port"
+
+#: luasrc/model/cbi/p2ptap.lua:258
+msgid "控制台快捷入口"
+msgstr "Console Quick Access"
+
+#: luasrc/view/p2ptap/status.htm:7
+msgid "运行中 (Running)"
+msgstr "Running"
+
+#: luasrc/view/p2ptap/status.htm:9
+msgid "未运行 (Stopped)"
+msgstr "Stopped"
+
+#: luasrc/view/p2ptap/status.htm:15
+msgid "正在获取运行状态..."
+msgstr "Fetching running status..."

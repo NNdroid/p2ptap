@@ -1,0 +1,185 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+USE_PROCD=1
+
+CONF="p2ptap"
+PROG="/usr/bin/p2ptap"
+JSON_CONF="/tmp/etc/p2ptap.json"
+
+generate_json_config() {
+	mkdir -p /tmp/etc /etc/p2ptap
+
+	local enabled log_level node_name tap_name tap_ip tap_ipv6 tap_mac mtu strategy enable_mdns psk node_key_file driver_type
+	config_get_bool enabled global enabled 0
+	[ "$enabled" -eq 1 ] || return 1
+
+	config_get log_level global log_level "info"
+	config_get node_name global node_name ""
+	config_get tap_name global tap_name "p2ptap0"
+	config_get tap_ip global tap_ip "10.0.0.1/24"
+	config_get tap_ipv6 global tap_ipv6 "fd00::1/64"
+	config_get tap_mac global tap_mac ""
+
+	# 新增：随机 MAC 生成与持久化逻辑
+	if [ -z "$tap_mac" ]; then
+		tap_mac="02$(hexdump -n 5 -e '1/1 ":%02x"' /dev/urandom)"
+		uci -q set p2ptap.global.tap_mac="$tap_mac"
+		uci -q commit p2ptap
+	fi
+
+	config_get mtu global mtu 1500
+	config_get strategy global transport_strategy "best_path"
+	config_get_bool enable_mdns global enable_mdns 1
+	config_get psk global psk ""
+	config_get node_key_file global node_key_file "/etc/p2ptap/node.key"
+	config_get driver_type global driver_type "auto"
+
+	local web_enable web_ip web_ipv6 web_port
+	config_get_bool web_enable webui enable 1
+	config_get web_ip webui listen_ip "0.0.0.0"
+	config_get web_ipv6 webui listen_ipv6 "::"
+	config_get web_port webui port 5857
+
+	local obfs_enable obfs_mode obfs_fixed obfs_block obfs_jitter obfs_min obfs_max obfs_auto_interval obfs_auto_threshold obfs_allow_switch
+	config_get_bool obfs_enable obfuscation enable 1
+	config_get obfs_mode obfuscation mode "fixed"
+	config_get obfs_fixed obfuscation fixed_size 1500
+	config_get obfs_block obfuscation block_size 256
+	config_get obfs_jitter obfuscation jitter_range 0
+	config_get obfs_min obfuscation min_size 128
+	config_get obfs_max obfuscation max_size 1500
+	config_get obfs_auto_interval obfuscation auto_detect_interval 30
+	config_get obfs_auto_threshold obfuscation auto_threshold_bytes 1048576
+	config_get_bool obfs_allow_switch obfuscation allow_mode_switch 0
+
+	local exit_enable exit_nat exit_wan
+	config_get_bool exit_enable exit_node enable 0
+	config_get_bool exit_nat exit_node nat_masquerade 0
+	config_get exit_wan exit_node wan_interface "auto"
+
+	local t_quic t_webrtc t_webtransport t_tcp t_tcp_brutal t_tcp_brutal_rate
+	config_get_bool t_quic transports enable_quic_reuse 1
+	config_get_bool t_webrtc transports enable_webrtc 1
+	config_get_bool t_webtransport transports enable_webtransport 1
+	config_get_bool t_tcp transports enable_tcp_reuse 1
+	config_get_bool t_tcp_brutal transports enable_tcp_brutal 0
+	config_get t_tcp_brutal_rate transports tcp_brutal_rate "100Mbps"
+
+	# Format JSON config
+	cat <<EOF > "$JSON_CONF"
+{
+  "log_level": "$log_level",
+  "node_name": "$node_name",
+  "tap_name": "$tap_name",
+  "tap_ip": "$tap_ip",
+  "tap_ipv6": "$tap_ipv6",
+  "tap_mac": "$tap_mac",
+  "mtu": $mtu,
+  "driver_type": "$driver_type",
+  "transport_strategy": "$strategy",
+  "enable_mdns": $([ "$enable_mdns" -eq 1 ] && echo true || echo false),
+  "psk": "$psk",
+  "node_key_file": "$node_key_file",
+  "web_ui": {
+    "enable": $([ "$web_enable" -eq 1 ] && echo true || echo false),
+    "listen_ip": "$web_ip",
+    "listen_ipv6": "$web_ipv6",
+    "port": $web_port
+  },
+  "obfuscation": {
+    "enable": $([ "$obfs_enable" -eq 1 ] && echo true || echo false),
+    "mode": "$obfs_mode",
+    "fixed_size": $obfs_fixed,
+    "block_size": $obfs_block,
+    "jitter_range": $obfs_jitter,
+    "min_size": $obfs_min,
+    "max_size": $obfs_max,
+    "auto_detect_interval": $obfs_auto_interval,
+    "auto_threshold_bytes": $obfs_auto_threshold,
+    "allow_mode_switch": $([ "$obfs_allow_switch" -eq 1 ] && echo true || echo false)
+  },
+  "exit_node": {
+    "enable": $([ "$exit_enable" -eq 1 ] && echo true || echo false),
+    "nat_masquerade": $([ "$exit_nat" -eq 1 ] && echo true || echo false),
+    "wan_interface": "$exit_wan"
+  },
+  "transports": {
+    "enable_quic_reuse": $([ "$t_quic" -eq 1 ] && echo true || echo false),
+    "enable_webrtc": $([ "$t_webrtc" -eq 1 ] && echo true || echo false),
+    "enable_webtransport": $([ "$t_webtransport" -eq 1 ] && echo true || echo false),
+    "enable_tcp_reuse": $([ "$t_tcp" -eq 1 ] && echo true || echo false),
+    "enable_tcp_brutal": $([ "$t_tcp_brutal" -eq 1 ] && echo true || echo false),
+    "tcp_brutal_rate": "$t_tcp_brutal_rate"
+  },
+  "listen_addrs": [
+EOF
+
+	# 动态遍历 listen_addrs
+	local first_listen=1
+	append_listen() {
+		if [ "$first_listen" -eq 1 ]; then
+			echo "    \"$1\"" >> "$JSON_CONF"
+			first_listen=0
+		else
+			echo "   ,\"$1\"" >> "$JSON_CONF"
+		fi
+	}
+	config_list_foreach global listen_addrs append_listen
+
+	cat <<EOF >> "$JSON_CONF"
+  ],
+  "bootstrap_peers": [
+EOF
+
+	local first=1
+	append_bootstrap() {
+		if [ "$first" -eq 1 ]; then
+			echo "    \"$1\"" >> "$JSON_CONF"
+			first=0
+		else
+			echo "   ,\"$1\"" >> "$JSON_CONF"
+		fi
+	}
+	config_list_foreach global bootstrap_peers append_bootstrap
+
+	cat <<EOF >> "$JSON_CONF"
+  ],
+  "static_peers": [
+EOF
+
+	first=1
+	append_static() {
+		if [ "$first" -eq 1 ]; then
+			echo "    \"$1\"" >> "$JSON_CONF"
+			first=0
+		else
+			echo "   ,\"$1\"" >> "$JSON_CONF"
+		fi
+	}
+	config_list_foreach global static_peers append_static
+
+	cat <<EOF >> "$JSON_CONF"
+  ]
+}
+EOF
+	return 0
+}
+
+start_service() {
+	config_load "$CONF"
+	generate_json_config || return 0
+
+	procd_open_instance
+	procd_set_param command "$PROG" run -c "$JSON_CONF"
+	procd_set_param respawn
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+reload_service() {
+	stop
+	start
+}
