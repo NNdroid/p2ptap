@@ -35,6 +35,7 @@ import (
 	"github.com/multiformats/go-multihash"
 
 	"github.com/pion/datachannel"
+	pionnet "github.com/pion/transport/v3"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -86,6 +87,8 @@ type WebRTCTransport struct {
 	noiseTpt     *noise.Transport
 	localPeerId  peer.ID
 
+	customNet pionnet.Net
+
 	listenUDP func(network string, laddr *net.UDPAddr) (net.PacketConn, error)
 
 	// dialerVersion picks which WebRTC Direct handshake to use when dialing: 1
@@ -106,6 +109,14 @@ type WebRTCTransport struct {
 var _ tpt.Transport = &WebRTCTransport{}
 
 type Option func(*WebRTCTransport) error
+
+// WithNet configures a custom pion transport.Net for WebRTC ICE operations.
+func WithNet(net pionnet.Net) Option {
+	return func(t *WebRTCTransport) error {
+		t.customNet = net
+		return nil
+	}
+}
 
 // WithDialerVersion picks which WebRTC Direct handshake to use when dialing. It
 // must be 1 (v1, SDP munging) or 2 (v2, no munging); any other value, including
@@ -347,6 +358,9 @@ func (t *WebRTCTransport) dial(ctx context.Context, scope network.ConnManagement
 
 	settingEngine := webrtc.SettingEngine{
 		LoggerFactory: pionLoggerFactory,
+	}
+	if t.customNet != nil {
+		settingEngine.SetNet(t.customNet)
 	}
 	settingEngine.SetICECredentials(localUfrag, localPwd)
 	settingEngine.DetachDataChannels()

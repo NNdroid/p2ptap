@@ -319,6 +319,11 @@ func TestBootBackboneFederatesDiscoveryAcrossClusters(t *testing.T) {
 	streamA := subscribe(clientA, bootA)
 	streamB := subscribe(clientB, bootB)
 
+	// Drain incoming broadcasts on clientA's stream so bootA's fanout doesn't stall.
+	go func() {
+		_, _ = io.Copy(io.Discard, streamA)
+	}()
+
 	// Bring up the backbone in BOTH directions, as a full mesh deployment would.
 	go meshUplinkLoop(ctx, bootA, hubA, peer.AddrInfo{ID: bootB.ID(), Addrs: bootB.Addrs()}, "bootA")
 	go meshUplinkLoop(ctx, bootB, hubB, peer.AddrInfo{ID: bootA.ID(), Addrs: bootA.Addrs()}, "bootB")

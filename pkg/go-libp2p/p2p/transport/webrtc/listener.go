@@ -203,6 +203,9 @@ func (l *listener) setupConnection(
 	serverUfrag := candidate.LocalUfrag
 
 	settingEngine := webrtc.SettingEngine{LoggerFactory: pionLoggerFactory}
+	if l.transport.customNet != nil {
+		settingEngine.SetNet(l.transport.customNet)
+	}
 	settingEngine.SetAnsweringDTLSRole(webrtc.DTLSRoleServer)
 	settingEngine.SetICECredentials(serverUfrag, serverUfrag)
 	settingEngine.SetLite(true)

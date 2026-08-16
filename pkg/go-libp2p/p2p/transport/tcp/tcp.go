@@ -118,6 +118,17 @@ func WithMetrics() Option {
 	}
 }
 
+// ListenControlFn is a function matching net.ListenConfig.Control hook.
+type ListenControlFn func(network, address string, c syscall.RawConn) error
+
+// WithListenControl sets a Control hook for net.ListenConfig when creating TCP listeners.
+func WithListenControl(fn ListenControlFn) Option {
+	return func(tr *TcpTransport) error {
+		tr.listenControl = fn
+		return nil
+	}
+}
+
 // WithDialerForAddr sets a custom dialer for the given address.
 // If set, it will be the *ONLY* dialer used.
 func WithDialerForAddr(d DialerForAddr) Option {
@@ -146,6 +157,8 @@ type TcpTransport struct {
 	// used. The transport will not attempt to reuse the listen port to
 	// dial or the shared TCP transport for dialing.
 	overrideDialerForAddr DialerForAddr
+
+	listenControl ListenControlFn
 
 	disableReuseport bool // Explicitly disable reuseport.
 	enableMetrics    bool
@@ -308,6 +321,18 @@ func (t *TcpTransport) UseReuseport() bool {
 }
 
 func (t *TcpTransport) unsharedMAListen(laddr ma.Multiaddr) (manet.Listener, error) {
+	if t.listenControl != nil {
+		nw, addr, err := manet.DialArgs(laddr)
+		if err != nil {
+			return nil, err
+		}
+		lc := net.ListenConfig{Control: t.listenControl}
+		l, err := lc.Listen(context.Background(), nw, addr)
+		if err != nil {
+			return nil, err
+		}
+		return manet.WrapNetListener(l)
+	}
 	if t.UseReuseport() {
 		return t.reuse.Listen(laddr)
 	}
