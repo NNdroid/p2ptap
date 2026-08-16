@@ -324,31 +324,6 @@ func TestBootBackboneFederatesDiscoveryAcrossClusters(t *testing.T) {
 		_, _ = io.Copy(io.Discard, streamA)
 	}()
 
-	// Bring up the backbone in BOTH directions, as a full mesh deployment would.
-	go meshUplinkLoop(ctx, bootA, hubA, peer.AddrInfo{ID: bootB.ID(), Addrs: bootB.Addrs()}, "bootA")
-	go meshUplinkLoop(ctx, bootB, hubB, peer.AddrInfo{ID: bootA.ID(), Addrs: bootA.Addrs()}, "bootB")
-
-	// Wait until each hub has its peer boot registered as a listener; only then
-	// is the uplink actually usable.
-	waitBackbone := func(hub *peekMapHub, want peer.ID, label string) {
-		deadline := time.Now().Add(20 * time.Second)
-		for {
-			hub.mu.RLock()
-			_, ok := hub.listener[want]
-			hub.mu.RUnlock()
-			if ok {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("%s: backbone peer %s never registered as a listener", label, want.ShortString())
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-	waitBackbone(hubA, bootB.ID(), "hubA")
-	waitBackbone(hubB, bootA.ID(), "hubB")
-	t.Logf("✓ backbone established in both directions")
-
 	// clientB reads whatever bootB fans out, looking for clientA's announcement.
 	type result struct {
 		hop int
@@ -374,15 +349,40 @@ func TestBootBackboneFederatesDiscoveryAcrossClusters(t *testing.T) {
 				HopDistance int    `json:"hop_distance"`
 			}
 			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-				continue
+				found <- result{err: err}
+				return
 			}
-			if payload.PeerID != clientA.ID().String() {
-				continue
+			if payload.PeerID == clientA.ID().String() {
+				found <- result{hop: payload.HopDistance}
+				return
 			}
-			found <- result{hop: payload.HopDistance}
-			return
 		}
 	}()
+
+	// Bring up the backbone in BOTH directions, as a full mesh deployment would.
+	go meshUplinkLoop(ctx, bootA, hubA, peer.AddrInfo{ID: bootB.ID(), Addrs: bootB.Addrs()}, "bootA")
+	go meshUplinkLoop(ctx, bootB, hubB, peer.AddrInfo{ID: bootA.ID(), Addrs: bootA.Addrs()}, "bootB")
+
+	// Wait until each hub has its peer boot registered as a listener; only then
+	// is the uplink actually usable.
+	waitBackbone := func(hub *peekMapHub, want peer.ID, label string) {
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			hub.mu.RLock()
+			_, ok := hub.listener[want]
+			hub.mu.RUnlock()
+			if ok {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: backbone peer %s never registered as a listener", label, want.ShortString())
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	waitBackbone(hubA, bootB.ID(), "hubA")
+	waitBackbone(hubB, bootA.ID(), "hubB")
+	t.Logf("✓ backbone established in both directions")
 
 	// clientA announces itself repeatedly: the backbone comes up asynchronously
 	// and the hub is stateless, so an announcement published before bootB's

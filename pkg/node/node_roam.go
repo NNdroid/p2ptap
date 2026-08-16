@@ -109,6 +109,10 @@ func reconcileRoam(ls listenerStore, base []multiaddr.Multiaddr) bool {
 func diffListeners(desired, current []multiaddr.Multiaddr) (toAdd, toRemove []multiaddr.Multiaddr) {
 	curByKey := make(map[string]multiaddr.Multiaddr, len(current))
 	for _, c := range current {
+		cStr := c.String()
+		if strings.Contains(cStr, "p2p-circuit") {
+			continue
+		}
 		curByKey[normKey(c)] = c
 	}
 	desKeys := make(map[string]bool, len(desired))
@@ -244,8 +248,6 @@ func (n *Node) startRoamWatcher() {
 			log.Warn("roam: failed to start network monitor: %v", err)
 		}
 	}()
-
-	n.roamDeb.trigger()
 }
 
 // reconcile recomputes the desired listener set from the cached config and

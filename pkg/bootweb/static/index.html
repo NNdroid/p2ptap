@@ -4321,29 +4321,84 @@
             ctx.moveTo(0, -maxRadius * 1.25); ctx.lineTo(0, maxRadius * 1.25);
             ctx.stroke();
 
-            // 2. Compute / Smooth Node Positions
+            // 2. Deterministic Node Positioning & Anti-Overlap Physics
+            // Sort peers deterministically by PeerID so angles never randomize on stats refresh
+            const sortedPeers = (state.peers || []).slice().sort((a, b) => (a.peer_id || '').localeCompare(b.peer_id || ''));
+            const peerCount = sortedPeers.length;
+
+            // Prune disconnected peers from position cache
+            const activePids = new Set(sortedPeers.map(p => p.peer_id));
+            for (const [pid] of topoNodePositions) {
+                if (!activePids.has(pid)) {
+                    topoNodePositions.delete(pid);
+                }
+            }
+
             const baseOrbit = maxRadius * 0.78;
-            peers.forEach((p, idx) => {
+            sortedPeers.forEach((p, idx) => {
                 let pos = topoNodePositions.get(p.peer_id);
                 const angle = (idx / (peerCount || 1)) * (Math.PI * 2) - Math.PI / 2;
-                // Add slight radius variation based on ping or index for organic look
-                const pingFactor = p.latency_ms > 0 ? Math.min(1.2, 0.6 + p.latency_ms / 200) : 0.85;
+                const pingFactor = p.latency_ms > 0 ? Math.min(1.25, 0.65 + p.latency_ms / 200) : 0.85;
                 const idealRadius = baseOrbit * (peerCount <= 4 ? 0.95 : pingFactor);
                 const idealX = Math.cos(angle) * idealRadius;
                 const idealY = Math.sin(angle) * idealRadius;
 
                 if (!pos) {
-                    pos = { x: idealX, y: idealY, vx: 0, vy: 0, targetX: idealX, targetY: idealY, radius: 16, peer: p, isFixed: false };
+                    pos = { x: idealX, y: idealY, targetX: idealX, targetY: idealY, radius: 16, peer: p, isFixed: false };
                     topoNodePositions.set(p.peer_id, pos);
                 } else {
                     pos.peer = p;
-                    if (!pos.isFixed) {
-                        // Smoothly spring towards ideal target
-                        pos.x += (idealX - pos.x) * 0.08;
-                        pos.y += (idealY - pos.y) * 0.08;
+                    pos.targetX = idealX;
+                    pos.targetY = idealY;
+                    if (!pos.isFixed && (!topoDraggingNode || topoDraggingNode.pos !== pos)) {
+                        pos.x += (idealX - pos.x) * 0.10;
+                        pos.y += (idealY - pos.y) * 0.10;
                     }
                 }
             });
+
+            // 2b. Collision Repulsion & Anti-Overlap Relaxation Loop
+            const allNodes = Array.from(topoNodePositions.values());
+            const minDist = 82; // Minimum distance between any two nodes to prevent badge overlap
+            const minCenterDist = 58; // Minimum distance from central BOOT core
+
+            for (let iter = 0; iter < 4; iter++) {
+                for (let i = 0; i < allNodes.length; i++) {
+                    for (let j = i + 1; j < allNodes.length; j++) {
+                        const n1 = allNodes[i];
+                        const n2 = allNodes[j];
+                        const dx = n2.x - n1.x;
+                        const dy = n2.y - n1.y;
+                        const dist = Math.hypot(dx, dy);
+                        if (dist < minDist) {
+                            const overlap = (minDist - dist) / 2;
+                            const angle = dist > 0.01 ? Math.atan2(dy, dx) : (i * 1.5);
+                            const shiftX = Math.cos(angle) * overlap;
+                            const shiftY = Math.sin(angle) * overlap;
+                            if (!n1.isFixed && (!topoDraggingNode || topoDraggingNode.pos !== n1)) {
+                                n1.x -= shiftX;
+                                n1.y -= shiftY;
+                            }
+                            if (!n2.isFixed && (!topoDraggingNode || topoDraggingNode.pos !== n2)) {
+                                n2.x += shiftX;
+                                n2.y += shiftY;
+                            }
+                        }
+                    }
+                }
+
+                // Prevent collapsing into BOOT center
+                for (const n of allNodes) {
+                    const cDist = Math.hypot(n.x, n.y);
+                    if (cDist < minCenterDist) {
+                        const angle = cDist > 0.01 ? Math.atan2(n.y, n.x) : 0;
+                        if (!n.isFixed && (!topoDraggingNode || topoDraggingNode.pos !== n)) {
+                            n.x = Math.cos(angle) * minCenterDist;
+                            n.y = Math.sin(angle) * minCenterDist;
+                        }
+                    }
+                }
+            }
 
             // 3. Draw Active Relay P2P Cross-Links (Mesh Topology Overlay)
             const relaySessions = state.relay_sessions || [];

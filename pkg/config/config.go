@@ -175,6 +175,23 @@ func DefaultConfig() *Config {
 	if err != nil || hostName == "" {
 		hostName = "p2ptap-node"
 	}
+	// Sanitize any characters outside allowed set and clamp to MaxNodeNameLen
+	var sb strings.Builder
+	for _, r := range hostName {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' || r == ' ' || r == '@':
+			sb.WriteRune(r)
+		default:
+			sb.WriteRune('-')
+		}
+	}
+	hostName = sb.String()
+	if hostName == "" {
+		hostName = "p2ptap-node"
+	}
+	if len(hostName) > MaxNodeNameLen {
+		hostName = hostName[:MaxNodeNameLen]
+	}
 
 	return &Config{
 		LogLevel: "info",

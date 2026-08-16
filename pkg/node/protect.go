@@ -104,7 +104,10 @@ func detectDefaultEgressLocked() (uint32, string, error) {
 // (e.g. the local TAP/Wintun virtual tunnel device). Binding P2P sockets to a
 // virtual tunnel interface would route all outbound traffic into the tunnel
 // itself and cause "unreachable network" dial errors.
-var protectedExcludeIfaces = map[string]bool{}
+var (
+	protectedExcludeMu     sync.RWMutex
+	protectedExcludeIfaces = map[string]bool{}
+)
 
 // virtualIfacePrefixes are weak hints used to skip virtual/tunnel adapters when
 // no interface has been explicitly registered via RegisterProtectedExcludeInterface.
@@ -115,7 +118,9 @@ var virtualIfacePrefixes = []string{"p2ptap", "wintun", "tap", "vethernet", "loo
 // protection logic. The node must call this right after creating its TAP device.
 func RegisterProtectedExcludeInterface(name string) {
 	if name != "" {
+		protectedExcludeMu.Lock()
 		protectedExcludeIfaces[strings.ToLower(name)] = true
+		protectedExcludeMu.Unlock()
 	}
 }
 
@@ -123,7 +128,10 @@ func RegisterProtectedExcludeInterface(name string) {
 // tunnel adapter that should not be used as the physical egress interface.
 func isVirtualInterface(name string) bool {
 	lower := strings.ToLower(name)
-	if protectedExcludeIfaces[lower] {
+	protectedExcludeMu.RLock()
+	excluded := protectedExcludeIfaces[lower]
+	protectedExcludeMu.RUnlock()
+	if excluded {
 		return true
 	}
 	for _, p := range virtualIfacePrefixes {
