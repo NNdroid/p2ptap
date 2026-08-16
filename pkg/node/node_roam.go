@@ -234,11 +234,17 @@ func (n *Node) startRoamWatcher() {
 	n.netMon = mon
 	ctx, cancel := context.WithCancel(n.ctx)
 	n.roamCancel = cancel
-	if err := mon.Watch(ctx, n.roamDeb.trigger); err != nil {
-		// Non-fatal: the initial scheduled reconcile still runs, and reconcile
-		// can also be triggered externally.
-		log.Warn("roam: failed to start network monitor: %v", err)
-	}
+
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		if err := mon.Watch(ctx, n.roamDeb.trigger); err != nil {
+			// Non-fatal: the initial scheduled reconcile still runs, and reconcile
+			// can also be triggered externally.
+			log.Warn("roam: failed to start network monitor: %v", err)
+		}
+	}()
+
 	n.roamDeb.trigger()
 }
 

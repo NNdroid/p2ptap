@@ -69,6 +69,7 @@ type SubnetRouteDTO struct {
 	ShortID   string `json:"short_id"`
 	NodeName  string `json:"node_name"`
 	TapIP     string `json:"tap_ip"`
+	TapIPv6   string `json:"tap_ipv6,omitempty"`
 	NetworkID string `json:"network_id"`
 }
 
@@ -435,12 +436,17 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 			peersList = append(peersList, item)
 
 			for _, sub := range subnets {
+				targetTapIP := tapIP
+				if strings.Contains(sub, ":") && tapIPv6 != "" {
+					targetTapIP = tapIPv6
+				}
 				subnetRoutesList = append(subnetRoutesList, SubnetRouteDTO{
 					Subnet:    sub,
 					PeerID:    pid.String(),
 					ShortID:   formatShortPeerID(pid),
 					NodeName:  nodeName,
-					TapIP:     tapIP,
+					TapIP:     targetTapIP,
+					TapIPv6:   tapIPv6,
 					NetworkID: netID,
 				})
 			}
