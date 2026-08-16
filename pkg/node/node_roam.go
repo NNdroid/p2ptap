@@ -231,8 +231,9 @@ func (n *Node) startRoamWatcher() {
 	}
 	n.parsedListenMu.Unlock()
 
-	n.roamDeb = newRoamDebouncer(n.reconcile)
-	n.roamDeb.start()
+	deb := newRoamDebouncer(n.reconcile)
+	deb.start()
+	n.roamDeb = deb
 
 	mon := NewNetMon(n.Config.TapName)
 	n.netMon = mon
@@ -242,7 +243,7 @@ func (n *Node) startRoamWatcher() {
 	n.wg.Add(1)
 	go func() {
 		defer n.wg.Done()
-		if err := mon.Watch(ctx, n.roamDeb.trigger); err != nil {
+		if err := mon.Watch(ctx, deb.trigger); err != nil {
 			// Non-fatal: the initial scheduled reconcile still runs, and reconcile
 			// can also be triggered externally.
 			log.Warn("roam: failed to start network monitor: %v", err)
@@ -271,16 +272,13 @@ func (n *Node) reconcile() {
 
 // stopRoamWatcher tears down the monitor + debouncer. Called from Close().
 func (n *Node) stopRoamWatcher() {
-	if n.roamDeb != nil {
-		n.roamDeb.stop()
-		n.roamDeb = nil
+	if n.roamCancel != nil {
+		n.roamCancel()
 	}
 	if n.netMon != nil {
 		_ = n.netMon.Close()
-		n.netMon = nil
 	}
-	if n.roamCancel != nil {
-		n.roamCancel()
-		n.roamCancel = nil
+	if n.roamDeb != nil {
+		n.roamDeb.stop()
 	}
 }

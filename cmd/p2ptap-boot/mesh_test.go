@@ -331,7 +331,7 @@ func TestBootBackboneFederatesDiscoveryAcrossClusters(t *testing.T) {
 	}
 	found := make(chan result, 1)
 	go func() {
-		dec := json.NewDecoder(io.LimitReader(streamB, 1<<20))
+		dec := json.NewDecoder(streamB)
 		for {
 			_ = streamB.SetReadDeadline(time.Now().Add(25 * time.Second))
 			var msg PeekMapMessage

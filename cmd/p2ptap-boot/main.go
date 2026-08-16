@@ -2069,7 +2069,7 @@ func runMeshUplink(ctx context.Context, h host.Host, hub *peekMapHub, info peer.
 	}
 
 	// Pump the remote hub's rebroadcasts into our local hub.
-	const maxPeekMapMsgSize = 256 * 1024
+	dec := json.NewDecoder(s)
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -2077,7 +2077,6 @@ func runMeshUplink(ctx context.Context, h host.Host, hub *peekMapHub, info peer.
 		// The remote hub is idle-quiet between client updates; allow a long gap
 		// but not forever, so a half-open TCP connection is eventually noticed.
 		_ = s.SetReadDeadline(time.Now().Add(10 * time.Minute))
-		dec := json.NewDecoder(io.LimitReader(s, maxPeekMapMsgSize))
 		var msg PeekMapMessage
 		if err := dec.Decode(&msg); err != nil {
 			return fmt.Errorf("read: %w", err)

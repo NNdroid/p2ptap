@@ -55,7 +55,8 @@ if [ -z "$VERSION" ]; then
 fi
 BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 GIT_COMMIT="$( (git rev-parse HEAD 2>/dev/null || echo 'unknown') | head -1)"
-VER_FLAGS="-X p2ptap/pkg/version.Version=$VERSION -X p2ptap/pkg/version.BuildTime=$BUILD_TIME -X p2ptap/pkg/version.GitCommit=$GIT_COMMIT"
+VER_FLAGS="-checklinkname=0 -X p2ptap/pkg/version.Version=$VERSION -X p2ptap/pkg/version.BuildTime=$BUILD_TIME -X p2ptap/pkg/version.GitCommit=$GIT_COMMIT"
+export GOFLAGS="-ldflags=-checklinkname=0"
 
 # ---- Sanity checks ----
 if ! command -v gomobile >/dev/null 2>&1; then
@@ -96,9 +97,7 @@ echo "========================================================="
 
 # gomobile bind:
 #   -target=android[/arm64] cross-compile for Android (optionally a single ABI)
-#   -androidapi 24         minSdk 24 (VpnService available since API 14; 24 is the
-#                          safe floor for NDK r27+/r29 — NDK may reject <21, so 24
-#                          avoids "unsupported API version" with the latest NDK)
+#   -androidapi 21         minSdk 21
 #   -javapkg com.p2ptap    Java package for the generated wrapper class
 #   -o bin/p2ptap.aar      AAR output path
 #   ./pkg/android          the package to bind (only this pkg is exported)
@@ -110,7 +109,7 @@ echo "========================================================="
 # uses CGO.
 gomobile bind \
   -target="$AAR_TARGET" \
-  -androidapi 24 \
+  -androidapi 21 \
   -javapkg com.p2ptap \
   -ldflags="-s -w $VER_FLAGS" \
   -o "$AAR" \

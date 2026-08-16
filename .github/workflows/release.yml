@@ -342,9 +342,7 @@ jobs:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/29.0.14206865
         run: |
           set -x
-          # gomobile bind needs golang.org/x/mobile/bind resolvable in the module
-          # graph at bind time (it is not imported by the app, so go mod tidy would
-          # strip it). Pull it ad-hoc here; this only touches the ephemeral CI checkout.
+          export GOFLAGS="-ldflags=-checklinkname=0"
           go get golang.org/x/mobile/bind@latest
           chmod +x scripts/*.sh
           STAGE="p2ptap-android"
