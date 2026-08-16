@@ -324,7 +324,7 @@ jobs:
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
           yes | sdkmanager --licenses
           sdkmanager --install \
-            "platforms;android-21" \
+            "platforms;android-35" \
             "build-tools;35.0.0" \
             "platform-tools" \
             "ndk;29.0.14206865"
@@ -346,9 +346,10 @@ jobs:
           # graph at bind time (it is not imported by the app, so go mod tidy would
           # strip it). Pull it ad-hoc here; this only touches the ephemeral CI checkout.
           go get golang.org/x/mobile/bind@latest
+          chmod +x scripts/*.sh
           STAGE="p2ptap-android"
           mkdir -p "dist/${STAGE}"
-          P2PTAP_VERSION="${VERSION}" AAR_TARGET="android" ./scripts/build-aar.sh
+          P2PTAP_VERSION="${VERSION}" AAR_TARGET="android" bash ./scripts/build-aar.sh
           cp bin/p2ptap.aar "dist/${STAGE}/"
           if [ -f bin/p2ptap-sources.jar ]; then
             cp bin/p2ptap-sources.jar "dist/${STAGE}/"

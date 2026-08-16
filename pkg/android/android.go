@@ -1,23 +1,24 @@
 //go:build android
 
-// Package android exposes the p2ptap P2P node to Android apps as an AAR produced
+// Package P2PTap exposes the p2ptap P2P node to Android apps as an AAR produced
 // by `gomobile bind`. It is the only package bound into the AAR; gomobile
 // compiles the entire Go dependency tree (libp2p, crypto, the node core, etc.)
-// into the AAR's native libraries.
+// into the AAR's native libraries under the P2PTap JNI class.
 //
 // Lifecycle (from the Kotlin/Java side):
 //
 //	val fd = vpnInterface.fileDescriptor.detachFd()   // from VpnService.Builder
-//	Android.SetProtector(protector)                  // implements VpnService.protect(fd)
-//	Android.Start(configJson, fd)                   // runs the node; non-blocking
+//	P2PTap.setProtector(protector)                   // implements VpnService.protect(fd)
+//	P2PTap.start(configJson, fd)                     // runs the node; non-blocking
 //	// ... VPN runs ...
-//	Android.Stop()                                  // tear down
+//	val running = P2PTap.isRunning()                 // check status
+//	P2PTap.stop()                                    // tear down
 //
 // Android only supports a TUN (layer-3) device, so the node runs over a
 // tun<->tap conversion layer (see p2ptap/pkg/tap + p2ptap/pkg/tuntap). The Exit
 // Node server is intentionally NOT supported on Android (no host routing/NAT
 // machinery on a TUN-only client) and is rejected at Start.
-package android
+package P2PTap
 
 import (
 	"encoding/json"
@@ -122,6 +123,13 @@ func Stop() error {
 	return err
 }
 
+// IsRunning reports whether the P2P TAP node is currently active.
+func IsRunning() bool {
+	mu.Lock()
+	defer mu.Unlock()
+	return instance != nil
+}
+
 // SetLogLevel adjusts the global log verbosity. level is one of
 // "debug"|"info"|"warn"|"error" (case-insensitive); unknown values default to
 // "info".
@@ -136,4 +144,36 @@ func Version() string {
 		return version.Version
 	}
 	return "dev"
+}
+
+// P2PTap provides an object-oriented receiver wrapper matching the class name.
+type P2PTap struct{}
+
+// NewP2PTap creates a new P2PTap instance wrapper.
+func NewP2PTap() *P2PTap {
+	return &P2PTap{}
+}
+
+func (a *P2PTap) SetProtector(p Protector) {
+	SetProtector(p)
+}
+
+func (a *P2PTap) Start(cfgJSON string, tunFd int) error {
+	return Start(cfgJSON, tunFd)
+}
+
+func (a *P2PTap) Stop() error {
+	return Stop()
+}
+
+func (a *P2PTap) IsRunning() bool {
+	return IsRunning()
+}
+
+func (a *P2PTap) SetLogLevel(level string) error {
+	return SetLogLevel(level)
+}
+
+func (a *P2PTap) Version() string {
+	return Version()
 }

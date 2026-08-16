@@ -3641,7 +3641,7 @@
                 acl_dir_both: "↔ Ambos",
                 acl_dir_in: "↓ Entrante",
                 acl_dir_out: "↑ Saliente",
-                acl_proto_any: "TODOS",
+                acl_proto_any: "Todos",
                 acl_proto_tcp: "TCP",
                 acl_proto_udp: "UDP",
                 acl_proto_icmp: "ICMP",
@@ -12221,14 +12221,19 @@ window.toggleSubnetRoute = async function(cidr, enable) {
         // instead of using direct children. Use this when rows are nested inside
         // a wrapper inside the target (e.g. the Exit Gateway panel keeps its
         // candidate cards inside an `.exit-candidates-grid` wrapper so the grid
-        // layout survives even when paging). Default = `> *` (direct children).
+        // layout survives even when paging). When omitted, rows default to the
+        // container's direct element children (`container.children`).
         function initModulePagination() {
             document.querySelectorAll('.module-search[data-paginate]').forEach(function (input) {
                 const targetId = input.getAttribute('data-search-target');
                 const container = targetId ? document.getElementById(targetId) : null;
                 if (!container) return;
 
-                const rowSelector = input.getAttribute('data-paginate-row-selector') || '> *';
+                // When `data-paginate-row-selector` is omitted the rows are the
+                // container's direct element children. `> *` alone is NOT a valid
+                // selector for querySelectorAll (it must be `:scope > *`), so we
+                // special-case the default and fall back to `container.children`.
+                const rowSelector = input.getAttribute('data-paginate-row-selector');
 
                 // Build + inject the pagination bar right after the table (or after
                 // the container itself when there is no enclosing <table>, e.g. encList).
@@ -12263,7 +12268,9 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 function apply() {
                     if (obs) obs.disconnect();
                     unwrapHighlights(container);
-                    const rows = Array.prototype.slice.call(container.querySelectorAll(rowSelector));
+                    const rows = Array.prototype.slice.call(
+                        rowSelector ? container.querySelectorAll(rowSelector) : container.children
+                    );
                     const term = state.term;
                     const matched = [];
                     rows.forEach(function (row) {
