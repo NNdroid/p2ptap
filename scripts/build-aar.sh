@@ -96,7 +96,9 @@ echo "========================================================="
 
 # gomobile bind:
 #   -target=android[/arm64] cross-compile for Android (optionally a single ABI)
-#   -androidapi 21         minSdk 21 (VpnService available since API 14, 21 is safe)
+#   -androidapi 24         minSdk 24 (VpnService available since API 14; 24 is the
+#                          safe floor for NDK r27+/r29 — NDK may reject <21, so 24
+#                          avoids "unsupported API version" with the latest NDK)
 #   -javapkg com.p2ptap    Java package for the generated wrapper class
 #   -o bin/p2ptap.aar      AAR output path
 #   ./pkg/android          the package to bind (only this pkg is exported)
@@ -108,7 +110,7 @@ echo "========================================================="
 # uses CGO.
 gomobile bind \
   -target="$AAR_TARGET" \
-  -androidapi 21 \
+  -androidapi 24 \
   -javapkg com.p2ptap \
   -ldflags="-s -w $VER_FLAGS" \
   -o "$AAR" \

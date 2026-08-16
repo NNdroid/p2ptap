@@ -297,7 +297,7 @@ jobs:
           if-no-files-found: ignore
 
   build-android:
-    name: Build Android AAR (arm64, arm, amd64, 386)
+    name: "Build Android AAR (fat: arm64, arm, amd64, 386)"
     needs: prepare
     runs-on: ubuntu-latest
     steps:
@@ -310,29 +310,42 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Set up Java (JDK 21)
+      - name: Set up Java (JDK 21 LTS)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Set up Android NDK (Latest r27c)
-        uses: nopen/setup-ndk@v1
-        with:
-          ndk-version: 'r27c'
-          add-to-path: true
+      - name: Set up Android SDK (cmdline-tools)
+        uses: android-actions/setup-android@v3
 
-      - name: Install gomobile & gobind
+      - name: Install Android SDK packages + latest NDK (r29)
+        run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --licenses
+          sdkmanager --install \
+            "platforms;android-21" \
+            "build-tools;35.0.0" \
+            "platform-tools" \
+            "ndk;29.0.14206865"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - name: Install gomobile & gobind (latest)
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
-          gomobile init
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Build Android AAR
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/29.0.14206865
         run: |
           set -x
+          # gomobile bind needs golang.org/x/mobile/bind resolvable in the module
+          # graph at bind time (it is not imported by the app, so go mod tidy would
+          # strip it). Pull it ad-hoc here; this only touches the ephemeral CI checkout.
+          go get golang.org/x/mobile/bind@latest
           STAGE="p2ptap-android"
           mkdir -p "dist/${STAGE}"
           P2PTAP_VERSION="${VERSION}" AAR_TARGET="android" ./scripts/build-aar.sh
