@@ -1,0 +1,96 @@
+name: P2P TAP VPN CI/CD Workflow
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Build & E2E Test Suite
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Always track go.mod so the toolchain matches the module requirement
+          # (go.mod currently requires go 1.25.x; a hard-coded older version
+          # would fail to build).
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install Dependencies
+        run: go mod download
+
+      - name: Run Unit & E2E Integration Tests (IPv4/IPv6 Ping, Strategies, Deduplication)
+        run: go test -v -count=1 ./...
+
+      - name: Cross-Compile Build Verification
+        run: go build -v -o p2ptap_test_bin ./cmd/p2ptap
+
+  # ── Race detector gate ────────────────────────────────────────────────────
+  # Catches data races / concurrency bugs (the items flagged in the concurrency
+  # audit) on every supported platform. The race runtime needs cgo, so each OS
+  # must provide a C toolchain:
+  #   • Linux / macOS : gcc / clang are preinstalled in the runner images.
+  #   • Windows       : no C toolchain by default → install MinGW-w64 via MSYS2
+  #                     (this is the "SDK" that brings gcc + windows.h, which
+  #                     Go's cgo/race build requires on Windows).
+  race:
+    name: Race Detector (concurrency safety)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # Linux runners ship gcc; macOS runners ship clang — nothing to install.
+      # Windows has no C compiler by default, so provision MinGW-w64 (gcc +
+      # Windows SDK headers). This is what enables `go test -race` (cgo) there.
+      - name: Install MinGW-w64 (Windows CGO / race SDK)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc
+
+      # Make the MinGW gcc visible to subsequent steps (default install path on
+      # the windows-latest image is C:\msys64). setup-go already put `go` on
+      # PATH, so the bash step below can invoke both.
+      - name: Add MinGW gcc to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "C:/msys64/mingw64/bin" >> "$GITHUB_PATH"
+
+      - name: Run tests with race detector (Linux / macOS)
+        if: runner.os != 'Windows'
+        env:
+          CGO_ENABLED: 1
+        run: go test -race -count=1 -timeout 900s ./pkg/node/...
+
+      - name: Run tests with race detector (Windows / MinGW)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          CGO_ENABLED: 1
+        run: go test -race -count=1 -timeout 900s ./pkg/node/...

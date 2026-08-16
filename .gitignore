@@ -1,0 +1,27 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+
+# Private key files
+*.key
+
+# Build output directories
+/bin/
+/dist/
+
+*.log
+
+.codebuddy/
+.kilo/
+.idea/
+docs/
+.workbuddy/

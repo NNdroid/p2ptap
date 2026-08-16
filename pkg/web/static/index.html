@@ -1,0 +1,1389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>p2ptap Dashboard - Layer-2 P2P TAP VPN</title>
+    
+    <link rel="stylesheet" href="styles.css">
+    <!-- theme.js: must load synchronously in <head> (no defer) so the saved
+         theme is applied before first paint, preventing a flash. -->
+    <script src="theme.js"></script>
+
+</head>
+<body>
+    <div class="ambient-bg">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+    </div>
+
+    <!-- Unified SVG line-icon sprite -->
+    <svg width="0" height="0" aria-hidden="true" focusable="false" class="ext1">
+      <defs>
+        <symbol id="ic-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.6 2.6 2.6 15.4 0 18M12 3c-2.6 2.6-2.6 15.4 0 18"/></symbol>
+        <symbol id="ic-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+        <symbol id="ic-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5"/><path d="M6 11l6-6 6 6"/></symbol>
+        <symbol id="ic-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M6 13l6 6 6-6"/></symbol>
+        <symbol id="ic-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/></symbol>
+        <symbol id="ic-activity" viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></symbol>
+        <symbol id="ic-bar-chart" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M21 20v-3"/></symbol>
+        <symbol id="ic-share" viewBox="0 0 24 24"><circle cx="6" cy="12" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="18" cy="18" r="2.4"/><path d="M8.1 10.9l7.6-3.7M8.1 13.1l7.6 3.7"/></symbol>
+        <symbol id="ic-map" viewBox="0 0 24 24"><path d="M9 4l6 2 6-2v14l-6 2-6-2-6 2V6z"/><path d="M9 4v14M15 6v14"/></symbol>
+        <symbol id="ic-server" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/><path d="M8 7.5h.01M8 16.5h.01"/></symbol>
+        <symbol id="ic-network" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M12 7v4M12 11l-5 6M12 11l5 6"/></symbol>
+        <symbol id="ic-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></symbol>
+        <symbol id="ic-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></symbol>
+        <symbol id="ic-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+        <symbol id="ic-terminal" viewBox="0 0 24 24"><path d="M4 6l5 5-5 5"/><path d="M12 18h8"/></symbol>
+        <symbol id="ic-radar" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="1.4"/></symbol>
+        <symbol id="ic-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></symbol>
+        <symbol id="ic-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.2-2.2z"/></symbol>
+        <symbol id="ic-cpu" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M9 3v2M15 3v2M9 19v2M15 19v2M3 9h2M3 15h2M19 9h2M19 15h2"/></symbol>
+        <symbol id="ic-key" viewBox="0 0 24 24"><circle cx="8" cy="8" r="4"/><path d="M11 11l9 9M17 17l2-2M14 14l2-2"/></symbol>
+        <symbol id="ic-table" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M3 14h18M9 4v16"/></symbol>
+        <symbol id="ic-layers" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></symbol>
+        <symbol id="ic-microscope" viewBox="0 0 24 24"><path d="M6 18h10M9 18a3 3 0 0 0 6 0M12 6V3M10 6l4 4M11 11a2.5 2.5 0 1 0 3 3"/></symbol>
+        <symbol id="ic-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+        <symbol id="ic-wifi" viewBox="0 0 24 24"><path d="M2 8.5a15 15 0 0 1 20 0M5 12a10 10 0 0 1 14 0M8 15.5a5 5 0 0 1 8 0"/><circle cx="12" cy="19" r="1"/></symbol>
+        <symbol id="ic-flask" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/></symbol>
+        <symbol id="ic-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></symbol>
+        <symbol id="ic-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></symbol>
+        <symbol id="ic-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/></symbol>
+        <symbol id="ic-save" viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M8 3v6h8V3M8 21v-7h8v7"/></symbol>
+        <symbol id="ic-zap" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></symbol>
+        <symbol id="ic-grip" viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="15" cy="18" r="1.4"/></symbol>
+        <symbol id="ic-compass" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-4 1.5 2-5z"/></symbol>
+        <symbol id="ic-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1"/></symbol>
+        <symbol id="ic-play" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></symbol>
+        <symbol id="ic-pause" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></symbol>
+        <symbol id="ic-id" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="12" r="2"/><path d="M14 10h4M14 14h3"/></symbol>
+        <symbol id="ic-shuffle" viewBox="0 0 24 24"><path d="M4 5h4l12 14M4 19h4l4-5M20 5l-4 5M16 4l4 1-1 4"/></symbol>
+        <symbol id="ic-scan" viewBox="0 0 24 24"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M4 12h16"/></symbol>
+        <symbol id="ic-list" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></symbol>
+        <symbol id="ic-pie" viewBox="0 0 24 24"><path d="M12 3v9h9a9 9 0 1 0-9-9z"/><path d="M12 3a9 9 0 0 1 9 9h-9z"/></symbol>
+        <symbol id="ic-signal" viewBox="0 0 24 24"><path d="M4 18v-3M9 18v-7M14 18v-11M19 18V4"/></symbol>
+        <symbol id="ic-moon" viewBox="0 0 24 24"><path d="M21 12.8A8 8 0 1 1 11.2 3 6.5 6.5 0 0 0 21 12.8z"/></symbol>
+        <symbol id="ic-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/></symbol>
+        <symbol id="ic-warning" viewBox="0 0 24 24"><path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17h.01"/></symbol>
+      </defs>
+    </svg>
+
+    <!-- Login Gate (replaces native prompt for access token) -->
+    <div id="loginModal" class="modal-backdrop ext2">
+        <div class="modal-card login-card">
+            <div class="login-header">
+                <div class="login-logo">P2P</div>
+                <div class="login-heading">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-lock"/></svg><h2 id="loginTitle" data-i18n="login_title">P2P TAP Dashboard Login</h2>
+                </div>
+                <p id="loginSubtitle" class="login-sub" data-i18n="login_subtitle">This dashboard is protected. Enter your access token to continue.</p>
+            </div>
+            <label class="login-label" for="loginTokenInput" id="loginTokenLabel" data-i18n="login_token_label">Access Token</label>
+            <input id="loginTokenInput" class="login-input" type="password" autocomplete="off" spellcheck="false"
+                   data-i18n-ph="login_token_placeholder" placeholder="Paste token from startup log or config (webui.auth_token)" />
+            <div id="loginError" class="login-error ext2"></div>
+            <button id="loginBtn" class="btn-glass login-btn" data-onclick="submitLogin()" data-i18n="login_btn">Login</button>
+            <p class="login-hint" id="loginHint" data-i18n="login_hint">The token is stored locally in your browser and sent as a Bearer header.</p>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- iOS Glass Header -->
+        <header class="header">
+            <div class="header-title-box">
+                <div class="header-logo">P2P</div>
+                <div>
+                    <h1 id="nodeName" data-i18n="default_node_name">P2P TAP VPN Node</h1>
+                    <div id="nodePeerID" class="ext3"><span data-i18n="peer_id_lbl">PeerID</span>: Loading...</div>
+                </div>
+            </div>
+            <div class="header-meta">
+                <div class="status-pill">
+                    <span class="status-dot"></span>
+                    <span data-i18n="online">ONLINE (2s Auto Refresh)</span>
+                </div>
+                <div class="pill-badge" id="strategyBadge" data-i18n="strategy_best_path">BEST_PATH</div>
+                <select id="langSelect" class="lang-select" data-onchange="setLanguage(this.value)">
+                    <option value="en">🌐 English</option>
+                    <option value="zh-CN">🇨🇳 简体中文</option>
+                    <option value="zh-TW">🇹🇼 繁體中文</option>
+                    <option value="ja">🇯🇵 日本語</option>
+                    <option value="de">🇩🇪 Deutsch</option>
+                    <option value="es">🇪🇸 Español</option>
+                    <option value="fr">🇫🇷 Français</option>
+                </select>
+            <button class="theme-toggle" id="themeToggle" data-onclick="toggleTheme()" type="button" title="切换白天 / 黑夜主题" aria-label="切换白天或黑夜主题">
+                <span class="tt-option tt-sun" aria-hidden="true"><svg class="ico" aria-hidden="true"><use href="#ic-sun"/></svg></span>
+                <span class="tt-option tt-moon" aria-hidden="true"><svg class="ico" aria-hidden="true"><use href="#ic-moon"/></svg></span>
+                <span class="tt-thumb"></span>
+            </button>
+                <button class="btn-glass" data-onclick="openAddStaticPeerModal()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-plus"/></svg><span data-i18n="btn_add_static_peer">Add Static Peer</span></button>
+                <button class="btn-glass" data-onclick="fetchStats()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-refresh"/></svg><span data-i18n="refresh">Refresh</span></button>
+                <button class="btn-glass" data-onclick="openConfigModal()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-gear"/></svg><span data-i18n="settings">Settings</span></button>
+            </div>
+        </header>
+
+        <!-- Dynamic Stat Cards Grid -->
+        <div class="stats-grid">
+            <div class="glass-card">
+                <div class="card-label">
+                    <span data-i18n="tap_ipv4">IPv4 Address</span>
+                    <span class="card-icon"><svg class="ico" aria-hidden="true"><use href="#ic-globe"/></svg></span>
+                </div>
+                <div class="card-value" id="tapIPv4">10.0.0.1/24</div>
+                <div class="card-subtext" data-i18n="tap_ipv4_sub">Layer-2 Virtual Ethernet</div>
+            </div>
+
+            <div class="glass-card">
+                <div class="card-label">
+                    <span data-i18n="tap_ipv6">IPv6 Address</span>
+                    <span class="card-icon"><svg class="ico" aria-hidden="true"><use href="#ic-lock"/></svg></span>
+                </div>
+                <div class="card-value" id="tapIPv6">fd00::1/64</div>
+                <div class="card-subtext" data-i18n="tap_ipv6_sub">Native Dual-Stack Transmission</div>
+            </div>
+
+            <div class="glass-card">
+                <div class="card-label">
+                    <span><span data-i18n="tx_bytes">Tx Data (Sent)</span> <span id="txSpeed" class="speed-badge" title="Local Node Real-Time TAP Transmission Rate">⚡ 0 KB/s</span></span>
+                    <span class="card-icon"><svg class="ico" aria-hidden="true"><use href="#ic-arrow-up"/></svg></span>
+                </div>
+                <div class="card-value" id="txBytes">0 B</div>
+                <div class="card-subtext" id="txPackets"><span data-i18n="pkts_total">Packets: </span>0 pkts</div>
+            </div>
+
+            <div class="glass-card">
+                <div class="card-label">
+                    <span><span data-i18n="rx_bytes">Rx Data (Received)</span> <span id="rxSpeed" class="speed-badge" title="Local Node Real-Time TAP Reception Rate">⚡ 0 KB/s</span></span>
+                    <span class="card-icon"><svg class="ico" aria-hidden="true"><use href="#ic-arrow-down"/></svg></span>
+                </div>
+                <div class="card-value" id="rxBytes">0 B</div>
+                <div class="card-subtext" id="rxPackets"><span data-i18n="pkts_total">Packets: </span>0 pkts</div>
+            </div>
+
+            <div class="glass-card">
+                <div class="card-label">
+                    <span data-i18n="dedup_count">Deduplicated Packets</span>
+                    <span class="card-icon"><svg class="ico" aria-hidden="true"><use href="#ic-shield"/></svg></span>
+                </div>
+                <div class="card-value" id="dedupCount">0</div>
+                <div class="card-subtext" data-i18n="dedup_sub">Multi-link Duplicate Filtering</div>
+            </div>
+        </div>
+
+        <!-- Live Bandwidth Waveform Chart -->
+        <section class="glass-section chart-panel ext4">
+            <div class="section-header ext5">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-activity"/></svg><span data-i18n="bandwidth_chart_title">Live Bandwidth Waveform (Tx / Rx)</span>
+                </div>
+                <div class="ext6">
+                    <span class="ext7"><span class="ext8"></span> Tx B/s</span>
+                    <span class="ext9"><span class="ext10"></span> Rx B/s</span>
+                </div>
+            </div>
+            <div class="ext11">
+                <canvas id="bandwidthCanvas" class="ext12"></canvas>
+                <div id="bwTooltip" class="ext13"></div>
+            </div>
+        </section>
+
+        <!-- Packet Rate Distribution Chart -->
+        <section class="glass-section chart-panel ext4">
+            <div class="section-header ext5">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-bar-chart"/></svg><span data-i18n="packet_rate_title">Packet Rate Distribution (Tx / Rx)</span>
+                </div>
+                <div class="ext14">
+                    <span class="ext15"><span class="ext16"></span> Tx Ucast</span>
+                    <span class="ext17"><span class="ext18"></span> Tx Mcast</span>
+                    <span class="ext19"><span class="ext20"></span> Tx Bcast</span>
+                    <span class="ext21"></span>
+                    <span class="ext22"><span class="ext23"></span> Rx Ucast</span>
+                    <span class="ext24"><span class="ext25"></span> Rx Mcast</span>
+                    <span class="ext26"><span class="ext27"></span> Rx Bcast</span>
+                </div>
+            </div>
+            <div class="ext28">
+                <canvas id="ppsCanvas" class="ext29"></canvas>
+                <div id="ppsTooltip" class="ext13"></div>
+            </div>
+        </section>
+
+        <!-- Mesh Quality Matrix Card -->
+        <section class="glass-section ext4">
+            <div class="section-header">
+                <div class="section-title">
+                        <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-share"/></svg><span data-i18n="mesh_matrix_title">Mesh Quality & Latency Matrix</span>
+                    </div>
+                    <input type="text" class="module-search" data-search-target="meshMatrixTableBody" data-i18n-ph="search_placeholder" placeholder="Search…">
+                </div>
+                <div class="table-responsive">
+                <table class="peer-table">
+                    <thead>
+                        <tr>
+                            <th data-i18n="matrix_src">Source Node</th>
+                            <th data-i18n="matrix_dst">Destination Node</th>
+                            <th data-i18n="matrix_rtt">RTT Latency</th>
+                            <th data-i18n="matrix_hops">Hops</th>
+                            <th data-i18n="matrix_type">Link Type</th>
+                        </tr>
+                    </thead>
+                    <tbody id="meshMatrixTableBody">
+                        <tr><td colspan="5" class="empty-row" data-i18n="no_matrix">No peer routes in matrix</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- 🗺️ Interactive P2P Topology Mesh Star Chart -->
+        <section class="glass-section ext4">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-map"/></svg><span data-i18n="topology_title">拓扑星图</span>
+                    <span data-i18n="topology_sub" class="ext30">(Drag nodes to reposition | Scroll to zoom | Double-click for Ping)</span>
+                </div>
+                <div class="ext31">
+                    <span data-i18n="topo_legend_direct_fast" class="ext32">● Direct (&lt;30ms)</span>
+                    <span data-i18n="topo_legend_direct_slow" class="ext33">● Direct (30-100ms)</span>
+                    <span data-i18n="topo_legend_relay" class="ext34">● Transit Relay / L2-Switch (amber)</span>
+                    <span data-i18n="topo_legend_boot" class="topo-legend-boot">● Bootstrap Node (purple)</span>
+                    <span data-i18n="topo_legend_overlay" class="topo-legend-overlay">◆ Overlay Relay (long dash)</span>
+                    <span data-i18n="topo_legend_flow" class="ext35">💧 Flow = real rate · edge mid shows ↑↓ speed</span>
+                    <button class="btn-glass ext36" data-onclick="resetTopologyZoom()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-target"/></svg><span data-i18n="reset_view">Reset View</span></button>
+                </div>
+            </div>
+            <div id="topoSummaryBar" class="ext37">
+                <span class="topo-chip ext38" id="topoSummaryNodes"></span>
+                <span class="topo-chip ext39" id="topoSummaryDirect"></span>
+                <span class="topo-chip ext40" id="topoSummaryRelayed"></span>
+                <span class="topo-chip ext41" id="topoSummaryRelays"></span>
+                <span class="topo-chip topo-chip--boot" id="topoSummaryBoots"></span>
+                <span class="topo-chip topo-chip--static" id="topoSummaryStatic"></span>
+                <span class="topo-chip topo-chip--cluster" id="topoSummaryClusters"></span>
+                <span class="topo-chip ext42" id="topoSummaryThru"></span>
+                <span class="topo-chip ext43" id="topoSummaryGw"></span>
+            </div>
+            <div class="topo-toolbar">
+                <span class="topo-toolbar-label" data-i18n="topo_filter_label">筛选:</span>
+                <button id="topoFilterAll" class="btn-glass topo-filter-btn is-active" data-onclick="selectTopoFilter('all')"><span data-i18n="topo_filter_all">全部</span></button>
+                <button id="topoFilterDirect" class="btn-glass topo-filter-btn" data-onclick="selectTopoFilter('direct')"><span data-i18n="topo_filter_direct">直连</span></button>
+                <button id="topoFilterRelayed" class="btn-glass topo-filter-btn" data-onclick="selectTopoFilter('relayed')"><span data-i18n="topo_filter_relayed">经中继</span></button>
+                <button id="topoFilterRemote" class="btn-glass topo-filter-btn" data-onclick="selectTopoFilter('remote')"><span data-i18n="topo_filter_remote">跨集群</span></button>
+                <span class="topo-toolbar-hint" data-i18n="topo_click_hint">单击节点可查看详情并高亮其到本机的路径</span>
+            </div>
+            <div id="topologyContainer" class="ext44">
+                <canvas id="topologyCanvas" class="ext45"></canvas>
+                <div id="topologyTooltip" class="topology-tooltip"></div>
+                <div id="topoDetailPanel" class="topo-detail-panel"></div>
+            </div>
+        </section>
+
+        <!-- Exit Node Control, Subnet Routes & ACL Security Status Grid -->
+        <div class="ext46">
+            <!-- Exit Node Gateway Control Card -->
+            <div class="glass-card ext47">
+                <div class="ext48">
+                    <div class="ext48-title">
+                        <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-server"/></svg><strong data-i18n="exit_client_card_title" class="ext49">Exit Node Gateway Control</strong>
+                        <span class="pill-badge role-peer ext50" id="exitClientBadge">Inactive</span>
+                    </div>
+                    <input type="text" id="exitClientSearch" class="module-search" data-search-target="exitClientCardBody" data-paginate="true" data-paginate-row-selector=".exit-peer-card" data-i18n-ph="search_placeholder" placeholder="Search…" style="display:none;">
+                </div>
+                <div id="exitClientCardBody" class="ext51">
+                    <div data-i18n="exit_client_status_inactive" class="ext52">No Exit Gateway active (using local default gateway)</div>
+                </div>
+            </div>
+
+            <!-- Advertised Subnet Routes -->
+            <div class="glass-card ext53">
+                <div class="ext48">
+                    <div class="ext48-title">
+                        <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-network"/></svg><strong data-i18n="subnet_routes_title" class="ext49">Authorized Subnet Routes</strong>
+                        <span class="pill-badge role-static ext50" id="subnetCountBadge">0 Subnets</span>
+                    </div>
+                    <input type="text" class="module-search" data-search-target="subnetRoutesList" data-paginate="true" data-i18n-ph="search_placeholder" placeholder="Search…">
+                </div>
+                <div id="subnetRoutesList" class="ext54">
+                    <div data-i18n="no_subnets" class="ext52">No advertised subnets received</div>
+                </div>
+            </div>
+
+            <!-- Duplicate IP / Subnet Conflicts (arbitration alerts) -->
+            <div class="glass-card dup-ip-card" id="dupIpConflictsCard">
+                <div class="ext48">
+                    <div class="ext48-title">
+                        <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-warning"/></svg><strong data-i18n="dup_ip_conflicts_title" class="ext49">Duplicate IP / Subnet Conflicts</strong>
+                        <span class="pill-badge role-static ext50" id="dupIpCountBadge">0</span>
+                    </div>
+                    <input type="text" class="module-search" data-search-target="dupIpConflictsList" data-paginate="true" data-i18n-ph="search_placeholder" placeholder="Search…">
+                </div>
+                <div id="dupIpConflictsList" class="ext54">
+                    <div data-i18n="no_dup_ip_conflicts" class="ext52">No duplicate IP or subnet conflicts detected</div>
+                </div>
+            </div>
+
+            <!-- ACL Firewall Status -->
+            <div class="glass-card ext55">
+                <div class="ext56">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-shield"/></svg><strong data-i18n="acl_status_title" class="ext49">Firewall</strong>
+                    <div class="ext57">
+                        <span class="pill-badge role-peer ext50" id="aclStatusBadge">Open Mesh</span>
+                        <button type="button" class="btn-glass ext58" id="aclEditBtn" title="Add new ACL rule"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-plus"/></svg></button>
+                        <button type="button" class="btn-glass ext59" id="aclTestBtn" title="Test a rule against a sample packet"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-flask"/></svg></button>
+                    </div>
+                </div>
+                <div id="aclRulesSummary" class="ext54">
+                    <div data-i18n="acl_open_desc" class="ext32">Mesh Firewall is Open (All P2P Traffic Allowed)</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- System Health & Security Grid (2 Cards per row) -->
+        <!-- 📊 Live Traffic Protocol & Packet Inspector Card -->
+        <section class="glass-section ext4">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-scan"/></svg><span data-i18n="protocol_inspector_title">Live Traffic & Ethernet Protocol Inspector</span>
+                    <span data-i18n="protocol_inspector_desc" class="ext30">(Layer-2/3/4 packet breakdown & live PPS statistics)</span>
+                </div>
+            </div>
+            <div class="ext60">
+                <div class="glass-card ext61">
+                    <div data-i18n="lbl_broadcast_pkts" class="ext62">Broadcast Packets</div>
+                    <div id="pktStatBroadcast" class="ext63">0</div>
+                    <div data-i18n="desc_broadcast" class="ext64">L2 Broadcast (incl. ARP)</div>
+                </div>
+                <div class="glass-card ext61">
+                    <div data-i18n="lbl_multicast_pkts" class="ext62">Multicast Packets</div>
+                    <div id="pktStatMulticast" class="ext65">0</div>
+                    <div data-i18n="desc_multicast" class="ext64">L2 Multicast (incl. mDNS)</div>
+                </div>
+                <div class="glass-card ext61">
+                    <div data-i18n="lbl_gateway_pkts" class="ext62">Exit Node Gateway Packets</div>
+                    <div id="pktStatGateway" class="ext66">0</div>
+                    <div data-i18n="desc_gateway" class="ext64">Tunnelled via Exit Node</div>
+                </div>
+                <div class="glass-card ext61">
+                    <div data-i18n="lbl_seq_sync" class="ext62">Seq Sync & Dedup</div>
+                    <div id="pktStatSeqSync" class="ext67">0</div>
+                    <div data-i18n="desc_seq_sync" class="ext64">Synced peers · replay/window drops</div>
+                </div>
+                <div class="glass-card ext61">
+                    <div data-i18n="lbl_icmp_ping" class="ext62">ICMP Echo (Ping)</div>
+                    <div id="pktStatICMP" class="ext68">0</div>
+                    <div data-i18n="desc_icmp" class="ext64">Network Probes & Keepalive</div>
+                </div>
+                <div class="glass-card ext61">
+                    <div data-i18n="lbl_udp_packets" class="ext62">UDP Transport Packets</div>
+                    <div id="pktStatUDP" class="ext67">0</div>
+                    <div data-i18n="desc_udp" class="ext64">Datagram Transport</div>
+                </div>
+                <div class="glass-card ext61">
+                    <div data-i18n="lbl_tcp_packets" class="ext62">TCP Stream Packets</div>
+                    <div id="pktStatTCP" class="ext69">0</div>
+                    <div data-i18n="desc_tcp" class="ext64">Reliable Byte Streams</div>
+                </div>
+            </div>
+        </section>
+
+        <div class="ext70">
+            <!-- System & Runtime Health -->
+            <div class="glass-card ext53">
+                <div class="ext48">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-cpu"/></svg><strong data-i18n="sys_health_title" class="ext49">System & Runtime Health</strong>
+                    <span class="pill-badge role-static ext50" data-i18n="badge_active">Active</span>
+                </div>
+                <div class="ext71">
+                    <!-- Left column -->
+                    <div class="ext72"><span data-i18n="lbl_heap" class="ext73">Heap Alloc / Sys:</span><strong id="sysHeap" class="ext33">—</strong></div>
+                    <div class="ext72"><span data-i18n="lbl_heap_inuse" class="ext73">Heap In-Use:</span><strong id="sysHeapInuse" class="ext74">—</strong></div>
+                    <div class="ext72"><span data-i18n="lbl_heap_objects" class="ext73">Heap Objects:</span><strong id="sysHeapObjects" class="ext74">—</strong></div>
+                    <div class="ext72"><span data-i18n="lbl_stack_inuse" class="ext73">Stack In-Use:</span><strong id="sysStackInuse" class="ext75">—</strong></div>
+                    <div class="ext72"><span data-i18n="lbl_next_gc" class="ext73">Next GC @:</span><strong id="sysNextGC" class="ext35">—</strong></div>
+                    <div class="ext72"><span data-i18n="lbl_last_gc_pause" class="ext73">Last GC Pause:</span><strong id="sysLastGCPause" class="ext35">—</strong></div>
+                    <!-- Right column -->
+                    <div class="ext72"><span data-i18n="lbl_gc_cpu" class="ext73">GC CPU Fraction:</span><strong id="sysGCCPUFrac" class="ext35">—</strong></div>
+                    <div class="ext72"><span data-i18n="lbl_gc_runs" class="ext73">GC Runs:</span><strong id="sysGC" class="ext32">—</strong></div>
+                    <div class="ext72"><span data-i18n="lbl_goroutines" class="ext73">Goroutines:</span><strong id="sysGoroutines" class="ext76">—</strong></div>
+                    <div class="ext72"><span data-i18n="lbl_gomaxprocs" class="ext73">GOMAXPROCS:</span><strong id="sysGOMAXPROCS" class="ext35">—</strong></div>
+                    <div class="ext72"><span data-i18n="lbl_cpu_cores" class="ext73">CPU Cores:</span><strong id="sysNumCPU" class="ext35">—</strong></div>
+                    <div class="ext72"><span data-i18n="lbl_process_uptime" class="ext73">Process Uptime:</span><strong id="sysUptime" class="ext35">—</strong></div>
+                </div>
+            </div>
+
+            <!-- Security & Crypto Status -->
+            <div class="glass-card ext53">
+                <div class="ext48">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-key"/></svg><strong data-i18n="security_title" class="ext49">Security & Encryption Status</strong>
+                    <span class="pill-badge role-bootstrap ext50" data-i18n="badge_protected">Protected</span>
+                </div>
+                <div class="ext54">
+                    <div class="ext77"><span data-i18n="lbl_psk_status" class="ext73">PSK Mesh Status:</span><strong id="secPSK" class="ext32">Active</strong></div>
+                    <div class="ext77"><span data-i18n="lbl_traffic_obfs" class="ext73">Traffic Obfuscation:</span><strong id="secObfs" class="ext34">Enabled</strong></div>
+                    <div class="ext77"><span data-i18n="lbl_id_fingerprint" class="ext73">Identity Fingerprint:</span><span class="sec-fp-group"><code id="secFingerprint" class="ext78 sec-fp">a1b2c3d4</code><button class="btn-copy sec-copy" id="secCopyFpBtn" data-onclick="copySecFingerprint()" title="Copy full fingerprint" aria-label="Copy fingerprint"><svg class="ico" aria-hidden="true"><use href="#ic-copy"/></svg></button></span></div>
+                    <div class="ext77"><span data-i18n="lbl_autonat_reach" class="ext73">AutoNAT Reachability:</span><strong id="secNAT" class="ext33">Public</strong></div>
+                </div>
+                <div class="ext79">
+                    <div class="ext80">
+                        <span data-i18n="lbl_per_peer_enc" class="ext81">Per-Peer Encryption</span>
+                        <span class="pill-badge ext82" id="encCount">0</span>
+                        <input type="text" class="module-search" data-search-target="encList" data-paginate="true" data-i18n-ph="search_placeholder" placeholder="Search…">
+                    </div>
+                    <div id="encList" class="ext83">
+                        <div class="empty-row ext84" data-i18n="no_peers_enc">No peers connected</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Protocol Traffic Distribution Card -->
+        <div class="glass-card ext85">
+            <div class="ext48">
+                <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-pie"/></svg><strong data-i18n="protocol_dist_title" class="ext49">Protocol Traffic Distribution</strong>
+                <span class="count-badge" id="protoTotalPkts">0 pkts</span>
+            </div>
+            <div class="ext86">
+                <div id="barIPv4" title="IPv4" class="ext87"></div>
+                <div id="barIPv6" title="IPv6" class="ext88"></div>
+                <div id="barARP" title="ARP" class="ext89"></div>
+                <div id="barNDP" title="NDP" class="ext90"></div>
+                <div id="barICMP" title="ICMP" class="ext91"></div>
+                <div id="barUDP" title="UDP" class="ext92"></div>
+                <div id="barTCP" title="TCP" class="ext93"></div>
+                <div id="barOther" title="Other" class="ext94"></div>
+            </div>
+            <div class="ext95">
+                <div><span class="ext33">■ IPv4:</span> <strong id="cntIPv4">0</strong></div>
+                <div><span class="ext76">■ IPv6:</span> <strong id="cntIPv6">0</strong></div>
+                <div><span class="ext32">■ ARP:</span> <strong id="cntARP">0</strong></div>
+                <div><span class="ext34">■ NDP:</span> <strong id="cntNDP">0</strong></div>
+                <div><span class="ext33">■ ICMP:</span> <strong id="cntICMP">0</strong></div>
+                <div><span class="ext75">■ UDP:</span> <strong id="cntUDP">0</strong></div>
+                <div><span class="ext96">■ TCP:</span> <strong id="cntTCP">0</strong></div>
+                <div><span class="ext73">■ Other:</span> <strong id="cntOther">0</strong></div>
+            </div>
+        </div>
+
+        <!-- Live System Log Stream Console Card -->
+        <section class="glass-section ext4">
+            <div class="section-header ext5">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-terminal"/></svg><span data-i18n="terminal_title">Live System Log Stream</span>
+                    <span class="pill-badge role-static ext97" id="logCountBadge" data-i18n="log_count">0 Logs</span>
+                    <span class="pill-badge ext98" id="logPausedBadge" data-i18n="log_paused_badge">⏸ Paused</span>
+                    <span id="logStreamIndicator" class="pcap-stream-indicator stream-off" title="WebSocket log stream status">
+                        <svg class="ico stream-ico" aria-hidden="true"><use href="#ic-zap"/></svg>
+                    </span>
+                </div>
+                <div class="ext99">
+                    <div class="ext100">
+                        <button class="filter-btn" data-level="ALL" data-onclick="setLogFilter('ALL')">ALL</button>
+                        <button class="filter-btn" data-level="INFO" data-onclick="setLogFilter('INFO')">INFO</button>
+                        <button class="filter-btn" data-level="DEBUG" data-onclick="setLogFilter('DEBUG')">DEBUG</button>
+                        <button class="filter-btn" data-level="WARN" data-onclick="setLogFilter('WARN')">WARN</button>
+                        <button class="filter-btn" data-level="ERROR" data-onclick="setLogFilter('ERROR')">ERROR</button>
+                    </div>
+                    <button class="btn-glass ext101" data-onclick="toggleAutoScroll()" id="autoScrollBtn" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-list"/></svg><span data-i18n="auto_scroll">Auto-Scroll: ON</span></button>
+                    <button class="btn-glass ext101" data-onclick="toggleLogPause()" id="logPauseBtn"><span data-i18n="pause_logs">⏸️ Pause</span></button>
+                    <button class="btn-glass ext101" data-onclick="copyLogConsole()" id="copyLogBtn" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-copy"/></svg><span data-i18n="copy_logs">Copy</span></button>
+                    <button class="btn-glass ext101" data-onclick="clearLogConsole()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-trash"/></svg><span data-i18n="clear_logs">Clear</span></button>
+                    <input type="text" class="module-search" data-search-target="terminalBox" data-i18n-ph="search_placeholder" placeholder="Search…">
+                </div>
+            </div>
+            <div class="terminal-resize-handle" id="terminalResizeHandle"></div>
+            <div class="terminal-box" id="terminalBox">
+                <div data-i18n="log_listening" class="ext102">Listening for live log events...</div>
+            </div>
+        </section>
+
+        <!-- P2P Network Diagnostics Tool (Ping & Traceroute) -->
+        <section class="glass-section">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-radar"/></svg><span data-i18n="ping_tool">P2P Network Diagnostics (Ping & Traceroute)</span>
+                </div>
+            </div>
+            <div class="ping-box">
+                <input type="text" id="pingTargetInput" class="ping-input" placeholder="e.g. 10.0.0.2 or 12D3KooW..." data-i18n-ph="ping_placeholder">
+                <button class="btn-glass" data-onclick="runPingDiagnostics()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-radar"/></svg><span data-i18n="run_ping">Run Ping Test</span></button>
+                <button class="btn-glass ext103" data-onclick="runTracerouteDiagnostics()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-search"/></svg><span data-i18n="run_trace">Run P2P Traceroute</span></button>
+            </div>
+            <div id="pingOutput" class="ping-output">Click "Run Ping Test" or "Run P2P Traceroute" to diagnose network paths and latency.</div>
+        </section>
+
+        <!-- P2P Connectivity Troubleshooter -->
+        <section class="glass-section">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-wrench"/></svg><span data-i18n="troubleshoot_title">P2P Connectivity Troubleshooter</span>
+                </div>
+            </div>
+            <div class="ext104">
+                <select id="troubleshootPeerSelect" class="ping-input ext105">
+                    <option value="" disabled selected data-i18n="troubleshoot_select_peer">Select a Peer to Diagnose</option>
+                </select>
+                <input type="text" id="troubleshootTargetInput" class="ping-input ext106" placeholder="Or enter Peer ID manually..." data-i18n-ph="troubleshoot_manual_input">
+                <button class="btn-glass ext107" data-onclick="runConnectivityDiagnosis()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-wrench"/></svg><span data-i18n="troubleshoot_run">Run Full Diagnosis</span></button>
+            </div>
+            <div id="troubleshootResults" class="ext108">
+                <span data-i18n="troubleshoot_idle">Select a peer and click 'Run Full Diagnosis' to start troubleshooting connectivity issues.</span>
+            </div>
+
+            <!-- Transport-Level Multiaddr Link Check (7-stage deep probe) -->
+            <div class="linkcheck-panel">
+                <div class="linkcheck-head">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-network"/></svg>
+                    <span data-i18n="linkcheck_title">Multiaddr Link Check</span>
+                </div>
+                <div class="linkcheck-desc" data-i18n="linkcheck_desc">Deep transport probe: multiaddr valid → DNS resolve → TCP/QUIC → libp2p transport → Noise/TLS handshake → Peer ID match → connection.</div>
+                <div class="linkcheck-controls">
+                    <input type="text" id="linkCheckInput" class="ping-input" placeholder="Enter a full P2P multiaddr, e.g. /ip4/1.2.3.4/tcp/4001/p2p/12D3KooW..." data-i18n-ph="linkcheck_input_ph">
+                    <button class="btn-glass" data-onclick="runLinkCheck()">
+                        <svg class="ico btn-ico" aria-hidden="true"><use href="#ic-network"/></svg>
+                        <span data-i18n="linkcheck_btn">Run Link Check</span>
+                    </button>
+                </div>
+                <div id="linkCheckResults" class="linkcheck-results"></div>
+            </div>
+        </section>
+
+        <!-- Connected Peers Table -->
+        <section class="glass-section">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-wifi"/></svg><span data-i18n="active_peers">Active P2P Peers</span>
+                    <span class="count-badge" id="peersCount">0</span>
+                </div>
+                <input type="text" class="module-search" data-search-target="peersList" data-paginate="true" data-i18n-ph="search_placeholder" placeholder="Search…">
+            </div>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th data-i18n="col_nodename">Node Name</th>
+                            <th data-i18n="col_geo">Geo Location</th>
+                            <th data-i18n="col_role">Node Role</th>
+                            <th data-i18n="col_osarch">OS / Arch</th>
+                            <th data-i18n="col_tapip">PEER IP</th>
+                            <th data-i18n="col_nat">NAT Status</th>
+                            <th data-i18n="col_encryption">Encryption</th>
+                            <th data-i18n="col_status">Conn Status</th>
+                            <th data-i18n="col_peerid">Peer ID</th>
+                            <th data-i18n="col_multiaddr">Network Multiaddr</th>
+                            <th data-i18n="col_transport">Transport</th>
+                            <th data-i18n="col_conn_time">Connected Time</th>
+                            <th data-i18n="col_last_active">Last Active</th>
+                            <th data-i18n="col_rtt">RTT Latency</th>
+                            <th data-i18n="col_jitter_loss">Jitter / Loss</th>
+                            <th data-i18n="col_actions">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="peersList">
+                        <tr><td colspan="15" class="empty-row" data-i18n="retrieving_metrics">Retrieving peer link metrics...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Synced Peer Metadata & Peek-Map Discovery Monitor -->
+        <section class="glass-section">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-layers"/></svg><span data-i18n="peer_meta_title">Peer Metadata & Peek-Map Discovery Monitor</span>
+                    <span class="count-badge" id="peerMetaCount">0</span>
+                </div>
+                <input type="text" class="module-search" data-search-target="peerMetaList" data-paginate="true" data-i18n-ph="search_placeholder" placeholder="Search…">
+            </div>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th data-i18n="col_nodename">Node Name</th>
+                            <th data-i18n="col_peerid">Peer ID</th>
+                            <th data-i18n="col_tapip">PEER IP</th>
+                            <th data-i18n="col_tapmac">TAP MAC</th>
+                            <th data-i18n="col_osarch">OS / Arch</th>
+                            <th data-i18n="col_subnets">Advertised Subnets</th>
+                            <th data-i18n="col_exit_egress">Exit Node Egress</th>
+                            <th data-i18n="col_sync_channel">Discovery Channel</th>
+                            <th data-i18n="col_last_sync">Last Heard</th>
+                        </tr>
+                    </thead>
+                    <tbody id="peerMetaList">
+                        <tr><td colspan="9" class="empty-row" data-i18n="no_peer_metas">No peer metadata received via peek-map / P2P</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Smart P2P Overlay Routing Table -->
+        <section class="glass-section">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-network"/></svg><span data-i18n="routes_table">Smart P2P Overlay Routing Table</span>
+                    <span class="count-badge" id="routeCount">0</span>
+                </div>
+                <input type="text" class="module-search" data-search-target="routeList" data-paginate="true" data-i18n-ph="search_placeholder" placeholder="Search…">
+            </div>
+
+            <!-- Summary Metric Cards -->
+            <div class="ext109">
+                <div class="ext110">
+                    <div data-i18n="stat_total_routes" class="ext111">Total Computed Routes</div>
+                    <div id="statTotalRoutes" class="ext112">0</div>
+                </div>
+                <div class="ext113">
+                    <div data-i18n="stat_relayed_routes" class="ext111">Relay Accelerated Paths</div>
+                    <div id="statRelayedRoutes" class="ext114">0</div>
+                </div>
+                <div class="ext115">
+                    <div data-i18n="stat_max_savings" class="ext111">Max Latency Saved</div>
+                    <div id="statMaxSavings" class="ext116">0 ms</div>
+                </div>
+                <div class="ext117">
+                    <div data-i18n="stat_mesh_health" class="ext111">Mesh Topology Health</div>
+                    <div id="statMeshHealth" class="ext118">100% Mesh</div>
+                </div>
+            </div>
+
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th data-i18n="col_dest">Destination Node</th>
+                            <th data-i18n="col_tap_ip">Virtual IP</th>
+                            <th data-i18n="col_hops">Hops</th>
+                            <th data-i18n="col_optimal_path">Visual Route Path</th>
+                            <th data-i18n="col_total_rtt">Optimal RTT</th>
+                            <th data-i18n="col_direct_rtt">Direct RTT</th>
+                            <th data-i18n="col_optimization">Smart Acceleration</th>
+                            <th data-i18n="col_route_status">Route Status</th>
+                            <th data-i18n="col_inspector">Decision Inspector</th>
+                        </tr>
+                    </thead>
+                    <tbody id="routeList">
+                        <tr><td colspan="9" class="empty-row" data-i18n="no_routes">No routing entries computed yet</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ARP / NDP Neighbor Table -->
+        <section class="glass-section">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-table"/></svg><span data-i18n="arp_table">Virtual Network ARP / NDP Neighbor Table</span>
+                    <span class="count-badge" id="arpCount">0</span>
+                </div>
+                <input type="text" class="module-search" data-search-target="arpList" data-paginate="true" data-i18n-ph="search_placeholder" placeholder="Search…">
+            </div>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th data-i18n="col_ip">IP Address</th>
+                            <th data-i18n="col_mac">MAC Address</th>
+                            <th data-i18n="col_nodename">Node Name</th>
+                            <th data-i18n="col_target_peer">Associated Peer ID</th>
+                            <th data-i18n="col_type">Type</th>
+                            <th data-i18n="col_last_active">Last Active Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="arpList">
+                        <tr><td colspan="6" class="empty-row" data-i18n="no_arps">No entries in ARP table</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- 24-Hour Per-IP Traffic Analytics -->
+        <section class="glass-section">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-bar-chart"/></svg><span data-i18n="ip_analytics">24-Hour Per-IP Traffic Analytics</span>
+                    <span class="count-badge" id="ipCount">0</span>
+                </div>
+                <input type="text" class="ip-search" data-i18n-ph="search_placeholder" placeholder="Search…">
+            </div>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th data-i18n="col_ip">IP Address</th>
+                            <th data-i18n="col_ip_attr">Node / Scope</th>
+                            <th data-i18n="col_mac">MAC Address</th>
+                            <th data-i18n="col_rate">Live Rate</th>
+                            <th data-i18n="col_tx_traffic">Tx Traffic</th>
+                            <th data-i18n="col_rx_traffic">Rx Traffic</th>
+                            <th data-i18n="col_total_traffic">Total Traffic</th>
+                            <th data-i18n="col_pkts">Packets</th>
+                            <th data-i18n="col_last_active">Last Active Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ipList">
+                        <tr><td colspan="9" class="empty-row" data-i18n="no_ips">No per-IP traffic recorded yet</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="pagination-bar" id="ipPagination">
+                <button type="button" class="pg-btn" id="ipPrev" data-i18n="prev_page">‹ 上一页</button>
+                <span class="pg-info" id="ipPageInfo">1 / 1</span>
+                <button type="button" class="pg-btn" id="ipNext" data-i18n="next_page">下一页 ›</button>
+                <label class="pg-size"><span data-i18n="per_page">每页</span>
+                    <select id="ipPageSize">
+                        <option value="25">25</option>
+                        <option value="50" selected>50</option>
+                        <option value="100">100</option>
+                        <option value="200">200</option>
+                    </select>
+                </label>
+            </div>
+        </section>
+
+        <!-- MAC Address Table -->
+        <section class="glass-section">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-shuffle"/></svg><span data-i18n="mac_table">Virtual Switch MAC Table</span>
+                    <span class="count-badge" id="macCount">0</span>
+                </div>
+                <input type="text" class="module-search" data-search-target="macList" data-paginate="true" data-i18n-ph="search_placeholder" placeholder="Search…">
+            </div>
+            <div class="mac-warn-wrap" id="macWarnWrap" hidden></div>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th data-i18n="col_mac">MAC Address</th>
+                            <th data-i18n="col_target_peer">Associated Peer ID</th>
+                            <th data-i18n="col_mac_origin">Source</th>
+                            <th data-i18n="col_last_active">Last Active Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="macList">
+                        <tr><td colspan="4" class="empty-row" data-i18n="no_macs">No entries in MAC table</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- 🔬 Packet Capture (raw TAP frames) -->
+        <section class="glass-section">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-microscope"/></svg><h2 data-i18n="pcap_title" class="ext119">抓包 (Packet Capture)</h2>
+                </div>
+                <div class="header-actions">
+                    <span id="pcapStreamIndicator" class="pcap-stream-indicator stream-off" title="WebSocket stream status">
+                        <svg class="ico stream-ico" aria-hidden="true"><use href="#ic-zap"/></svg>
+                    </span>
+                    <span id="pcapStateBadge" class="pill-badge ext120" data-i18n="pcap_stopped">已停止</span>
+                    <button class="btn-glass" id="pcapToggleBtn" data-onclick="pcapToggle()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-play"/></svg><span data-i18n="pcap_start">开始</span></button>
+                    <button class="btn-glass" data-onclick="pcapClear()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-trash"/></svg><span data-i18n="pcap_clear">清除</span></button>
+                    <label class="ext121">
+                        <input type="checkbox" id="pcapAutoScroll" checked> <span data-i18n="pcap_autoscroll">自动滚动</span>
+                    </label>
+                    <input type="text" class="module-search" data-search-target="pcapBody" data-i18n-ph="search_placeholder" placeholder="Search…">
+                </div>
+            </div>
+            <p id="pcapDescText" class="ext122">
+                抓取本机 TAP 虚拟网卡收发的原始以太网帧（含源/目的 MAC、协议、IP、十六进制）。
+                <span class="ext33">tx</span> = 本机发出，<span class="ext96">rx</span> = 本机收到。
+                <span class="ext33">点击任意一行</span>可查看完整详情与原始帧十六进制。
+            </p>
+            <div class="ext123" id="pcapScroll">
+                <table class="pcap-table">
+                    <thead class="ext124">
+                        <tr>
+                            <th data-i18n="pcap_col_seq">#</th><th data-i18n="pcap_col_time">时间</th><th data-i18n="pcap_col_dir">方向</th><th data-i18n="pcap_col_srcmac">源 MAC</th><th data-i18n="pcap_col_dstmac">目的 MAC</th>
+                            <th data-i18n="pcap_col_etype">类型</th><th data-i18n="pcap_col_proto">协议</th><th data-i18n="pcap_col_srcip">源 IP</th><th data-i18n="pcap_col_dstip">目的 IP</th><th data-i18n="pcap_col_ports">端口</th><th data-i18n="pcap_col_flags">标志</th><th data-i18n="pcap_col_dns">DNS</th><th data-i18n="pcap_col_sni">SNI</th><th data-i18n="pcap_col_frompeer">发出Peer</th><th data-i18n="pcap_col_topeer">送达Peer</th><th data-i18n="pcap_col_len">长度</th><th data-i18n="pcap_col_info">摘要</th><th data-i18n="pcap_col_hex">Hex(前64B)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="pcapBody"></tbody>
+                </table>
+            </div>
+            <div id="pcapEmpty" data-i18n="pcap_empty" class="ext125">
+                暂无数据。点击「开始」捕获本机 TAP 流量。
+            </div>
+        </section>
+
+        <footer class="footer">
+            p2ptap <span id="appVersion">dev</span> &bull; Layer-2 P2P TAP VPN (go-libp2p)
+        </footer>
+    </div>
+
+    <!-- 🛣️ Multiaddr Detail Modal (click-to-open) -->
+    <div id="multiaddrModal" class="modal-backdrop" data-onclick="if(event.target===this) closeMultiaddrModal()">
+        <div class="modal-card multiaddr-modal-card" data-onclick="event.stopPropagation()">
+            <div class="modal-title">
+                <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-network"/></svg><span id="multiaddrModalTitle">Discovered Multiaddr Pathways</span>
+                <span data-onclick="closeMultiaddrModal()" class="ext126"><svg class="ico close-ico" aria-hidden="true"><use href="#ic-x"/></svg></span>
+            </div>
+            <div id="multiaddrModalBody" class="ext127"></div>
+            <div class="ext128">
+                <button class="btn-probe-maddrs" id="multiaddrModalProbeBtn" data-onclick="testPeerMultiaddrs(currentMultiaddrPeerID)" title="Probe each multiaddr for reachability &amp; RTT" data-i18n="test_all">Test All</button>
+                <button class="btn-glass" data-onclick="closeMultiaddrModal()" data-i18n="btn_close">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 🔬 Packet Capture Detail Modal (click a row to open) -->
+    <div id="pcapModal" class="modal-backdrop" data-onclick="if(event.target===this) closePcapModal()">
+        <div class="modal-card ext129">
+            <div class="modal-title">
+                <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-microscope"/></svg><span data-i18n="pcap_modal_title">数据包详情</span>
+                <span data-onclick="closePcapModal()" class="ext126"><svg class="ico close-ico" aria-hidden="true"><use href="#ic-x"/></svg></span>
+            </div>
+            <div id="pcapModalBody" class="ext130"></div>
+            <div class="pkt-raw-section">
+                <div class="pkt-raw-hex-label" data-i18n="pcap_modal_raw">完整十六进制 (raw frame)</div>
+                <textarea id="pcapModalHex" readonly class="pcap-raw-hex"></textarea>
+            </div>
+            <div class="ext131">
+                <button class="btn-glass" data-onclick="copyPcapHex()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-copy"/></svg><span data-i18n="pcap_copy_hex">复制 Hex</span></button>
+                <button class="btn-glass" data-onclick="closePcapModal()" data-i18n="btn_close">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 🔐 Peer Encryption Detail Modal -->
+    <div id="peerEncModal" class="modal-backdrop" data-onclick="if(event.target===this) closePeerEncModal()">
+        <div class="modal-card">
+            <div class="modal-title">
+                <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-key"/></svg><span id="peerEncModalTitle" data-i18n="sec_peer_title">Peer Encryption Details</span>
+                <span data-onclick="closePeerEncModal()" class="ext126"><svg class="ico close-ico" aria-hidden="true"><use href="#ic-x"/></svg></span>
+            </div>
+            <div id="peerEncModalBody" class="peer-enc-detail"></div>
+            <div class="ext131">
+                <button class="btn-glass" data-onclick="closePeerEncModal()" data-i18n="sec_peer_close">Close</button>
+            </div>
+        </div>
+    </div>
+    <div id="addStaticPeerModal" class="modal-backdrop">
+        <div class="modal-card ext132">
+            <div class="modal-title">
+                <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-plus"/></svg><span data-i18n="modal_add_static_title">Add Permanent Static Peer Multiaddr</span>
+                <span data-onclick="closeAddStaticPeerModal()" class="ext126"><svg class="ico close-ico" aria-hidden="true"><use href="#ic-x"/></svg></span>
+            </div>
+            <div data-i18n="modal_add_static_desc" class="ext133">
+                Enter a full P2P Multiaddr containing target <code>/p2p/&lt;PEER_ID&gt;</code>. Address will be permanently registered in Peerstore with <code>PermanentAddrTTL</code> and auto-connected.
+            </div>
+            <div class="ext134">
+                <label data-i18n="lbl_multiaddr_str" class="ext135">Multiaddr String</label>
+                <input type="text" id="addStaticMultiaddrInput" class="form-input ext136" placeholder="/ip4/1.2.3.4/udp/4001/quic-v1/p2p/12D3KooW..." data-i18n-ph="multiaddr_placeholder">
+            </div>
+            <div class="ext137">
+                <button class="btn-glass" data-onclick="closeAddStaticPeerModal()" data-i18n="btn_cancel">Cancel</button>
+                <button class="btn-glass ext138" data-onclick="submitAddStaticPeer()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-plus"/></svg><span data-i18n="btn_test_save_peer">Test & Save Permanent Peer</span></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ⚡ Peer Path Diagnostics Modal -->
+    <div id="peerDiagnosticsModal" class="modal-backdrop">
+        <div class="modal-card ext139">
+            <div class="modal-title">
+                <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-radar"/></svg><span id="diagModalTitle" data-i18n="modal_diag_title">Peer Path Diagnostics & Benchmark</span>
+                <span data-onclick="closePeerDiagnosticsModal()" class="ext126"><svg class="ico close-ico" aria-hidden="true"><use href="#ic-x"/></svg></span>
+            </div>
+            <div id="diagModalContent" class="ext140">
+                <div class="ext141">Loading multiaddr candidate paths...</div>
+            </div>
+            <div class="ext142">
+                <button class="btn-glass" data-onclick="closePeerDiagnosticsModal()" data-i18n="btn_close">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Configuration Modal Dialog -->
+    <div id="configModal" class="modal-backdrop">
+        <div class="modal-card">
+            <div class="modal-title">
+                <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-gear"/></svg><span data-i18n="modal_title">p2ptap Node Configuration</span>
+                <span data-onclick="closeConfigModal()" class="ext126"><svg class="ico close-ico" aria-hidden="true"><use href="#ic-x"/></svg></span>
+            </div>
+            <!-- ── Node Identity Section ── -->
+            <div class="config-section ext143">
+                <div class="config-section-header">
+                    <div class="config-section-icon ext144"><svg class="ico" aria-hidden="true"><use href="#ic-id"/></svg></div>
+                    <div>
+                        <div class="config-section-title" data-i18n="section_identity">Node Identity</div>
+                        <div class="config-section-subtitle" data-i18n="section_identity_desc">Name and encryption settings for this node</div>
+                    </div>
+                </div>
+                <div class="config-row">
+                    <div>
+                        <div class="config-row-label" data-i18n="node_name_lbl">Node Name</div>
+                        <div class="config-row-desc" data-i18n="node_name_desc">Human-readable identifier for the dashboard</div>
+                    </div>
+                    <input type="text" id="cfgNodeName" class="form-input ext145">
+                </div>
+                <div class="config-row">
+                    <div>
+                        <div class="config-row-label" data-i18n="psk_lbl">Pre-Shared Key (PSK)</div>
+                        <div class="config-row-desc" data-i18n="psk_desc">Empty for public network, set key for encrypted isolation</div>
+                    </div>
+                    <input type="password" id="cfgPSK" class="form-input ext145" placeholder="••••••••">
+                </div>
+            </div>
+
+            <!-- ── Transport & Strategy Section ── -->
+            <div class="config-section ext146">
+                <div class="config-section-header">
+                    <div class="config-section-icon ext147"><svg class="ico" aria-hidden="true"><use href="#ic-shuffle"/></svg></div>
+                    <div>
+                        <div class="config-section-title" data-i18n="section_transport">Transport & Logging</div>
+                        <div class="config-section-subtitle" data-i18n="section_transport_desc">Routing strategy and diagnostic verbosity</div>
+                    </div>
+                </div>
+                <div class="config-row">
+                    <div>
+                        <div class="config-row-label" data-i18n="strategy_lbl">Transport Strategy</div>
+                        <div class="config-row-desc" data-i18n="strategy_desc">How packets are routed across P2P links</div>
+                    </div>
+                    <select id="cfgStrategy" class="form-select ext145">
+                        <option value="best_path" data-i18n="strategy_best_path">best_path (Best Path Priority)</option>
+                        <option value="redundant" data-i18n="strategy_redundant">redundant (Dual-Send Redundant)</option>
+                        <option value="fallback" data-i18n="strategy_fallback">fallback (Failover Fallback)</option>
+                    </select>
+                </div>
+                <div class="config-row">
+                    <div>
+                        <div class="config-row-label" data-i18n="loglevel_lbl">Log Level</div>
+                        <div class="config-row-desc" data-i18n="loglevel_desc">Controls verbosity of console output</div>
+                    </div>
+                    <select id="cfgLogLevel" class="form-select ext148">
+                        <option value="debug" data-i18n="log_level_debug">debug (Verbose Debug)</option>
+                        <option value="info" data-i18n="log_level_info">info (Standard Info)</option>
+                        <option value="warn" data-i18n="log_level_warn">warn (Warnings Only)</option>
+                        <option value="error" data-i18n="log_level_error">error (Errors Only)</option>
+                    </select>
+                </div>
+                <div class="config-row">
+                    <div>
+                        <div class="config-row-label">Disable Circuit Relay (diagnostic)</div>
+                        <div class="config-row-desc">Turn OFF libp2p circuit-relay client/service, AutoRelay &amp; DCUtR hole-punching. Requires restart. If a slow peer becomes unreachable with this ON, it was being auto-relayed through a static relay. Does NOT touch p2ptap's own overlay relay.</div>
+                    </div>
+                    <div class="ext157">
+                        <label class="toggle ext158">
+                            <input type="checkbox" id="cfgDisableRelay" data-onchange="updateToggleLabel(this,'cfgDisableRelayLabel','Off','On')">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="cfgDisableRelayLabel" class="toggle-label">Off</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── Obfuscation Section ── -->
+            <div class="config-section ext149">
+                <div class="config-section-header">
+                    <div class="config-section-icon ext150"><svg class="ico" aria-hidden="true"><use href="#ic-key"/></svg></div>
+                    <div>
+                        <div class="config-section-title" data-i18n="section_obfs">Traffic Obfuscation</div>
+                        <div class="config-section-subtitle" data-i18n="section_obfs_desc">Padding, jitter & protocol disguise to defeat DPI</div>
+                    </div>
+                </div>
+                <div class="config-row">
+                    <div>
+                        <div class="config-row-label">Obfuscation Mode</div>
+                        <div class="config-row-desc">Padding/disguise strategy for P2P frames</div>
+                    </div>
+                    <select id="cfgObfsMode" class="form-select ext145" data-onchange="onObfsModeChange()">
+                        <option value="fixed" data-i18n="obfs_fixed">fixed – Fixed Size Padding</option>
+                        <option value="block" data-i18n="obfs_block">block – Block Multiple</option>
+                        <option value="random" data-i18n="obfs_random">random – Random Length</option>
+                        <option value="dynamic" data-i18n="obfs_dynamic">dynamic – Variable Range</option>
+                        <option value="auto" data-i18n="obfs_auto">auto – Auto-Detect & Switch</option>
+                    </select>
+                </div>
+                <!-- Jitter Range -->
+                <div class="config-row" data-obfs-field="jitter">
+                    <div>
+                        <div class="config-row-label" data-i18n="obfs_jitter_lbl">Jitter Range (±bytes)</div>
+                        <div class="config-row-desc" data-i18n="obfs_jitter_desc">Random jitter to break fixed-size patterns (0=off)</div>
+                    </div>
+                    <div class="range-group">
+                        <input type="range" id="cfgJitterRange" class="range-input" min="0" max="512" step="8" value="64" data-oninput="updateRangeProgress(this); document.getElementById('cfgJitterRangeBadge').textContent='±'+this.value">
+                        <span class="range-value-badge" id="cfgJitterRangeBadge">±64</span>
+                    </div>
+                </div>
+                <!-- Fixed Size (fixed mode) -->
+                <div class="config-row" data-obfs-field="fixed-size">
+                    <div>
+                        <div class="config-row-label" data-i18n="obfs_fixed_size_lbl">Fixed Packet Size</div>
+                        <div class="config-row-desc" data-i18n="obfs_fixed_size_desc">Target frame size for fixed/dynamic-max (bytes)</div>
+                    </div>
+                    <div class="range-group">
+                        <input type="range" id="cfgFixedSize" class="range-input" min="256" max="4096" step="64" value="1500" data-oninput="updateRangeProgress(this); document.getElementById('cfgFixedSizeBadge').textContent=this.value">
+                        <span class="range-value-badge" id="cfgFixedSizeBadge">1500</span>
+                    </div>
+                </div>
+                <!-- Dynamic Range (dynamic/auto mode) -->
+                <div class="config-row" data-obfs-field="dynamic-range">
+                    <div>
+                        <div class="config-row-label" data-i18n="obfs_dynamic_lbl">Dynamic Size Range (bytes)</div>
+                        <div class="config-row-desc" data-i18n="obfs_dynamic_desc">Min–Max range for variable-size frames</div>
+                    </div>
+                    <div class="ext152">
+                        <input type="number" id="cfgMinSize" class="form-input small-input ext153" min="128" max="4096" value="512">
+                        <span class="ext154">–</span>
+                        <input type="number" id="cfgMaxSize" class="form-input small-input ext153" min="256" max="65535" value="1500">
+                    </div>
+                </div>
+                <!-- Block Size -->
+                <div class="config-row" data-obfs-field="block-size">
+                    <div>
+                        <div class="config-row-label" data-i18n="obfs_block_size_lbl">Block Alignment Size</div>
+                        <div class="config-row-desc" data-i18n="obfs_block_size_desc">Alignment granularity for block mode (bytes)</div>
+                    </div>
+                    <input type="number" id="cfgBlockSize" class="form-input small-input ext153" min="64" max="4096" value="256">
+                </div>
+                <!-- Auto-Detection Fields -->
+                <div class="config-row ext155" data-obfs-field="auto-fields">
+                    <div>
+                        <div class="config-row-label ext34" data-i18n="obfs_auto_title">🤖 Auto-Detect Settings</div>
+                    </div>
+                </div>
+                <div class="config-row" data-obfs-field="auto-fields">
+                    <div class="config-row-label" data-i18n="obfs_eval_interval_lbl">Eval Interval</div>
+                    <input type="number" id="cfgAutoDetectInterval" class="form-input small-input ext153" min="5" max="600" value="30">
+                    <span class="ext156">seconds</span>
+                </div>
+                <div class="config-row" data-obfs-field="auto-fields">
+                    <div class="config-row-label" data-i18n="obfs_threshold_lbl">Threshold</div>
+                    <input type="number" id="cfgAutoThresholdBytes" class="form-input small-input ext153" min="1024" max="1048576" value="65536">
+                    <span class="ext156">bytes</span>
+                </div>
+                <div class="config-row" data-obfs-field="auto-fields">
+                    <div class="ext157">
+                        <span class="config-row-label" data-i18n="obfs_allow_switch_lbl">Allow Automatic Mode Switching</span>
+                        <label class="toggle ext158">
+                            <input type="checkbox" id="cfgAllowModeSwitch" data-onchange="updateToggleLabel(this,'cfgAllowModeSwitchLabel','Off','On')">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="cfgAllowModeSwitchLabel" class="toggle-label">Off</span>
+                    </div>
+                </div>
+                <!-- Strict Key Negotiation -->
+                <div class="config-row ext159">
+                    <div>
+                        <div class="config-row-label ext160" data-i18n="obfs_strict_key_lbl">🔑 Strict Key Negotiation (PFS)</div>
+                        <div class="config-row-desc" data-i18n="obfs_strict_key_desc">Forbid falling back to the long-lived node key. Each peer pair must derive its own cipher from a one-shot ECDH ephemeral key; otherwise that peer stays plaintext. Hardens per-pair key isolation.</div>
+                    </div>
+                    <div class="ext157">
+                        <label class="toggle ext158">
+                            <input type="checkbox" id="cfgStrictKeyNegotiation" data-onchange="updateToggleLabel(this,'cfgStrictKeyNegotiationLabel','Off','On')">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="cfgStrictKeyNegotiationLabel" class="toggle-label">Off</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── Bootstrap Section ── -->
+            <div class="config-section ext161">
+                <div class="config-section-header">
+                    <div class="config-section-icon ext162"><svg class="ico" aria-hidden="true"><use href="#ic-signal"/></svg></div>
+                    <div>
+                        <div class="config-section-title" data-i18n="section_bootstrap">Bootstrap Peers</div>
+                        <div class="config-section-subtitle" data-i18n="section_bootstrap_desc">Initial relay nodes for network discovery</div>
+                    </div>
+                    <div class="header-actions">
+                        <button type="button" class="btn-glass" data-onclick="addCfgListItem('bootstrap')"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-plus"/></svg><span data-i18n="cfg_add_item">Add</span></button>
+                    </div>
+                </div>
+                <!-- mDNS LAN Auto-Discovery -->
+                <div class="config-row">
+                    <div>
+                        <div class="config-row-label" data-i18n="enable_mdns_lbl">Enable mDNS LAN Discovery</div>
+                        <div class="config-row-desc" data-i18n="enable_mdns_desc">Auto-discover peers on the same LAN via mDNS (local network only)</div>
+                    </div>
+                    <div class="ext157">
+                        <label class="toggle ext158">
+                            <input type="checkbox" id="cfgEnableMDNS" data-onchange="updateToggleLabel(this,'cfgEnableMDNSLabel','Off','On')">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="cfgEnableMDNSLabel" class="toggle-label">Off</span>
+                    </div>
+                </div>
+                <div class="config-full-row">
+                    <div class="cfg-list" id="cfgBootstrapList">
+                        <div class="cfg-list-empty" data-i18n="cfg_list_empty" hidden></div>
+                        <div class="cfg-list-rows"></div>
+                    </div>
+                </div>
+            </div>
+            <!-- Exit Node Configuration Section -->
+            <div id="exitNodeConfigSection" class="ext163">
+                <div class="ext164">
+                    <div class="ext165"><svg class="ico ext166" aria-hidden="true"><use href="#ic-globe"/></svg></div>
+                    <div>
+                        <div data-i18n="exit_node_title" class="ext167">设置出口网关</div>
+                        <div data-i18n="exit_node_desc" class="ext168">Internet egress routing via this node</div>
+                    </div>
+                </div>
+                <div class="ext169">
+                    <div>
+                        <label data-i18n="exit_enable_lbl" class="ext170">Enable Exit Node Gateway Mode</label>
+                        <div data-i18n="exit_enable_desc" class="ext171">Route internet traffic through this peer</div>
+                    </div>
+                    <label class="toggle-switch ext172">
+                        <input type="checkbox" id="cfgExitEnable">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="ext173">
+                    <div>
+                        <label data-i18n="exit_nat_lbl" class="ext170">Enable SNAT / Masquerade</label>
+                        <div data-i18n="exit_nat_desc" class="ext171">Source address translation for outbound traffic</div>
+                    </div>
+                    <label class="toggle-switch ext172">
+                        <input type="checkbox" id="cfgExitNAT" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="ext174">
+                    <label data-i18n="exit_wan_lbl" class="ext175">WAN Egress Interface</label>
+                    <input type="text" id="cfgExitWAN" class="form-input ext176" placeholder="auto (auto-detect physical egress interface)" data-i18n-ph="exit_wan_placeholder">
+                </div>
+                <div id="exitStatusPanel" class="ext177">
+                    <div class="ext178">
+                        <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-signal"/></svg><span data-i18n="exit_status_title">Live Status</span>
+                    </div>
+                    <div id="exitStatusBody" class="ext73">—</div>
+                </div>
+            </div>
+            <!-- Subnet Routing & Security Authorization Section -->
+            <div class="config-section ext179">
+                <div class="config-section-header">
+                    <div class="config-section-icon ext180"><svg class="ico ext181" aria-hidden="true"><use href="#ic-network"/></svg></div>
+                    <div>
+                        <div class="config-section-title" data-i18n="section_subnet_title">Subnet Router & Authorization</div>
+                        <div class="config-section-subtitle" data-i18n="section_subnet_desc">Route subnets and authorize which peers may use them</div>
+                    </div>
+                </div>
+                <div class="config-full-row">
+                    <div class="cfg-list-section">
+                        <div class="cfg-list-header">
+                            <label class="form-label" data-i18n="adv_subnets_lbl">Advertised Subnets (CIDR, one per line)</label>
+                            <button type="button" class="btn-glass cfg-list-add-btn" data-onclick="addCfgListItem('subnet')"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-plus"/></svg><span data-i18n="cfg_add_item">Add</span></button>
+                        </div>
+                        <div class="cfg-list" id="cfgAdvSubnetsList">
+                            <div class="cfg-list-empty" data-i18n="cfg_list_empty" hidden></div>
+                            <div class="cfg-list-rows"></div>
+                        </div>
+                    </div>
+                </div>
+                <label for="cfgAcceptSubnets" class="config-row ext182">
+                    <span class="config-row-label" data-i18n="accept_subnets_lbl">Accept Advertised Subnets from Remote Peers</span>
+                    <input type="checkbox" id="cfgAcceptSubnets" class="ext183">
+                </label>
+                <div class="config-full-row">
+                    <div class="cfg-list-section">
+                        <div class="cfg-list-header">
+                            <label class="form-label" data-i18n="allowed_subnet_peers_lbl">Allowed Subnet Peer IDs (* for trust all, one per line)</label>
+                            <button type="button" class="btn-glass cfg-list-add-btn" data-onclick="addCfgListItem('peer')"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-plus"/></svg><span data-i18n="cfg_add_item">Add</span></button>
+                        </div>
+                        <div class="cfg-list" id="cfgAllowedPeersList">
+                            <div class="cfg-list-empty" data-i18n="cfg_list_empty" hidden></div>
+                            <div class="cfg-list-rows"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- ACL Mesh Firewall Section (ZeroTier-Style Rule Engine) -->
+            <div class="config-section ext184">
+                <div class="config-section-header">
+                    <div class="config-section-icon ext185"><svg class="ico ext181" aria-hidden="true"><use href="#ic-shield"/></svg></div>
+                    <div>
+                        <div class="config-section-title" data-i18n="section_acl_title">ZeroTier-Style P2P Mesh ACL Rules Editor</div>
+                        <div class="config-section-subtitle" data-i18n="section_acl_desc">Per-peer traffic filtering rules</div>
+                    </div>
+                    <div class="header-actions ext158">
+                        <button type="button" class="btn-glass ext186" data-onclick="addACLRuleRow()"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-plus"/></svg><span data-i18n="add_rule_btn">Add Rule</span></button>
+                    </div>
+                </div>
+                <label for="cfgACLEnable" class="config-row ext182">
+                    <span class="config-row-label" data-i18n="enable_acl_lbl">Enable ACL Firewall Engine</span>
+                    <input type="checkbox" id="cfgACLEnable" class="ext183">
+                </label>
+                <div class="config-full-row">
+                    <label class="form-label" data-i18n="acl_default_action_lbl">Default Policy for Unmatched Traffic</label>
+                    <select id="cfgACLDefaultAction" class="form-select">
+                        <option value="accept" data-i18n="acl_default_accept">ACCEPT (Default Allow)</option>
+                        <option value="drop" data-i18n="acl_default_drop">DROP (Default Deny)</option>
+                    </select>
+                </div>
+                <div class="config-full-row ext187">
+                    <div class="config-section-subtitle ext188" data-i18n="acl_flow_title">Sequential Rules Flow:</div>
+                    <div id="aclRulesList" class="ext189">
+                        <!-- Generated dynamically by JS -->
+                    </div>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-glass ext190" data-onclick="openShareModal()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-share"/></svg><span data-i18n="share_config">Share & Export</span></button>
+                <button class="btn-glass" data-onclick="closeConfigModal()"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-x"/></svg><span data-i18n="cancel_btn">Cancel</span></button>
+                <button class="btn-glass" data-onclick="saveConfigModal()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-save"/></svg><span data-i18n="save_btn">Save & Apply</span></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Standalone ACL Rule Editor Modal -->
+    <div id="aclEditorModal" class="modal-backdrop ext2">
+        <div class="modal-card ext191">
+            <div class="modal-title">
+                <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-shield"/></svg><span data-i18n="acl_editor_title">ACL Rule Editor</span>
+                <button type="button" class="btn-glass ext192" data-onclick="closeACLEditor()"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-x"/></svg></button>
+            </div>
+            <div class="ext193">
+                <label class="ext194">
+                    <input type="checkbox" id="aclEdEnable" class="ext195"> <span data-i18n="enable_acl_lbl">Enable ACL Firewall Engine</span>
+                </label>
+                <label class="ext196">
+                    <span data-i18n="acl_default_action_lbl">Default Policy</span>
+                    <select id="aclEdDefault" class="form-select ext197">
+                        <option value="accept" data-i18n="acl_default_accept">ACCEPT (Default Allow)</option>
+                        <option value="drop" data-i18n="acl_default_drop">DROP (Default Deny)</option>
+                    </select>
+                </label>
+                <span class="ext106"></span>
+                <select id="aclEdTemplate" class="form-select ext197">
+                    <option value="" data-i18n="acl_template_lbl">Insert Template…</option>
+                    <option value="ssh">🟢 Allow SSH (TCP 22)</option>
+                    <option value="web">🟢 Allow Web (TCP 443)</option>
+                    <option value="dns">🔴 Block DNS (UDP 53)</option>
+                    <option value="rdp">🟢 Allow RDP (TCP 3389)</option>
+                    <option value="denyall">🔴 Deny All (catch-all)</option>
+                </select>
+                <button type="button" class="btn-glass ext198" data-onclick="addEditorACLRule()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-plus"/></svg><span data-i18n="add_rule_btn">Add Rule</span></button>
+                <input type="text" class="module-search" data-search-target="aclEditorRulesList" data-i18n-ph="search_placeholder" placeholder="Search…">
+            </div>
+            <div id="aclEditorRulesList" class="ext199"></div>
+            <div class="modal-actions">
+                <button class="btn-glass" data-onclick="closeACLEditor()" data-i18n="cancel_btn">Cancel</button>
+                <button class="btn-glass ext200" data-onclick="saveACLEditor()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-save"/></svg><span data-i18n="save_btn">Save &amp; Apply</span></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ACL Rule Tester Modal -->
+    <div id="aclTestModal" class="modal-backdrop ext2">
+        <div class="modal-card ext201">
+            <div class="modal-title">
+                <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-flask"/></svg><span data-i18n="acl_test_title">ACL Rule Tester</span>
+                <button type="button" class="btn-glass ext192" data-onclick="closeACLTest()"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-x"/></svg></button>
+            </div>
+            <div class="ext202">
+                <label class="form-label ext203" data-i18n="acl_test_peer">Source Peer ID</label>
+                <input type="text" id="aclTestPeer" class="form-input ext176" placeholder="* or 12D3KooW…">
+                <label class="form-label ext203" data-i18n="acl_test_dir">Direction</label>
+                <select id="aclTestDir" class="form-select ext176">
+                    <option value="inbound">⬇️ INBOUND</option>
+                    <option value="outbound">⬆️ OUTBOUND</option>
+                    <option value="both">⇄ BOTH</option>
+                </select>
+                <label class="form-label ext203" data-i18n="acl_test_proto">Protocol</label>
+                <select id="aclTestProto" class="form-select ext176">
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                    <option value="icmp">ICMP</option>
+                    <option value="any">ANY</option>
+                </select>
+                <label class="form-label ext203" data-i18n="acl_test_dstip">Destination IP</label>
+                <input type="text" id="aclTestDstIP" class="form-input ext176" placeholder="10.0.0.5">
+                <label class="form-label ext203" data-i18n="acl_test_dstport">Destination Port</label>
+                <input type="text" id="aclTestDstPort" class="form-input ext176" placeholder="22">
+            </div>
+            <button type="button" class="btn-glass ext204" data-onclick="runACLTest()">▶ Run Test Against Current Rules</button>
+            <div id="aclTestResult" class="ext205"></div>
+            <div class="modal-actions">
+                <button class="btn-glass" data-onclick="closeACLTest()" data-i18n="close_btn">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Routing Decision Inspector Modal -->
+    <div id="routeInspectorModal" class="modal-backdrop">
+        <div class="modal-card ext206">
+            <div class="modal-title">
+                <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-compass"/></svg><span data-i18n="inspector_title">Smart Routing Decision Inspector</span>
+                <span data-onclick="closeRouteInspector()" class="ext126"><svg class="ico close-ico" aria-hidden="true"><use href="#ic-x"/></svg></span>
+            </div>
+            <div id="inspectorContent" class="ext207">
+                <!-- Dynamically filled by JS -->
+            </div>
+            <div class="modal-actions ext208">
+                <button class="btn-glass" data-onclick="closeRouteInspector()" data-i18n="btn_close">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- P2P SpeedTest Modal -->
+    <div id="speedTestModal" class="modal-backdrop">
+        <div class="modal-card ext209">
+            <div class="modal-title ext210">
+                <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-zap"/></svg><span data-i18n="speedtest_title">P2P Link Bandwidth & Latency SpeedTest</span>
+                <span data-onclick="closeSpeedTestModal()" class="ext126"><svg class="ico close-ico" aria-hidden="true"><use href="#ic-x"/></svg></span>
+            </div>
+            <div>
+                <label class="form-label ext211" data-i18n="select_target_peer">Select Target Peer for SpeedTest</label>
+                <select id="speedTestPeerSelect" class="form-select ext134">
+                </select>
+                
+                <div class="ext212">
+                    <div id="speedGaugeVal" class="ext213">0.0</div>
+                    <div data-i18n="mbps_label" class="ext214">Mbps (P2P Throughput Rate)</div>
+                    <div class="ext215">
+                        <div id="speedProgressBar" class="ext216"></div>
+                    </div>
+                </div>
+
+                <div class="ext217">
+                    <div class="ext218">
+                        <div data-i18n="rtt_avg" class="ext219">RTT Avg</div>
+                        <div id="stRTTAvg" class="ext220">-</div>
+                    </div>
+                    <div class="ext218">
+                        <div data-i18n="jitter_lbl" class="ext219">Jitter</div>
+                        <div id="stJitter" class="ext221">-</div>
+                    </div>
+                    <div class="ext218">
+                        <div data-i18n="quality_lbl" class="ext219">Quality</div>
+                        <div id="stQuality" class="ext222">-</div>
+                    </div>
+                </div>
+
+                <button class="btn-glass ext223" data-onclick="runSpeedTest()" id="startSpeedTestBtn" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-radar"/></svg><span data-i18n="start_test_btn">Start Benchmark Test</span></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Share & Export Configuration Modal -->
+    <div id="shareModal" class="modal-backdrop">
+        <div class="modal-card ext224">
+            <div class="modal-title ext210">
+                <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-share"/></svg><span data-i18n="share_title">Share & Export Configuration</span>
+                <span data-onclick="closeShareModal()" class="ext126"><svg class="ico close-ico" aria-hidden="true"><use href="#ic-x"/></svg></span>
+            </div>
+            <div>
+                <div id="qrCodeContainer" class="ext225">
+                </div>
+                <div data-i18n="share_desc" class="ext226">Scan QR code or export configuration JSON to deploy nodes.</div>
+                
+                <div class="ext227">
+                    <button class="btn-glass ext106" data-onclick="copyConfigJSON()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-copy"/></svg><span data-i18n="copy_json">Copy JSON</span></button>
+                    <button class="btn-glass ext228" data-onclick="downloadConfigJSON()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-download"/></svg><span data-i18n="download_json">Download File</span></button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Banner -->
+    <div id="toast" class="toast">Configuration saved successfully!</div>
+
+    <script src="app.js"></script>
+</body>
+</html>

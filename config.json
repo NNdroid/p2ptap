@@ -1,0 +1,51 @@
+{
+  "_listen_note": "端口设为 0 表示由系统随机分配，libp2p 会通过 DHT/mDNS/Identify 自动告知对端实际端口。bootstrap 节点请勿使用随机端口。",
+  "listen_addrs": [
+    "/ip4/0.0.0.0/udp/0/quic-v1",
+    "/ip6/::/udp/0/quic-v1",
+    "/ip4/0.0.0.0/udp/0/webrtc-direct",
+    "/ip6/::/udp/0/webrtc-direct",
+    "/ip4/0.0.0.0/udp/0/quic-v1/webtransport",
+    "/ip6/::/udp/0/quic-v1/webtransport",
+    "/ip4/0.0.0.0/tcp/0",
+    "/ip6/::/tcp/0"
+  ],
+  "_bootstrap_note": "bootstrap_peers 双重用途: (1) DHT 引导 (2) Circuit Relay v2 中继。公共 IPFS 节点只能引导 DHT，不支持 Circuit Relay v2。如果你需要在 NAT 后打洞互通，必须在这里放入至少一个 p2ptap-boot 中继节点的 multiaddr，否则 relay 回退和 DCUtR 打洞均不可用。",
+  "bootstrap_peers": [
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTmoXMY5PeBKyy1EicV2g7HQ1b18423b",
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmQCUEtxvUDMfWiStEwcBsQ55nsnH7tKNiLB5ns3RNr41J"
+  ],
+  "static_peers": [],
+  "enable_mdns": true,
+  "web_ui": {
+    "enable": true,
+    "listen_ip": "10.0.0.1",
+    "listen_ipv6": "fd00::1",
+    "port": 80
+  },
+  "transports": {
+    "enable_quic_reuse": true,
+    "enable_webrtc": true,
+    "enable_webtransport": true,
+    "enable_tcp_reuse": true,
+    "enable_tcp_brutal": false,
+    "tcp_brutal_rate": "100Mbps"
+  },
+  "transport_strategy": "best_path",
+  "node_name": "auto",
+  "tap_name": "p2ptap0",
+  "tap_ip": "10.0.0.1/24",
+  "tap_ipv6": "fd00::1/64",
+  "tap_mac": "02:00:00:00:00:01",
+  "node_key_file": "node.key",
+  "psk": "",
+  "_psk_note": "psk 为空串则 DHT Discovery Loop 不启动，节点无法通过 DHT 发现其他 peer。Peer 发现只依赖 mDNS (局域网) 和 static_peers。如需跨 NAT 组网，请设置相同 psk 并部署 p2ptap-boot 中继节点。",
+  "obfuscation": {
+    "enable": true,
+    "mode": "random",
+    "fixed_size": 1500,
+    "block_size": 256,
+    "max_frag_size": 0,
+    "algorithm": "auto"
+  }
+}
