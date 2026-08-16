@@ -32,9 +32,18 @@ cd "$ROOT_DIR"
 
 # ---- Locate Android SDK / NDK (best-effort auto-detect) ----
 : "${ANDROID_HOME:=$HOME/Android/Sdk}"
+if [ -z "${ANDROID_NDK_HOME:-}" ] && [ -n "${ANDROID_NDK_ROOT:-}" ]; then
+  ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
+fi
+if [ -z "${ANDROID_NDK_HOME:-}" ] && [ -n "${ANDROID_NDK_LATEST_HOME:-}" ]; then
+  ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+fi
 if [ -z "${ANDROID_NDK_HOME:-}" ] && [ -d "$ANDROID_HOME/ndk" ]; then
-  ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME/ndk"/*/ 2>/dev/null | head -1)"
+  ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME/ndk"/*/ 2>/dev/null | sort -V | tail -1)"
   ANDROID_NDK_HOME="${ANDROID_NDK_HOME%/}"
+fi
+if [ -z "${ANDROID_NDK_HOME:-}" ] && [ -d "$ANDROID_HOME/ndk-bundle" ]; then
+  ANDROID_NDK_HOME="$ANDROID_HOME/ndk-bundle"
 fi
 export ANDROID_HOME
 export ANDROID_NDK_HOME

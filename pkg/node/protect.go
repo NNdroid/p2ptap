@@ -272,6 +272,14 @@ func resolveProtectIfName(wanIfName, address string) string {
 // pinned to. A concrete IP is pinned to the interface that owns it; an
 // unspecified address (0.0.0.0 / ::) falls back to the cached default egress
 // interface. Returns "" when no binding is needed or possible.
+//
+// Loopback / link-local listen addresses are deliberately NOT pinned to a
+// physical NIC. Binding a 127.0.0.1 (or ::1 / 169.254.x) listener with
+// SO_BINDTODEVICE / IP_BOUND_IF to the default egress interface would force the
+// socket onto that NIC and make it unreachable from loopback — breaking every
+// in-process peer (the E2E test mesh dials 127.0.0.1) and any local client.
+// This mirrors the dialer-side shouldProtect() exclusion for loopback and must
+// stay in sync with it.
 func listenerInterfaceForAddress(address string) string {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
@@ -279,6 +287,10 @@ func listenerInterfaceForAddress(address string) string {
 	}
 	ip := net.ParseIP(host)
 	if ip != nil && !ip.IsUnspecified() {
+		// Never pin loopback / link-local listeners to a physical NIC.
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return ""
+		}
 		if name, ok := interfaceNameByIP(ip); ok {
 			return name
 		}

@@ -46,7 +46,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version-file: go.mod
           cache: false
 
       - name: Build Linux Binaries
@@ -87,7 +87,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version-file: go.mod
           cache: false
 
       - name: Build Windows Binaries
@@ -132,7 +132,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version-file: go.mod
           cache: false
 
       - name: Build macOS Binaries
@@ -183,7 +183,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version-file: go.mod
           cache: false
 
       - name: Prepare OpenWrt Package Directory & Auto Compute PKG_MIRROR_HASH
@@ -296,18 +296,73 @@ jobs:
             dist/.placeholder
           if-no-files-found: ignore
 
+  build-android:
+    name: Build Android AAR (arm64, arm, amd64, 386)
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Set up Java (JDK 21)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Android NDK (Latest r27c)
+        uses: nopen/setup-ndk@v1
+        with:
+          ndk-version: 'r27c'
+          add-to-path: true
+
+      - name: Install gomobile & gobind
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          gomobile init
+
+      - name: Build Android AAR
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -x
+          STAGE="p2ptap-android"
+          mkdir -p "dist/${STAGE}"
+          P2PTAP_VERSION="${VERSION}" AAR_TARGET="android" ./scripts/build-aar.sh
+          cp bin/p2ptap.aar "dist/${STAGE}/"
+          if [ -f bin/p2ptap-sources.jar ]; then
+            cp bin/p2ptap-sources.jar "dist/${STAGE}/"
+          fi
+          cd dist && zip -r "${STAGE}-aar.zip" "${STAGE}" && cd ..
+          cp bin/p2ptap.aar "dist/p2ptap-${VERSION}.aar"
+
+      - name: Upload Android Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-android-aar
+          path: |
+            dist/*.zip
+            dist/*.aar
+
   release:
     name: Create GitHub Release
-    needs: [prepare, build-linux, build-windows, build-macos, build-openwrt]
+    needs: [prepare, build-linux, build-windows, build-macos, build-openwrt, build-android]
     runs-on: ubuntu-latest
     steps:
       - name: Download Dist Artifacts
         uses: actions/download-artifact@v4
         with:
-          # 按 artifact 名称匹配（build job 的 name 形如 dist-linux-amd64）。
+          # 按 artifact 名称匹配（build job 的 name 形如 dist-linux-amd64、dist-android-aar）。
           # 单独一个 pattern（OR 语义），避免逗号多 pattern 被判成 AND 而全部排除。
           # 前缀 * 兼容 download 上下文中可能带 owner 前缀（NNdroid~p2ptap~...）的真实名。
-          # 这些 artifact 内部都是 *.zip 构建产物，不会命中 openwrt/gh-action-sdk 的 *.dockerbuild 缓存。
+          # 这些 artifact 内部都是 *.zip / *.aar 构建产物，不会命中 openwrt/gh-action-sdk 的 *.dockerbuild 缓存。
           pattern: '*dist-*'
           path: release-assets
           merge-multiple: true
@@ -339,6 +394,7 @@ jobs:
 
             ### Build Artifacts
             - **`.zip`** — Prebuilt binaries for Linux / Windows / macOS (per-architecture)
+            - **`p2ptap.aar`** / **`p2ptap-android-aar.zip`** — Prebuilt Android Archive library (fat AAR with arm64, armv7, x86_64, x86 JNI binaries)
 
             ### OpenWrt Packages
             - **`.ipk`** — For OpenWrt 19.07 ~ 23.05 (opkg package manager)

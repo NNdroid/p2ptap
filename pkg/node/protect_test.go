@@ -38,3 +38,25 @@ func TestShouldProtectSkipsOverlayAndLoopback(t *testing.T) {
 		}
 	}
 }
+
+// TestListenerInterfaceForAddressSkipsLoopback pins the listener-side analogue of
+// TestShouldProtectSkipsOverlayAndLoopback: a loopback / link-local listen
+// address must resolve to "" (no NIC pin) so the socket binds normally and
+// stays reachable from loopback. Without this, a 127.0.0.1 listener falls back
+// to the default egress interface (eth0) via SO_BINDTODEVICE / IP_BOUND_IF and
+// every in-process peer (the E2E test mesh dials 127.0.0.1) times out on
+// connect — a failure that only reproduces on Linux/macOS where NIC pinning is
+// supported (Windows has no SO_BINDTODEVICE, so the bug is invisible there).
+func TestListenerInterfaceForAddressSkipsLoopback(t *testing.T) {
+	noBind := []string{
+		"127.0.0.1:49183",   // IPv4 loopback
+		"[::1]:49183",       // IPv6 loopback
+		"169.254.1.1:1234",  // IPv4 link-local
+		"[fe80::1]:1234",    // IPv6 link-local
+	}
+	for _, a := range noBind {
+		if got := listenerInterfaceForAddress(a); got != "" {
+			t.Errorf("listenerInterfaceForAddress(%q) = %q, want \"\" (loopback/link-local must not be NIC-pinned)", a, got)
+		}
+	}
+}

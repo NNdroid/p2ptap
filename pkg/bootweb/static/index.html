@@ -4324,7 +4324,6 @@
             // 2. Deterministic Node Positioning & Anti-Overlap Physics
             // Sort peers deterministically by PeerID so angles never randomize on stats refresh
             const sortedPeers = (state.peers || []).slice().sort((a, b) => (a.peer_id || '').localeCompare(b.peer_id || ''));
-            const peerCount = sortedPeers.length;
 
             // Prune disconnected peers from position cache
             const activePids = new Set(sortedPeers.map(p => p.peer_id));
