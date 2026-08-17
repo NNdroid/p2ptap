@@ -212,7 +212,11 @@ func (c *trayStateCache) set(s *statsResponse) {
 	c.activeExit = s.ExitNode.ActiveExitTapIP
 	exits := make([]peerExitInfo, 0, len(s.ActivePeers))
 	for _, p := range s.ActivePeers {
-		if p.TapIP != "" || p.TapIPv6 != "" {
+		// Only peers that advertised themselves as Exit Node gateways
+		// (config.json's `exit_node.enable = true`) are valid exit candidates.
+		// TapIP/TapIPv6 alone are not enough — every peer has those because they
+		// are the peer's own tunnel endpoint addresses.
+		if p.IsExitNode {
 			exits = append(exits, peerExitInfo{
 				PeerID:   p.PeerID,
 				TapIP:    p.TapIP,

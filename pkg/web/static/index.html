@@ -466,6 +466,42 @@
             </div>
         </div>
 
+        <!-- 📡 Active Protocol Streams & Channels Monitor Card -->
+        <section class="glass-section ext4" id="protoChannelsSection">
+            <div class="section-header ext5">
+                <div class="section-title">
+                    <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-layers"/></svg><span data-i18n="proto_channels_title">Protocol Streams & Subsystem Channels</span>
+                    <span class="pill-badge role-static ext50" id="activeStreamsBadge">0 Streams</span>
+                </div>
+                <div class="ext99">
+                    <input type="text" id="streamSearchInput" class="module-search" data-search-target="streamsTableBody" data-paginate="true" data-i18n-ph="search_streams_ph" placeholder="🔍 Search streams, protocols, peers…">
+                </div>
+            </div>
+
+            <!-- Subsystem Channels Status Grid -->
+            <div class="ext60" id="protoChannelsGrid" style="grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));">
+                <!-- Injected via JS -->
+            </div>
+
+            <!-- Live Active Streams Table -->
+            <div class="glass-card ext53" style="margin-top: 14px; overflow-x: auto; padding: 0;">
+                <table class="data-table" id="streamsTable" style="width: 100%; border-collapse: collapse;">
+                    <thead>
+                        <tr>
+                            <th data-i18n="th_stream_proto">Protocol / Channel</th>
+                            <th data-i18n="th_stream_peer">Remote Peer</th>
+                            <th data-i18n="th_stream_direction">Direction</th>
+                            <th data-i18n="th_stream_transport">Transport & Multiaddr</th>
+                            <th data-i18n="th_stream_status">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="streamsTableBody">
+                        <!-- Injected via JS -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
         <!-- Live System Log Stream Console Card -->
         <section class="glass-section ext4">
             <div class="section-header ext5">
@@ -963,8 +999,8 @@
                 </div>
                 <div class="config-row">
                     <div>
-                        <div class="config-row-label">Disable Circuit Relay (diagnostic)</div>
-                        <div class="config-row-desc">Turn OFF libp2p circuit-relay client/service, AutoRelay &amp; DCUtR hole-punching. Requires restart. If a slow peer becomes unreachable with this ON, it was being auto-relayed through a static relay. Does NOT touch p2ptap's own overlay relay.</div>
+                        <div class="config-row-label" data-i18n="cfg_disable_relay_lbl">Disable Circuit Relay (diagnostic)</div>
+                        <div class="config-row-desc" data-i18n="cfg_disable_relay_desc">Turn OFF libp2p circuit-relay client/service, AutoRelay &amp; DCUtR hole-punching. Requires restart. If a slow peer becomes unreachable with this ON, it was being auto-relayed through a static relay. Does NOT touch p2ptap's own overlay relay.</div>
                     </div>
                     <div class="ext157">
                         <label class="toggle ext158">
@@ -987,8 +1023,8 @@
                 </div>
                 <div class="config-row">
                     <div>
-                        <div class="config-row-label">Obfuscation Mode</div>
-                        <div class="config-row-desc">Padding/disguise strategy for P2P frames</div>
+                        <div class="config-row-label" data-i18n="obfs_lbl">Obfuscation Mode</div>
+                        <div class="config-row-desc" data-i18n="obfs_mode_desc">Padding/disguise strategy for P2P frames</div>
                     </div>
                     <select id="cfgObfsMode" class="form-select ext145" data-onchange="onObfsModeChange()">
                         <option value="fixed" data-i18n="obfs_fixed">fixed – Fixed Size Padding</option>

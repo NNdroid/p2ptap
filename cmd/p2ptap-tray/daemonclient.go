@@ -16,10 +16,11 @@ import (
 // --- Daemon /api/* DTOs (minimal shapes the tray client needs) ---
 
 type peerInfoDTO struct {
-	PeerID   string `json:"peer_id"`
-	NodeName string `json:"node_name"`
-	TapIP    string `json:"tap_ip"`
-	TapIPv6  string `json:"tap_ipv6"`
+	PeerID    string `json:"peer_id"`
+	NodeName  string `json:"node_name"`
+	TapIP     string `json:"tap_ip"`
+	TapIPv6   string `json:"tap_ipv6"`
+	IsExitNode bool `json:"is_exit_node"`
 }
 
 type exitNodeInfoDTO struct {

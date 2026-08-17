@@ -11,7 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 
@@ -836,7 +838,216 @@ func (n *Node) updateWebCollectorState() {
 	}
 	n.Collector.UpdateMeshMatrix(matrixDTOs)
 
-	log.Debug("Web collector updated: %d active peers, %d MACs, %d ARP entries, %d IP entries, %d routes, %d subnets", len(peersDTO), len(macDTO), len(arpDTO), len(ipDTO), len(routesDTO), len(subnetDTOs))
+	channelsDTO, streamsDTO := n.collectProtocolChannelsAndStreams()
+	n.Collector.UpdateProtocolChannels(channelsDTO)
+	n.Collector.UpdateActiveStreams(streamsDTO)
+
+	log.Debug("Web collector updated: %d active peers, %d MACs, %d ARP entries, %d IP entries, %d routes, %d subnets, %d channels, %d streams", len(peersDTO), len(macDTO), len(arpDTO), len(ipDTO), len(routesDTO), len(subnetDTOs), len(channelsDTO), len(streamsDTO))
+}
+
+func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDTO, []observer.ProtocolStreamDTO) {
+	if n.Host == nil || n.Host.Network() == nil {
+		return nil, nil
+	}
+
+	protoNameMap := map[protocol.ID]struct {
+		ID       string
+		Name     string
+		Category string
+	}{
+		protocol.ID("/p2ptap/seqsync/1.0.0"):            {ID: "seqsync", Name: "Sequence Sync (SeqSync)", Category: "sync"},
+		protocol.ID("/p2ptap/lsa/1.0.0"):                {ID: "lsa", Name: "LSA Mesh Routing", Category: "routing"},
+		protocol.ID("/p2ptap/peek-map/1.0.0"):           {ID: "peek-map", Name: "Peek-Map Network Pub/Sub", Category: "pubsub"},
+		protocol.ID("/p2ptap/auth/1.0.0"):               {ID: "auth", Name: "Mesh Authentication", Category: "security"},
+		protocol.ID("/p2ptap/echo/1.0.0"):               {ID: "echo", Name: "Diagnostic Echo", Category: "diagnostics"},
+		protocol.ID("/ipfs/ping/1.0.0"):                 {ID: "ping", Name: "libp2p Ping", Category: "diagnostics"},
+		protocol.ID("/libp2p/dcutr"):                    {ID: "dcutr", Name: "Direct Connection Upgrade (DCUtR)", Category: "transport"},
+		protocol.ID("/libp2p/circuit/relay/0.2.0/stop"): {ID: "relay-v2", Name: "Circuit Relay v2", Category: "transport"},
+		protocol.ID("/meshsub/1.1.0"):                   {ID: "pubsub", Name: "GossipSub PubSub", Category: "pubsub"},
+		protocol.ID("/ipfs/id/1.0.0"):                   {ID: "identify", Name: "Identify Protocol", Category: "discovery"},
+		protocol.ID("/ipfs/id/push/1.0.0"):              {ID: "identify-push", Name: "Identify Push", Category: "discovery"},
+	}
+
+	streamsList := make([]observer.ProtocolStreamDTO, 0)
+	inboundCounts := make(map[string]int)
+	outboundCounts := make(map[string]int)
+
+	for _, conn := range n.Host.Network().Conns() {
+		remotePeer := conn.RemotePeer()
+		remoteAddr := conn.RemoteMultiaddr().String()
+		transport := "P2P"
+		if strings.Contains(remoteAddr, "/quic") {
+			transport = "QUIC"
+		} else if strings.Contains(remoteAddr, "/webrtc") {
+			transport = "WebRTC"
+		} else if strings.Contains(remoteAddr, "/tcp") {
+			transport = "TCP"
+		} else if strings.Contains(remoteAddr, "/p2p-circuit") {
+			transport = "Circuit Relay"
+		}
+
+		peerName := n.relayHopLabel(remotePeer)
+
+		for _, s := range conn.GetStreams() {
+			pid := s.Protocol()
+			dirStr := "outbound"
+			if s.Stat().Direction == network.DirInbound {
+				dirStr = "inbound"
+				inboundCounts[string(pid)]++
+			} else {
+				outboundCounts[string(pid)]++
+			}
+
+			pInfo, known := protoNameMap[pid]
+			pName := string(pid)
+			if known {
+				pName = pInfo.Name
+			}
+
+			streamsList = append(streamsList, observer.ProtocolStreamDTO{
+				Protocol:     string(pid),
+				ProtocolName: pName,
+				PeerID:       remotePeer.String(),
+				PeerIDShort:  remotePeer.ShortString(),
+				PeerName:     peerName,
+				Direction:    dirStr,
+				Transport:    transport,
+				RemoteAddr:   remoteAddr,
+				Status:       "active",
+			})
+		}
+	}
+
+	// 1. SeqSync Channel
+	seqIn := inboundCounts["/p2ptap/seqsync/1.0.0"]
+	seqOut := outboundCounts["/p2ptap/seqsync/1.0.0"]
+	seqTotal := seqIn + seqOut
+	seqStatus := "idle"
+	if seqTotal > 0 {
+		seqStatus = "active"
+	}
+
+	// 2. LSA Routing Channel
+	lsaIn := inboundCounts["/p2ptap/lsa/1.0.0"]
+	lsaOut := outboundCounts["/p2ptap/lsa/1.0.0"]
+	lsaTotal := lsaIn + lsaOut
+	lsaStatus := "running"
+	if lsaTotal > 0 {
+		lsaStatus = "active"
+	}
+
+	// 3. Peek-Map Broadcast Channel
+	peekIn := inboundCounts["/p2ptap/peek-map/1.0.0"]
+	peekOut := outboundCounts["/p2ptap/peek-map/1.0.0"]
+	peekTotal := peekIn + peekOut
+	peekStatus := "idle"
+	if peekTotal > 0 || len(n.Config.BootstrapPeers) > 0 {
+		peekStatus = "running"
+	}
+
+	// 4. Virtual TAP Datapath
+	obfsAlgo := n.Config.Obfuscation.Algorithm
+	if obfsAlgo == "" {
+		obfsAlgo = "auto"
+	}
+	obfsMode := n.Config.Obfuscation.Mode
+	if obfsMode == "" {
+		obfsMode = "fixed"
+	}
+	dataStatus := "active"
+	if n.TAP == nil {
+		dataStatus = "standby"
+	}
+	totalConns := len(n.Host.Network().Conns())
+
+	// 5. Mesh Auth
+	authIn := inboundCounts["/p2ptap/auth/1.0.0"]
+	authOut := outboundCounts["/p2ptap/auth/1.0.0"]
+	authTotal := authIn + authOut
+	authStatus := "running"
+	if n.Config.PSK == "" {
+		authStatus = "open-mode"
+	}
+
+	// 6. DCUtR / Relay
+	dcutrIn := inboundCounts["/libp2p/dcutr"] + inboundCounts["/libp2p/circuit/relay/0.2.0/stop"]
+	dcutrOut := outboundCounts["/libp2p/dcutr"] + outboundCounts["/libp2p/circuit/relay/0.2.0/stop"]
+	dcutrTotal := dcutrIn + dcutrOut
+	dcutrStatus := "ready"
+	if dcutrTotal > 0 {
+		dcutrStatus = "active"
+	}
+
+	channels := []observer.ProtocolChannelDTO{
+		{
+			ID:              "seqsync",
+			Name:            "Sequence Sync (SeqSync)",
+			Protocol:        "/p2ptap/seqsync/1.0.0",
+			Category:        "sync",
+			Status:          seqStatus,
+			ActiveStreams:   seqTotal,
+			InboundStreams:  seqIn,
+			OutboundStreams: seqOut,
+			Details:         fmt.Sprintf("Streams: %d (↓%d ↑%d) · Window Dedup & Replay Protection", seqTotal, seqIn, seqOut),
+		},
+		{
+			ID:              "lsa",
+			Name:            "LSA Mesh Routing",
+			Protocol:        "/p2ptap/lsa/1.0.0",
+			Category:        "routing",
+			Status:          lsaStatus,
+			ActiveStreams:   lsaTotal,
+			InboundStreams:  lsaIn,
+			OutboundStreams: lsaOut,
+			Details:         fmt.Sprintf("Streams: %d (↓%d ↑%d) · Dijkstra Shortest Path", lsaTotal, lsaIn, lsaOut),
+		},
+		{
+			ID:              "peek-map",
+			Name:            "Peek-Map Broadcast",
+			Protocol:        "/p2ptap/peek-map/1.0.0",
+			Category:        "pubsub",
+			Status:          peekStatus,
+			ActiveStreams:   peekTotal,
+			InboundStreams:  peekIn,
+			OutboundStreams: peekOut,
+			Details:         fmt.Sprintf("Streams: %d (↓%d ↑%d) · Bootstrap Topology Sync", peekTotal, peekIn, peekOut),
+		},
+		{
+			ID:              "data",
+			Name:            "Virtual TAP Datapath",
+			Protocol:        "Layer-2 Ethernet Overlay",
+			Category:        "data",
+			Status:          dataStatus,
+			ActiveStreams:   totalConns,
+			InboundStreams:  totalConns,
+			OutboundStreams: totalConns,
+			Details:         fmt.Sprintf("Cipher: %s · Mode: %s", obfsAlgo, obfsMode),
+		},
+		{
+			ID:              "auth",
+			Name:            "Mesh Authentication",
+			Protocol:        "/p2ptap/auth/1.0.0",
+			Category:        "security",
+			Status:          authStatus,
+			ActiveStreams:   authTotal,
+			InboundStreams:  authIn,
+			OutboundStreams: authOut,
+			Details:         fmt.Sprintf("PSK Mesh Network Isolation · Streams: %d", authTotal),
+		},
+		{
+			ID:              "dcutr",
+			Name:            "DCUtR Hole-Punch & Relay",
+			Protocol:        "/libp2p/dcutr",
+			Category:        "transport",
+			Status:          dcutrStatus,
+			ActiveStreams:   dcutrTotal,
+			InboundStreams:  dcutrIn,
+			OutboundStreams: dcutrOut,
+			Details:         fmt.Sprintf("Direct Connection Upgrade · Streams: %d", dcutrTotal),
+		},
+	}
+
+	return channels, streamsList
 }
 
 // cacheActivePeers stores the latest PeerInfoDTO slice locally so that
@@ -1221,7 +1432,10 @@ func (n *Node) derivePeerConnState(pID peer.ID, role string) (string, int, strin
 		}
 		return connStateOK, 4, obfAlgo + " end-to-end OK"
 	}
-	// No frames seen yet (or plaintext path without AEAD counters): report the
-	// best-known stage as "connecting" rather than a false failure.
-	return connStateConnecting, 3, obfAlgo + " negotiated, awaiting data"
+	// Encryption and readiness handshake are complete. The connection is fully
+	// operational in standby (awaiting TAP traffic).
+	if sig.isRelayed {
+		return connStateRelayOK, 3, obfAlgo + " ready via relay (standby)"
+	}
+	return connStateOK, 3, obfAlgo + " ready (standby)"
 }

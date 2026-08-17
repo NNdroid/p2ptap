@@ -736,7 +736,18 @@ func (n *Node) negotiateObfWithPeer(p peer.ID, peerPub []byte, peerAlgos []byte,
 			keyB[i] = 0
 		}
 	}()
-	algo := obfuscate.SelectAlgo(n.mySupportedAlgos(), peerAlgos)
+
+	// Symmetric algorithm selection: always evaluate using the Resync Leader's
+	// (smaller PeerID) preference order against the follower's supported set.
+	// This ensures both peers select the EXACT same cipher when they advertise
+	// different local preferences (e.g. Node A prefers AES-GCM while Node B is Auto).
+	var leaderPref, followerAlgos []byte
+	if n.Host.ID() < p {
+		leaderPref, followerAlgos = n.mySupportedAlgos(), peerAlgos
+	} else {
+		leaderPref, followerAlgos = peerAlgos, n.mySupportedAlgos()
+	}
+	algo := obfuscate.SelectAlgo(leaderPref, followerAlgos)
 	if algo == obfuscate.ObfAlgoNone {
 		log.Debug("SeqSync: no common algorithm with %s, falling back to plaintext", p.String())
 		return

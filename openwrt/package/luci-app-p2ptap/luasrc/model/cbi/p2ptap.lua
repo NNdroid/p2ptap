@@ -290,4 +290,8 @@ function o.cfgvalue(self, section)
 	return '<div style="margin:12px 0;"><a href="' .. url .. '" target="_blank" class="cbi-button cbi-button-apply" style="background:linear-gradient(135deg, #06b6d4, #3b82f6); color:#fff; border:none; padding:10px 24px; border-radius:8px; font-weight:bold; font-size:15px; text-decoration:none; display:inline-block; box-shadow:0 4px 12px rgba(6,182,212,0.3);">🚀 打开 p2ptap 高级 WebUI 控制台 (' .. url .. ')</a></div>'
 end
 
+function m.on_after_commit(self)
+	luci.sys.call("/etc/init.d/p2ptap restart >/dev/null 2>&1 &")
+end
+
 return m

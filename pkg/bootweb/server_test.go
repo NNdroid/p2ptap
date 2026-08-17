@@ -28,8 +28,8 @@ func (m *mockBootDataProvider) GetPeerNetworkID(p peer.ID) string               
 func (m *mockBootDataProvider) HasPeekMapListener(p peer.ID) bool                 { return true }
 func (m *mockBootDataProvider) GetPeekMapListenerCount() int                      { return 3 }
 func (m *mockBootDataProvider) HasBootRelayClient(p peer.ID) bool                 { return true }
-func (m *mockBootDataProvider) GetPeerNodeInfo(p peer.ID) (string, string, string, string, string, string, string, []string, bool) {
-	return "TestNode", "10.0.0.5", "", "aa:bb:cc:dd:ee:ff", "linux", "amd64", "v0.1.0", []string{"192.168.1.0/24"}, false
+func (m *mockBootDataProvider) GetPeerNodeInfo(p peer.ID) (string, string, string, string, string, string, string, []string, bool, string, string) {
+	return "TestNode", "10.0.0.5", "", "aa:bb:cc:dd:ee:ff", "linux", "amd64", "v0.1.0", []string{"192.168.1.0/24"}, false, "aes-gcm", "fixed"
 }
 func (m *mockBootDataProvider) GetMeshPeers() []MeshPeerInfo { return nil }
 func (m *mockBootDataProvider) GetRecentAlerts() []AlertEventDTO {

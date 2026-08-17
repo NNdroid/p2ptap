@@ -588,6 +588,9 @@ type PeekMapNodeInfo struct {
 	// through the backbone, which merges the two clusters into one
 	// circuit-relay domain (see considerDiscoveredBoot).
 	IsBoot bool `json:"is_boot,omitempty"`
+	// ObfsAlgo and ObfsMode declare this node's encryption algorithm and obfuscation strategy.
+	ObfsAlgo string `json:"obfs_algo,omitempty"`
+	ObfsMode string `json:"obfs_mode,omitempty"`
 }
 
 // PeekMapMessage is the envelope for all peek-map broadcast traffic. The boot
@@ -907,7 +910,9 @@ func (n *Node) localPeekMapNodeInfo() PeekMapNodeInfo {
 		// Loopback is not stripped here: the peerstore is a knowledge base and
 		// the dial paths already drop loopback (filterLoopbackAddrs), so
 		// filtering twice would only make single-machine setups untestable.
-		Addrs: multiaddrsToStrings(n.Host.Addrs()),
+		Addrs:    multiaddrsToStrings(n.Host.Addrs()),
+		ObfsAlgo: n.Config.Obfuscation.Algorithm,
+		ObfsMode: n.Config.Obfuscation.Mode,
 	}
 }
 

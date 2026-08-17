@@ -70,6 +70,8 @@ type clientNodeInfo struct {
 	HopDistance       int      `json:"hop_distance,omitempty"`
 	Addrs             []string `json:"addrs,omitempty"`
 	IsBoot            bool     `json:"is_boot,omitempty"`
+	ObfsAlgo          string   `json:"obfs_algo,omitempty"`
+	ObfsMode          string   `json:"obfs_mode,omitempty"`
 }
 
 var peerInfoCache sync.Map // peer.ID -> clientNodeInfo
@@ -1356,12 +1358,12 @@ func (p *bootDataProviderImpl) HasBootRelayClient(id peer.ID) bool {
 	return ok
 }
 
-func (p *bootDataProviderImpl) GetPeerNodeInfo(id peer.ID) (string, string, string, string, string, string, string, []string, bool) {
+func (p *bootDataProviderImpl) GetPeerNodeInfo(id peer.ID) (string, string, string, string, string, string, string, []string, bool, string, string) {
 	if v, ok := peerInfoCache.Load(id); ok {
 		info := v.(clientNodeInfo)
-		return info.NodeName, info.TapIP, info.TapIPv6, info.TapMAC, info.OS, info.Arch, info.Version, info.AdvertisedSubnets, info.IsExitNode
+		return info.NodeName, info.TapIP, info.TapIPv6, info.TapMAC, info.OS, info.Arch, info.Version, info.AdvertisedSubnets, info.IsExitNode, info.ObfsAlgo, info.ObfsMode
 	}
-	return "", "", "", "", "", "", "", nil, false
+	return "", "", "", "", "", "", "", nil, false, "", ""
 }
 
 func (p *bootDataProviderImpl) GetMeshPeers() []bootweb.MeshPeerInfo {
@@ -1386,8 +1388,8 @@ func (p *bootDataProviderImpl) GetRelaySessions() []bootweb.RelaySessionDTO {
 	raw := p.sessions.GetAll()
 	out := make([]bootweb.RelaySessionDTO, 0, len(raw))
 	for _, s := range raw {
-		srcName, _, _, _, _, _, _, _, _ := p.GetPeerNodeInfo(s.SrcPeer)
-		dstName, _, _, _, _, _, _, _, _ := p.GetPeerNodeInfo(s.DstPeer)
+		srcName, _, _, _, _, _, _, _, _, _, _ := p.GetPeerNodeInfo(s.SrcPeer)
+		dstName, _, _, _, _, _, _, _, _, _, _ := p.GetPeerNodeInfo(s.DstPeer)
 		out = append(out, bootweb.RelaySessionDTO{
 			SrcPeerID:   s.SrcPeer.String(),
 			SrcShortID:  s.SrcPeer.ShortString(),
@@ -1420,7 +1422,7 @@ func (p *bootDataProviderImpl) GetGeoNodes() []bootweb.GeoNodeDTO {
 		if lat == 0 && lon == 0 {
 			continue
 		}
-		nodeName, _, _, _, _, _, _, _, _ := p.GetPeerNodeInfo(pid)
+		nodeName, _, _, _, _, _, _, _, _, _, _ := p.GetPeerNodeInfo(pid)
 		latMs := int64(0)
 		if l := h.Peerstore().LatencyEWMA(pid); l > 0 {
 			latMs = l.Milliseconds()
@@ -1465,8 +1467,8 @@ func (p *bootDataProviderImpl) GetGeoArcs() []bootweb.GeoArcDTO {
 		if (srcLat == 0 && srcLon == 0) || (dstLat == 0 && dstLon == 0) {
 			continue
 		}
-		srcName, _, _, _, _, _, _, _, _ := p.GetPeerNodeInfo(s.SrcPeer)
-		dstName, _, _, _, _, _, _, _, _ := p.GetPeerNodeInfo(s.DstPeer)
+		srcName, _, _, _, _, _, _, _, _, _, _ := p.GetPeerNodeInfo(s.SrcPeer)
+		dstName, _, _, _, _, _, _, _, _, _, _ := p.GetPeerNodeInfo(s.DstPeer)
 		out = append(out, bootweb.GeoArcDTO{
 			SrcLat:    srcLat,
 			SrcLon:    srcLon,

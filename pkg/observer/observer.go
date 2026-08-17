@@ -133,6 +133,8 @@ type Collector interface {
 	UpdateSubnetRoutes(routes []SubnetRouteDTO)
 	UpdatePeerMetas(metas []PeerMetaDTO)
 	UpdateMeshMatrix(matrix []MeshMatrixCellDTO)
+	UpdateProtocolChannels(channels []ProtocolChannelDTO)
+	UpdateActiveStreams(streams []ProtocolStreamDTO)
 	// UpdateDuplicateIPConflicts pushes the current duplicate-IP / overlapping-
 	// subnet conflict set (and arbitration verdicts) for the WebUI to display.
 	UpdateDuplicateIPConflicts(conflicts []DuplicateIPConflictDTO)
@@ -770,33 +772,61 @@ type ACLDropDTO struct {
 	Dir     string    `json:"direction"`
 }
 
+// ProtocolChannelDTO captures high-level status and metrics of a P2P protocol subsystem/channel.
+type ProtocolChannelDTO struct {
+	ID              string `json:"id"`               // e.g. "seqsync", "lsa", "peek-map", "data", "auth", "dcutr", "echo"
+	Name            string `json:"name"`             // Friendly name, e.g. "Sequence Sync (SeqSync)"
+	Protocol        string `json:"protocol"`         // e.g. "/p2ptap/seqsync/1.0.0"
+	Category        string `json:"category"`         // "sync" | "routing" | "pubsub" | "data" | "security" | "transport" | "diagnostics"
+	Status          string `json:"status"`           // "active" | "running" | "idle" | "standby"
+	ActiveStreams   int    `json:"active_streams"`   // total active open streams count
+	InboundStreams  int    `json:"inbound_streams"`  // inbound streams
+	OutboundStreams int    `json:"outbound_streams"` // outbound streams
+	Details         string `json:"details"`          // summary metrics
+}
+
+// ProtocolStreamDTO captures runtime details of an active stream/channel on a live P2P connection.
+type ProtocolStreamDTO struct {
+	Protocol     string `json:"protocol"`      // e.g. "/p2ptap/seqsync/1.0.0"
+	ProtocolName string `json:"protocol_name"` // Friendly name, e.g. "SeqSync"
+	PeerID       string `json:"peer_id"`
+	PeerIDShort  string `json:"peer_id_short"`
+	PeerName     string `json:"peer_name"`
+	Direction    string `json:"direction"`     // "inbound" | "outbound"
+	Transport    string `json:"transport"`     // "QUIC" / "TCP" / "Relay"
+	RemoteAddr   string `json:"remote_addr"`
+	Status       string `json:"status"`        // "active" | "established"
+}
+
 type StatsResponse struct {
-	NodeName          string                `json:"node_name"`
-	PeerID            string                `json:"peer_id"`
-	Version           string                `json:"version"`
-	TapIP             string                `json:"tap_ip"`
-	TapIPv6           string                `json:"tap_ipv6"`
-	TransportStrategy string                `json:"transport_strategy"`
-	ListenAddrs       []string              `json:"listen_addrs"`
-	NATStatus         string                `json:"nat_status"`
-	ExitNode          ExitNodeInfoDTO       `json:"exit_node"`
-	ActivePeers       []PeerInfoDTO         `json:"active_peers"`
-	MACTable          []MACInfoDTO          `json:"mac_table"`
-	ARPTable          []ARPInfoDTO          `json:"arp_table"`
-	IPTable           []IPInfoDTO           `json:"ip_table"`
-	RoutesTable       []RouteInfoDTO        `json:"routes_table"`
-	PacketStats       PacketStatsDTO        `json:"packet_stats"`
-	ProtocolStats     ProtocolStatsDTO      `json:"protocol_stats"`
-	GatewayPackets    GatewayPacketStatsDTO `json:"gateway_packets"`
-	SeqStats          SeqStatsDTO           `json:"seq_stats"`
-	Security          SecurityStatusDTO     `json:"security"`
-	ACL               ACLStatsDTO           `json:"acl"`
-	System            SystemHealthDTO       `json:"system"`
-	Speed             SpeedStatsDTO         `json:"speed"`
-	SpeedHistory      []SpeedSampleDTO      `json:"speed_history"`
-	SubnetRoutes      []SubnetRouteDTO      `json:"subnet_routes"`
-	PeerMetas         []PeerMetaDTO         `json:"peer_metas"`
-	MeshMatrix        []MeshMatrixCellDTO   `json:"mesh_matrix"`
+	NodeName             string                   `json:"node_name"`
+	PeerID               string                   `json:"peer_id"`
+	Version              string                   `json:"version"`
+	TapIP                string                   `json:"tap_ip"`
+	TapIPv6              string                   `json:"tap_ipv6"`
+	TransportStrategy    string                   `json:"transport_strategy"`
+	ListenAddrs          []string                 `json:"listen_addrs"`
+	NATStatus            string                   `json:"nat_status"`
+	ExitNode             ExitNodeInfoDTO          `json:"exit_node"`
+	ActivePeers          []PeerInfoDTO            `json:"active_peers"`
+	MACTable             []MACInfoDTO             `json:"mac_table"`
+	ARPTable             []ARPInfoDTO             `json:"arp_table"`
+	IPTable              []IPInfoDTO              `json:"ip_table"`
+	RoutesTable          []RouteInfoDTO           `json:"routes_table"`
+	PacketStats          PacketStatsDTO           `json:"packet_stats"`
+	ProtocolStats        ProtocolStatsDTO         `json:"protocol_stats"`
+	GatewayPackets       GatewayPacketStatsDTO    `json:"gateway_packets"`
+	SeqStats             SeqStatsDTO              `json:"seq_stats"`
+	Security             SecurityStatusDTO        `json:"security"`
+	ACL                  ACLStatsDTO              `json:"acl"`
+	System               SystemHealthDTO          `json:"system"`
+	Speed                SpeedStatsDTO            `json:"speed"`
+	SpeedHistory         []SpeedSampleDTO         `json:"speed_history"`
+	SubnetRoutes         []SubnetRouteDTO         `json:"subnet_routes"`
+	PeerMetas            []PeerMetaDTO            `json:"peer_metas"`
+	MeshMatrix           []MeshMatrixCellDTO      `json:"mesh_matrix"`
+	ProtocolChannels     []ProtocolChannelDTO     `json:"protocol_channels"`
+	ActiveStreams        []ProtocolStreamDTO      `json:"active_streams"`
 	// DuplicateIPConflicts surfaces duplicate-IP and overlapping-subnet
 	// conflicts (with arbitration verdicts) detected by the node.
 	DuplicateIPConflicts []DuplicateIPConflictDTO `json:"duplicate_ip_conflicts"`

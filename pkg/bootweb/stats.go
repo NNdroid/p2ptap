@@ -60,6 +60,8 @@ type PeerItemDTO struct {
 	AdvertisedSubnets []string `json:"advertised_subnets"`
 	IsExitNode        bool     `json:"is_exit_node"`
 	AllMultiaddrs     []string `json:"all_multiaddrs"`
+	ObfsAlgo          string   `json:"obfs_algo"`
+	ObfsMode          string   `json:"obfs_mode"`
 }
 
 // SubnetRouteDTO represents an advertised subnet route learned from a client node.
@@ -221,7 +223,7 @@ type BootDataProvider interface {
 	HasPeekMapListener(p peer.ID) bool
 	GetPeekMapListenerCount() int
 	HasBootRelayClient(p peer.ID) bool
-	GetPeerNodeInfo(p peer.ID) (nodeName, tapIP, tapIPv6, tapMAC, osStr, archStr, verStr string, subnets []string, isExit bool)
+	GetPeerNodeInfo(p peer.ID) (nodeName, tapIP, tapIPv6, tapMAC, osStr, archStr, verStr string, subnets []string, isExit bool, obfsAlgo, obfsMode string)
 	GetMeshPeers() []MeshPeerInfo
 	GetRecentAlerts() []AlertEventDTO
 	// New methods for enhanced dashboard modules
@@ -400,7 +402,7 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 			hasPeekMap := p.HasPeekMapListener(pid)
 			hasBootRelay := p.HasBootRelayClient(pid)
 
-			nodeName, tapIP, tapIPv6, tapMAC, osStr, archStr, verStr, subnets, isExit := p.GetPeerNodeInfo(pid)
+			nodeName, tapIP, tapIPv6, tapMAC, osStr, archStr, verStr, subnets, isExit, obfsAlgo, obfsMode := p.GetPeerNodeInfo(pid)
 
 			rttMs := int64(0)
 			latency := h.Peerstore().LatencyEWMA(pid)
@@ -432,6 +434,8 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 				AdvertisedSubnets: subnets,
 				IsExitNode:        isExit,
 				AllMultiaddrs:     allMultiaddrs,
+				ObfsAlgo:          obfsAlgo,
+				ObfsMode:          obfsMode,
 			}
 			peersList = append(peersList, item)
 

@@ -129,6 +129,38 @@
         html[data-theme="light"] .drawer-title {
             color: #0f172a;
         }
+        html[data-theme="light"] .drawer-header {
+            border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+        }
+        html[data-theme="light"] .drawer-section-label {
+            color: #475569;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+        }
+        html[data-theme="light"] .drawer-multiaddrs-box {
+            background: #f8fafc;
+            border: 1px solid #cbd5e1;
+        }
+        html[data-theme="light"] .drawer-multiaddr-item {
+            color: #0369a1;
+            font-weight: 500;
+        }
+        html[data-theme="light"] .drawer-event-item {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            color: #1e293b;
+        }
+        html[data-theme="light"] .drawer .detail-label {
+            color: #64748b;
+        }
+        html[data-theme="light"] .drawer .detail-val {
+            color: #0f172a;
+        }
+        html[data-theme="light"] .drawer .config-key {
+            color: #64748b;
+        }
+        html[data-theme="light"] .drawer .config-val {
+            color: #0f172a;
+        }
 
         html[data-theme="light"] .network-group-card {
             background: rgba(248, 250, 252, 0.85);
@@ -451,6 +483,9 @@
         .drawer-title { font-size: 16px; font-weight: 700; color: #f1f5f9; }
         .drawer-section { display: flex; flex-direction: column; gap: 8px; }
         .drawer-section-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px; margin-bottom: 4px; }
+        .drawer-multiaddrs-box { background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 8px; max-height: 140px; overflow-y: auto; }
+        .drawer-multiaddr-item { font-size: 11px; font-family: monospace; color: #38bdf8; padding: 3px 0; word-break: break-all; }
+        .drawer-event-item { font-size: 11px; padding: 6px 8px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 4px; display: flex; gap: 8px; align-items: center; }
 
         /* Globe 3D */
         .globe-container { width: 100%; height: 460px; position: relative; overflow: hidden; border-radius: 12px; background: radial-gradient(ellipse at center, #0a0f2e 0%, #030510 100%); border: 1px solid var(--glass-border); user-select: none; }
@@ -850,7 +885,9 @@
                     <div class="globe-legend-item"><span class="globe-dot" style="background: #10b981;"></span><span style="color: #94a3b8;" data-i18n="globe_legend_authed">已认证节点</span></div>
                     <div class="globe-legend-item"><span class="globe-dot" style="background: #3b82f6;"></span><span style="color: #94a3b8;" data-i18n="globe_legend_boot">Boot 骨干</span></div>
                     <div class="globe-legend-item"><span class="globe-dot" style="background: #ef4444;"></span><span style="color: #94a3b8;" data-i18n="globe_legend_unauthed">未认证节点</span></div>
+                    <div class="globe-legend-item"><span class="globe-dot" style="background: #f59e0b;"></span><span style="color: #94a3b8;" data-i18n="globe_legend_mixed">混合聚合节点</span></div>
                 </div>
+
             </div>
         </div>
 
@@ -1006,8 +1043,10 @@
                     <span class="filter-chip" onclick="setLogFilter('[peek-map]', this)" data-i18n="filter_peekmap">Peek-Map</span>
                     <span class="filter-chip" onclick="setLogFilter('[keepalive]', this)" data-i18n="filter_ping">保活 Ping</span>
                 </div>
-                <div style="display: flex; gap: 8px; align-items: center;">
-                    <input type="text" id="logSearchInput" data-i18n-ph="log_search_ph" placeholder="🔍 搜索日志..." style="background: rgba(0,0,0,0.4); border: 1px solid var(--glass-border); border-radius: 6px; padding: 2px 8px; font-size: 11px; color: #fff; width: 140px;" oninput="renderLogs()" />
+                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                    <input type="text" id="logSearchInput" data-i18n-ph="log_search_ph" placeholder="🔍 搜索日志..." style="background: rgba(0,0,0,0.4); border: 1px solid var(--glass-border); border-radius: 6px; padding: 2px 8px; font-size: 11px; color: inherit; width: 130px;" oninput="renderLogs()" />
+                    <button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px;" id="logPauseBtn" onclick="toggleLogPause()"><span id="logPauseIcon">⏸️</span> <span id="logPauseText" data-i18n="btn_pause_logs">暂停</span></button>
+                    <button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px;" onclick="copyLogs()">📋 <span data-i18n="btn_copy_logs">复制日志</span></button>
                     <button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px;" onclick="clearLogs()"><span data-i18n="btn_clear">清屏</span></button>
                     <label style="display: flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer;">
                         <input type="checkbox" id="autoScrollCheck" checked /> <span data-i18n="chk_autoscroll">自动滚动</span>
@@ -1096,6 +1135,9 @@
                 'filter_peekmap': 'Peek-Map',
                 'log_search_ph': '🔍 搜索日志...',
                 'btn_clear': '清屏',
+                'btn_pause_logs': '暂停',
+                'btn_resume_logs': '继续',
+                'btn_copy_logs': '复制日志',
                 'chk_autoscroll': '自动滚动',
                 'authed': '🟢 已认证',
                 'unauthed': '🔴 未认证',
@@ -1134,6 +1176,8 @@
                 'globe_legend_authed': '已认证节点',
                 'globe_legend_boot': 'Boot 骨干',
                 'globe_legend_unauthed': '未认证节点',
+                'globe_legend_mixed': '混合聚合节点 (部分认证)',
+
                 'sparkline_peers_lbl': '👥 在线客户端变化趋势',
                 'sparkline_relay_lbl': '🔀 活跃中继会话变化趋势',
                 'drawer_title': '节点详情',
@@ -1186,6 +1230,18 @@
                 'drawer_sec_subnets': '宣告子网路由',
                 'drawer_sec_multiaddrs': '底层物理 Multiaddr 链路',
                 'drawer_sec_events': '最近节点事件',
+                'drawer_sec_crypto': '加密与混淆 (Encryption & Obfs)',
+                'drawer_lbl_cipher': '加密算法 (Cipher)',
+                'drawer_lbl_obfs_mode': '混淆模式 (Obfuscation Mode)',
+                'crypto_obfs': '加密与混淆',
+                'obfs_algo_tip': '加密算法与混淆模式',
+                'obfs_algo_auto_desc': 'ECDH 自适应协商',
+                'obfs_algo_none_desc': '明文无加密',
+                'obfs_mode_fixed_desc': '固定长度混淆填充',
+                'obfs_mode_block_desc': '对齐块混淆填充',
+                'obfs_mode_dynamic_desc': '动态自适应混淆',
+                'obfs_mode_random_desc': '随机抖动填充',
+                'obfs_mode_none_desc': '无填充',
                 'drawer_lbl_name': '节点名称',
                 'drawer_lbl_phy_ip': '物理 IP',
                 'drawer_lbl_transport': '传输通道',
@@ -1277,6 +1333,9 @@
                 'filter_peekmap': 'Peek-Map',
                 'log_search_ph': '🔍 搜索日誌...',
                 'btn_clear': '清屏',
+                'btn_pause_logs': '暫停',
+                'btn_resume_logs': '繼續',
+                'btn_copy_logs': '複製日誌',
                 'chk_autoscroll': '自動滾動',
                 'authed': '🟢 已認證',
                 'unauthed': '🔴 未認證',
@@ -1315,6 +1374,8 @@
                 'globe_legend_authed': '已認證節點',
                 'globe_legend_boot': 'Boot 骨幹',
                 'globe_legend_unauthed': '未認證節點',
+                'globe_legend_mixed': '混合聚合節點 (部分認證)',
+
                 'sparkline_peers_lbl': '👥 在線客戶端變化趨勢',
                 'sparkline_relay_lbl': '🔀 活躍中繼會話變化趨勢',
                 'drawer_title': '節點詳情',
@@ -1367,6 +1428,18 @@
                 'drawer_sec_subnets': '宣告子網路由',
                 'drawer_sec_multiaddrs': '底層物理 Multiaddr 鏈路',
                 'drawer_sec_events': '最近節點事件',
+                'drawer_sec_crypto': '加密與混淆 (Encryption & Obfs)',
+                'drawer_lbl_cipher': '加密演算法 (Cipher)',
+                'drawer_lbl_obfs_mode': '混淆模式 (Obfuscation Mode)',
+                'crypto_obfs': '加密與混淆',
+                'obfs_algo_tip': '加密演算法與混淆模式',
+                'obfs_algo_auto_desc': 'ECDH 自適應協商',
+                'obfs_algo_none_desc': '明文無加密',
+                'obfs_mode_fixed_desc': '固定長度混淆填充',
+                'obfs_mode_block_desc': '對齊塊混淆填充',
+                'obfs_mode_dynamic_desc': '動態自適應混淆',
+                'obfs_mode_random_desc': '隨機抖動填充',
+                'obfs_mode_none_desc': '無填充',
                 'drawer_lbl_name': '節點名稱',
                 'drawer_lbl_phy_ip': '物理 IP',
                 'drawer_lbl_transport': '傳輸通道',
@@ -1458,6 +1531,9 @@
                 'filter_peekmap': 'Peek-Map',
                 'log_search_ph': '🔍 Search logs...',
                 'btn_clear': 'Clear',
+                'btn_pause_logs': 'Pause',
+                'btn_resume_logs': 'Resume',
+                'btn_copy_logs': 'Copy Logs',
                 'chk_autoscroll': 'Auto Scroll',
                 'authed': '🟢 Authenticated',
                 'unauthed': '🔴 Unauthenticated',
@@ -1496,6 +1572,8 @@
                 'globe_legend_authed': 'Authenticated Node',
                 'globe_legend_boot': 'Boot Backbone',
                 'globe_legend_unauthed': 'Unauthenticated Node',
+                'globe_legend_mixed': 'Mixed Cluster (Partial Auth)',
+
                 'sparkline_peers_lbl': '👥 Online Peers Trend',
                 'sparkline_relay_lbl': '🔀 Active Relay Sessions Trend',
                 'drawer_title': 'Peer Details',
@@ -1548,6 +1626,18 @@
                 'drawer_sec_subnets': 'Advertised Subnets',
                 'drawer_sec_multiaddrs': 'Underlying Multiaddrs',
                 'drawer_sec_events': 'Recent Node Events',
+                'drawer_sec_crypto': 'Encryption & Obfuscation',
+                'drawer_lbl_cipher': 'Cipher Algorithm',
+                'drawer_lbl_obfs_mode': 'Obfuscation Mode',
+                'crypto_obfs': 'Crypto & Obfs',
+                'obfs_algo_tip': 'Encryption cipher and obfuscation strategy',
+                'obfs_algo_auto_desc': 'ECDH Auto-Negotiated',
+                'obfs_algo_none_desc': 'Plaintext Unencrypted',
+                'obfs_mode_fixed_desc': 'Fixed-Length Padding',
+                'obfs_mode_block_desc': 'Block-Aligned Padding',
+                'obfs_mode_dynamic_desc': 'Dynamic Adaptive Obfs',
+                'obfs_mode_random_desc': 'Random Jitter Padding',
+                'obfs_mode_none_desc': 'No Padding',
                 'drawer_lbl_name': 'Node Name',
                 'drawer_lbl_phy_ip': 'Physical IP',
                 'drawer_lbl_transport': 'Transport',
@@ -1639,6 +1729,9 @@
                 'filter_peekmap': 'Peek-Map',
                 'log_search_ph': '🔍 ログを検索...',
                 'btn_clear': 'クリア',
+                'btn_pause_logs': '一時停止',
+                'btn_resume_logs': '再開',
+                'btn_copy_logs': 'ログをコピー',
                 'chk_autoscroll': '自動スクロール',
                 'authed': '🟢 認証済み',
                 'unauthed': '🔴 未認証',
@@ -1677,6 +1770,8 @@
                 'globe_legend_authed': '認証済みノード',
                 'globe_legend_boot': 'Boot バックボーン',
                 'globe_legend_unauthed': '未認証ノード',
+                'globe_legend_mixed': '混合クラスター (認証混在)',
+
                 'sparkline_peers_lbl': '👥 オンラインピアの推移',
                 'sparkline_relay_lbl': '🔀 アクティブリレーセッション推移',
                 'drawer_title': 'ノード詳細',
@@ -1729,6 +1824,18 @@
                 'drawer_sec_subnets': '広告サブネットルート',
                 'drawer_sec_multiaddrs': '物理 Multiaddr リンク',
                 'drawer_sec_events': '最近のノードイベント',
+                'drawer_sec_crypto': '暗号化と難読化 (Encryption & Obfs)',
+                'drawer_lbl_cipher': '暗号アルゴリズム (Cipher)',
+                'drawer_lbl_obfs_mode': '難読化モード (Obfuscation Mode)',
+                'crypto_obfs': '暗号化と難読化',
+                'obfs_algo_tip': '暗号化アルゴリズムと難読化モード',
+                'obfs_algo_auto_desc': 'ECDH 自動ネゴシエーション',
+                'obfs_algo_none_desc': '平文・暗号化なし',
+                'obfs_mode_fixed_desc': '固定長難読化パディング',
+                'obfs_mode_block_desc': 'ブロック整列パディング',
+                'obfs_mode_dynamic_desc': '動的適応型難読化',
+                'obfs_mode_random_desc': 'ランダムジッターパディング',
+                'obfs_mode_none_desc': 'パディングなし',
                 'drawer_lbl_name': 'ノード名',
                 'drawer_lbl_phy_ip': '物理 IP',
                 'drawer_lbl_transport': 'トランスポート',
@@ -1820,6 +1927,9 @@
                 'filter_peekmap': 'Peek-Map',
                 'log_search_ph': '🔍 로그 검색...',
                 'btn_clear': '지우기',
+                'btn_pause_logs': '일시 정지',
+                'btn_resume_logs': '다시 시작',
+                'btn_copy_logs': '로그 복사',
                 'chk_autoscroll': '자동 스크롤',
                 'authed': '🟢 인증됨',
                 'unauthed': '🔴 미인증',
@@ -1858,6 +1968,8 @@
                 'globe_legend_authed': '인증된 노드',
                 'globe_legend_boot': 'Boot 백본',
                 'globe_legend_unauthed': '미인증 노드',
+                'globe_legend_mixed': '혼합 클러스터 (부분 인증)',
+
                 'sparkline_peers_lbl': '👥 온라인 피어 추세',
                 'sparkline_relay_lbl': '🔀 활성 릴레이 세션 추세',
                 'drawer_title': '노드 상세 정보',
@@ -1910,6 +2022,18 @@
                 'drawer_sec_subnets': '광고된 서브넷 라우트',
                 'drawer_sec_multiaddrs': '물리적 Multiaddr 링크',
                 'drawer_sec_events': '최근 노드 이벤트',
+                'drawer_sec_crypto': '암호화 및 난독화 (Encryption & Obfs)',
+                'drawer_lbl_cipher': '암호화 알고리즘 (Cipher)',
+                'drawer_lbl_obfs_mode': '난독화 모드 (Obfuscation Mode)',
+                'crypto_obfs': '암호화 및 난독화',
+                'obfs_algo_tip': '암호화 알고리즘 및 난독화 모드',
+                'obfs_algo_auto_desc': 'ECDH 자동 협상',
+                'obfs_algo_none_desc': '평문 암호화 없음',
+                'obfs_mode_fixed_desc': '고정 길이 난독화 패딩',
+                'obfs_mode_block_desc': '블록 정렬 패딩',
+                'obfs_mode_dynamic_desc': '동적 적응형 난독화',
+                'obfs_mode_random_desc': '무작위 지터 패딩',
+                'obfs_mode_none_desc': '패딩 없음',
                 'drawer_lbl_name': '노드 이름',
                 'drawer_lbl_phy_ip': '물리적 IP',
                 'drawer_lbl_transport': '전송 프로토콜',
@@ -2001,6 +2125,9 @@
                 'filter_peekmap': 'Peek-Map',
                 'log_search_ph': '🔍 Buscar registros...',
                 'btn_clear': 'Limpiar',
+                'btn_pause_logs': 'Pausar',
+                'btn_resume_logs': 'Reanudar',
+                'btn_copy_logs': 'Copiar Registros',
                 'chk_autoscroll': 'Auto Desplazamiento',
                 'authed': '🟢 Autenticado',
                 'unauthed': '🔴 No Autenticado',
@@ -2039,6 +2166,8 @@
                 'globe_legend_authed': 'Nodo Autenticado',
                 'globe_legend_boot': 'Troncal Boot',
                 'globe_legend_unauthed': 'Nodo No Autenticado',
+                'globe_legend_mixed': 'Clúster Mixto (Auth Parcial)',
+
                 'sparkline_peers_lbl': '👥 Tendencia de Pares en Línea',
                 'sparkline_relay_lbl': '🔀 Tendencia de Sesiones de Retransmisión',
                 'drawer_title': 'Detalles del Nodo',
@@ -2091,6 +2220,18 @@
                 'drawer_sec_subnets': 'Subredes Anunciadas',
                 'drawer_sec_multiaddrs': 'Enlaces Físicos Multiaddr',
                 'drawer_sec_events': 'Eventos Recientes',
+                'drawer_sec_crypto': 'Cifrado y Ofuscación',
+                'drawer_lbl_cipher': 'Algoritmo de Cifrado',
+                'drawer_lbl_obfs_mode': 'Modo de Ofuscación',
+                'crypto_obfs': 'Cifrado y Ofuscación',
+                'obfs_algo_tip': 'Algoritmo de cifrado y modo de ofuscación',
+                'obfs_algo_auto_desc': 'ECDH Auto-Negociado',
+                'obfs_algo_none_desc': 'Texto plano sin cifrar',
+                'obfs_mode_fixed_desc': 'Relleno de Longitud Fija',
+                'obfs_mode_block_desc': 'Relleno Alineado por Bloques',
+                'obfs_mode_dynamic_desc': 'Ofuscación Adaptativa Dinámica',
+                'obfs_mode_random_desc': 'Relleno con Jitter Aleatorio',
+                'obfs_mode_none_desc': 'Sin Relleno',
                 'drawer_lbl_name': 'Nombre de Nodo',
                 'drawer_lbl_phy_ip': 'IP Física',
                 'drawer_lbl_transport': 'Transporte',
@@ -2182,6 +2323,9 @@
                 'filter_peekmap': 'Peek-Map',
                 'log_search_ph': '🔍 Protokolle durchsuchen...',
                 'btn_clear': 'Löschen',
+                'btn_pause_logs': 'Pause',
+                'btn_resume_logs': 'Fortsetzen',
+                'btn_copy_logs': 'Protokolle kopieren',
                 'chk_autoscroll': 'Auto-Scroll',
                 'authed': '🟢 Authentifiziert',
                 'unauthed': '🔴 Nicht Authentifiziert',
@@ -2220,6 +2364,8 @@
                 'globe_legend_authed': 'Authentifizierter Knoten',
                 'globe_legend_boot': 'Boot-Backbone',
                 'globe_legend_unauthed': 'Nicht authentifizierter Knoten',
+                'globe_legend_mixed': 'Gemischter Cluster (Teilauth.)',
+
                 'sparkline_peers_lbl': '👥 Online-Peers Trend',
                 'sparkline_relay_lbl': '🔀 Aktive Relay-Sitzungen Trend',
                 'drawer_title': 'Knotendetails',
@@ -2272,6 +2418,18 @@
                 'drawer_sec_subnets': 'Angekündigte Subnetze',
                 'drawer_sec_multiaddrs': 'Physische Multiaddr-Links',
                 'drawer_sec_events': 'Aktuelle Knotenereignisse',
+                'drawer_sec_crypto': 'Verschlüsselung & Obfuskation',
+                'drawer_lbl_cipher': 'Verschlüsselungsalgorithmus',
+                'drawer_lbl_obfs_mode': 'Obfuskationsmodus',
+                'crypto_obfs': 'Verschlüsselung & Obfuskation',
+                'obfs_algo_tip': 'Verschlüsselungsalgorithmus und Obfuskationsmodus',
+                'obfs_algo_auto_desc': 'ECDH Automatisch ausgehandelt',
+                'obfs_algo_none_desc': 'Klartext unverschlüsselt',
+                'obfs_mode_fixed_desc': 'Feste Länge Padding',
+                'obfs_mode_block_desc': 'Block-ausgerichtetes Padding',
+                'obfs_mode_dynamic_desc': 'Dynamisch adaptive Obfuskation',
+                'obfs_mode_random_desc': 'Zufälliges Jitter-Padding',
+                'obfs_mode_none_desc': 'Kein Padding',
                 'drawer_lbl_name': 'Knotenname',
                 'drawer_lbl_phy_ip': 'Physische IP',
                 'drawer_lbl_transport': 'Transport',
@@ -2363,6 +2521,9 @@
                 'filter_peekmap': 'Peek-Map',
                 'log_search_ph': '🔍 Rechercher dans les logs...',
                 'btn_clear': 'Effacer',
+                'btn_pause_logs': 'Pause',
+                'btn_resume_logs': 'Reprendre',
+                'btn_copy_logs': 'Copier Journaux',
                 'chk_autoscroll': 'Défilement Auto',
                 'authed': '🟢 Authentifié',
                 'unauthed': '🔴 Non Authentifié',
@@ -2401,6 +2562,8 @@
                 'globe_legend_authed': 'Nœud Authentifié',
                 'globe_legend_boot': 'Dorsale Boot',
                 'globe_legend_unauthed': 'Nœud Non Authentifié',
+                'globe_legend_mixed': 'Cluster Mixte (Auth Partielle)',
+
                 'sparkline_peers_lbl': '👥 Tendance des Pairs en Ligne',
                 'sparkline_relay_lbl': '🔀 Tendance des Sessions de Relais',
                 'drawer_title': 'Détails du Nœud',
@@ -2453,6 +2616,18 @@
                 'drawer_sec_subnets': 'Sous-réseaux Annoncés',
                 'drawer_sec_multiaddrs': 'Liaisons Physiques Multiaddr',
                 'drawer_sec_events': 'Événements Récents',
+                'drawer_sec_crypto': 'Chiffrement & Offuscation',
+                'drawer_lbl_cipher': 'Algorithme de Chiffrement',
+                'drawer_lbl_obfs_mode': "Mode d'Offuscation",
+                'crypto_obfs': 'Chiffrement & Offuscation',
+                'obfs_algo_tip': "Algorithme de chiffrement et mode d'offuscation",
+                'obfs_algo_auto_desc': 'ECDH Auto-Négocié',
+                'obfs_algo_none_desc': 'Texte brut non chiffré',
+                'obfs_mode_fixed_desc': 'Remplissage Longueur Fixe',
+                'obfs_mode_block_desc': 'Remplissage Aligné par Blocs',
+                'obfs_mode_dynamic_desc': 'Offuscation Adaptative Dynamique',
+                'obfs_mode_random_desc': 'Remplissage Aléatoire avec Gigue',
+                'obfs_mode_none_desc': 'Aucun Remplissage',
                 'drawer_lbl_name': 'Nom du Nœud',
                 'drawer_lbl_phy_ip': 'IP Physique',
                 'drawer_lbl_transport': 'Transport',
@@ -2544,6 +2719,9 @@
                 'filter_peekmap': 'Peek-Map',
                 'log_search_ph': '🔍 Поиск в логах...',
                 'btn_clear': 'Очистить',
+                'btn_pause_logs': 'Пауза',
+                'btn_resume_logs': 'Продолжить',
+                'btn_copy_logs': 'Копировать логи',
                 'chk_autoscroll': 'Автопрокрутка',
                 'authed': '🟢 Аутентифицирован',
                 'unauthed': '🔴 Не аутентифицирован',
@@ -2582,6 +2760,8 @@
                 'globe_legend_authed': 'Аутентифицированный узел',
                 'globe_legend_boot': 'Магистраль Boot',
                 'globe_legend_unauthed': 'Неаутентифицированный узел',
+                'globe_legend_mixed': 'Смешанный кластер (часть аутент.)',
+
                 'sparkline_peers_lbl': '👥 Тренд онлайн-пиров',
                 'sparkline_relay_lbl': '🔀 Тренд активных сессий ретрансляции',
                 'drawer_title': 'Детали узла',
@@ -2634,6 +2814,18 @@
                 'drawer_sec_subnets': 'Анонсированные подсети',
                 'drawer_sec_multiaddrs': 'Физические каналы Multiaddr',
                 'drawer_sec_events': 'Недавние события узла',
+                'drawer_sec_crypto': 'Шифрование и обфускация',
+                'drawer_lbl_cipher': 'Алгоритм шифрования',
+                'drawer_lbl_obfs_mode': 'Режим обфускации',
+                'crypto_obfs': 'Шифрование и обфускация',
+                'obfs_algo_tip': 'Алгоритм шифрования и режим обфускации',
+                'obfs_algo_auto_desc': 'ECDH автосогласование',
+                'obfs_algo_none_desc': 'Открытый текст без шифрования',
+                'obfs_mode_fixed_desc': 'Фиксированное заполнение',
+                'obfs_mode_block_desc': 'Блочное выравнивание',
+                'obfs_mode_dynamic_desc': 'Динамическая обфускация',
+                'obfs_mode_random_desc': 'Случайное заполнение с джиттером',
+                'obfs_mode_none_desc': 'Без заполнения',
                 'drawer_lbl_name': 'Имя узла',
                 'drawer_lbl_phy_ip': 'Физический IP',
                 'drawer_lbl_transport': 'Транспорт',
@@ -3028,13 +3220,11 @@
                 sb.innerHTML = pageItems.map(sr => {
                     const isIPv6Sub = sr.subnet && sr.subnet.includes(':');
                     const targetIP = (isIPv6Sub && sr.tap_ipv6) ? sr.tap_ipv6 : (sr.tap_ip || '--');
-                    const ipColor = isIPv6Sub ? '#c084fc' : '#a78bfa';
-                    const ipFont = isIPv6Sub ? 'font-size: 11px;' : '';
                     return `
                     <tr>
                         <td><span style="font-weight: 700; color: var(--accent-cyan); font-family: monospace;">${highlightMatch(sr.subnet, q)}</span></td>
                         <td><span style="font-weight: 600; color: var(--text-primary);">${highlightMatch(sr.node_name, q)}</span></td>
-                        <td><span style="color: ${ipColor}; font-family: monospace; ${ipFont}">${highlightMatch(targetIP, q)}</span></td>
+                        <td><span style="color: var(--accent-purple, #8b5cf6); font-family: monospace; font-size: 12px; font-weight: 600;">${highlightMatch(targetIP, q)}</span></td>
                         <td><span class="badge badge-purple">net=${highlightMatch(sr.network_id || 'default', q)}</span></td>
                         <td class="peer-id-cell" onclick="copyText('${sr.peer_id}')">${highlightMatch(sr.short_id, q)}</td>
                     </tr>
@@ -3367,6 +3557,27 @@
             return { x, y, z, r };
         }
 
+        function getGeoClusters(geoNodes) {
+            const clusters = [];
+            (geoNodes || []).forEach(node => {
+                const existing = clusters.find(c => Math.hypot(c.lat - node.lat, c.lon - node.lon) < 0.6);
+                if (existing) {
+                    existing.nodes.push(node);
+                    if (node.is_boot) existing.hasBoot = true;
+                    if (!node.is_authenticated) existing.hasUnauthed = true;
+                } else {
+                    clusters.push({
+                        lat: node.lat,
+                        lon: node.lon,
+                        nodes: [node],
+                        hasBoot: !!node.is_boot,
+                        hasUnauthed: !node.is_authenticated,
+                    });
+                }
+            });
+            return clusters;
+        }
+
         function checkGlobeHover(e) {
             if (!globeCanvas) return;
             const rect = globeCanvas.getBoundingClientRect();
@@ -3377,16 +3588,18 @@
             const R = Math.min(cx, cy) * 0.70 * globeScale;
 
             const geoNodes = state.geo_nodes || [];
+            const clusters = getGeoClusters(geoNodes);
             let found = null;
 
-            for (const node of geoNodes) {
-                const p = projectGeo3D(node.lat, node.lon, R, 0.08);
-                if (p.z > 0.02) { // visible on front
+            for (const c of clusters) {
+                const p = projectGeo3D(c.lat, c.lon, R, 0.09);
+                if (p.z > 0.01) { // visible on front
                     const sx = cx + p.x * R;
                     const sy = cy - p.y * R;
+                    const hitRadius = c.nodes.length > 1 ? 22 : 16;
                     const dist = Math.hypot(mx - sx, my - sy);
-                    if (dist < 18) {
-                        found = { node, sx, sy, clientX: e.clientX, clientY: e.clientY };
+                    if (dist < hitRadius) {
+                        found = { cluster: c, sx, sy };
                         break;
                     }
                 }
@@ -3394,14 +3607,35 @@
 
             const tip = document.getElementById('globeTooltip');
             if (found && tip) {
-                globeHoverNode = found.node;
                 tip.style.display = 'block';
                 tip.style.left = (found.sx + 12) + 'px';
                 tip.style.top = (found.sy - 24) + 'px';
-                tip.innerHTML = '<div style="font-weight:700;color:var(--accent-cyan);margin-bottom:3px;font-size:13px;">' + escapeHtml(found.node.node_name || found.node.short_id) + '</div>' +
-                    '<div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px;">📍 ' + escapeHtml(found.node.city ? found.node.city + ', ' : '') + escapeHtml(found.node.country || 'Unknown') + '</div>' +
-                    '<div style="font-size:11px;color:var(--text-muted);font-family:monospace;">🌐 IP: ' + escapeHtml(found.node.physical_ip) + '</div>' +
-                    '<div style="font-size:11px;color:#10b981;margin-top:3px;font-weight:600;">⚡ RTT: ' + (found.node.latency_ms > 0 ? found.node.latency_ms + ' ms' : '--') + '</div>';
+                const c = found.cluster;
+                if (c.nodes.length === 1) {
+                    const node = c.nodes[0];
+                    globeHoverNode = node;
+                    tip.innerHTML = '<div style="font-weight:700;color:var(--accent-cyan);margin-bottom:3px;font-size:13px;">' + escapeHtml(node.node_name || node.short_id) + '</div>' +
+                        '<div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px;">📍 ' + escapeHtml(node.city ? node.city + ', ' : '') + escapeHtml(node.country || 'Unknown') + '</div>' +
+                        '<div style="font-size:11px;color:var(--text-muted);font-family:monospace;">🌐 IP: ' + escapeHtml(node.physical_ip) + '</div>' +
+                        '<div style="font-size:11px;color:#10b981;margin-top:3px;font-weight:600;">⚡ RTT: ' + (node.latency_ms > 0 ? node.latency_ms + ' ms' : '--') + '</div>';
+                } else {
+                    globeHoverNode = null;
+                    const place = escapeHtml((c.nodes[0].city ? c.nodes[0].city + ', ' : '') + (c.nodes[0].country || 'Unknown'));
+                    let listHtml = c.nodes.slice(0, 6).map(n => `
+                        <div style="display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.06);">
+                            <span style="font-weight:600;color:inherit;">${escapeHtml(n.node_name || n.short_id)}</span>
+                            <span style="color:#38bdf8;font-family:monospace;">${escapeHtml(n.physical_ip || '--')}</span>
+                            <span style="color:#10b981;font-weight:600;">${n.latency_ms > 0 ? n.latency_ms + 'ms' : '--'}</span>
+                        </div>
+                    `).join('');
+                    if (c.nodes.length > 6) {
+                        listHtml += `<div style="font-size:10px;color:var(--text-muted);margin-top:2px;">... ${t('pagination_total') || '共'} ${c.nodes.length} 个节点</div>`;
+                    }
+                    tip.innerHTML = `
+                        <div style="font-weight:700;color:var(--accent-cyan);margin-bottom:4px;font-size:13px;">📍 ${place} <span class="badge badge-info" style="font-size:10px;margin-left:4px;">${c.nodes.length} Peers</span></div>
+                        <div style="display:flex;flex-direction:column;gap:1px;min-width:200px;">${listHtml}</div>
+                    `;
+                }
             } else {
                 globeHoverNode = null;
                 if (tip) tip.style.display = 'none';
@@ -3624,68 +3858,158 @@
                 }
             });
 
-            // 8. Draw 3D Beacon Node Pins & Radar Ripples
+            // 8. Draw 3D Beacon Node Pins & Radar Ripples with Proximity Clustering
             const geoNodes = state.geo_nodes || [];
-            geoNodes.forEach(n => {
-                const pBase = projectGeo3D(n.lat, n.lon, R, 0);
-                const pTip = projectGeo3D(n.lat, n.lon, R, 0.09); // Elevated beacon pin
+            const clusters = getGeoClusters(geoNodes);
+
+            clusters.forEach(c => {
+                const pBase = projectGeo3D(c.lat, c.lon, R, 0);
+                const pTip = projectGeo3D(c.lat, c.lon, R, 0.09); // Elevated beacon pin
                 if (pTip.z > 0.01) { // Front visible
                     const bx = cx + pBase.x * R;
                     const by = cy - pBase.y * R;
                     const tx = cx + pTip.x * R;
                     const ty = cy - pTip.y * R;
-                    const color = n.is_boot ? '#3b82f6' : (n.is_authenticated ? '#10b981' : '#ef4444');
+                    const count = c.nodes.length;
+
+                    // Color assignment: Single nodes use status color;
+                    // Clusters blend color based on authentication status of member nodes.
+                    let color;
+                    if (count === 1) {
+                        const n = c.nodes[0];
+                        color = n.is_boot ? '#3b82f6' : (n.is_authenticated ? '#10b981' : '#ef4444');
+                    } else {
+                        // Count how many are authenticated vs unauthenticated vs boot
+                        const authedCount   = c.nodes.filter(n => n.is_authenticated && !n.is_boot).length;
+                        const bootCount     = c.nodes.filter(n => n.is_boot).length;
+                        const unauthedCount = c.nodes.filter(n => !n.is_authenticated && !n.is_boot).length;
+                        if (bootCount > 0 && authedCount + unauthedCount === 0) {
+                            color = '#3b82f6';      // All boot nodes
+                        } else if (unauthedCount === 0) {
+                            color = '#10b981';      // All authenticated (+ possibly boot)
+                        } else if (authedCount === 0 && bootCount === 0) {
+                            color = '#ef4444';      // All unauthenticated
+                        } else {
+                            color = '#f59e0b';      // Mixed: some authed, some not
+                        }
+                    }
 
                     // 8a. Dynamic Expanding Radar Ripple on ground
                     const wavePhase = (timeVal * 2 + pBase.x * 2) % 1;
+                    const baseRadius = count > 1 ? 6 + Math.min(8, count * 1.5) : 4;
                     ctx.strokeStyle = color;
                     ctx.lineWidth = 1.2 * (1 - wavePhase);
                     ctx.beginPath();
-                    ctx.ellipse(bx, by, (4 + wavePhase * 14), (2 + wavePhase * 7), 0, 0, Math.PI * 2);
+                    ctx.ellipse(bx, by, (baseRadius + wavePhase * 16), (baseRadius * 0.5 + wavePhase * 8), 0, 0, Math.PI * 2);
                     ctx.stroke();
 
                     // 8b. Vertical Beacon Pole
                     ctx.strokeStyle = color;
-                    ctx.lineWidth = 1.8;
+                    ctx.lineWidth = count > 1 ? 2.2 : 1.8;
                     ctx.beginPath();
                     ctx.moveTo(bx, by);
                     ctx.lineTo(tx, ty);
                     ctx.stroke();
 
-                    // 8c. Glowing Radiant Orb at Beacon Tip
-                    const orbGlow = ctx.createRadialGradient(tx, ty, 1, tx, ty, 8);
-                    orbGlow.addColorStop(0, color);
-                    orbGlow.addColorStop(1, 'rgba(0,0,0,0)');
-                    ctx.fillStyle = orbGlow;
-                    ctx.beginPath();
-                    ctx.arc(tx, ty, 8, 0, Math.PI * 2);
-                    ctx.fill();
+                    // 8c. Radiant Orb / Cluster Badge at Beacon Tip
+                    if (count === 1) {
+                        const orbGlow = ctx.createRadialGradient(tx, ty, 1, tx, ty, 8);
+                        orbGlow.addColorStop(0, color);
+                        orbGlow.addColorStop(1, 'rgba(0,0,0,0)');
+                        ctx.fillStyle = orbGlow;
+                        ctx.beginPath();
+                        ctx.arc(tx, ty, 8, 0, Math.PI * 2);
+                        ctx.fill();
 
-                    ctx.fillStyle = '#ffffff';
-                    ctx.beginPath();
-                    ctx.arc(tx, ty, 3.2, 0, Math.PI * 2);
-                    ctx.fill();
+                        ctx.fillStyle = '#ffffff';
+                        ctx.beginPath();
+                        ctx.arc(tx, ty, 3.2, 0, Math.PI * 2);
+                        ctx.fill();
 
-                    // 8d. Node Name Pill Backdrop & Text
-                    const name = n.node_name || n.short_id;
-                    ctx.font = 'bold 10px sans-serif';
-                    const textW = ctx.measureText(name).width;
-                    const pillW = textW + 12;
-                    const pillH = 16;
-                    const pillX = tx - pillW / 2;
-                    const pillY = ty - 22;
+                        // 8d. Single Node Name Pill
+                        const n = c.nodes[0];
+                        const name = n.node_name || n.short_id;
+                        ctx.font = 'bold 10px sans-serif';
+                        const textW = ctx.measureText(name).width;
+                        const pillW = textW + 12;
+                        const pillH = 16;
+                        const pillX = tx - pillW / 2;
+                        const pillY = ty - 22;
 
-                    ctx.fillStyle = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(15, 23, 42, 0.90)';
-                    ctx.strokeStyle = isLight ? 'rgba(2, 132, 199, 0.3)' : 'rgba(56, 189, 248, 0.4)';
-                    ctx.lineWidth = 1;
-                    ctx.beginPath();
-                    ctx.roundRect(pillX, pillY, pillW, pillH, 8);
-                    ctx.fill();
-                    ctx.stroke();
+                        ctx.fillStyle = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(15, 23, 42, 0.90)';
+                        ctx.strokeStyle = isLight ? 'rgba(2, 132, 199, 0.3)' : 'rgba(56, 189, 248, 0.4)';
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.roundRect(pillX, pillY, pillW, pillH, 8);
+                        ctx.fill();
+                        ctx.stroke();
 
-                    ctx.fillStyle = isLight ? '#0369a1' : '#38bdf8';
-                    ctx.textAlign = 'center';
-                    ctx.fillText(name, tx, ty - 11);
+                        ctx.fillStyle = isLight ? '#0369a1' : '#38bdf8';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'alphabetic';
+                        ctx.fillText(name, tx, ty - 11);
+                    } else {
+                        // Multi-Node Clustered Badge (⚪ with visible number inside)
+                        const badgeRadius = Math.min(13, 8 + Math.sqrt(count) * 2.2);
+
+                        // Outer Glowing Halo
+                        const haloGlow = ctx.createRadialGradient(tx, ty, badgeRadius * 0.5, tx, ty, badgeRadius * 2.2);
+                        haloGlow.addColorStop(0, color);
+                        haloGlow.addColorStop(1, 'rgba(0,0,0,0)');
+                        ctx.fillStyle = haloGlow;
+                        ctx.beginPath();
+                        ctx.arc(tx, ty, badgeRadius * 2.2, 0, Math.PI * 2);
+                        ctx.fill();
+
+                        // Solid Cluster Circle
+                        ctx.fillStyle = color;
+                        ctx.beginPath();
+                        ctx.arc(tx, ty, badgeRadius, 0, Math.PI * 2);
+                        ctx.fill();
+
+                        // High-contrast crisp border
+                        ctx.strokeStyle = '#ffffff';
+                        ctx.lineWidth = 1.6;
+                        ctx.beginPath();
+                        ctx.arc(tx, ty, badgeRadius, 0, Math.PI * 2);
+                        ctx.stroke();
+
+                        // Centered Number inside ⚪ (Guaranteed high-contrast & crisp)
+                        ctx.save();
+                        ctx.font = 'bold ' + (count >= 100 ? '9px' : '10px') + ' sans-serif';
+                        ctx.fillStyle = '#ffffff';
+                        ctx.shadowColor = 'rgba(0, 0, 0, 0.85)';
+                        ctx.shadowBlur = 3;
+                        ctx.shadowOffsetX = 0;
+                        ctx.shadowOffsetY = 1;
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(count.toString(), tx, ty);
+                        ctx.restore();
+
+                        // Cluster Pill Backdrop & Location / Count Label
+                        const place = c.nodes[0].city || c.nodes[0].country || 'Cluster';
+                        const labelText = `${place} (${count})`;
+                        ctx.font = 'bold 10px sans-serif';
+                        const textW = ctx.measureText(labelText).width;
+                        const pillW = textW + 14;
+                        const pillH = 16;
+                        const pillX = tx - pillW / 2;
+                        const pillY = ty - badgeRadius - 16;
+
+                        ctx.fillStyle = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(15, 23, 42, 0.92)';
+                        ctx.strokeStyle = color;
+                        ctx.lineWidth = 1.2;
+                        ctx.beginPath();
+                        ctx.roundRect(pillX, pillY, pillW, pillH, 8);
+                        ctx.fill();
+                        ctx.stroke();
+
+                        ctx.fillStyle = isLight ? '#0f172a' : '#f1f5f9';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'alphabetic';
+                        ctx.fillText(labelText, tx, pillY + 11);
+                    }
                 }
             });
 
@@ -3928,6 +4252,25 @@
             `;
         }
 
+        function formatObfsAlgo(algo) {
+            const a = (algo || 'auto').toLowerCase();
+            if (a === 'auto') return `auto (${t('obfs_algo_auto_desc') || 'ECDH 自适应协商'})`;
+            if (a === 'chacha20') return 'chacha20 (ChaCha20-Poly1305 AEAD)';
+            if (a === 'aes-gcm') return 'aes-gcm (AES-256-GCM AEAD)';
+            if (a === 'none') return `none (${t('obfs_algo_none_desc') || '明文无加密'})`;
+            return escapeHtml(algo);
+        }
+
+        function formatObfsMode(mode) {
+            const m = (mode || 'fixed').toLowerCase();
+            if (m === 'fixed') return `fixed (${t('obfs_mode_fixed_desc') || '固定长度混淆填充'})`;
+            if (m === 'block') return `block (${t('obfs_mode_block_desc') || '对齐块混淆填充'})`;
+            if (m === 'dynamic') return `dynamic (${t('obfs_mode_dynamic_desc') || '动态自适应混淆'})`;
+            if (m === 'random') return `random (${t('obfs_mode_random_desc') || '随机抖动填充'})`;
+            if (m === 'none') return `none (${t('obfs_mode_none_desc') || '无填充'})`;
+            return escapeHtml(mode);
+        }
+
         /* ── Module E: Peer Detail Side Drawer ────────────────────────── */
         function openPeerDrawer(peerId) {
             const peer = (state.peers || []).find(p => p.peer_id === peerId);
@@ -3967,6 +4310,13 @@
                     </div>
                 </div>
                 <div class="drawer-section">
+                    <div class="drawer-section-label">${t('drawer_sec_crypto')}</div>
+                    <div class="config-grid">
+                        <span class="config-key">${t('drawer_lbl_cipher')}</span><span class="config-val" style="color:var(--accent-purple,#a78bfa);font-weight:600;">🔒 ${formatObfsAlgo(peer.obfs_algo)}</span>
+                        <span class="config-key">${t('drawer_lbl_obfs_mode')}</span><span class="config-val">${formatObfsMode(peer.obfs_mode)}</span>
+                    </div>
+                </div>
+                <div class="drawer-section">
                     <div class="drawer-section-label">${t('drawer_sec_os')}</div>
                     <div class="config-grid">
                         <span class="config-key">${t('drawer_lbl_os_arch')}</span><span class="config-val">${escapeHtml(peer.os || '--')} / ${escapeHtml(peer.arch || '--')}</span>
@@ -3981,8 +4331,8 @@
                 ${(peer.all_multiaddrs || []).length > 0 ? `
                 <div class="drawer-section">
                     <div class="drawer-section-label">${t('drawer_sec_multiaddrs')} (${peer.all_multiaddrs.length})</div>
-                    <div style="max-height: 120px; overflow-y: auto; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px;">
-                        ${peer.all_multiaddrs.map(a => `<div style="font-size: 11px; font-family: monospace; color: #94a3b8; padding: 2px 0; word-break: break-all;">${escapeHtml(a)}</div>`).join('')}
+                    <div class="drawer-multiaddrs-box">
+                        ${peer.all_multiaddrs.map(a => `<div class="drawer-multiaddr-item">${escapeHtml(a)}</div>`).join('')}
                     </div>
                 </div>` : ''}
                 ${alerts.length > 0 ? `
@@ -3990,8 +4340,8 @@
                     <div class="drawer-section-label">${t('drawer_sec_events')}</div>
                     <div style="display: flex; flex-direction: column; gap: 4px;">
                         ${alerts.map(a => `
-                            <div style="font-size: 11px; padding: 4px 6px; background: rgba(255,255,255,0.03); border-radius: 4px; display: flex; gap: 8px;">
-                                <span style="color: var(--text-muted);">${a.timestamp}</span>
+                            <div class="drawer-event-item">
+                                <span style="color: var(--text-muted); font-family: monospace;">${a.timestamp}</span>
                                 <span>${typeIcons[a.type] || ''} ${escapeHtml(a.message)}</span>
                             </div>
                         `).join('')}
@@ -4019,7 +4369,9 @@
                        (p.physical_ip && p.physical_ip.toLowerCase().includes(query)) ||
                        (p.network_id && p.network_id.toLowerCase().includes(query)) ||
                        (p.transport && p.transport.toLowerCase().includes(query)) ||
-                       (p.tap_ip && p.tap_ip.toLowerCase().includes(query));
+                       (p.tap_ip   && p.tap_ip.toLowerCase().includes(query)) ||
+                       (p.tap_ipv6 && p.tap_ipv6.toLowerCase().includes(query));
+
             });
 
             const totalPages = Math.max(1, Math.ceil(peers.length / PAGE_SIZE));
@@ -4045,6 +4397,7 @@
                 if (p.has_peek_map_stream) streamBadges.push(`<span class="badge badge-info">Peek-Map</span>`);
                 if (p.has_boot_relay) streamBadges.push(`<span class="badge badge-purple">Relay Uplink</span>`);
                 if (p.is_exit_node) streamBadges.push(`<span class="badge badge-warning">Exit Node</span>`);
+                if (p.obfs_algo) streamBadges.push(`<span class="badge badge-purple" title="${t('obfs_algo_tip')}: ${escapeHtml(formatObfsAlgo(p.obfs_algo))} | ${escapeHtml(formatObfsMode(p.obfs_mode))}">🔒 ${highlightMatch(p.obfs_algo, query)}</span>`);
                 if (streamBadges.length === 0) streamBadges.push(`<span class="badge badge-outline">No Stream</span>`);
 
                 const transportBadge = `<span class="badge badge-info">${highlightMatch(p.transport || 'QUIC', query)}</span>`;
@@ -4056,7 +4409,9 @@
                                 <span>${isExpanded ? '▼' : '▶'}</span>
                                 <span>${highlightMatch(p.node_name || t('client_node_def'), query)}</span>
                             </div>
-                            ${p.tap_ip ? `<div style="font-size: 11px; color: #38bdf8; margin-left: 14px;">TAP: ${highlightMatch(p.tap_ip, query)}</div>` : ''}
+                            ${p.tap_ip ? `<div style="font-size: 11px; color: #38bdf8; margin-left: 14px; font-family: monospace;">TAP: ${highlightMatch(p.tap_ip, query)}</div>` : ''}
+                            ${p.tap_ipv6 ? `<div style="font-size: 10px; color: #c084fc; margin-left: 14px; font-family: monospace; opacity: 0.9;">${highlightMatch(p.tap_ipv6, query)}</div>` : ''}
+
                         </td>
                         <td>
                             <div class="peer-id-cell" onclick="event.stopPropagation(); copyText('${p.peer_id}')" title="Click to copy full ID">${highlightMatch(p.short_id || p.peer_id, query)}</div>
@@ -4102,6 +4457,10 @@
                                             ${p.tap_ipv6 ? `IPv6: ${highlightMatch(p.tap_ipv6, query)}<br>` : ''}
                                             MAC: ${highlightMatch(p.tap_mac || '--', query)}
                                         </div>
+                                    </div>
+                                    <div class="detail-item">
+                                        <div class="detail-label">${t('crypto_obfs')}</div>
+                                        <div class="detail-val" style="color:var(--accent-purple,#a78bfa);font-weight:600;">🔒 ${highlightMatch(formatObfsAlgo(p.obfs_algo), query)}<br><span style="font-weight:normal;color:var(--text-secondary);">${highlightMatch(formatObfsMode(p.obfs_mode), query)}</span></div>
                                     </div>
                                     <div class="detail-item">
                                         <div class="detail-label">${t('subnet_routes_lbl')}</div>
@@ -4614,7 +4973,49 @@
             renderLogs();
         }
 
+        let isLogPaused = false;
+
+        function toggleLogPause() {
+            isLogPaused = !isLogPaused;
+            const btn = document.getElementById('logPauseBtn');
+            const icon = document.getElementById('logPauseIcon');
+            const txt = document.getElementById('logPauseText');
+            if (isLogPaused) {
+                if (btn) btn.classList.add('active');
+                if (icon) icon.textContent = '▶️';
+                if (txt) txt.textContent = t('btn_resume_logs') || '继续';
+            } else {
+                if (btn) btn.classList.remove('active');
+                if (icon) icon.textContent = '⏸️';
+                if (txt) txt.textContent = t('btn_pause_logs') || '暂停';
+                fetchLogs();
+            }
+        }
+
+        function copyLogs() {
+            const searchVal = (document.getElementById('logSearchInput').value || '').toLowerCase();
+            const filtered = logEntries.filter(l => {
+                if (logModuleFilter !== 'ALL') {
+                    const tag = (l.module || '').toLowerCase();
+                    const target = logModuleFilter.replace(/[\[\]]/g, '').toLowerCase();
+                    if (!tag.includes(target) && !l.message.toLowerCase().includes(target)) return false;
+                }
+                if (searchVal) {
+                    const fullText = (l.timestamp + ' ' + l.module + ' ' + l.message).toLowerCase();
+                    if (!fullText.includes(searchVal)) return false;
+                }
+                return true;
+            });
+            if (filtered.length === 0) {
+                copyText('');
+                return;
+            }
+            const text = filtered.map(l => `[${l.timestamp}] [${l.level || 'INFO'}] [${l.module || 'Boot'}] ${l.message}`).join('\n');
+            copyText(text);
+        }
+
         async function fetchLogs() {
+            if (isLogPaused) return;
             try {
                 const res = await fetch('/api/logs?token=' + encodeURIComponent(authToken), {
                     headers: getAuthHeaders()

@@ -50,6 +50,20 @@
                 topo_self_node: "Self Node",
                 protocol_inspector_title: "📊 Live Traffic & Ethernet Protocol Inspector",
                 protocol_inspector_desc: "(Layer-2/3/4 packet breakdown & live PPS statistics)",
+                proto_channels_title: "📡 Protocol Streams & Subsystem Channels",
+                th_stream_proto: "Protocol / Channel",
+                th_stream_peer: "Remote Peer",
+                th_stream_direction: "Direction",
+                th_stream_transport: "Transport & Multiaddr",
+                th_stream_status: "Status",
+                search_streams_ph: "🔍 Search streams, protocols, peers…",
+                no_matching_streams: "No active protocol streams found",
+                no_channels: "No active protocol channels",
+                lbl_active_streams: "Streams",
+                lbl_streams: "streams",
+                dir_out: "Outbound ↑",
+                dir_in: "Inbound ↓",
+                stream_active: "Active",
                 lbl_arp_broadcast: "ARP Broadcast Frames",
                 lbl_broadcast_pkts: "Broadcast Packets",
                 lbl_multicast_pkts: "Multicast Packets",
@@ -506,6 +520,8 @@
                 loglevel_desc: "Controls verbosity of console output",
                 enable_mdns_lbl: "Enable mDNS LAN Discovery",
                 enable_mdns_desc: "Auto-discover peers on the same LAN via mDNS (local network only)",
+                cfg_disable_relay_lbl: "Disable Circuit Relay (diagnostic)",
+                cfg_disable_relay_desc: "Turn OFF libp2p circuit-relay client/service, AutoRelay & DCUtR hole-punching. Requires restart. If a slow peer becomes unreachable with this ON, it was being auto-relayed through a static relay. Does NOT touch p2ptap's own overlay relay.",
                 section_obfs: "Traffic Obfuscation",
                 section_obfs_desc: "Packet padding to defeat DPI fingerprinting",
                 obfs_mode_desc: "Padding strategy for P2P data frames",
@@ -703,6 +719,20 @@
                 topo_self_node: "本机节点",
                 protocol_inspector_title: "📊 实时以太网协议与数据包分析器",
                 protocol_inspector_desc: "(二/三/四层数据包抓包分析与 PPS 速率统计)",
+                proto_channels_title: "📡 协议通道与流状态监测",
+                th_stream_proto: "协议 / 通道标识",
+                th_stream_peer: "对端节点",
+                th_stream_direction: "流方向",
+                th_stream_transport: "传输层与 Multiaddr 链路",
+                th_stream_status: "状态",
+                search_streams_ph: "🔍 搜索流、协议、对端节点…",
+                no_matching_streams: "未找到活跃协议流",
+                no_channels: "未找到活跃协议通道",
+                lbl_active_streams: "条活跃流",
+                lbl_streams: "条流",
+                dir_out: "出站 ↑",
+                dir_in: "入站 ↓",
+                stream_active: "活跃中",
                 lbl_arp_broadcast: "ARP 广播以太帧",
                 lbl_broadcast_pkts: "广播包",
                 lbl_multicast_pkts: "组播包",
@@ -1158,6 +1188,8 @@
                 loglevel_desc: "控制控制台日志输出的详细程度",
                 enable_mdns_lbl: "启用 mDNS 局域网节点发现",
                 enable_mdns_desc: "通过 mDNS 自动发现同一局域网内的节点（仅限本地网络）",
+                cfg_disable_relay_lbl: "禁用标准中继 (排障诊断)",
+                cfg_disable_relay_desc: "关闭 libp2p 标准 circuit-relay 客户端/服务端、AutoRelay 和 DCUtR 打洞。需重启生效。若开启后某些慢节点无法访问，说明原先通过静态中继转发。不影响 p2ptap 自有骨干中继。",
                 section_obfs: "流量混淆",
                 section_obfs_desc: "通过报文填充对抗 DPI 指纹识别",
                 obfs_mode_desc: "P2P 数据帧的填充策略",
@@ -1735,6 +1767,8 @@
                 loglevel_desc: "控制主控台日誌輸出的詳細程度",
                 enable_mdns_lbl: "啟用 mDNS 區域網路節點發現",
                 enable_mdns_desc: "透過 mDNS 自動發現同一區域網路內的節點（僅限本地網路）",
+                cfg_disable_relay_lbl: "停用標準中繼 (排障診斷)",
+                cfg_disable_relay_desc: "關閉 libp2p 標準 circuit-relay 客戶端/服務端、AutoRelay 與 DCUtR 打洞。需重啟生效。若開啟後某些慢節點無法連線，說明原先透過靜態中繼轉發。不影響 p2ptap 自有骨幹中繼。",
                 section_obfs: "流量混淆",
                 section_obfs_desc: "通過封包填充對抗 DPI 指紋識別",
                 obfs_mode_desc: "P2P 資料幀的填充策略",
@@ -1968,6 +2002,20 @@
                 pcap_layer_tree: "協定解析",
                 protocol_inspector_desc: "（第 2/3/4 層封包拆解與即時 PPS 統計）",
                 protocol_inspector_title: "📊 即時流量與乙太網路協定檢視器",
+                proto_channels_title: "📡 協議通道與流狀態監測",
+                th_stream_proto: "協議 / 通道標識",
+                th_stream_peer: "對端節點",
+                th_stream_direction: "流方向",
+                th_stream_transport: "傳輸層與 Multiaddr 鏈路",
+                th_stream_status: "狀態",
+                search_streams_ph: "🔍 搜索流、協議、對端節點…",
+                no_matching_streams: "未找到活躍協議流",
+                no_channels: "未找到活躍協議通道",
+                lbl_active_streams: "條活躍流",
+                lbl_streams: "條流",
+                dir_out: "出站 ↑",
+                dir_in: "入站 ↓",
+                stream_active: "活躍中",
                 rejected: "❌ 已拒絕",
                 relay_accel_active: "中繼加速作用中",
                 relay_accel_desc: "Dijkstra 演算法計算的多跳路徑經由",
@@ -2322,6 +2370,8 @@
                 loglevel_desc: "コンソール出力の詳細度を制御",
                 enable_mdns_lbl: "mDNS LAN ノード検出を有効化",
                 enable_mdns_desc: "mDNS で同一 LAN 内のノードを自動検出します（ローカルネットワークのみ）",
+                cfg_disable_relay_lbl: "標準リレーを無効化 (診断用)",
+                cfg_disable_relay_desc: "libp2pの標準circuit-relayクライアント/サービス、AutoRelayおよびDCUtRホールパンチングを無効化します（要再起動）。p2ptap独自のオーバーレイリレーには影響しません。",
                 section_obfs: "トラフィック難読化",
                 section_obfs_desc: "パケットパディングでDPIフィンガープリントを回避",
                 obfs_mode_desc: "P2Pデータフレームのパディング戦略",
@@ -2553,6 +2603,20 @@
                 peer_traffic_title: "Peer Live Broadcasted Rate & Traffic",
                 protocol_inspector_desc: "（レイヤ 2/3/4 パケット内訳とライブ PPS 統計）",
                 protocol_inspector_title: "📊 ライブトラフィックとイーサネットプロトコルインスペクター",
+                proto_channels_title: "📡 プロトコルストリームとチャネル状態監視",
+                th_stream_proto: "プロトコル / チャネル",
+                th_stream_peer: "対向ピア",
+                th_stream_direction: "方向",
+                th_stream_transport: "トランスポート & Multiaddr",
+                th_stream_status: "状態",
+                search_streams_ph: "🔍 ストリーム、プロトコル、ピアを検索…",
+                no_matching_streams: "アクティブなプロトコルストリームが見つかりません",
+                no_channels: "アクティブなチャネルがありません",
+                lbl_active_streams: "ストリーム",
+                lbl_streams: "ストリーム",
+                dir_out: "送信 ↑",
+                dir_in: "受信 ↓",
+                stream_active: "アクティブ",
                 rejected: "❌ 拒否",
                 relay_accel_active: "リレー高速化アクティブ",
                 relay_accel_desc: "Dijkstra アルゴリズムが計算したマルチホップパス経由",
@@ -2973,6 +3037,8 @@
                 loglevel_desc: "Steuert die Ausführlichkeit der Konsolenausgabe",
                 enable_mdns_lbl: "mDNS LAN-Knotenerkennung aktivieren",
                 enable_mdns_desc: "Erkennt Peers im selben LAN automatisch via mDNS (nur lokales Netzwerk)",
+                cfg_disable_relay_lbl: "Circuit-Relay deaktivieren (Diagnose)",
+                cfg_disable_relay_desc: "Deaktiviert libp2p Circuit-Relay, AutoRelay & DCUtR Hole-Punching (Neustart erforderlich). Hat keine Auswirkungen auf das p2ptap-Overlay-Relay.",
                 section_obfs: "Verkehrsobfuskation",
                 section_obfs_desc: "Paketauffüllung zur Abwehr von DPI-Fingerprinting",
                 obfs_mode_desc: "Auffüllstrategie für P2P-Datenrahmen",
@@ -3204,6 +3270,20 @@
                 peer_traffic_title: "Peer Live Broadcasted Rate & Traffic",
                 protocol_inspector_desc: "（Layer-2/3/4-Paketaufschlüsselung & Live-PPS-Statistik）",
                 protocol_inspector_title: "📊 Live-Datenverkehr & Ethernet-Protokoll-Inspektor",
+                proto_channels_title: "📡 Protokoll-Streams & Kanalüberwachung",
+                th_stream_proto: "Protokoll / Kanal",
+                th_stream_peer: "Gegenstelle",
+                th_stream_direction: "Richtung",
+                th_stream_transport: "Transport & Multiaddr",
+                th_stream_status: "Status",
+                search_streams_ph: "🔍 Streams, Protokolle, Peers durchsuchen…",
+                no_matching_streams: "Keine aktiven Protokoll-Streams gefunden",
+                no_channels: "Keine aktiven Protokollkanäle",
+                lbl_active_streams: "Streams",
+                lbl_streams: "Streams",
+                dir_out: "Ausgehend ↑",
+                dir_in: "Eingehend ↓",
+                stream_active: "Aktiv",
                 rejected: "❌ Abgelehnt",
                 relay_accel_active: "Relay-Beschleunigung aktiv",
                 relay_accel_desc: "Dijkstra-Algorithmus berechneter Multihop-Pfad über",
@@ -3624,6 +3704,8 @@
                 loglevel_desc: "Controla el nivel de detalle de la salida de consola",
                 enable_mdns_lbl: "Habilitar detección de nodos LAN por mDNS",
                 enable_mdns_desc: "Descubre automáticamente nodos en la misma LAN vía mDNS (solo red local)",
+                cfg_disable_relay_lbl: "Desactivar Circuit Relay (diagnóstico)",
+                cfg_disable_relay_desc: "Desactiva el cliente/servicio circuit-relay libp2p, AutoRelay y perforación DCUtR (requiere reinicio). No afecta al relé de superposición de p2ptap.",
                 section_obfs: "Ofuscación de Tráfico",
                 section_obfs_desc: "Relleno de paquetes para evitar huellas DPI",
                 obfs_mode_desc: "Estrategia de relleno para tramas de datos P2P",
@@ -3855,6 +3937,20 @@
                 peer_traffic_title: "Peer Live Broadcasted Rate & Traffic",
                 protocol_inspector_desc: "（Desglose de paquetes de capa 2/3/4 y estadísticas PPS en vivo）",
                 protocol_inspector_title: "📊 Inspector de tráfico en vivo y protocolo Ethernet",
+                proto_channels_title: "📡 Streams de Protocolo y Canales de Subsistema",
+                th_stream_proto: "Protocolo / Canal",
+                th_stream_peer: "Nodo Remoto",
+                th_stream_direction: "Dirección",
+                th_stream_transport: "Transporte & Multiaddr",
+                th_stream_status: "Estado",
+                search_streams_ph: "🔍 Buscar streams, protocolos, peers…",
+                no_matching_streams: "No se encontraron streams de protocolo activos",
+                no_channels: "No hay canales de protocolo activos",
+                lbl_active_streams: "Streams",
+                lbl_streams: "streams",
+                dir_out: "Saliente ↑",
+                dir_in: "Entrante ↓",
+                stream_active: "Activo",
                 rejected: "❌ Rechazado",
                 relay_accel_active: "Aceleración de retransmisión activa",
                 relay_accel_desc: "Algoritmo Dijkstra calculó ruta multi-salto vía",
@@ -4316,6 +4412,8 @@
                 loglevel_desc: "Contrôle la verbosité de la sortie console",
                 enable_mdns_lbl: "Activer la découverte de nœuds LAN via mDNS",
                 enable_mdns_desc: "Découvre automatiquement les nœuds du même LAN via mDNS (réseau local uniquement)",
+                cfg_disable_relay_lbl: "Désactiver Circuit Relay (diagnostic)",
+                cfg_disable_relay_desc: "Désactive le client/service circuit-relay libp2p, AutoRelay et perforation DCUtR (redémarrage requis). N'affecte pas le relais propre à p2ptap.",
                 section_obfs: "Offuscation du Trafic",
                 section_obfs_desc: "Remplissage de paquets contre l'empreinte DPI",
                 obfs_mode_desc: "Stratégie de remplissage pour les trames de données P2P",
@@ -4570,6 +4668,20 @@
                 peer_meta_title: "📡 Moniteur de métadonnées de pair et découverte Peek-Map",
                 protocol_inspector_desc: "（Détail des paquets couche 2/3/4 et statistiques PPS en direct）",
                 protocol_inspector_title: "📊 Inspecteur de trafic en direct et protocole Ethernet",
+                proto_channels_title: "📡 Flux de Protocoles et Canaux Actifs",
+                th_stream_proto: "Protocole / Canal",
+                th_stream_peer: "Nœud Distant",
+                th_stream_direction: "Direction",
+                th_stream_transport: "Transport & Multiaddr",
+                th_stream_status: "État",
+                search_streams_ph: "🔍 Rechercher flux, protocoles, pairs…",
+                no_matching_streams: "Aucun flux de protocole actif trouvé",
+                no_channels: "Aucun canal de protocole actif",
+                lbl_active_streams: "Flux",
+                lbl_streams: "flux",
+                dir_out: "Sortant ↑",
+                dir_in: "Entrant ↓",
+                stream_active: "Actif",
                 rejected: "❌ Rejeté",
                 relay_accel_active: "Accélération de relais active",
                 relay_accel_desc: "Algorithme Dijkstra a calculé un chemin multi-sauts via",
@@ -7710,6 +7822,120 @@
             }
         }
 
+        /* ── Protocol Streams & Channels Monitor ───────────────────────── */
+        const channelCategoryConfig = {
+            sync:         { icon: '🔄', color: '#38bdf8', borderColor: 'var(--accent-cyan-border)' },
+            routing:      { icon: '🗺️', color: '#a78bfa', borderColor: 'var(--accent-purple-border)' },
+            pubsub:       { icon: '📡', color: '#fbbf24', borderColor: 'var(--accent-yellow-border, #92400e)' },
+            data:         { icon: '🚀', color: '#34d399', borderColor: 'var(--accent-green-border)' },
+            security:     { icon: '🛡️', color: '#f87171', borderColor: 'var(--danger-border, #7f1d1d)' },
+            transport:    { icon: '🕳️', color: '#c084fc', borderColor: 'var(--accent-purple-border)' },
+            diagnostics:  { icon: '🩺', color: '#94a3b8', borderColor: 'var(--border-subtle)' },
+            discovery:    { icon: '🔍', color: '#38bdf8', borderColor: 'var(--accent-cyan-border)' },
+        };
+
+        function channelStatusBadge(status) {
+            if (status === 'active')     return `<span style="color:#34d399;font-weight:700;font-size:0.75rem;">● ${t('stream_active') || 'Active'}</span>`;
+            if (status === 'running')    return `<span style="color:#38bdf8;font-weight:700;font-size:0.75rem;">● Running</span>`;
+            if (status === 'idle')       return `<span style="color:#94a3b8;font-weight:700;font-size:0.75rem;">◌ Idle</span>`;
+            if (status === 'standby')    return `<span style="color:#fbbf24;font-weight:700;font-size:0.75rem;">⏸ Standby</span>`;
+            if (status === 'ready')      return `<span style="color:#a78bfa;font-weight:700;font-size:0.75rem;">● Ready</span>`;
+            if (status === 'open-mode') return `<span style="color:#fbbf24;font-weight:700;font-size:0.75rem;">◌ Open</span>`;
+            return `<span style="color:var(--text-muted);font-size:0.75rem;">◌ ${escapeHTML(status)}</span>`;
+        }
+
+        function renderProtocolChannels(data) {
+            const channels = data.protocol_channels || [];
+            const streams  = data.active_streams  || [];
+
+            // Update stream count badge
+            const badge = document.getElementById('activeStreamsBadge');
+            if (badge) badge.textContent = `${streams.length} ${t('lbl_active_streams') || 'Streams'}`;
+
+            // --- Channels Grid ---
+            const grid = document.getElementById('protoChannelsGrid');
+            if (grid) {
+                if (channels.length === 0) {
+                    grid.innerHTML = `<div class="empty-row" style="padding:16px;color:var(--text-muted);">${t('no_channels') || 'No active protocol channels'}</div>`;
+                } else {
+                    grid.innerHTML = channels.map(ch => {
+                        const cfg = channelCategoryConfig[ch.category] || channelCategoryConfig.diagnostics;
+                        const totalStreams = ch.active_streams || 0;
+                        const inStr  = ch.inbound_streams  || 0;
+                        const outStr = ch.outbound_streams || 0;
+                        return `
+                            <div class="glass-card ext61" style="border-left:3px solid ${cfg.color}; display:flex; flex-direction:column; gap:6px; padding:14px 16px;">
+                                <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
+                                    <div style="display:flex; align-items:center; gap:8px;">
+                                        <span style="font-size:1.2rem;">${cfg.icon}</span>
+                                        <strong style="color:var(--text-primary); font-size:0.9rem;">${escapeHTML(ch.name)}</strong>
+                                    </div>
+                                    ${channelStatusBadge(ch.status)}
+                                </div>
+                                <div style="font-family:monospace; font-size:0.72rem; color:var(--text-muted); word-break:break-all;">${escapeHTML(ch.protocol)}</div>
+                                <div style="display:flex; gap:10px; font-size:0.78rem; color:var(--text-secondary);">
+                                    <span>↓ ${inStr}  ↑ ${outStr}  ∑ ${totalStreams}</span>
+                                    <span style="margin-left:auto; background:var(--glass-fill); padding:1px 7px; border-radius:5px; font-size:0.7rem; color:${cfg.color};">${escapeHTML(ch.category)}</span>
+                                </div>
+                                ${ch.details ? `<div style="font-size:0.75rem; color:var(--text-dim); margin-top:2px;">${escapeHTML(ch.details)}</div>` : ''}
+                            </div>
+                        `;
+                    }).join('');
+                }
+            }
+
+            // --- Streams Table ---
+            const query = (document.getElementById('streamSearchInput') || {}).value || '';
+            const q = query.toLowerCase();
+            const filtered = q
+                ? streams.filter(s =>
+                    (s.protocol      && s.protocol.toLowerCase().includes(q)) ||
+                    (s.protocol_name && s.protocol_name.toLowerCase().includes(q)) ||
+                    (s.peer_id       && s.peer_id.toLowerCase().includes(q)) ||
+                    (s.peer_id_short && s.peer_id_short.toLowerCase().includes(q)) ||
+                    (s.peer_name     && s.peer_name.toLowerCase().includes(q)) ||
+                    (s.transport     && s.transport.toLowerCase().includes(q)) ||
+                    (s.remote_addr   && s.remote_addr.toLowerCase().includes(q))
+                  )
+                : streams;
+
+            const tbody = document.getElementById('streamsTableBody');
+            if (!tbody) return;
+
+            if (filtered.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="5" class="empty-row" style="text-align:center;padding:20px;color:var(--text-muted);">${t('no_matching_streams') || 'No active protocol streams found'}</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = filtered.map(s => {
+                const dirLabel = s.direction === 'outbound'
+                    ? `<span style="color:#38bdf8;">${t('dir_out') || 'Outbound ↑'}</span>`
+                    : `<span style="color:#a78bfa;">${t('dir_in') || 'Inbound ↓'}</span>`;
+                const transportBadge = `<span style="background:var(--glass-fill);border:1px solid var(--border-subtle);padding:2px 7px;border-radius:5px;font-size:0.73rem;color:var(--text-secondary);">${escapeHTML(s.transport || 'P2P')}</span>`;
+                const statusDot = `<span style="color:#34d399;font-weight:700;font-size:0.75rem;">● ${t('stream_active') || 'Active'}</span>`;
+                const peerDisplay = s.peer_name
+                    ? `<div style="font-weight:600;color:var(--text-primary);font-size:0.85rem;">${escapeHTML(s.peer_name)}</div><div style="font-family:monospace;font-size:0.72rem;color:var(--text-muted);">${escapeHTML(s.peer_id_short || s.peer_id)}</div>`
+                    : `<div style="font-family:monospace;font-size:0.75rem;color:var(--text-muted);">${escapeHTML(s.peer_id_short || s.peer_id)}</div>`;
+                return `
+                    <tr style="border-bottom:1px solid var(--border-subtle);">
+                        <td style="padding:8px 12px;">
+                            <div style="font-weight:600;color:var(--text-primary);font-size:0.84rem;">${escapeHTML(s.protocol_name || s.protocol)}</div>
+                            <div style="font-family:monospace;font-size:0.7rem;color:var(--text-muted);">${escapeHTML(s.protocol)}</div>
+                        </td>
+                        <td style="padding:8px 12px;">${peerDisplay}</td>
+                        <td style="padding:8px 12px;">${dirLabel}</td>
+                        <td style="padding:8px 12px;">
+                            <div style="display:flex;flex-direction:column;gap:3px;">
+                                ${transportBadge}
+                                <div style="font-family:monospace;font-size:0.68rem;color:var(--text-dim);word-break:break-all;">${escapeHTML(s.remote_addr || '')}</div>
+                            </div>
+                        </td>
+                        <td style="padding:8px 12px;">${statusDot}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
         function renderExitStatus(data) {
             const panel = document.getElementById('exitStatusPanel');
             const body = document.getElementById('exitStatusBody');
@@ -8361,6 +8587,7 @@
                 if (!res.ok) return;
                 const data = await res.json();
                 latestStatsData = data;
+                window.__lastStatsData = data;
 
                 // Pull the full mesh topology (link-state graph) in the same tick so
                 // the topology view can render a hierarchical tree (relay nodes above
@@ -8746,6 +8973,7 @@
                 renderExitStatus(data);
                 renderExitClientCard(data);
                 renderACLCard(data);
+                renderProtocolChannels(data);
 
                 // ARP Table
                 const arps = data.arp_table || [];
@@ -12341,6 +12569,13 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             if (ipPrevEl) ipPrevEl.addEventListener('click', function () { if (ipCurPage > 1) { ipCurPage--; renderIpTable(); } });
             if (ipNextEl) ipNextEl.addEventListener('click', function () { ipCurPage++; renderIpTable(); });
             if (ipSizeEl) ipSizeEl.addEventListener('change', function () { ipPageSize = parseInt(ipSizeEl.value, 10) || 50; ipCurPage = 1; renderIpTable(); });
+        })();
+        // Protocol Streams search: re-render on each keystroke using cached data.
+        (function initStreamSearch() {
+            const el = document.getElementById('streamSearchInput');
+            if (el) el.addEventListener('input', debounce(function () {
+                if (window.__lastStatsData) renderProtocolChannels(window.__lastStatsData);
+            }, 100));
         })();
         updateLogFilterUI();
         updateLogPauseUI();

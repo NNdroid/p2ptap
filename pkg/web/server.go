@@ -72,6 +72,8 @@ type (
 	StatsResponse         = observer.StatsResponse
 	PeerSeqState          = observer.PeerSeqState
 	SeqStatsDTO           = observer.SeqStatsDTO
+	ProtocolChannelDTO    = observer.ProtocolChannelDTO
+	ProtocolStreamDTO     = observer.ProtocolStreamDTO
 	GatewayController     = observer.GatewayController
 )
 

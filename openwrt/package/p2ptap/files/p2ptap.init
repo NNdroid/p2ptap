@@ -22,17 +22,20 @@ generate_json_config() {
 	config_get tap_ipv6 global tap_ipv6 "fd00::1/64"
 	config_get tap_mac global tap_mac ""
 
-	# 新增：随机 MAC 生成与持久化逻辑 (兼容 minimal busybox，不依赖 hexdump)
-	if [ -z "$tap_mac" ]; then
-		local mac_suffix
-		mac_suffix=$(dd if=/dev/urandom bs=5 count=1 2>/dev/null | od -An -tx1 2>/dev/null | tr -s ' ' | tr ' ' ':')
-		if [ -n "$mac_suffix" ]; then
-			tap_mac="02${mac_suffix}"
-		else
-			tap_mac="02:$(hexdump -n 5 -e '1/1 "%02x:"' /dev/urandom | sed 's/:$//')"
+	# 随机 MAC 生成与持久化逻辑 (兼容 minimal busybox/awk，避免双冒号格式错误)
+	if [ -z "$tap_mac" ] || [ "$tap_mac" = "auto" ] || [ ${#tap_mac} -ne 17 ]; then
+		local r5
+		r5=$(hexdump -n 5 -e '5/1 "%02x "' /dev/urandom 2>/dev/null | awk '{print $1":"$2":"$3":"$4":"$5}')
+		if [ -z "$r5" ]; then
+			r5=$(dd if=/dev/urandom bs=5 count=1 2>/dev/null | od -An -tx1 | tr -d '\n' | awk '{print $1":"$2":"$3":"$4":"$5}')
 		fi
-		uci -q set p2ptap.global.tap_mac="$tap_mac"
-		uci -q commit p2ptap
+		if [ -n "$r5" ] && [ ${#r5} -eq 14 ]; then
+			tap_mac="02:${r5}"
+			uci -q set p2ptap.global.tap_mac="$tap_mac"
+			uci -q commit p2ptap
+		else
+			tap_mac=""
+		fi
 	fi
 
 	config_get mtu global mtu 1500
@@ -230,10 +233,15 @@ start_service() {
 
 	procd_open_instance
 	procd_set_param command "$PROG" run -c "$JSON_CONF"
+	procd_set_param file /etc/config/p2ptap
 	procd_set_param respawn
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger "p2ptap"
 }
 
 reload_service() {

@@ -40,6 +40,8 @@ func (noopCollector) UpdateRoutes([]observer.RouteInfoDTO)                      
 func (noopCollector) UpdateSubnetRoutes([]observer.SubnetRouteDTO)                          {}
 func (noopCollector) UpdatePeerMetas([]observer.PeerMetaDTO)                                {}
 func (noopCollector) UpdateMeshMatrix([]observer.MeshMatrixCellDTO)                         {}
+func (noopCollector) UpdateProtocolChannels([]observer.ProtocolChannelDTO)                 {}
+func (noopCollector) UpdateActiveStreams([]observer.ProtocolStreamDTO)                     {}
 func (noopCollector) UpdateDuplicateIPConflicts([]observer.DuplicateIPConflictDTO)          {}
 func (noopCollector) UpdateListenAddrs([]string)                                            {}
 func (noopCollector) UpdateNATStatus(string)                                                {}

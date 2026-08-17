@@ -81,6 +81,8 @@ type StatsCollector struct {
 	SubnetRoutes []SubnetRouteDTO
 	PeerMetas    []observer.PeerMetaDTO
 	MeshMatrix   []MeshMatrixCellDTO
+	ProtocolChannels []ProtocolChannelDTO
+	ActiveStreams    []ProtocolStreamDTO
 	// DuplicateIPConflicts holds the latest duplicate-IP / overlapping-subnet
 	// conflict set pushed by the node for dashboard display.
 	DuplicateIPConflicts []observer.DuplicateIPConflictDTO
@@ -313,6 +315,18 @@ func (s *StatsCollector) UpdateMeshMatrix(matrix []MeshMatrixCellDTO) {
 	s.MeshMatrix = matrix
 }
 
+func (s *StatsCollector) UpdateProtocolChannels(channels []ProtocolChannelDTO) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ProtocolChannels = channels
+}
+
+func (s *StatsCollector) UpdateActiveStreams(streams []ProtocolStreamDTO) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ActiveStreams = streams
+}
+
 func (s *StatsCollector) UpdateListenAddrs(addrs []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -372,6 +386,8 @@ func NewStatsCollector() *StatsCollector {
 		DuplicateIPConflicts: make([]observer.DuplicateIPConflictDTO, 0),
 		SubnetRoutes:         make([]SubnetRouteDTO, 0),
 		MeshMatrix:           make([]MeshMatrixCellDTO, 0),
+		ProtocolChannels:     make([]ProtocolChannelDTO, 0),
+		ActiveStreams:        make([]ProtocolStreamDTO, 0),
 		speedHistory:         make([]SpeedSampleDTO, 0),
 		ListenAddrs:          make([]string, 0),
 		StartTime:            time.Now(),
@@ -792,6 +808,15 @@ func (s *StatsCollector) GetResponse() StatsResponse {
 		SyncedPeers:    synced,
 	}
 
+	protoChannels := s.ProtocolChannels
+	if protoChannels == nil {
+		protoChannels = []ProtocolChannelDTO{}
+	}
+	activeStreams := s.ActiveStreams
+	if activeStreams == nil {
+		activeStreams = []ProtocolStreamDTO{}
+	}
+
 	resp := StatsResponse{
 		NodeName:          s.NodeName,
 		PeerID:            s.PeerID,
@@ -839,6 +864,8 @@ func (s *StatsCollector) GetResponse() StatsResponse {
 		SubnetRoutes:         subnetRoutes,
 		PeerMetas:            s.PeerMetas,
 		MeshMatrix:           meshMatrix,
+		ProtocolChannels:     protoChannels,
+		ActiveStreams:        activeStreams,
 		DuplicateIPConflicts: dupConflicts,
 	}
 	return resp

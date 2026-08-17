@@ -142,10 +142,31 @@ func TestLSASnapshotReplayConvergesLateJoiner(t *testing.T) {
 
 	// The snapshot must never echo a peer's own LSA back at it, and must never
 	// contain the local node (broadcastLSA owns that advertisement).
-	bNode.lsaCacheMu.RLock()
-	_, selfCached := bNode.lsaCache[bID]
-	_, aCached := bNode.lsaCache[aID]
-	bNode.lsaCacheMu.RUnlock()
+	//
+	// B caches A's LSA asynchronously: A's ConnectedF broadcasts A's OWN LSA to B
+	// (node.go:1578-1586), and B accepts it via handleLSAStream → ProcessLSA →
+	// cacheLSA. That arrival is event-driven (a single goroutine spawned on
+	// connect), NOT on a fixed tick, so it races the assertion below. On slower
+	// schedulers (e.g. macOS, where the dialer's ConnectedF typically fires after
+	// the listener's) A's broadcast can land a beat after A already converged via
+	// B's snapshot push. Wait for it, exactly like the C-cache wait at line 81 —
+	// an instant check here is a false failure, not a real regression.
+	cacheDeadline := time.Now().Add(10 * time.Second)
+	aCached := false
+	selfCached := false
+	for {
+		bNode.lsaCacheMu.RLock()
+		_, selfCached = bNode.lsaCache[bID]
+		_, aCached = bNode.lsaCache[aID]
+		bNode.lsaCacheMu.RUnlock()
+		if aCached {
+			break
+		}
+		if time.Now().After(cacheDeadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	if selfCached {
 		t.Errorf("NodeB cached its OWN LSA — cacheLSA must skip self-origin")
 	}

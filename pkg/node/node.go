@@ -974,7 +974,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		notifee := &mdnsNotifee{h: h}
 		s := mdns.NewMdnsService(h, "_p2ptap-discovery._udp.local", notifee)
 		if err := s.Start(); err != nil {
-			log.Warn("mDNS start error: %v", err)
+			log.Debug("mDNS LAN discovery not active: %v (multicast unavailable, WAN/P2P routing unaffected)", err)
 		} else {
 			log.Info("mDNS LAN Auto-Discovery enabled")
 		}
