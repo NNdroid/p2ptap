@@ -52,6 +52,8 @@ var (
 	// events when the same src→dst pair is established in rapid succession.
 	// A pair is suppressed for 10 seconds after its first recorded alert.
 	relayAllowedDedup sync.Map // string → time.Time
+	// relayDeniedDedup prevents alert flooding on repeated dial retries to offline peers.
+	relayDeniedDedup sync.Map // string → time.Time
 )
 
 type clientNodeInfo struct {
@@ -493,13 +495,19 @@ func (f *pskACLFilter) AllowConnect(src peer.ID, srcAddr multiaddr.Multiaddr, de
 		return true
 	}
 
+	now := time.Now()
+
 	// 1. Check source authentication (wait briefly if auth stream is in-flight)
 	if !f.IsAuthenticated(src) {
 		f.waitForAuth(src, 2*time.Second)
 	}
 	if !f.IsAuthenticated(src) {
 		log.Debug("[acl] relay connect DENIED: src=%s not authenticated (dest=%s)", src.String(), dest.String())
-		bootAlerts.Add("warn", "relay_denied", src.ShortString(), fmt.Sprintf("Relay connect denied: src %s not authenticated", src.ShortString()))
+		key := "src:" + src.String()
+		if last, ok := relayDeniedDedup.Load(key); !ok || now.Sub(last.(time.Time)) > 30*time.Second {
+			relayDeniedDedup.Store(key, now)
+			bootAlerts.Add("warn", "relay_denied", src.ShortString(), fmt.Sprintf("Relay connect denied: src %s not authenticated", src.ShortString()))
+		}
 		return false
 	}
 
@@ -509,7 +517,18 @@ func (f *pskACLFilter) AllowConnect(src peer.ID, srcAddr multiaddr.Multiaddr, de
 	}
 	if !f.IsAuthenticated(dest) {
 		log.Debug("[acl] relay connect DENIED: dest=%s not authenticated (src=%s)", dest.String(), src.String())
-		bootAlerts.Add("warn", "relay_denied", dest.ShortString(), fmt.Sprintf("Relay connect denied: dest %s not authenticated", dest.ShortString()))
+		// Only emit dashboard warning if dest is actively connected (PSK mismatch / pending).
+		// Normal dial attempts to offline/disconnected peers are dropped silently to avoid alert spam.
+		f.mu.RLock()
+		h := f.host
+		f.mu.RUnlock()
+		if h != nil && h.Network().Connectedness(dest) == network.Connected {
+			key := "dest:" + dest.String()
+			if last, ok := relayDeniedDedup.Load(key); !ok || now.Sub(last.(time.Time)) > 30*time.Second {
+				relayDeniedDedup.Store(key, now)
+				bootAlerts.Add("warn", "relay_denied", dest.ShortString(), fmt.Sprintf("Relay connect denied: dest %s is connected but not authenticated (PSK mismatch or pending)", dest.ShortString()))
+			}
+		}
 		return false
 	}
 
@@ -518,7 +537,11 @@ func (f *pskACLFilter) AllowConnect(src peer.ID, srcAddr multiaddr.Multiaddr, de
 	if srcNet != dstNet {
 		log.Debug("[acl] relay connect DENIED: src=%s (net=%s) and dest=%s (net=%s) are different networks",
 			src.String(), srcNet, dest.String(), dstNet)
-		bootAlerts.Add("warn", "relay_denied", src.ShortString()+"->"+dest.ShortString(), fmt.Sprintf("Relay connect denied: network isolation mismatch (%s != %s)", srcNet, dstNet))
+		key := "mismatch:" + src.String() + "->" + dest.String()
+		if last, ok := relayDeniedDedup.Load(key); !ok || now.Sub(last.(time.Time)) > 30*time.Second {
+			relayDeniedDedup.Store(key, now)
+			bootAlerts.Add("warn", "relay_denied", src.ShortString()+"->"+dest.ShortString(), fmt.Sprintf("Relay connect denied: network isolation mismatch (%s != %s)", srcNet, dstNet))
+		}
 		return false
 	}
 	log.Debug("[acl] relay connect ALLOWED: src=%s -> dest=%s (net=%s)", src.String(), dest.String(), srcNet)
@@ -528,7 +551,6 @@ func (f *pskACLFilter) AllowConnect(src peer.ID, srcAddr multiaddr.Multiaddr, de
 	}
 	// Emit a deduplicated relay_allowed alert (same pair suppressed for 10 s).
 	key := src.String() + "->" + dest.String()
-	now := time.Now()
 	if last, ok := relayAllowedDedup.Load(key); !ok || now.Sub(last.(time.Time)) > 10*time.Second {
 		relayAllowedDedup.Store(key, now)
 		bootAlerts.Add("info", "relay_allowed", src.ShortString(),
@@ -2158,11 +2180,19 @@ func runMaintenanceSweeper(ctx context.Context, h host.Host, acl *pskACLFilter, 
 		case <-ticker.C:
 			now := time.Now()
 
-			// 1. Prune relayAllowedDedup entries older than 30 seconds
+			// 1. Prune relayAllowedDedup & relayDeniedDedup entries older than 30 seconds
 			relayAllowedDedup.Range(func(key, val any) bool {
 				if t, ok := val.(time.Time); ok {
 					if now.Sub(t) > 30*time.Second {
 						relayAllowedDedup.Delete(key)
+					}
+				}
+				return true
+			})
+			relayDeniedDedup.Range(func(key, val any) bool {
+				if t, ok := val.(time.Time); ok {
+					if now.Sub(t) > 30*time.Second {
+						relayDeniedDedup.Delete(key)
 					}
 				}
 				return true
