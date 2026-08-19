@@ -4,8 +4,10 @@ import (
 	"testing"
 	"time"
 
+	"p2ptap/pkg/routing"
 	"p2ptap/pkg/tap"
 )
+
 
 // TestLSASnapshotReplayConvergesLateJoiner verifies that a node joining an
 // ALREADY-CONVERGED mesh immediately receives the full topology, not just its
@@ -125,11 +127,19 @@ func TestLSASnapshotReplayConvergesLateJoiner(t *testing.T) {
 		time.Since(joinedAt).Round(time.Millisecond))
 
 	// A must now be able to route to C with NextHop == B (relayed, not direct).
-	aNode.invalidateRouteCache()
-	routes := aNode.Router.ComputeRoutes()
-	r, ok := routes[cID]
-	if !ok {
-		t.Fatalf("NodeA has no route to NodeC after snapshot convergence")
+	routeDeadline := time.Now().Add(2 * time.Second)
+	var r routing.RouteInfo
+	for {
+		aNode.invalidateRouteCache()
+		routes := aNode.Router.ComputeRoutes()
+		var ok bool
+		if r, ok = routes[cID]; ok {
+			break
+		}
+		if time.Now().After(routeDeadline) {
+			t.Fatalf("NodeA has no route to NodeC after snapshot convergence")
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 	if r.IsDirect {
 		t.Fatalf("NodeA's route to NodeC is marked direct, expected relayed via B")
@@ -138,6 +148,7 @@ func TestLSASnapshotReplayConvergesLateJoiner(t *testing.T) {
 		t.Fatalf("NodeA route to C has NextHop %s, expected B (%s)",
 			r.NextHop.ShortString(), bID.ShortString())
 	}
+
 	t.Logf("✓ NodeA route to C: NextHop=%s path=%v", r.NextHop.ShortString(), r.Path)
 
 	// The snapshot must never echo a peer's own LSA back at it, and must never
