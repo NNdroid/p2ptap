@@ -1,15 +1,319 @@
+<style type="text/css">
+	.p2ptap-status-card {
+		padding: 16px 20px;
+		background: rgba(255, 255, 255, 0.6);
+		border: 1px solid rgba(0, 0, 0, 0.08);
+		border-radius: 8px;
+		margin-bottom: 16px;
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+		transition: all 0.2s ease;
+	}
+	[data-theme="dark"] .p2ptap-status-card,
+	.dark-mode .p2ptap-status-card,
+	body.dark .p2ptap-status-card {
+		background: rgba(30, 41, 59, 0.6);
+		border-color: rgba(255, 255, 255, 0.1);
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+	}
+	.p2ptap-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: 14px;
+		padding-bottom: 10px;
+		border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+	}
+	[data-theme="dark"] .p2ptap-header,
+	.dark-mode .p2ptap-header,
+	body.dark .p2ptap-header {
+		border-bottom-color: rgba(255, 255, 255, 0.08);
+	}
+	.p2ptap-status-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-weight: 700;
+		font-size: 14px;
+		color: #16a34a;
+	}
+	.p2ptap-status-pill.stopped {
+		color: #dc2626;
+	}
+	.p2ptap-pulse-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background-color: #22c55e;
+		box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);
+		animation: p2ptap-pulse 2s infinite;
+	}
+	.p2ptap-status-pill.stopped .p2ptap-pulse-dot {
+		background-color: #ef4444;
+		animation: none;
+		box-shadow: none;
+	}
+	@keyframes p2ptap-pulse {
+		0% {
+			transform: scale(0.95);
+			box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);
+		}
+		70% {
+			transform: scale(1);
+			box-shadow: 0 0 0 6px rgba(34, 197, 94, 0);
+		}
+		100% {
+			transform: scale(0.95);
+			box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);
+		}
+	}
+	.p2ptap-badge {
+		font-size: 12px;
+		font-weight: 500;
+		padding: 2px 10px;
+		border-radius: 12px;
+		background: rgba(100, 116, 139, 0.12);
+		color: #475569;
+	}
+	[data-theme="dark"] .p2ptap-badge,
+	.dark-mode .p2ptap-badge,
+	body.dark .p2ptap-badge {
+		background: rgba(148, 163, 184, 0.15);
+		color: #cbd5e1;
+	}
+	.p2ptap-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+		gap: 12px 20px;
+		font-size: 13px;
+	}
+	.p2ptap-item {
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+	}
+	.p2ptap-label {
+		color: #64748b;
+		font-size: 11px;
+		text-transform: uppercase;
+		font-weight: 700;
+		letter-spacing: 0.3px;
+	}
+	[data-theme="dark"] .p2ptap-label,
+	.dark-mode .p2ptap-label,
+	body.dark .p2ptap-label {
+		color: #94a3b8;
+	}
+	.p2ptap-val {
+		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+		font-size: 13px;
+		font-weight: 600;
+		color: #0f172a;
+		word-break: break-all;
+	}
+	[data-theme="dark"] .p2ptap-val,
+	.dark-mode .p2ptap-val,
+	body.dark .p2ptap-val {
+		color: #f8fafc;
+	}
+	.p2ptap-copy-btn {
+		display: inline-flex;
+		align-items: center;
+		cursor: pointer;
+		margin-left: 8px;
+		padding: 2px 8px;
+		font-size: 11px;
+		font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+		font-weight: 500;
+		border-radius: 4px;
+		background: rgba(37, 99, 235, 0.1);
+		color: #2563eb;
+		border: 1px solid rgba(37, 99, 235, 0.25);
+		transition: all 0.15s ease;
+		vertical-align: middle;
+	}
+	.p2ptap-copy-btn:hover {
+		background: rgba(37, 99, 235, 0.2);
+		border-color: rgba(37, 99, 235, 0.4);
+		transform: translateY(-0.5px);
+	}
+	.p2ptap-copy-btn:active {
+		transform: translateY(0);
+	}
+	.p2ptap-copy-btn.copied {
+		background: rgba(22, 163, 74, 0.15);
+		color: #16a34a;
+		border-color: rgba(22, 163, 74, 0.3);
+	}
+	.p2ptap-webui-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		margin-top: 14px;
+		padding: 8px 18px;
+		font-size: 13px;
+		font-weight: 600;
+		color: #ffffff !important;
+		background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%);
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		border-radius: 6px;
+		text-decoration: none !important;
+		box-shadow: 0 2px 5px rgba(37, 99, 235, 0.25);
+		transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+		cursor: pointer;
+	}
+	.p2ptap-webui-btn:hover {
+		background: linear-gradient(135deg, #0369a1 0%, #1d4ed8 100%);
+		color: #ffffff !important;
+		box-shadow: 0 4px 10px rgba(37, 99, 235, 0.35);
+		transform: translateY(-1px);
+		text-decoration: none !important;
+	}
+	.p2ptap-webui-btn:active {
+		transform: translateY(0);
+		box-shadow: 0 1px 3px rgba(37, 99, 235, 0.2);
+	}
+	.p2ptap-webui-btn span.arrow {
+		transition: transform 0.2s ease;
+	}
+	.p2ptap-webui-btn:hover span.arrow {
+		transform: translate(2px, -2px);
+	}
+</style>
+
 <script type="text/javascript">//<![CDATA[
-	XHR.poll(5, '<%=luci.dispatcher.build_url("admin", "services", "p2ptap", "status")%>', null,
+	var p2ptapCachedState = {
+		peer_id: '',
+		node_name: '',
+		tap_ip: '',
+		tap_ipv6: '',
+		tap_mac: '',
+		peer_count: 0,
+		tx_speed: '0 B/s',
+		rx_speed: '0 B/s',
+		active_exit: '',
+		webui_url: ''
+	};
+
+	function copyP2pTapPeerID(btn, text) {
+		var doSuccess = function() {
+			if (btn) {
+				var orig = btn.innerHTML;
+				btn.innerHTML = '✓ <%:已复制%>';
+				btn.className = 'p2ptap-copy-btn copied';
+				setTimeout(function() {
+					btn.innerHTML = orig;
+					btn.className = 'p2ptap-copy-btn';
+				}, 1500);
+			}
+		};
+
+		if (navigator.clipboard && window.isSecureContext) {
+			navigator.clipboard.writeText(text).then(doSuccess).catch(function() {
+				copyFallback(text, doSuccess);
+			});
+		} else {
+			copyFallback(text, doSuccess);
+		}
+	}
+
+	function copyFallback(text, callback) {
+		var ta = document.createElement('textarea');
+		ta.value = text;
+		ta.style.position = 'fixed';
+		ta.style.left = '-9999px';
+		ta.style.top = '0';
+		document.body.appendChild(ta);
+		ta.select();
+		try {
+			document.execCommand('copy');
+			if (callback) callback();
+		} catch (e) {
+			prompt('<%:请复制以下 Peer ID：%>', text);
+		}
+		document.body.removeChild(ta);
+	}
+
+	XHR.poll(3, '<%=luci.dispatcher.build_url("admin", "services", "p2ptap", "status")%>', null,
 		function(x, st)
 		{
-			var tb = document.getElementById('p2ptap_status');
-			if (st && st.running) {
-				tb.innerHTML = '<span style="color:green; font-weight:bold;"><%:运行中 (Running)%></span>';
-			} else {
-				tb.innerHTML = '<span style="color:red; font-weight:bold;"><%:未运行 (Stopped)%></span>';
+			var box = document.getElementById('p2ptap_status_box');
+			if (!box) return;
+
+			if (!st || !st.running) {
+				box.innerHTML = '<div class="p2ptap-status-card">' +
+					'<div class="p2ptap-header" style="margin-bottom:0; padding-bottom:0; border-bottom:none;">' +
+						'<span class="p2ptap-status-pill stopped">' +
+							'<span class="p2ptap-pulse-dot"></span>' +
+							'<%:未运行 (Stopped)%>' +
+						'</span>' +
+					'</div>' +
+				'</div>';
+				return;
 			}
+
+			// Merge with cached state to prevent intermittent blank fields during router CPU spikes
+			if (st.peer_id && st.peer_id.length > 0) p2ptapCachedState.peer_id = st.peer_id;
+			if (st.node_name && st.node_name.length > 0) p2ptapCachedState.node_name = st.node_name;
+			if (st.tap_ip && st.tap_ip.length > 0) p2ptapCachedState.tap_ip = st.tap_ip;
+			if (st.tap_ipv6 && st.tap_ipv6.length > 0) p2ptapCachedState.tap_ipv6 = st.tap_ipv6;
+			if (st.tap_mac && st.tap_mac.length > 0) p2ptapCachedState.tap_mac = st.tap_mac;
+			if (typeof st.peer_count === 'number') p2ptapCachedState.peer_count = st.peer_count;
+			if (st.tx_speed) p2ptapCachedState.tx_speed = st.tx_speed;
+			if (st.rx_speed) p2ptapCachedState.rx_speed = st.rx_speed;
+			if (st.active_exit) p2ptapCachedState.active_exit = st.active_exit;
+			if (st.webui_url && st.webui_url.length > 0) p2ptapCachedState.webui_url = st.webui_url;
+
+			var peerShort = p2ptapCachedState.peer_id || '—';
+			var copyBtn = '';
+			if (p2ptapCachedState.peer_id && p2ptapCachedState.peer_id.length > 0) {
+				copyBtn = '<span class="p2ptap-copy-btn" onclick="copyP2pTapPeerID(this, \'' + p2ptapCachedState.peer_id + '\')"><%:复制%></span>';
+			}
+
+			var exitNodeHtml = '';
+			if (p2ptapCachedState.active_exit && p2ptapCachedState.active_exit.length > 0) {
+				exitNodeHtml = '<div class="p2ptap-item"><span class="p2ptap-label">🌐 <%:当前出口网关%></span><span class="p2ptap-val" style="color:#d97706;">' + p2ptapCachedState.active_exit + '</span></div>';
+			}
+
+			var webuiBtn = '';
+			if (p2ptapCachedState.webui_url && p2ptapCachedState.webui_url.length > 0) {
+				var finalUrl = p2ptapCachedState.webui_url;
+				if (finalUrl.indexOf('127.0.0.1') !== -1 || finalUrl.indexOf('0.0.0.0') !== -1 || finalUrl.indexOf('[::]') !== -1) {
+					var browserHost = window.location.hostname || '192.168.1.1';
+					finalUrl = finalUrl.replace('127.0.0.1', browserHost).replace('0.0.0.0', browserHost).replace('[::]', browserHost);
+				}
+				webuiBtn = '<a class="p2ptap-webui-btn" href="' + finalUrl + '" target="_blank">' +
+					'<span>🌐</span>' +
+					'<span><%:打开完整 WebUI 控制台 (拓扑图/实时监控)%></span>' +
+					'<span class="arrow">↗</span>' +
+				'</a>';
+			}
+
+
+			var titleNodeName = p2ptapCachedState.node_name ? ' · <span style="color:#6366f1; font-weight:600;">' + p2ptapCachedState.node_name + '</span>' : '';
+
+			var html = '<div class="p2ptap-status-card">' +
+				'<div class="p2ptap-header">' +
+					'<span class="p2ptap-status-pill">' +
+						'<span class="p2ptap-pulse-dot"></span>' +
+						'<%:运行中 (Running)%>' + titleNodeName +
+					'</span>' +
+					'<span class="p2ptap-badge">' + p2ptapCachedState.peer_count + ' <%:个 Peer 在线%></span>' +
+				'</div>' +
+				'<div class="p2ptap-grid">' +
+					'<div class="p2ptap-item" style="grid-column: 1 / -1;"><span class="p2ptap-label">🆔 <%:自身 Peer ID (Local Peer ID)%></span><span class="p2ptap-val" style="color:#2563eb;">' + peerShort + copyBtn + '</span></div>' +
+					'<div class="p2ptap-item"><span class="p2ptap-label">📌 <%:虚拟 IPv4 (TAP IPv4)%></span><span class="p2ptap-val">' + (p2ptapCachedState.tap_ip || '—') + '</span></div>' +
+					(p2ptapCachedState.tap_ipv6 ? '<div class="p2ptap-item"><span class="p2ptap-label">🌐 <%:虚拟 IPv6 (TAP IPv6)%></span><span class="p2ptap-val">' + p2ptapCachedState.tap_ipv6 + '</span></div>' : '') +
+					'<div class="p2ptap-item"><span class="p2ptap-label">🏷️ <%:虚拟 MAC (TAP MAC)%></span><span class="p2ptap-val">' + (p2ptapCachedState.tap_mac || '—') + '</span></div>' +
+					'<div class="p2ptap-item"><span class="p2ptap-label">🚀 <%:实时网速 (Speed)%></span><span class="p2ptap-val">↑ ' + (p2ptapCachedState.tx_speed || '0 B/s') + ' &nbsp; ↓ ' + (p2ptapCachedState.rx_speed || '0 B/s') + '</span></div>' +
+					exitNodeHtml +
+				'</div>' +
+				webuiBtn +
+			'</div>';
+
+			box.innerHTML = html;
 		}
 	);
 //]]></script>
 
-<div id="p2ptap_status"><em><%:正在获取运行状态...%></em></div>
+<div id="p2ptap_status_box"><div class="p2ptap-status-card"><em><%:正在获取运行状态...%></em></div></div>
+

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // WebUIConfig defines Web Dashboard options
@@ -22,6 +23,13 @@ type WebUIConfig struct {
 	// When empty at startup, p2ptap generates a random token and prints it
 	// to the log. Set this to a fixed value to use a known password.
 	AuthToken string `json:"auth_token"`
+	// PcapSampleEvery captures 1 of every N frames (1 = capture all). Lets an
+	// operator bound the per-frame parse/memcopy cost of the live packet view
+	// on a busy link. Higher = lower CPU but coarser capture.
+	PcapSampleEvery int `json:"pcap_sample_every"`
+	// PcapMaxRatePerSec caps captured frames per second (0 = unlimited). A
+	// secondary safety net on top of PcapSampleEvery for extreme throughput.
+	PcapMaxRatePerSec int `json:"pcap_max_rate_per_sec"`
 }
 
 // MaxNodeNameLen is the upper bound for a NodeName accepted by the WebUI.
@@ -136,10 +144,10 @@ type ACLConfig struct {
 
 // Config represents the complete P2P TAP VPN configuration
 type Config struct {
-	LogLevel                string            `json:"log_level"` // "debug", "info", "warn", "error"
-	ListenAddrs             []string          `json:"listen_addrs"`
-	BootstrapPeers          []string          `json:"bootstrap_peers"`
-	StaticPeers             []string          `json:"static_peers"`
+	LogLevel       string   `json:"log_level"` // "debug", "info", "warn", "error"
+	ListenAddrs    []string `json:"listen_addrs"`
+	BootstrapPeers []string `json:"bootstrap_peers"`
+	StaticPeers    []string `json:"static_peers"`
 	// DiscoverBootMesh lets this node attach to boot nodes it discovers through
 	// a federated boot backbone (boots interconnected with p2ptap-boot -mesh),
 	// in addition to the ones listed in BootstrapPeers. Attaching gives the two
@@ -166,7 +174,14 @@ type Config struct {
 	AcceptAdvertisedSubnets bool              `json:"accept_advertised_subnets"` // Default: false
 	AllowedSubnetPeers      []string          `json:"allowed_subnet_peers"`      // Allowed Peer IDs or ["*"]
 	ACL                     ACLConfig         `json:"acl"`
-	ConfigPath              string            `json:"-"`
+	ConfigPath              string            `json:"-"` // Path to config file (not persisted)
+	HolePunchTimeout        time.Duration     `json:"hole_punch_timeout"`
+	// ForcePrivateReachability forces the libp2p host to advertise itself as
+	// private (relay-only). Default false: reachability is auto-detected via
+	// AutoNAT, so nodes with a public IP still advertise direct addresses and
+	// peers can dial them directly instead of always going through a relay.
+	// Enable only when AutoNAT is known to be unreliable in your network.
+	ForcePrivateReachability bool `json:"force_private_reachability"`
 }
 
 // DefaultConfig returns a sane default configuration
@@ -194,14 +209,14 @@ func DefaultConfig() *Config {
 	}
 
 	return &Config{
-		LogLevel: "info",
+		HolePunchTimeout: 10 * time.Second,
 		ListenAddrs: []string{
 			"/ip4/0.0.0.0/udp/0/quic-v1",
 			"/ip6/::/udp/0/quic-v1",
 			"/ip4/0.0.0.0/udp/0/webrtc-direct",
 			"/ip6/::/udp/0/webrtc-direct",
-		"/ip4/0.0.0.0/udp/0/quic-v1/webtransport",
-		"/ip6/::/udp/0/quic-v1/webtransport",
+			"/ip4/0.0.0.0/udp/0/quic-v1/webtransport",
+			"/ip6/::/udp/0/quic-v1/webtransport",
 			"/ip4/0.0.0.0/tcp/0",
 			"/ip6/::/tcp/0",
 		},
@@ -510,7 +525,49 @@ func UpdateConfigFileDelta(configPath string, incoming *Config) error {
 		return err
 	}
 
-	return os.WriteFile(configPath, updatedBytes, 0644)
+	// Atomic write: marshal to a temp file in the same directory then rename
+	// over the target. A crash or full disk mid-write would otherwise leave
+	// config.json truncated/corrupt, bricking the node's next startup.
+	return atomicWriteFile(configPath, updatedBytes, 0644)
+}
+
+// atomicWriteFile writes data to path atomically: it writes to a uniquely-named
+// temp file in the same directory (so the rename stays on one filesystem and is
+// atomic), fsyncs it, then renames it over the target. On any failure the temp
+// file is removed and the original target is left untouched. Config file
+// persistence is exactly the kind of state that must not be torn by a crash.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName) // no-op after a successful rename
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	tmpName = "" // rename succeeded — don't remove the temp path (it no longer exists)
+	return nil
 }
 
 // WebUITokenFile is the sidecar file (next to config.json) where the running

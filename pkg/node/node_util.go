@@ -20,6 +20,7 @@ import (
 
 	"p2ptap/pkg/observer"
 	"p2ptap/pkg/packet"
+	"p2ptap/pkg/tap"
 )
 
 // arpIndexEntry is one resolved TAP IP -> (peer, MAC) binding.
@@ -61,10 +62,14 @@ func parseHWMac(s string) net.HardwareAddr {
 // isLocalAdvertisedSubnet reports whether target IP falls within any of this
 // node's own advertised subnets (i.e. this node is the LAN gateway).
 func (n *Node) isLocalAdvertisedSubnet(ip net.IP) bool {
-	if ip == nil || n.Config == nil || len(n.Config.AdvertisedSubnets) == 0 {
+	if ip == nil {
 		return false
 	}
-	for _, sub := range n.Config.AdvertisedSubnets {
+	c := n.config()
+	if c == nil || len(c.AdvertisedSubnets) == 0 {
+		return false
+	}
+	for _, sub := range c.AdvertisedSubnets {
 		if _, cidr, err := net.ParseCIDR(sub); err == nil && cidr != nil {
 			if cidr.Contains(ip) {
 				return true
@@ -74,13 +79,24 @@ func (n *Node) isLocalAdvertisedSubnet(ip net.IP) bool {
 	return false
 }
 
-
 // storePeerMeta persists peer metadata AND rebuilds the read-optimized ARP index
 // so it stays consistent with peerMeta. Must be used at every peerMeta write
 // site; do not call n.peerMeta.Store directly for peer records.
 func (n *Node) storePeerMeta(pID peer.ID, m PeerMeta) {
 	n.peerMeta.Store(pID, m)
 	n.rebuildARPIndex()
+
+	// Proactively emit a Gratuitous ARP frame to the local OS TAP adapter so Windows / Linux
+	// immediately associates this peer's IP with its MAC without waiting on ARP discovery/timeouts.
+	if m.TapIP != "" && m.TapMAC != "" && n.TAP != nil {
+		ipStr := strings.Split(m.TapIP, "/")[0]
+		if ip := net.ParseIP(ipStr).To4(); ip != nil {
+			if mac, err := net.ParseMAC(m.TapMAC); err == nil && len(mac) == 6 {
+				garpFrame := tap.BuildARPReplyFrame(mac, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, ip, ip)
+				_, _ = n.tapWrite(garpFrame)
+			}
+		}
+	}
 }
 
 // deletePeerMeta removes a peer record and rebuilds the ARP index.
@@ -111,17 +127,42 @@ func (n *Node) rebuildARPIndex() {
 	n.peerMeta.Range(func(key, value any) bool {
 		pID, _ := key.(peer.ID)
 		meta := value.(PeerMeta)
+		effectiveMAC := parseHWMac(meta.TapMAC)
+		if obs := n.observedTapMACFrom(pID); len(obs) == 6 {
+			// TEMP-DIAG: only fires when the observed wire MAC disagrees with
+			// the advertised metadata MAC (the suspected three-node bug).
+			if log.IsDebug() && string(obs) != string(effectiveMAC) {
+				log.Debug("ARP-DIAG: peer=%s ip=%s overriding metadata MAC %s with OBSERVED wire MAC %s",
+					pID.String(), meta.TapIP, effectiveMAC.String(), obs.String())
+			}
+			effectiveMAC = obs
+		}
+		if len(effectiveMAC) != 6 {
+			if meta.TapIP != "" {
+				if ip := net.ParseIP(strings.Split(meta.TapIP, "/")[0]).To4(); ip != nil {
+					effectiveMAC = net.HardwareAddr{0x02, 0x00, ip[0], ip[1], ip[2], ip[3]}
+				}
+			}
+			if len(effectiveMAC) != 6 && meta.TapIPv6 != "" {
+				if ip6 := net.ParseIP(strings.Split(meta.TapIPv6, "/")[0]).To16(); ip6 != nil {
+					effectiveMAC = net.HardwareAddr{0x02, 0x00, ip6[12], ip6[13], ip6[14], ip6[15]}
+				}
+			}
+			if len(effectiveMAC) != 6 {
+				effectiveMAC = packet.DefaultTapMAC
+			}
+		}
 		if meta.TapIP != "" {
 			if ip := net.ParseIP(strings.Split(meta.TapIP, "/")[0]).To4(); ip != nil {
 				k := binary.BigEndian.Uint32(ip)
-				v4Claims[k] = append(v4Claims[k], arpIndexEntry{mac: parseHWMac(meta.TapMAC), pid: pID})
+				v4Claims[k] = append(v4Claims[k], arpIndexEntry{mac: effectiveMAC, pid: pID})
 			}
 		}
 		if meta.TapIPv6 != "" {
 			if ip := net.ParseIP(strings.Split(meta.TapIPv6, "/")[0]).To16(); ip != nil {
 				var k [16]byte
 				copy(k[:], ip)
-				v6Claims[k] = append(v6Claims[k], arpIndexEntry{mac: parseHWMac(meta.TapMAC), pid: pID})
+				v6Claims[k] = append(v6Claims[k], arpIndexEntry{mac: effectiveMAC, pid: pID})
 			}
 		}
 		for _, sub := range meta.AdvertisedSubnets {
@@ -129,7 +170,7 @@ func (n *Node) rebuildARPIndex() {
 				continue
 			}
 			if _, ipNet, err := net.ParseCIDR(sub); err == nil {
-				allSubnets = append(allSubnets, arpSubnetEntry{net: ipNet, mac: parseHWMac(meta.TapMAC), pid: pID})
+				allSubnets = append(allSubnets, arpSubnetEntry{net: ipNet, mac: effectiveMAC, pid: pID})
 			}
 		}
 		return true
@@ -540,9 +581,12 @@ func (n *Node) getExitPeerMAC() net.HardwareAddr {
 	return n.lookupPeerTapMAC(pID)
 }
 
-// lookupPeerTapMAC returns the configured TAP MAC of the given peer from
-// peerMeta.  Returns nil when the peer is unknown or has no TapMAC recorded.
+// lookupPeerTapMAC returns the effective TAP MAC of the given peer, prioritizing
+// the observed wire MAC if available, falling back to metadata TapMAC.
 func (n *Node) lookupPeerTapMAC(pID peer.ID) net.HardwareAddr {
+	if obs := n.observedTapMACFrom(pID); len(obs) == 6 {
+		return obs
+	}
 	val, ok := n.peerMeta.Load(pID)
 	if !ok {
 		return nil
@@ -578,6 +622,11 @@ func extractFrameDstIP(frame []byte) net.IP {
 			return nil
 		}
 		return net.IP(append([]byte(nil), frame[38:54]...))
+	case 0x0806: // ARP
+		if len(frame) < 42 {
+			return nil
+		}
+		return net.IP(append([]byte(nil), frame[38:42]...))
 	}
 	return nil
 }
@@ -724,6 +773,93 @@ func (n *Node) lookupPeerMACByIPv6(ip net.IP) (net.HardwareAddr, peer.ID) {
 	return nil, ""
 }
 
+// learnPeerAddressFromFrame automatically learns a peer's IPv4/IPv6 from an inbound
+// Ethernet frame into peer metadata and injects a gratuitous ARP or Neighbor Advertisement
+// into the local TAP device, ensuring the local OS kernel ARP/NDP tables are hot and immediate
+// unicast return replies can be emitted without broadcast ARP/NDP resolution delay.
+func (n *Node) learnPeerAddressFromFrame(srcPeer peer.ID, srcMAC net.HardwareAddr, payload []byte) {
+	if len(payload) < 14 || len(srcMAC) != 6 || srcPeer == "" || (n.Host != nil && srcPeer == n.Host.ID()) {
+		return
+	}
+	ethType := binary.BigEndian.Uint16(payload[12:14])
+	// IPv4 (0x0800)
+	if ethType == packet.EtherTypeIPv4 && len(payload) >= 34 {
+		srcIP := net.IP(payload[26:30]).To4()
+		if srcIP != nil && !srcIP.IsUnspecified() && !srcIP.IsMulticast() && !srcIP.IsLoopback() {
+			// CRITICAL GUARD: Only learn IP addresses that belong to the local overlay mesh network!
+			// External WAN/Internet addresses (e.g. 8.8.8.8) returning from an Exit Node MUST NEVER
+			// be learned as the Exit Node's TapIP. Doing so poisons peerMeta, overwrites the peer's
+			// real IP in arpIndex, breaks subsequent ARP proxy resolution on both ends, and corrupts routing.
+			if n.localV4Net != nil && !n.localV4Net.Contains(srcIP) {
+				return
+			}
+			if n.localV4Net == nil && !srcIP.IsPrivate() && !srcIP.IsLinkLocalUnicast() {
+				return
+			}
+			val, ok := n.peerMeta.Load(srcPeer)
+			var m PeerMeta
+			if ok {
+				m = val.(PeerMeta)
+			}
+			changed := false
+			if m.TapIP == "" {
+				m.TapIP = srcIP.String() + "/24"
+				changed = true
+			}
+			cleanTapIP := strings.Split(m.TapIP, "/")[0]
+			if (m.TapMAC == "" || m.TapMAC != srcMAC.String()) && cleanTapIP == srcIP.String() {
+				m.TapMAC = srcMAC.String()
+				changed = true
+			}
+			if changed {
+				n.storePeerMeta(srcPeer, m)
+				if n.TAP != nil && (n.localV4Net == nil || n.localV4Net.Contains(srcIP)) {
+					garpFrame := tap.BuildARPReplyFrame(srcMAC, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, srcIP, srcIP)
+					_, _ = n.tapWrite(garpFrame)
+				}
+			}
+		}
+		return
+	}
+	// IPv6 (0x86DD)
+	if ethType == packet.EtherTypeIPv6 && len(payload) >= 54 {
+		srcIP := net.IP(payload[22:38])
+		if srcIP != nil && !srcIP.IsUnspecified() && !srcIP.IsMulticast() && !srcIP.IsLoopback() {
+			// Only learn IPv6 addresses belonging to the mesh subnet or ULA (fc00::/7) / link-local
+			if n.localV6Net != nil && !n.localV6Net.Contains(srcIP) {
+				return
+			}
+			if n.localV6Net == nil && srcIP.IsGlobalUnicast() && (len(srcIP) > 0 && (srcIP[0]&0xfe) != 0xfc) {
+				return
+			}
+			val, ok := n.peerMeta.Load(srcPeer)
+			var m PeerMeta
+			if ok {
+				m = val.(PeerMeta)
+			}
+			changed := false
+			if m.TapIPv6 == "" {
+				m.TapIPv6 = srcIP.String() + "/64"
+				changed = true
+			}
+			cleanTapIPv6 := strings.Split(m.TapIPv6, "/")[0]
+			if (m.TapMAC == "" || m.TapMAC != srcMAC.String()) && cleanTapIPv6 == srcIP.String() {
+				m.TapMAC = srcMAC.String()
+				changed = true
+			}
+			if changed {
+				n.storePeerMeta(srcPeer, m)
+				if n.TAP != nil && (n.localV6Net == nil || n.localV6Net.Contains(srcIP)) {
+					naFrame := tap.BuildIPv6NeighborAdvertisementFrameWithMAC(srcMAC, net.HardwareAddr{0x33, 0x33, 0x00, 0x00, 0x00, 0x01}, srcIP, net.ParseIP("ff02::1"))
+					if len(naFrame) > 0 {
+						_, _ = n.tapWrite(naFrame)
+					}
+				}
+			}
+		}
+	}
+}
+
 // proxyResolution is the result of resolveProxyMAC: which MAC to answer an ARP/NDP
 // request with, and how it was resolved. The four cases (direct peer, advertised
 // subnet peer, Exit Node catch-all, local TAP) are identical for IPv4 ARP and IPv6
@@ -745,6 +881,21 @@ const (
 	proxyViaExit                   // active Exit Node catch-all (or local MAC fallback)
 	proxyViaLocal                  // our own TAP IP / WebUI virtual IP
 )
+
+func (v proxyVia) String() string {
+	switch v {
+	case proxyViaPeer:
+		return "peer"
+	case proxyViaSubnet:
+		return "subnet"
+	case proxyViaExit:
+		return "exit"
+	case proxyViaLocal:
+		return "local"
+	default:
+		return "none"
+	}
+}
 
 // resolveProxyMAC runs the unified four-stage ARP/NDP proxy decision for a single
 // target IP. direct resolves a peer by its own TAP IP, subnet resolves a peer by an

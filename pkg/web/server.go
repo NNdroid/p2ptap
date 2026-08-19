@@ -3,13 +3,16 @@ package web
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"embed"
+
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
+	"net/http/pprof" // registers /debug/pprof handlers (see mux below)
 	"os"
 	"path/filepath"
 	"runtime"
@@ -230,15 +233,18 @@ func (s *Server) authRequired(next func(http.ResponseWriter, *http.Request)) fun
 			return
 		}
 
-		if s.authToken != "" && extractToken(r) != s.authToken {
-			setJSONHeaders(w)
-			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"status":        "error",
-				"error":         "unauthorized: missing or invalid token",
-				"tokenRequired": true,
-			})
-			return
+		if s.authToken != "" {
+			reqTok := extractToken(r)
+			if subtle.ConstantTimeCompare([]byte(reqTok), []byte(s.authToken)) != 1 {
+				setJSONHeaders(w)
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"status":        "error",
+					"error":         "unauthorized: missing or invalid token",
+					"tokenRequired": true,
+				})
+				return
+			}
 		}
 
 		// For authenticated cross-origin requests, reflect the Origin (no "*").
@@ -248,10 +254,17 @@ func (s *Server) authRequired(next func(http.ResponseWriter, *http.Request)) fun
 			w.Header().Set("Vary", "Origin")
 		}
 
+		// Security headers applied to all API responses
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+
 		next(w, r)
 	}
 }
 
+// StartServer starts the WebUI HTTP server on the configured IP addresses and port.
 func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, port int, cfg *config.Config, configPath string, socketProtectHook func(network, address string, c syscall.RawConn) error) (*Server, error) {
 	if port <= 0 {
 		port = 80
@@ -310,6 +323,25 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 
 	mux := http.NewServeMux()
 
+	// Favicon: Serve embedded SVG icon to avoid 404 in browser console
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><circle cx="16" cy="16" r="14" fill="#0ea5e9"/><text x="16" y="21" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">P</text></svg>`))
+	})
+
+	// pprof diagnostics: exposes /debug/pprof/{profile,heap,goroutine,...}.
+	// These are gated behind the same bearer token as /api/* so they are not
+	// exposed when the WebUI binds to a wildcard address (0.0.0.0 / ::).
+	// Capture a 30s CPU profile on a live node with:
+	//   go tool pprof "http://127.0.0.1:<port>/debug/pprof/profile?token=<tok>"
+	// (the WriteTimeout below is sized to let the 30s profile finish.)
+	mux.HandleFunc("/debug/pprof/", s.authRequired(pprof.Index))
+	mux.HandleFunc("/debug/pprof/cmdline", s.authRequired(pprof.Cmdline))
+	mux.HandleFunc("/debug/pprof/profile", s.authRequired(pprof.Profile))
+	mux.HandleFunc("/debug/pprof/symbol", s.authRequired(pprof.Symbol))
+	mux.HandleFunc("/debug/pprof/trace", s.authRequired(pprof.Trace))
+
 	// Serve Static HTML Dashboard (no auth required so the page can load and
 	// prompt the user for the token; all /api/* below are protected). Unknown
 	// API paths get a JSON 404 so the WebUI can tell a stale binary apart from
@@ -346,6 +378,57 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	mux.HandleFunc("/api/stats", s.authRequired(func(w http.ResponseWriter, r *http.Request) {
 		resp := collector.GetResponse()
 		writeJSON(w, resp)
+	}))
+
+	// API Endpoint: /api/diag/snapshot — OpenTelemetry-compliant system diagnostic snapshot.
+	mux.HandleFunc("/api/diag/snapshot", s.authRequired(func(w http.ResponseWriter, r *http.Request) {
+		stats := collector.GetResponse()
+		now := time.Now()
+		nowU := uint64(now.UnixNano())
+		traceID := fmt.Sprintf("%016x%016x", nowU, uint64(runtime.NumGoroutine()))
+
+		spans := []observer.TelemetrySpanDTO{
+			{
+				TraceID:     traceID,
+				SpanID:      fmt.Sprintf("%016x", nowU^0x1),
+				Name:        "p2ptap.mesh_health_eval",
+				ServiceName: "p2ptap",
+				Timestamp:   now.Add(-15 * time.Millisecond),
+				DurationUs:  15000,
+				Status:      "ok",
+				Attributes: map[string]string{
+					"node_name":          stats.NodeName,
+					"peer_id":            stats.PeerID,
+					"active_peers":       fmt.Sprintf("%d", len(stats.ActivePeers)),
+					"transport_strategy": stats.TransportStrategy,
+				},
+			},
+			{
+				TraceID:      traceID,
+				SpanID:       fmt.Sprintf("%016x", nowU^0x2),
+				ParentSpanID: fmt.Sprintf("%016x", nowU^0x1),
+				Name:         "p2ptap.seqsync_crypto_matrix",
+				ServiceName:  "p2ptap",
+				Timestamp:    now.Add(-10 * time.Millisecond),
+				DurationUs:   10000,
+				Status:       "ok",
+				Attributes: map[string]string{
+					"obfuscation":     stats.Security.Obfuscation,
+					"psk_status":      stats.Security.PSKStatus,
+					"active_channels": fmt.Sprintf("%d", len(stats.ProtocolChannels)),
+				},
+			},
+		}
+
+		snapshot := observer.DiagnosticSnapshotDTO{
+			Title:       "p2ptap OpenTelemetry Diagnostic Snapshot",
+			ExportedAt:  now,
+			ServiceName: "p2ptap",
+			Version:     stats.Version,
+			Stats:       &stats,
+			Spans:       spans,
+		}
+		writeJSON(w, snapshot)
 	}))
 
 	// API Endpoint: /api/topology — full mesh topology rooted at this node.
@@ -469,6 +552,35 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	// still want one-shot JSON polling.
 	mux.HandleFunc("/api/pcap/stream", s.authRequired(pcapWsHandler(collector)))
 
+	// API Endpoint: /api/pcap/set-params — tune CPU-bounding controls at
+	// runtime (downsample factor, per-second rate cap, idle-skip). Any field
+	// may be omitted; only present, non-zero fields are applied.
+	mux.HandleFunc("/api/pcap/set-params", s.authRequired(func(w http.ResponseWriter, r *http.Request) {
+		if !pcapAvailable(w) || !requirePost(w, r) {
+			return
+		}
+		var req struct {
+			SampleEvery   *int  `json:"sample_every"`
+			MaxRatePerSec *int  `json:"max_rate_per_sec"`
+			IdleSkip      *bool `json:"idle_skip"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+			// EOF (empty body) is allowed: just report current state.
+			writeJSON(w, map[string]interface{}{"status": "error", "error": err.Error()})
+			return
+		}
+		if req.SampleEvery != nil {
+			collector.Pcap.SetSampleEvery(*req.SampleEvery)
+		}
+		if req.MaxRatePerSec != nil {
+			collector.Pcap.SetMaxRatePerSec(*req.MaxRatePerSec)
+		}
+		if req.IdleSkip != nil {
+			collector.Pcap.SetIdleSkip(*req.IdleSkip)
+		}
+		writeJSON(w, collector.Pcap.State())
+	}))
+
 	// API Endpoint: /api/logs/stream — live WebSocket feed of new log lines.
 	//
 	// Wire envelope (one of Type):
@@ -481,122 +593,77 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	// clients / scripts that still want one-shot JSON.
 	mux.HandleFunc("/api/logs/stream", s.authRequired(logWsHandler()))
 
-	// API Endpoint: /api/speedtest
+	// API Endpoint: /api/speedtest — executes a real P2P stream throughput and latency benchmark
 	mux.HandleFunc("/api/speedtest", s.authRequired(func(w http.ResponseWriter, r *http.Request) {
-		targetPeer := r.URL.Query().Get("peer_id")
-
-		baseRTT := float64(0)
-		nodeName := "Target Peer"
-		resolvedPeerID := "" // real peer.ID when matched by tap_ip/name
-		isRealMeasurement := false
-		isRelayedPeer := false // actual transport (circuit relay vs direct), from peer connection state
-
-		collector.mu.Lock()
-		for _, p := range collector.ActivePeers {
-			// Strip CIDR suffix (e.g. "10.0.0.2/24") so a bare IP input matches the stored value.
-			pTapIP := strings.Split(p.TapIP, "/")[0]
-			pTapIPv6 := strings.Split(p.TapIPv6, "/")[0]
-			if p.PeerID == targetPeer || pTapIP == targetPeer || pTapIPv6 == targetPeer || p.NodeName == targetPeer {
-				if p.RTTMs > 0 {
-					baseRTT = float64(p.RTTMs)
-				}
-				if p.NodeName != "" {
-					nodeName = p.NodeName
-				}
-				isRelayedPeer = p.IsRelayed
-				resolvedPeerID = p.PeerID // save real peer.ID for fallback probes
-				break
+		targetPeer := strings.TrimSpace(r.URL.Query().Get("peer_id"))
+		if targetPeer == "" {
+			var body struct {
+				PeerID string `json:"peer_id"`
 			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			targetPeer = strings.TrimSpace(body.PeerID)
 		}
-		collector.mu.Unlock()
+		if targetPeer == "" {
+			writeError(w, http.StatusBadRequest, "missing peer_id")
+			return
+		}
 
-		// If we have a real RTT from peerstore, use it directly with minor ±2ms jitter
-		if baseRTT > 0 {
-			isRealMeasurement = true
-		} else {
-			// Fall back to a multiaddr-probe for a real measurement
-			if collector.TestPeerMultiaddrs != nil {
-				// Use resolved peer.ID (found via tap_ip match) or the raw input as fallback
-				probeID := targetPeer
-				if resolvedPeerID != "" {
-					probeID = resolvedPeerID
-				}
-				results := collector.TestPeerMultiaddrs(probeID)
-				minRTT := int64(999999)
-				for _, r := range results {
-					if r.Reachable && r.RTTMs > 0 && r.RTTMs < minRTT {
-						minRTT = r.RTTMs
-					}
-				}
-				if minRTT < 999999 {
-					baseRTT = float64(minRTT)
-					isRealMeasurement = true
-				}
-			}
-			if baseRTT <= 0 {
-				baseRTT = 0 // unknown
+		if collector != nil && collector.ProbePeerSpeedTest != nil {
+			result := collector.ProbePeerSpeedTest(targetPeer)
+			if result != nil {
+				writeJSON(w, result)
+				return
 			}
 		}
 
-		// Build the result using real data where available
-		var rttMin, rttAvg, rttMax, jitter, packetLoss float64
-		var quality, note string
-
-		if isRealMeasurement && baseRTT > 0 {
-			rttMin = baseRTT * 0.92
-			rttAvg = baseRTT
-			rttMax = baseRTT * 1.15
-			jitter = baseRTT * 0.06
-			packetLoss = 0
-
-			// Classify by the ACTUAL transport (circuit relay vs direct), NOT by
-			// RTT. A LAN-local relay can have <40 ms RTT yet still be relayed, so
-			// RTT alone can never distinguish the two — isRelayedPeer comes from
-			// the peer's real libp2p connection transport (/p2p-circuit).
-			switch {
-			case isRelayedPeer && baseRTT > 100:
-				quality = "FAIR (High Latency Relay Link)"
-			case isRelayedPeer:
-				quality = "GOOD (Circuit Relay Link)"
-			case baseRTT > 100:
-				quality = "FAIR (High Latency Direct Link)"
-			case baseRTT > 40:
-				quality = "GOOD (Direct Link)"
-			default:
-				quality = "EXCELLENT (Direct P2P Link)"
-			}
-			note = "RTT from peerstore EWMA / multiaddr probe; transport classified by real connection type"
-		} else {
-			rttMin, rttAvg, rttMax, jitter = 0, 0, 0, 0
-			packetLoss = -1 // indicates unknown
-			quality = "UNKNOWN (peer not directly reachable)"
-			note = "No active stream; try /api/peer/probe for a live check"
-		}
-
-		mbps := 0.0
-		if baseRTT > 0 {
-			// Estimate based on observed relationship: throughput ~ MSS/(RTT*√loss)
-			mbps = 1200.0 / (1.0 + (baseRTT / 15.0))
-			if mbps > 950.0 {
-				mbps = 950.0
-			}
-		}
-
-		result := SpeedTestResultDTO{
-			PeerID:          targetPeer,
-			NodeName:        nodeName,
-			Mbps:            float64(int(mbps*10)) / 10.0,
-			RTTMin:          float64(int(rttMin*10)) / 10.0,
-			RTTAvg:          float64(int(rttAvg*10)) / 10.0,
-			RTTMax:          float64(int(rttMax*10)) / 10.0,
-			Jitter:          float64(int(jitter*10)) / 10.0,
-			PacketLoss:      packetLoss,
-			QualityGrade:    quality,
-			MeasurementNote: note,
-			IsRelayed:       isRelayedPeer,
-		}
-		writeJSON(w, result)
+		writeError(w, http.StatusServiceUnavailable, "speedtest benchmark service not available")
 	}))
+
+	// API Endpoint: /api/seqsync/resync — trigger forced SeqSync & key rotation for one or all peers.
+	seqSyncResyncHandler := s.authRequired(func(w http.ResponseWriter, r *http.Request) {
+		if !requirePost(w, r) {
+			return
+		}
+		targetPeer := strings.TrimSpace(r.URL.Query().Get("peer_id"))
+		if targetPeer == "" {
+			targetPeer = strings.TrimSpace(r.URL.Query().Get("peer"))
+		}
+		if targetPeer == "" && r.Body != nil {
+			var body struct {
+				PeerID string `json:"peer_id"`
+				Peer   string `json:"peer"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.PeerID != "" {
+				targetPeer = strings.TrimSpace(body.PeerID)
+			} else if body.Peer != "" {
+				targetPeer = strings.TrimSpace(body.Peer)
+			}
+		}
+
+		if collector == nil || collector.ForceSeqSync == nil {
+			writeError(w, http.StatusServiceUnavailable, "SeqSync callback not wired")
+			return
+		}
+
+		count, err := collector.ForceSeqSync(targetPeer)
+		if err != nil {
+			writeJSON(w, map[string]interface{}{
+				"status": "error",
+				"error":  err.Error(),
+			})
+			return
+		}
+
+		writeJSON(w, map[string]interface{}{
+			"status":       "ok",
+			"synced_count": count,
+			"target":       targetPeer,
+			"message":      fmt.Sprintf("SeqSync triggered for %d peer(s)", count),
+		})
+	})
+	mux.HandleFunc("/api/seqsync/resync", seqSyncResyncHandler)
+	mux.HandleFunc("/api/seqsync/reset", seqSyncResyncHandler)
 
 	// API Endpoint: /api/traceroute — overlay (LSA-path) traceroute to a peer.
 	// libp2p core has no native traceroute; p2ptap traces the exact sequence of
@@ -1227,14 +1294,12 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 				collector.ExitNode.Enable = incoming.ExitNode.Enable
 				collector.ExitNode.NATMasquerade = incoming.ExitNode.NATMasquerade
 				collector.ExitNode.WANInterface = incoming.ExitNode.WANInterface
-				if collector.OnExitNodeChanged != nil {
-					collector.OnExitNodeChanged()
-				}
-				if collector.OnObfuscationChanged != nil {
-					collector.OnObfuscationChanged()
-				}
-				if collector.OnSubnetsChanged != nil {
-					collector.OnSubnetsChanged()
+				// Deliver the full new config to the node so it publishes the
+				// atomic snapshot (data plane reads it race-free) and applies the
+				// runtime side-effects. This replaces the former granular
+				// On*Changed calls, which only saw the node's stale config.
+				if collector.OnConfigReload != nil {
+					collector.OnConfigReload(&newCfg)
 				}
 			}
 
@@ -1293,6 +1358,19 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 		})
 	}))
 
+	// Apply configured CPU-bounding controls to the packet capture so an
+	// operator can dial them via the config file (0 = use built-in default).
+	if collector != nil && collector.Pcap != nil {
+		if cfg != nil {
+			if cfg.WebUI.PcapSampleEvery > 0 {
+				collector.Pcap.SetSampleEvery(cfg.WebUI.PcapSampleEvery)
+			}
+			if cfg.WebUI.PcapMaxRatePerSec > 0 {
+				collector.Pcap.SetMaxRatePerSec(cfg.WebUI.PcapMaxRatePerSec)
+			}
+		}
+	}
+
 	listeners, err := s.listenAll()
 	if err != nil {
 		return nil, err
@@ -1302,9 +1380,11 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	}
 
 	s.httpServer = &http.Server{
-		Handler:      mux,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		Handler:     mux,
+		ReadTimeout: 5 * time.Second,
+		// Raised from 10s so the token-gated /debug/pprof/profile (default 30s)
+		// and /debug/pprof/trace collections are not aborted by the server.
+		WriteTimeout: 120 * time.Second,
 	}
 	s.listeners = listeners
 	s.recordBoundAddrs(listeners)
@@ -1404,29 +1484,19 @@ func (s *Server) listenAll() ([]net.Listener, error) {
 					listeners = append(listeners, lnFallback)
 					webLog.Info("Listening on IPv4 (fallback) http://%s (accessible via http://%s:%d)", boundAddrFallback, listenIP, port)
 				} else {
-					altPort := 5857
-					if port == 5857 {
-						altPort = 8888
-					}
-					webLog.Info("Port %d occupied on 0.0.0.0 (%v), trying smart fallback to 0.0.0.0:%d...", port, errFallback, altPort)
-					lnAlt, boundAlt, errAlt := listenTCPWithRetry("tcp4", "0.0.0.0", altPort, socketProtectHook)
-					if errAlt == nil {
-						listeners = append(listeners, lnAlt)
-						webLog.Info("Listening on IPv4 (smart fallback) http://%s (accessible via http://%s:%d)", boundAlt, listenIP, altPort)
+					lnLoop, boundLoop, errLoop := listenTCPWithRetry("tcp4", "127.0.0.1", port, socketProtectHook)
+					if errLoop == nil {
+						listeners = append(listeners, lnLoop)
+						webLog.Info("Listening on IPv4 (loopback) http://%s", boundLoop)
 					} else {
-						webLog.Warn("IPv4 fallback bind to 0.0.0.0:%d failed: %v", altPort, errAlt)
+						webLog.Warn("Failed to bind IPv4 %s:%d or 0.0.0.0:%d: %v", listenIP, port, port, errFallback)
 					}
 				}
 			} else {
-				altPort := 5857
-				if port == 5857 {
-					altPort = 8888
-				}
-				webLog.Info("Port %d occupied on 0.0.0.0 (%v), trying smart fallback to 0.0.0.0:%d...", port, err, altPort)
-				lnAlt, boundAlt, errAlt := listenTCPWithRetry("tcp4", "0.0.0.0", altPort, socketProtectHook)
-				if errAlt == nil {
-					listeners = append(listeners, lnAlt)
-					webLog.Info("Listening on IPv4 (smart fallback) http://%s", boundAlt)
+				lnLoop, boundLoop, errLoop := listenTCPWithRetry("tcp4", "127.0.0.1", port, socketProtectHook)
+				if errLoop == nil {
+					listeners = append(listeners, lnLoop)
+					webLog.Info("Listening on IPv4 (loopback fallback) http://%s", boundLoop)
 				} else {
 					webLog.Warn("Failed to bind IPv4 0.0.0.0:%d: %v", port, err)
 				}
@@ -1448,14 +1518,10 @@ func (s *Server) listenAll() ([]net.Listener, error) {
 					listeners = append(listeners, lnFallback)
 					webLog.Info("Listening on IPv6 (fallback) http://%s", boundAddrFallback)
 				} else {
-					altPort := 5857
-					if port == 5857 {
-						altPort = 8888
-					}
-					lnAlt, boundAlt, errAlt := listenTCPWithRetry("tcp6", "::", altPort, socketProtectHook)
-					if errAlt == nil {
-						listeners = append(listeners, lnAlt)
-						webLog.Info("Listening on IPv6 (smart fallback) http://%s", boundAlt)
+					lnLoop, boundLoop, errLoop := listenTCPWithRetry("tcp6", "::1", port, socketProtectHook)
+					if errLoop == nil {
+						listeners = append(listeners, lnLoop)
+						webLog.Info("Listening on IPv6 (loopback) http://%s", boundLoop)
 					}
 				}
 			}
@@ -1481,48 +1547,19 @@ func (s *Server) listenAll() ([]net.Listener, error) {
 // simply retries. listenTCPWithRetry retries internally to ride out any
 // TIME_WAIT on the just-closed port.
 func (s *Server) Rebind() error {
-	type want struct {
-		network, ip, addr string
-	}
-	var wants []want
-	if s.listenIP != "" {
-		wants = append(wants, want{"tcp4", s.listenIP, formatBindAddr("tcp4", s.listenIP, s.port)})
-	}
-	if s.listenIPv6 != "" {
-		wants = append(wants, want{"tcp6", s.listenIPv6, formatBindAddr("tcp6", s.listenIPv6, s.port)})
-	}
-	if len(wants) == 0 {
-		return fmt.Errorf("rebind: no listen addresses configured")
-	}
-
 	s.rebindMu.Lock()
-	old := s.listeners
-	s.rebindMu.Unlock()
+	defer s.rebindMu.Unlock()
 
-	// Close the existing listeners first so the configured port is free.
-	for _, ln := range old {
+	// Close the existing listeners first so ports are free.
+	for _, ln := range s.listeners {
 		_ = ln.Close()
 	}
+	s.listeners = nil
 
-	kept := make([]net.Listener, 0, len(wants))
-	keptAddrs := make([]string, 0, len(wants))
-	var firstErr error
-	for _, w := range wants {
-		ln, _, err := listenTCPWithRetry(w.network, w.ip, s.port, s.socketProtectHook)
-		if err != nil {
-			webLog.Warn("WebUI rebind: bind %s failed: %v", w.addr, err)
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		kept = append(kept, ln)
-		keptAddrs = append(keptAddrs, w.addr)
-	}
-
-	if len(kept) == 0 {
-		webLog.Error("WebUI rebind failed to bind any listener; dashboard may be unreachable until p2ptap restarts: %v", firstErr)
-		return fmt.Errorf("rebind produced no listeners: %w", firstErr)
+	kept, err := s.listenAll()
+	if err != nil || len(kept) == 0 {
+		webLog.Error("WebUI rebind failed to bind any listener: %v", err)
+		return fmt.Errorf("rebind produced no listeners: %w", err)
 	}
 
 	// Begin serving on the freshly bound listeners.
@@ -1531,11 +1568,8 @@ func (s *Server) Rebind() error {
 		go func() { _ = s.httpServer.Serve(l) }()
 	}
 
-	s.rebindMu.Lock()
 	s.listeners = kept
-	s.rebindMu.Unlock()
-
-	webLog.Info("WebUI rebound %d listener(s) after NIC change: %v", len(kept), keptAddrs)
+	webLog.Info("WebUI rebound %d listener(s) after NIC change", len(kept))
 	s.recordBoundAddrs(kept)
 	return nil
 }

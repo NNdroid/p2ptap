@@ -1,4 +1,5 @@
-//go:build !linux && !windows && !darwin
+//go:build (!linux && !windows && !darwin) || android
+// +build !linux,!windows,!darwin android
 
 package node
 

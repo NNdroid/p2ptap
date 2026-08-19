@@ -116,21 +116,34 @@ func TestARPPingThreeNode(t *testing.T) {
 		bMac := net.HardwareAddr{}
 		dl := time.Now().Add(6 * time.Second)
 		for time.Now().Before(dl) {
-			arp := buildARPRequest(testMACA, net.ParseIP(srcIP), net.ParseIP(dstIP))
+			arp := buildARPRequest(from.localMAC, net.ParseIP(srcIP), net.ParseIP(dstIP))
 			fromPipe.Write(arp)
 			d := time.After(1500 * time.Millisecond)
 			answered := false
 			for !answered {
-				select {
-				case f := <-fromReader.frames:
-					if len(f) >= 42 && binary.BigEndian.Uint16(f[12:14]) == 0x0806 &&
-						binary.BigEndian.Uint16(f[20:22]) == 2 {
-						bMac = net.HardwareAddr(append([]byte(nil), f[22:28]...))
-						answered = true
+			wantIP := net.ParseIP(dstIP).To4()
+			select {
+			case f := <-fromReader.frames:
+				if len(f) >= 42 && binary.BigEndian.Uint16(f[12:14]) == 0x0806 &&
+					binary.BigEndian.Uint16(f[20:22]) == 2 {
+					// CRITICAL: the reply must come from the IP we actually
+					// asked about (ARP sender protocol address lives at
+					// f[28:32]). fromReader is a long-lived shared reader, so
+					// it can still hold ARP replies left over from an earlier
+					// retry or from a PREVIOUS ping in this test. Accepting any
+					// opcode-2 frame binds the WRONG MAC: the ICMP is then
+					// forwarded to the wrong peer and the ping reports "no
+					// delivery" even though the data path worked perfectly —
+					// which is exactly what made A->C and B->C look broken.
+					if !net.IP(f[28:32]).Equal(wantIP) {
+						continue // stale reply for a different target
 					}
-				case <-d:
+					bMac = net.HardwareAddr(append([]byte(nil), f[22:28]...))
 					answered = true
 				}
+			case <-d:
+				answered = true
+			}
 			}
 			if len(bMac) == 6 {
 				break
@@ -148,7 +161,7 @@ func TestARPPingThreeNode(t *testing.T) {
 			srcIP, dstIP, neg, algo, enc, from.isPeerReady(to.Host.ID()),
 			func() bool { _, pid := from.lookupPeerMACByIPv4(net.ParseIP(dstIP)); return pid != "" }())
 		marker := []byte("PING_" + srcIP + "_" + dstIP)
-		icmp := constructICMPv4PacketWithData(testMACA, bMac, net.ParseIP(srcIP), net.ParseIP(dstIP), 7000, 1, marker)
+		icmp := constructICMPv4PacketWithData(from.localMAC, bMac, net.ParseIP(srcIP), net.ParseIP(dstIP), 7000, 1, marker)
 		fromPipe.Write(icmp)
 		d := time.After(6 * time.Second)
 		for {
@@ -166,9 +179,13 @@ func TestARPPingThreeNode(t *testing.T) {
 	}
 
 	ok := true
+	// Forward and reverse pairs: verify fully bidirectional mesh communication
 	ok = ping(nodeA, nodeB, pipeA, pipeB, "10.0.0.1", "10.0.0.2") && ok
+	ok = ping(nodeB, nodeA, pipeB, pipeA, "10.0.0.2", "10.0.0.1") && ok
 	ok = ping(nodeA, nodeC, pipeA, pipeC, "10.0.0.1", "10.0.0.3") && ok
+	ok = ping(nodeC, nodeA, pipeC, pipeA, "10.0.0.3", "10.0.0.1") && ok
 	ok = ping(nodeB, nodeC, pipeB, pipeC, "10.0.0.2", "10.0.0.3") && ok
+	ok = ping(nodeC, nodeB, pipeC, pipeB, "10.0.0.3", "10.0.0.2") && ok
 	if !ok {
 		t.Errorf("multi-peer mesh: at least one directed ping failed")
 	}

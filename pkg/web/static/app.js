@@ -35,6 +35,16 @@
         let latestTopologyData = null; // full mesh topology from /api/topology (SPT hierarchy)
         const i18nDict = {
             en: {
+                score_loopback: "Loopback (Score 0)",
+                score_lan_direct: "LAN Direct (Score 10)",
+                score_wan_direct: "WAN Direct (Score 20)",
+                score_relay: "Relay (Score 100)",
+                priority_score_tooltip: "Routing Priority Score: lower is higher priority (0:Loopback, 10:LAN Direct, 20:WAN Direct, 100:Relay)",
+
+                channel_status_synced: "Synchronized",
+                lbl_peers: "peers",
+                channel_peekmap_desc: "Bootstrap Topology Sync",
+
                 default_node_name: "P2P TAP VPN Node",
                 login_title: "🔐 P2P TAP Dashboard Login",
                 login_subtitle: "This dashboard is protected. Enter your access token to continue.",
@@ -91,6 +101,50 @@
                 channel_dcutr_name: "DCUtR Hole-Punch & Relay",
                 channel_dcutr_desc: "Direct Connection Upgrade",
                 cipher_lbl: "Cipher",
+
+                proto_traffic_distribution: "Protocol Traffic Distribution",
+                frames_unit: "frames",
+                btn_global_resync: "Global Resync",
+                btn_resync: "Resync",
+                btn_resync_title: "Force SeqSync & Key Rotation",
+                cat_tab_all: "All",
+                cat_tab_data: "Data",
+                cat_tab_sync: "Sync & Security",
+                cat_tab_routing: "Routing",
+                cat_tab_transport: "Transport",
+                cat_tab_pubsub: "PubSub",
+                cat_tab_diagnostics: "Diagnostics",
+                tx_frames_lbl: "TX Frames",
+                rx_frames_lbl: "RX Frames",
+                sync_events_lbl: "Sync Events",
+                synced_peers_lbl: "Synced Peers",
+                resync_success: "SeqSync & Key Rotation triggered",
+
+                mesh_health_score_lbl: "Mesh Health",
+                mesh_health_title: "Overlay Mesh Link Quality & Self-Healing Status",
+                mesh_health_desc: "Real-time health assessment covering direct-path ratio, cryptographic integrity, packet loss, and routing stability",
+                btn_crypto_inspector: "Crypto & Sequence Inspector",
+                lbl_direct_ratio: "Direct Ratio",
+                lbl_crypto_grade: "Encryption Grade",
+                lbl_dedup_drops: "Window Dedup",
+                lbl_dup_conflicts: "IP Conflicts",
+                traffic_comp_title: "Ethernet & Network Traffic Composition",
+                crypto_inspector_title: "Peer Cryptography & Anti-Replay Sequence Inspector",
+                select_peer_lbl: "Select Peer:",
+                btn_resync_this_peer: "Resync This Peer",
+                btn_export_report: "Export Report",
+                diagnostic_export_success: "Diagnostic report exported successfully!",
+                sliding_window_lbl: "Anti-Replay Sliding Window (0..65535)",
+                ephemeral_fp_lbl: "Ephemeral ECDH Key Fingerprint",
+                tx_key_fp_lbl: "TxKey Fingerprint",
+                rx_key_fp_lbl: "RxKey Fingerprint",
+                cipher_algo_lbl: "Negotiated Cipher",
+                handshake_latency_lbl: "Handshake Latency",
+                tip_tap_failed: "❌ TAP device self-test failed: verify kernel driver and permissions.",
+                tip_dup_ips: "⚠️ {count} duplicate IP conflict(s) detected in mesh topology.",
+                tip_decrypt_errs: "⚠️ {count} decryption failure(s) observed. Click {btn} to inspect & resync.",
+                no_peers_connected: "No peers connected. Ready to establish secure P2P mesh.",
+                mesh_status_optimal: "Mesh link quality optimal: all connected peers securely synchronized with forward-secret AEAD.",
 
                 lbl_arp_broadcast: "ARP Broadcast Frames",
                 lbl_broadcast_pkts: "Broadcast Packets",
@@ -285,6 +339,7 @@
                 col_encryption: "Encryption",
                 col_status: "Conn Status",
                 col_return_path: "Return Path",
+                col_tap_path: "TAP Path",
                 conn_ok: "Connected",
                 conn_relay_ok: "Relay OK",
                 conn_connecting: "Connecting",
@@ -293,7 +348,14 @@
                 conn_unreachable: "Unreachable",
                 return_ok: "Return OK",
                 return_dead: "Return Dead",
-                return_idle: "Unknown",
+                return_idle: "Standby",
+                return_relay_only: "Relay Only",
+                return_asymmetric: "One-Way (Tx)",
+                return_mac_mismatch: "MAC Mismatch",
+                tp_ok: "TAP OK",
+                tp_fail: "TAP Fail",
+                tp_mac_mismatch: "MAC Mismatch",
+                tp_unknown: "Unprobed",
                 col_actions: "Actions",
                 topo_tx: "Outbound (Tx ➔)",
                 topo_rx: "Return (Rx ⬅️)",
@@ -438,6 +500,12 @@
                 run_ping: "🚀 Run Ping Test",
                 run_trace: "🔍 Run P2P Traceroute",
                 ping_placeholder: "e.g. 10.0.0.2 or 12D3KooW...",
+                view_visual: "📊 Visual Flow",
+                view_raw: ">_ Terminal",
+                diag_idle_title: "Select a peer or enter an address to start diagnostic",
+                diag_idle_desc: "Inspect real-time RTT latency, jitter stability, packet loss, and full overlay hop-by-hop forwarding topology.",
+                enc_plaintext: "Plaintext (none)",
+                enc_not_active: "Not Active",
                 active_peers: "⚡ Active P2P Peers",
                 routes_table: "🛣️ Smart P2P Overlay Routing Table",
                 stat_total_routes: "Total Computed Routes",
@@ -736,6 +804,117 @@
                 probing_pathways_desc: "Testing stream reachability, RTT, and transport types...",
             },
             "zh-CN": {
+                score_loopback: "本地回环 (Score 0)",
+                score_lan_direct: "局域网直连 (Score 10)",
+                score_wan_direct: "公网直连 (Score 20)",
+                score_relay: "中继转发 (Score 100)",
+                priority_score_tooltip: "路由链路优先级评分: 数值越小优先级越高 (0:本机回环, 10:局域网直连, 20:公网直连, 100:中继)",
+
+                btn_crypto_inspector: "\u52a0\u5bc6\u4e0e\u5e8f\u53f7\u63a2\u9488",
+                btn_export_report: "\u5bfc\u51fa\u8bca\u65ad\u62a5\u544a",
+                btn_global_resync: "\u5168\u5c40\u91cd\u65b0\u540c\u6b65",
+                btn_resync: "\u91cd\u534f\u5546",
+                btn_resync_this_peer: "\u91cd\u534f\u5546\u6b64\u8282\u70b9",
+                btn_resync_title: "\u5f3a\u5236 SeqSync \u63e1\u624b\u4e0e\u5bc6\u94a5\u8f6e\u6362",
+                cat_tab_all: "\u5168\u90e8",
+                cat_tab_data: "\u6570\u636e\u6d41",
+                cat_tab_diagnostics: "\u8bca\u65ad\u63a2\u9488",
+                cat_tab_pubsub: "\u5e7f\u64ad\u53d1\u5e03",
+                cat_tab_routing: "\u8def\u7531\u62d3\u6251",
+                cat_tab_sync: "\u540c\u6b65\u4e0e\u52a0\u5bc6",
+                cat_tab_transport: "\u5e95\u5c42\u4f20\u8f93",
+                channel_peekmap_desc: "\u5f15\u5bfc\u8282\u70b9\u62d3\u6251\u540c\u6b65",
+                channel_status_synced: "\u5df2\u540c\u6b65",
+                cipher_algo_lbl: "\u534f\u5546\u52a0\u5bc6\u7b97\u6cd5",
+                crypto_inspector_title: "\u8282\u70b9\u7aef\u5230\u7aef\u52a0\u5bc6\u4e0e\u9632\u91cd\u653e\u5e8f\u53f7\u63a2\u9488",
+                diag_idle_desc: "\u5b9e\u65f6\u63a2\u6d4b RTT \u5f80\u8fd4\u65f6\u5ef6\u3001\u6296\u52a8\u7a33\u5b9a\u6027\u3001\u4e22\u5305\u7387\u53ca\u5168\u7f51\u9010\u8df3\u4e2d\u7ee7\u62d3\u6251\u3002",
+                diag_idle_title: "\u8bf7\u9009\u62e9\u8282\u70b9\u6216\u8f93\u5165\u76ee\u6807\u5730\u5740\u5f00\u59cb\u8bca\u65ad",
+                diagnostic_export_success: "\u8bca\u65ad\u62a5\u544a\u5bfc\u51fa\u6210\u529f\uff01",
+                enc_not_active: "\u672a\u6fc0\u6d3b",
+                enc_plaintext: "\u660e\u6587 (\u672a\u52a0\u5bc6)",
+                ephemeral_fp_lbl: "\u4e34\u65f6 ECDH \u5bc6\u94a5\u6307\u7eb9 (PFS)",
+                frames_unit: "\u5e27",
+                handshake_latency_lbl: "\u63e1\u624b\u6536\u655b\u65f6\u5ef6",
+                hops_label: "\u8282\u70b9",
+                lbl_crypto_grade: "\u52a0\u5bc6\u5b89\u5168\u8bc4\u7ea7",
+                lbl_dedup_drops: "\u6ed1\u52a8\u7a97\u53e3\u53bb\u91cd",
+                lbl_direct_ratio: "\u76f4\u8fde\u94fe\u8def\u5360\u6bd4",
+                lbl_dup_conflicts: "IP \u5730\u5740\u51b2\u7a81",
+                lbl_peers: "\u8282\u70b9",
+                mesh_health_desc: "\u7efc\u5408\u8bc4\u4f30\u76f4\u8fde\u8def\u5f84\u6bd4\u3001\u524d\u5411\u5b89\u5168\u52a0\u5bc6\u5b8c\u5907\u5ea6\u3001\u4e22\u5305\u7387\u53ca\u94fe\u8def\u81ea\u6108\u7a33\u5b9a\u6027",
+                mesh_health_score_lbl: "\u7f51\u72b6\u5065\u5eb7\u5ea6",
+                mesh_health_title: "\u8986\u76d6\u7f51\u7edc\u94fe\u8def\u8d28\u91cf\u4e0e\u81ea\u6108\u72b6\u6001",
+                mesh_status_optimal: "\u7f51\u72b6\u94fe\u8def\u8d28\u91cf\u5904\u4e8e\u6700\u4f73\u72b6\u6001\uff1a\u6240\u6709\u8fde\u63a5\u8282\u70b9\u5747\u5df2\u901a\u8fc7\u524d\u5411\u5b89\u5168 AEAD \u5efa\u7acb\u5f3a\u52a0\u5bc6\u540c\u6b65\u3002",
+                no_peers_connected: "\u5f53\u524d\u65e0\u6d3b\u52a8\u8282\u70b9\u8fde\u63a5\uff0c\u5c31\u7eea\u5efa\u7acb P2P \u5b89\u5168\u7f51\u72b6\u7f51\u7edc\u3002",
+                proto_traffic_distribution: "\u534f\u8bae\u6d41\u91cf\u5206\u5e03",
+                resync_success: "\u5df2\u89e6\u53d1 SeqSync \u63e1\u624b\u4e0e\u5bc6\u94a5\u8f6e\u6362",
+                rx_frames_lbl: "\u63a5\u6536\u5e27\u6570 (RX)",
+                rx_key_fp_lbl: "RxKey \u89e3\u5bc6\u6307\u7eb9",
+                select_peer_lbl: "\u9009\u62e9\u76ee\u6807\u8282\u70b9:",
+                sliding_window_lbl: "\u9632\u91cd\u653e\u6ed1\u52a8\u7a97\u53e3 (0..65535)",
+                sync_events_lbl: "\u540c\u6b65\u4e8b\u4ef6",
+                synced_peers_lbl: "\u5df2\u540c\u6b65\u8282\u70b9",
+                tip_decrypt_errs: "\u26a0\ufe0f \u68c0\u6d4b\u5230 {count} \u6b21\u89e3\u5bc6\u5931\u8d25\u3002\u70b9\u51fb {btn} \u68c0\u67e5\u5e76\u91cd\u65b0\u540c\u6b65\u5bc6\u94a5\u3002",
+                tip_dup_ips: "\u26a0\ufe0f \u5728\u7f51\u72b6\u62d3\u6251\u4e2d\u68c0\u6d4b\u5230 {count} \u4e2a\u91cd\u590d IP / \u91cd\u53e0\u7f51\u6bb5\u51b2\u7a81\u3002",
+                tip_tap_failed: "\u274c TAP \u865a\u62df\u7f51\u5361\u81ea\u68c0\u5931\u8d25\uff1a\u8bf7\u68c0\u67e5\u5185\u6838\u9a71\u52a8\u53ca\u8fd0\u884c\u6743\u9650\u3002",
+                traffic_comp_title: "\u4ee5\u592a\u7f51\u4e0e\u7f51\u7edc\u534f\u8bae\u6d41\u91cf\u6784\u6210",
+                tx_frames_lbl: "\u53d1\u9001\u5e27\u6570 (TX)",
+                tx_key_fp_lbl: "TxKey \u52a0\u5bc6\u6307\u7eb9",
+                view_raw: ">_ \u7ec8\u7aef\u8f93\u51fa",
+                view_visual: "\ud83d\udcca \u53ef\u89c6\u5316\u6d41\u5411",
+
+                "btn_crypto_inspector": "\u52a0\u5bc6\u4e0e\u5e8f\u53f7\u63a2\u9488",
+                "btn_export_report": "\u5bfc\u51fa\u8bca\u65ad\u62a5\u544a",
+                "btn_global_resync": "\u5168\u5c40\u91cd\u65b0\u540c\u6b65",
+                "btn_resync": "\u91cd\u534f\u5546",
+                "btn_resync_this_peer": "\u91cd\u534f\u5546\u6b64\u8282\u70b9",
+                "btn_resync_title": "\u5f3a\u5236 SeqSync \u63e1\u624b\u4e0e\u5bc6\u94a5\u8f6e\u6362",
+                "cat_tab_all": "\u5168\u90e8",
+                "cat_tab_data": "\u6570\u636e\u6d41",
+                "cat_tab_diagnostics": "\u8bca\u65ad\u63a2\u9488",
+                "cat_tab_pubsub": "\u5e7f\u64ad\u53d1\u5e03",
+                "cat_tab_routing": "\u8def\u7531\u62d3\u6251",
+                "cat_tab_sync": "\u540c\u6b65\u4e0e\u52a0\u5bc6",
+                "cat_tab_transport": "\u5e95\u5c42\u4f20\u8f93",
+                "channel_peekmap_desc": "\u5f15\u5bfc\u8282\u70b9\u62d3\u6251\u540c\u6b65",
+                "channel_status_synced": "\u5df2\u540c\u6b65",
+                "cipher_algo_lbl": "\u534f\u5546\u52a0\u5bc6\u7b97\u6cd5",
+                "crypto_inspector_title": "\u8282\u70b9\u7aef\u5230\u7aef\u52a0\u5bc6\u4e0e\u9632\u91cd\u653e\u5e8f\u53f7\u63a2\u9488",
+                "diag_idle_desc": "\u5b9e\u65f6\u63a2\u6d4b RTT \u5f80\u8fd4\u65f6\u5ef6\u3001\u6296\u52a8\u7a33\u5b9a\u6027\u3001\u4e22\u5305\u7387\u53ca\u5168\u7f51\u9010\u8df3\u4e2d\u7ee7\u62d3\u6251\u3002",
+                "diag_idle_title": "\u8bf7\u9009\u62e9\u8282\u70b9\u6216\u8f93\u5165\u76ee\u6807\u5730\u5740\u5f00\u59cb\u8bca\u65ad",
+                "diagnostic_export_success": "\u8bca\u65ad\u62a5\u544a\u5bfc\u51fa\u6210\u529f\uff01",
+                "enc_not_active": "\u672a\u6fc0\u6d3b",
+                "enc_plaintext": "\u660e\u6587 (\u672a\u52a0\u5bc6)",
+                "ephemeral_fp_lbl": "\u4e34\u65f6 ECDH \u5bc6\u94a5\u6307\u7eb9 (PFS)",
+                "frames_unit": "\u5e27",
+                "handshake_latency_lbl": "\u63e1\u624b\u6536\u655b\u65f6\u5ef6",
+                "hops_label": "\u8282\u70b9",
+                "lbl_crypto_grade": "\u52a0\u5bc6\u5b89\u5168\u8bc4\u7ea7",
+                "lbl_dedup_drops": "\u6ed1\u52a8\u7a97\u53e3\u53bb\u91cd",
+                "lbl_direct_ratio": "\u76f4\u8fde\u94fe\u8def\u5360\u6bd4",
+                "lbl_dup_conflicts": "IP \u5730\u5740\u51b2\u7a81",
+                "mesh_health_desc": "\u7efc\u5408\u8bc4\u4f30\u76f4\u8fde\u8def\u5f84\u6bd4\u3001\u524d\u5411\u5b89\u5168\u52a0\u5bc6\u5b8c\u5907\u5ea6\u3001\u4e22\u5305\u7387\u53ca\u94fe\u8def\u81ea\u6108\u7a33\u5b9a\u6027",
+                "mesh_health_score_lbl": "\u7f51\u72b6\u5065\u5eb7\u5ea6",
+                "mesh_health_title": "\u8986\u76d6\u7f51\u7edc\u94fe\u8def\u8d28\u91cf\u4e0e\u81ea\u6108\u72b6\u6001",
+                "mesh_status_optimal": "\u7f51\u72b6\u94fe\u8def\u8d28\u91cf\u5904\u4e8e\u6700\u4f73\u72b6\u6001\uff1a\u6240\u6709\u8fde\u63a5\u8282\u70b9\u5747\u5df2\u901a\u8fc7\u524d\u5411\u5b89\u5168 AEAD \u5efa\u7acb\u5f3a\u52a0\u5bc6\u540c\u6b65\u3002",
+                "no_peers_connected": "\u5f53\u524d\u65e0\u6d3b\u52a8\u8282\u70b9\u8fde\u63a5\uff0c\u5c31\u7eea\u5efa\u7acb P2P \u5b89\u5168\u7f51\u72b6\u7f51\u7edc\u3002",
+                "proto_traffic_distribution": "\u534f\u8bae\u6d41\u91cf\u5206\u5e03",
+                "resync_success": "\u5df2\u89e6\u53d1 SeqSync \u63e1\u624b\u4e0e\u5bc6\u94a5\u8f6e\u6362",
+                "rx_frames_lbl": "\u63a5\u6536\u5e27\u6570 (RX)",
+                "rx_key_fp_lbl": "RxKey \u89e3\u5bc6\u6307\u7eb9",
+                "select_peer_lbl": "\u9009\u62e9\u76ee\u6807\u8282\u70b9:",
+                "sliding_window_lbl": "\u9632\u91cd\u653e\u6ed1\u52a8\u7a97\u53e3 (0..65535)",
+                "sync_events_lbl": "\u540c\u6b65\u4e8b\u4ef6",
+                "synced_peers_lbl": "\u5df2\u540c\u6b65\u8282\u70b9",
+                "tip_decrypt_errs": "\u26a0\ufe0f \u68c0\u6d4b\u5230 {count} \u6b21\u89e3\u5bc6\u5931\u8d25\u3002\u70b9\u51fb {btn} \u68c0\u67e5\u5e76\u91cd\u65b0\u540c\u6b65\u5bc6\u94a5\u3002",
+                "tip_dup_ips": "\u26a0\ufe0f \u5728\u7f51\u72b6\u62d3\u6251\u4e2d\u68c0\u6d4b\u5230 {count} \u4e2a\u91cd\u590d IP / \u91cd\u53e0\u7f51\u6bb5\u51b2\u7a81\u3002",
+                "tip_tap_failed: ": "\u274c TAP \u865a\u62df\u7f51\u5361\u81ea\u68c0\u5931\u8d25\uff1a\u8bf7\u68c0\u67e5\u5185\u6838\u9a71\u52a8\u53ca\u8fd0\u884c\u6743\u9650\u3002",
+                "traffic_comp_title": "\u4ee5\u592a\u7f51\u4e0e\u7f51\u7edc\u534f\u8bae\u6d41\u91cf\u6784\u6210",
+                "tx_frames_lbl": "\u53d1\u9001\u5e27\u6570 (TX)",
+                "tx_key_fp_lbl": "TxKey \u52a0\u5bc6\u6307\u7eb9",
+                "view_raw": ">_ \u7ec8\u7aef\u8f93\u51fa",
+                "view_visual": "\ud83d\udcca \u53ef\u89c6\u5316\u6d41\u5411",
+
                 default_node_name: "P2P TAP 虚拟专网节点",
                 login_title: "🔐 P2P TAP 仪表盘登录",
                 login_subtitle: "此仪表盘受保护，请输入访问令牌以继续。",
@@ -792,6 +971,50 @@
                 channel_dcutr_name: "DCUtR 自动打洞与中继",
                 channel_dcutr_desc: "NAT 直连打洞自动升级",
                 cipher_lbl: "加密算法",
+
+                proto_traffic_distribution: "协议吞吐流量分布",
+                frames_unit: "帧",
+                btn_global_resync: "全网重同步",
+                btn_resync: "重同步",
+                btn_resync_title: "强制序号重同步与前向保密密钥轮换",
+                cat_tab_all: "全部",
+                cat_tab_data: "数据传输",
+                cat_tab_sync: "序列与安全",
+                cat_tab_routing: "拓扑路由",
+                cat_tab_transport: "传输与打洞",
+                cat_tab_pubsub: "发布订阅",
+                cat_tab_diagnostics: "诊断回显",
+                tx_frames_lbl: "发送帧量",
+                rx_frames_lbl: "接收帧量",
+                sync_events_lbl: "同步事件",
+                synced_peers_lbl: "已同步节点",
+                resync_success: "已触发序号重同步与前向保密密钥轮换",
+
+                mesh_health_score_lbl: "全网健康度",
+                mesh_health_title: "Overlay Mesh 链路质量与自愈状态",
+                mesh_health_desc: "实时综合评估全网节点直连率、密码学加密完整度、丢包率与拓扑选路稳定性",
+                btn_crypto_inspector: "密码学与序列分析",
+                lbl_direct_ratio: "直连率",
+                lbl_crypto_grade: "加密等级",
+                lbl_dedup_drops: "窗口去重",
+                lbl_dup_conflicts: "IP 冲突",
+                traffic_comp_title: "以太网与网络层流量构成",
+                crypto_inspector_title: "节点密码学与防重放序列深度观测台",
+                select_peer_lbl: "选择观测节点:",
+                btn_resync_this_peer: "重新协商该节点",
+                btn_export_report: "导出网络报告",
+                diagnostic_export_success: "已成功导出全网诊断快照报告！",
+                sliding_window_lbl: "防重放滑动窗口 (0..65535 计数器空间)",
+                ephemeral_fp_lbl: "临时 ECDH 密钥指纹",
+                tx_key_fp_lbl: "发送密钥指纹 (TxKey)",
+                rx_key_fp_lbl: "接收密钥指纹 (RxKey)",
+                cipher_algo_lbl: "协商加密套件",
+                handshake_latency_lbl: "握手收敛耗时",
+                tip_tap_failed: "❌ TAP 虚拟网卡自检失败：请检查系统内核驱动与运行权限。",
+                tip_dup_ips: "⚠️ 在 Mesh 拓扑中检测到 {count} 个冲突的重复 IP。",
+                tip_decrypt_errs: "⚠️ 观察到 {count} 次解密失败。点击「{btn}」查看详情并重同步。",
+                no_peers_connected: "暂无在线节点连接，已准备就绪以建立安全 P2P 虚拟网。",
+                mesh_status_optimal: "全网链路质量极佳：所有在线节点均已通过具备前向保密的 AEAD 安全同步。",
 
                 lbl_arp_broadcast: "ARP 广播以太帧",
                 lbl_broadcast_pkts: "广播包",
@@ -985,6 +1208,7 @@
                 col_jitter_loss: "抖动 / 丢包率",
                 col_status: "连接状态",
                 col_return_path: "回程状态",
+                col_tap_path: "TAP 路径",
                 conn_ok: "已连接",
                 conn_relay_ok: "中继正常",
                 conn_connecting: "连接中",
@@ -992,8 +1216,15 @@
                 conn_obf_failed: "解密失败",
                 conn_unreachable: "不可达",
                 return_ok: "回程正常",
-                return_dead: "回程断",
-                return_idle: "回程未知",
+                return_dead: "回程中断",
+                return_idle: "待机就绪",
+                return_relay_only: "信令中继",
+                return_asymmetric: "单向仅发",
+                return_mac_mismatch: "MAC不一致",
+                tp_ok: "TAP 正常",
+                tp_fail: "TAP 异常",
+                tp_mac_mismatch: "MAC 不一致",
+                tp_unknown: "未探测",
                 col_actions: "操作",
                 topo_tx: "去程链路 (Tx ➔)",
                 topo_rx: "回程链路 (Rx ⬅️)",
@@ -1138,6 +1369,12 @@
                 run_ping: "🚀 运行 Ping 测试",
                 run_trace: "🔍 运行 P2P 路径追踪",
                 ping_placeholder: "例如 10.0.0.2 或 12D3KooW...",
+                view_visual: "📊 可视化流图",
+                view_raw: ">_ 终端模式",
+                diag_idle_title: "选择节点或输入地址以启动诊断",
+                diag_idle_desc: "实时检测 RTT 延迟、抖动稳定性、丢包率及完整 Overlay 逐跳转发拓扑。",
+                enc_plaintext: "明文传输 (无加密)",
+                enc_not_active: "未启用",
                 active_peers: "⚡ 在线 P2P 节点",
                 routes_table: "🛣️ 智能 P2P Overlay 路由表",
                 stat_total_routes: "已计算的路由总数",
@@ -1496,6 +1733,117 @@
                 topo_tt_uptime: "运行时长：",
             },
             "zh-TW": {
+                score_loopback: "本機回環 (Score 0)",
+                score_lan_direct: "區域網直連 (Score 10)",
+                score_wan_direct: "公網直連 (Score 20)",
+                score_relay: "中繼轉發 (Score 100)",
+                priority_score_tooltip: "路由鏈路優先級評分: 數值越小優先級越高 (0:本機回環, 10:區域網直連, 20:公網直連, 100:中繼)",
+
+                btn_crypto_inspector: "\u52a0\u5bc6\u8207\u5e8f\u865f\u63a2\u91dd",
+                btn_export_report: "\u532f\u51fa\u8a3a\u65b7\u5831\u544a",
+                btn_global_resync: "\u5168\u57df\u91cd\u65b0\u540c\u6b65",
+                btn_resync: "\u91cd\u5354\u5546",
+                btn_resync_this_peer: "\u91cd\u5354\u5546\u6b64\u7bc0\u9ede",
+                btn_resync_title: "\u5f37\u5236 SeqSync \u63e1\u624b\u8207\u91d1\u9470\u8f2a\u63db",
+                cat_tab_all: "\u5168\u90e8",
+                cat_tab_data: "\u8cc7\u6599\u6d41",
+                cat_tab_diagnostics: "\u8a3a\u65b7\u63a2\u91dd",
+                cat_tab_pubsub: "\u5ee3\u64ad\u767c\u5e03",
+                cat_tab_routing: "\u8def\u7531\u62d3\u64b2",
+                cat_tab_sync: "\u540c\u6b65\u8207\u52a0\u5bc6",
+                cat_tab_transport: "\u5e95\u5c64\u50b3\u8f38",
+                channel_peekmap_desc: "\u5f15\u5c0e\u7bc0\u9ede\u62d3\u64b2\u540c\u6b65",
+                channel_status_synced: "\u5df2\u540c\u6b65",
+                cipher_algo_lbl: "\u5354\u5546\u52a0\u5bc6\u6f14\u7b97\u6cd5",
+                crypto_inspector_title: "\u7bc0\u9ede\u7aef\u5c0d\u7aef\u52a0\u5bc6\u8207\u9632\u91cd\u653e\u5e8f\u865f\u63a2\u91dd",
+                diag_idle_desc: "\u5373\u6642\u63a2\u6e2c RTT \u4f86\u56de\u5ef6\u9072\u3001\u6296\u52d5\u7a69\u5b9a\u6027\u3001\u5c01\u5305\u907a\u5931\u7387\u53ca\u5168\u7db2\u9010\u8df3\u4e2d\u7e7c\u62d3\u64b2\u3002",
+                diag_idle_title: "\u8acb\u9078\u64c7\u7bc0\u9ede\u6216\u8f38\u5165\u76ee\u6a19\u4f4d\u5740\u958b\u59cb\u8a3a\u65b7",
+                diagnostic_export_success: "\u8a3a\u65b7\u5831\u544a\u532f\u51fa\u6210\u529f\uff01",
+                enc_not_active: "\u672a\u555f\u7528",
+                enc_plaintext: "\u660e\u6587 (\u672a\u52a0\u5bc6)",
+                ephemeral_fp_lbl: "\u81e8\u6642 ECDH \u91d1\u9470\u6307\u7d0b (PFS)",
+                frames_unit: "\u8a0a\u6846",
+                handshake_latency_lbl: "\u63e1\u624b\u6536\u6582\u5ef6\u9072",
+                hops_label: "\u7bc0\u9ede",
+                lbl_crypto_grade: "\u52a0\u5bc6\u5b89\u5168\u8a55\u7d1a",
+                lbl_dedup_drops: "\u6ed1\u52d5\u8996\u7a97\u53bb\u91cd",
+                lbl_direct_ratio: "\u76f4\u9023\u9023\u7d50\u4f54\u6bd4",
+                lbl_dup_conflicts: "IP \u4f4d\u5740\u885d\u7a81",
+                lbl_peers: "\u7bc0\u9ede",
+                mesh_health_desc: "\u7d9c\u5408\u8a55\u4f30\u76f4\u9023\u8def\u5f91\u6bd4\u3001\u524d\u5411\u5b89\u5168\u52a0\u5bc6\u5b8c\u5099\u5ea6\u3001\u5c01\u5305\u907a\u5931\u7387\u53ca\u9023\u7d50\u81ea\u7652\u7a69\u5b9a\u6027",
+                mesh_health_score_lbl: "\u7db2\u72c0\u5065\u5eb7\u5ea6",
+                mesh_health_title: "\u8986\u84cb\u7db2\u8def\u9023\u7d50\u54c1\u8cea\u8207\u81ea\u7652\u72c0\u614b",
+                mesh_status_optimal: "\u7db2\u72c0\u9023\u7d50\u54c1\u8cea\u8655\u65bc\u6700\u4f73\u72c0\u614b\uff1a\u6240\u6709\u9023\u7dda\u7bc0\u9ede\u5747\u5df2\u900f\u904e\u524d\u5411\u5b89\u5168 AEAD \u5efa\u7acb\u5f37\u52a0\u5bc6\u540c\u6b65\u3002",
+                no_peers_connected: "\u76ee\u524d\u7121\u6d3b\u52d5\u7bc0\u9ede\u9023\u7dda\uff0c\u5c31\u7dd2\u5efa\u7acb P2P \u5b89\u5168\u7db2\u72c0\u7db2\u8def\u3002",
+                proto_traffic_distribution: "\u901a\u8a0a\u5354\u5b9a\u6d41\u91cf\u5206\u4f48",
+                resync_success: "\u5df2\u89f8\u767c SeqSync \u63e1\u624b\u8207\u91d1\u9470\u8f2a\u63db",
+                rx_frames_lbl: "\u63a5\u6536\u8a0a\u6846\u6578 (RX)",
+                rx_key_fp_lbl: "RxKey \u89e3\u5bc6\u6307\u7d0b",
+                select_peer_lbl: "\u9078\u64c7\u76ee\u6a19\u7bc0\u9ede:",
+                sliding_window_lbl: "\u9632\u91cd\u653e\u6ed1\u52d5\u8996\u7a97 (0..65535)",
+                sync_events_lbl: "\u540c\u6b65\u4e8b\u4ef6",
+                synced_peers_lbl: "\u5df2\u540c\u6b65\u7bc0\u9ede",
+                tip_decrypt_errs: "\u26a0\ufe0f \u5075\u6e2c\u5230 {count} \u6b21\u89e3\u5bc6\u5931\u6557\u3002\u9ede\u64ca {btn} \u6aa2\u67e5\u4e26\u91cd\u65b0\u540c\u6b65\u91d1\u9470\u3002",
+                tip_dup_ips: "\u26a0\ufe0f \u5728\u7db2\u72c0\u62d3\u64b2\u4e2d\u5075\u6e2c\u5230 {count} \u500b\u91cd\u8907 IP / \u91cd\u758a\u5b50\u7db2\u8def\u885d\u7a81\u3002",
+                tip_tap_failed: "\u274c TAP \u865b\u64ec\u7db2\u5361\u81ea\u6211\u6aa2\u6e2c\u5931\u6557\uff1a\u8acb\u6aa2\u67e5\u6838\u5fc3\u9a45\u52d5\u53ca\u6b0a\u9650\u3002",
+                traffic_comp_title: "\u4e59\u592a\u7db2\u8def\u8207\u7db2\u8def\u901a\u8a0a\u5354\u5b9a\u6d41\u91cf\u69cb\u6210",
+                tx_frames_lbl: "\u767c\u9001\u8a0a\u6846\u6578 (TX)",
+                tx_key_fp_lbl: "TxKey \u52a0\u5bc6\u6307\u7d0b",
+                view_raw: ">_ \u7d42\u7aef\u6a5f\u8f38\u51fa",
+                view_visual: "\ud83d\udcca \u8996\u89ba\u5316\u6d41\u5411",
+
+                "btn_crypto_inspector": "\u52a0\u5bc6\u8207\u5e8f\u865f\u63a2\u91dd",
+                "btn_export_report": "\u532f\u51fa\u8a3a\u65b7\u5831\u544a",
+                "btn_global_resync": "\u5168\u57df\u91cd\u65b0\u540c\u6b65",
+                "btn_resync": "\u91cd\u5354\u5546",
+                "btn_resync_this_peer": "\u91cd\u5354\u5546\u6b64\u7bc0\u9ede",
+                "btn_resync_title": "\u5f37\u5236 SeqSync \u63e1\u624b\u8207\u91d1\u9470\u8f2a\u63db",
+                "cat_tab_all": "\u5168\u90e8",
+                "cat_tab_data": "\u8cc7\u6599\u6d41",
+                "cat_tab_diagnostics": "\u8a3a\u65b7\u63a2\u91dd",
+                "cat_tab_pubsub": "\u5ee3\u64ad\u767c\u5e03",
+                "cat_tab_routing": "\u8def\u7531\u62d3\u64b2",
+                "cat_tab_sync": "\u540c\u6b65\u8207\u52a0\u5bc6",
+                "cat_tab_transport": "\u5e95\u5c64\u50b3\u8f38",
+                "channel_peekmap_desc": "\u5f15\u5c0e\u7bc0\u9ede\u62d3\u64b2\u540c\u6b65",
+                "channel_status_synced": "\u5df2\u540c\u6b65",
+                "cipher_algo_lbl": "\u5354\u5546\u52a0\u5bc6\u6f14\u7b97\u6cd5",
+                "crypto_inspector_title": "\u7bc0\u9ede\u7aef\u5c0d\u7aef\u52a0\u5bc6\u8207\u9632\u91cd\u653e\u5e8f\u865f\u63a2\u91dd",
+                "diag_idle_desc": "\u5373\u6642\u63a2\u6e2c RTT \u4f86\u56de\u5ef6\u9072\u3001\u6296\u52d5\u7a69\u5b9a\u6027\u3001\u5c01\u5305\u907a\u5931\u7387\u53ca\u5168\u7db2\u9010\u8df3\u4e2d\u7e7c\u62d3\u64b2\u3002",
+                "diag_idle_title": "\u8acb\u9078\u64c7\u7bc0\u9ede\u6216\u8f38\u5165\u76ee\u6a19\u4f4d\u5740\u958b\u59cb\u8a3a\u65b7",
+                "diagnostic_export_success": "\u8a3a\u65b7\u5831\u544a\u532f\u51fa\u6210\u529f\uff01",
+                "enc_not_active": "\u672a\u555f\u7528",
+                "enc_plaintext": "\u660e\u6587 (\u672a\u52a0\u5bc6)",
+                "ephemeral_fp_lbl": "\u81e8\u6642 ECDH \u91d1\u9470\u6307\u7d0b (PFS)",
+                "frames_unit": "\u8a0a\u6846",
+                "handshake_latency_lbl": "\u63e1\u624b\u6536\u6582\u5ef6\u9072",
+                "hops_label": "\u7bc0\u9ede",
+                "lbl_crypto_grade": "\u52a0\u5bc6\u5b89\u5168\u8a55\u7d1a",
+                "lbl_dedup_drops": "\u6ed1\u52d5\u8996\u7a97\u53bb\u91cd",
+                "lbl_direct_ratio": "\u76f4\u9023\u9023\u7d50\u4f54\u6bd4",
+                "lbl_dup_conflicts": "IP \u4f4d\u5740\u885d\u7a81",
+                "mesh_health_desc": "\u7d9c\u5408\u8a55\u4f30\u76f4\u9023\u8def\u5f91\u6bd4\u3001\u524d\u5411\u5b89\u5168\u52a0\u5bc6\u5b8c\u5099\u5ea6\u3001\u5c01\u5305\u907a\u5931\u7387\u53ca\u9023\u7d50\u81ea\u7652\u7a69\u5b9a\u6027",
+                "mesh_health_score_lbl": "\u7db2\u72c0\u5065\u5eb7\u5ea6",
+                "mesh_health_title": "\u8986\u84cb\u7db2\u8def\u9023\u7d50\u54c1\u8cea\u8207\u81ea\u7652\u72c0\u614b",
+                "mesh_status_optimal": "\u7db2\u72c0\u9023\u7d50\u54c1\u8cea\u8655\u65bc\u6700\u4f73\u72c0\u614b\uff1a\u6240\u6709\u9023\u7dda\u7bc0\u9ede\u5747\u5df2\u900f\u904e\u524d\u5411\u5b89\u5168 AEAD \u5efa\u7acb\u5f37\u52a0\u5bc6\u540c\u6b65\u3002",
+                "no_peers_connected": "\u76ee\u524d\u7121\u6d3b\u52d5\u7bc0\u9ede\u9023\u7dda\uff0c\u5c31\u7dd2\u5efa\u7acb P2P \u5b89\u5168\u7db2\u72c0\u7db2\u8def\u3002",
+                "proto_traffic_distribution": "\u901a\u8a0a\u5354\u5b9a\u6d41\u91cf\u5206\u4f48",
+                "resync_success": "\u5df2\u89f8\u767c SeqSync \u63e1\u624b\u8207\u91d1\u9470\u8f2a\u63db",
+                "rx_frames_lbl": "\u63a5\u6536\u8a0a\u6846\u6578 (RX)",
+                "rx_key_fp_lbl": "RxKey \u89e3\u5bc6\u6307\u7d0b",
+                "select_peer_lbl": "\u9078\u64c7\u76ee\u6a19\u7bc0\u9ede:",
+                "sliding_window_lbl": "\u9632\u91cd\u653e\u6ed1\u52d5\u8996\u7a97 (0..65535)",
+                "sync_events_lbl": "\u540c\u6b65\u4e8b\u4ef6",
+                "synced_peers_lbl": "\u5df2\u540c\u6b65\u7bc0\u9ede",
+                "tip_decrypt_errs": "\u26a0\ufe0f \u5075\u6e2c\u5230 {count} \u6b21\u89e3\u5bc6\u5931\u6557\u3002\u9ede\u64ca {btn} \u6aa2\u67e5\u4e26\u91cd\u65b0\u540c\u6b65\u91d1\u9470\u3002",
+                "tip_dup_ips": "\u26a0\ufe0f \u5728\u7db2\u72c0\u62d3\u64b2\u4e2d\u5075\u6e2c\u5230 {count} \u500b\u91cd\u8907 IP / \u91cd\u758a\u5b50\u7db2\u8def\u885d\u7a81\u3002",
+                "tip_tap_failed": "\u274c TAP \u865b\u64ec\u7db2\u5361\u81ea\u6211\u6aa2\u6e2c\u5931\u6557\uff1a\u8acb\u6aa2\u67e5\u6838\u5fc3\u9a45\u52d5\u53ca\u6b0a\u9650\u3002",
+                "traffic_comp_title": "\u4e59\u592a\u7db2\u8def\u8207\u7db2\u8def\u901a\u8a0a\u5354\u5b9a\u6d41\u91cf\u69cb\u6210",
+                "tx_frames_lbl": "\u767c\u9001\u8a0a\u6846\u6578 (TX)",
+                "tx_key_fp_lbl": "TxKey \u52a0\u5bc6\u6307\u7d0b",
+                "view_raw": ">_ \u7d42\u7aef\u6a5f\u8f38\u51fa",
+                "view_visual": "\ud83d\udcca \u8996\u89ba\u5316\u6d41\u5411",
+
                 default_node_name: "P2P TAP 虛擬專網節點",
                 login_title: "🔐 P2P TAP 儀表板登入",
                 login_subtitle: "此儀表板受保護，請輸入存取令牌以繼續。",
@@ -1606,6 +1954,7 @@
                 col_jitter_loss: "抖動 / 丟包率",
                 col_status: "連線狀態",
                 col_return_path: "回程狀態",
+                col_tap_path: "TAP 路徑",
                 conn_ok: "已連線",
                 conn_relay_ok: "中繼正常",
                 conn_connecting: "連線中",
@@ -1613,8 +1962,15 @@
                 conn_obf_failed: "解密失敗",
                 conn_unreachable: "無法連線",
                 return_ok: "回程正常",
-                return_dead: "回程斷",
-                return_idle: "回程未知",
+                return_dead: "回程中斷",
+                return_idle: "待機就緒",
+                return_relay_only: "信令中繼",
+                return_asymmetric: "單向僅發",
+                return_mac_mismatch: "MAC不一致",
+                tp_ok: "TAP 正常",
+                tp_fail: "TAP 異常",
+                tp_mac_mismatch: "MAC 不一致",
+                tp_unknown: "未探測",
                 col_actions: "操作",
                 topo_tx: "去程鏈路 (Tx ➔)",
                 topo_rx: "回程鏈路 (Rx ⬅️)",
@@ -2194,6 +2550,117 @@
                 topo_via: "經由",
             },
             ja: {
+                score_loopback: "ループバック (Score 0)",
+                score_lan_direct: "LAN直接 (Score 10)",
+                score_wan_direct: "WAN直接 (Score 20)",
+                score_relay: "リレー転送 (Score 100)",
+                priority_score_tooltip: "ルーティング優先度スコア: 小さいほど優先 (0:ループバック, 10:LAN直接, 20:WAN直接, 100:リレー)",
+
+                btn_crypto_inspector: "\u6697\u53f7\u5316\uff06\u30b7\u30fc\u30b1\u30f3\u30b9\u8a3a\u65ad",
+                btn_export_report: "\u8a3a\u65ad\u30ec\u30dd\u30fc\u30c8\u51fa\u529b",
+                btn_global_resync: "\u5168\u4f53\u518d\u540c\u671f",
+                btn_resync: "\u518d\u30cd\u30b4\u30b7\u30a8\u30fc\u30b7\u30e7\u30f3",
+                btn_resync_this_peer: "\u3053\u306e\u30d4\u30a2\u3068\u518d\u540c\u671f",
+                btn_resync_title: "SeqSync \u518d\u30cd\u30b4\u30b7\u30a8\u30fc\u30b7\u30e7\u30f3\u3068\u9375\u66f4\u65b0\u3092\u5f37\u5236",
+                cat_tab_all: "\u3059\u3079\u3066",
+                cat_tab_data: "\u30c7\u30fc\u30bf",
+                cat_tab_diagnostics: "\u8a3a\u65ad",
+                cat_tab_pubsub: "PubSub",
+                cat_tab_routing: "\u30eb\u30fc\u30c6\u30a3\u30f3\u30b0",
+                cat_tab_sync: "\u540c\u671f\u30fb\u30bb\u30ad\u30e5\u30ea\u30c6\u30a3",
+                cat_tab_transport: "\u30c8\u30e9\u30f3\u30b9\u30dd\u30fc\u30c8",
+                channel_peekmap_desc: "\u30d6\u30fc\u30c8\u30b9\u30c8\u30e9\u30c3\u30d7\u30c8\u30dd\u30ed\u30b8\u540c\u671f",
+                channel_status_synced: "\u540c\u671f\u5b8c\u4e86",
+                cipher_algo_lbl: "\u30cd\u30b4\u30b7\u30a8\u30fc\u30c8\u6e08\u307f\u6697\u53f7",
+                crypto_inspector_title: "\u30d4\u30a2\u6697\u53f7\u5316\uff06\u30ea\u30d7\u30ec\u30a4\u9632\u6b62\u30b7\u30fc\u30b1\u30f3\u30b9\u691c\u67fb",
+                diag_idle_desc: "\u30ea\u30a2\u30eb\u30bf\u30a4\u30e0 RTT \u30ec\u30a4\u30c6\u30f3\u30b7\u3001\u30b8\u30c3\u30bf\u30fc\u5b89\u5b9a\u6027\u3001\u30d1\u30b1\u30c3\u30c8\u30ed\u30b9\u3001\u30aa\u30fc\u30d0\u30fc\u30ec\u30a4\u4e2d\u7d99\u30c8\u30dd\u30ed\u30b8\u3092\u8a3a\u65ad\u3057\u307e\u3059\u3002",
+                diag_idle_title: "\u8a3a\u65ad\u3092\u958b\u59cb\u3059\u308b\u306b\u306f\u30d4\u30a2\u307e\u305f\u306f\u30a2\u30c9\u30ec\u30b9\u3092\u9078\u629e\u3057\u3066\u304f\u3060\u3055\u3044",
+                diagnostic_export_success: "\u8a3a\u65ad\u30ec\u30dd\u30fc\u30c8\u3092\u6b63\u5e38\u306b\u30a8\u30af\u30b9\u30dd\u30fc\u30c8\u3057\u307e\u3057\u305f\uff01",
+                enc_not_active: "\u975e\u30a2\u30af\u30c6\u30a3\u30d6",
+                enc_plaintext: "\u5e73\u6587 (\u6697\u53f7\u5316\u306a\u3057)",
+                ephemeral_fp_lbl: "\u30a8\u30d5\u30a7\u30e1\u30e9\u30eb ECDH \u9375\u30d5\u30a3\u30f3\u30ac\u30fc\u30d7\u30ea\u30f3\u30c8",
+                frames_unit: "\u30d5\u30ec\u30fc\u30e0",
+                handshake_latency_lbl: "\u30cf\u30f3\u30c9\u30b7\u30a7\u30a4\u30af\u53ce\u675f\u6642\u9593",
+                hops_label: "\u30d4\u30a2",
+                lbl_crypto_grade: "\u6697\u53f7\u5316\u30b0\u30ec\u30fc\u30c9",
+                lbl_dedup_drops: "\u30a6\u30a3\u30f3\u30c9\u30a6\u91cd\u8907\u6392\u9664",
+                lbl_direct_ratio: "\u76f4\u63a5\u63a5\u7d9a\u7387",
+                lbl_dup_conflicts: "IP \u7af6\u5408",
+                lbl_peers: "\u30d4\u30a2",
+                mesh_health_desc: "\u76f4\u63a5\u30d1\u30b9\u6bd4\u7387\u3001\u6697\u53f7\u5316\u6574\u5408\u6027\u3001\u30d1\u30b1\u30c3\u30c8\u30ed\u30b9\u3001\u30eb\u30fc\u30c6\u30a3\u30f3\u30b0\u5b89\u5b9a\u6027\u3092\u7dcf\u5408\u8a55\u4fa1",
+                mesh_health_score_lbl: "\u30e1\u30c3\u30b7\u30e5\u5065\u5168\u6027",
+                mesh_health_title: "\u30aa\u30fc\u30d0\u30fc\u30ec\u30a4\u30ea\u30f3\u30af\u54c1\u8cea\uff06\u81ea\u5df1\u4fee\u5fa9\u30b9\u30c6\u30fc\u30bf\u30b9",
+                mesh_status_optimal: "\u30e1\u30c3\u30b7\u30e5\u54c1\u8cea\u306f\u6700\u9069\u3067\u3059\uff1a\u3059\u3079\u3066\u306e\u63a5\u7d9a\u30d4\u30a2\u304c AEAD \u6697\u53f7\u5316\u3067\u5b89\u5168\u306b\u540c\u671f\u3055\u308c\u3066\u3044\u307e\u3059\u3002",
+                no_peers_connected: "\u63a5\u7d9a\u30d4\u30a2\u304c\u3042\u308a\u307e\u305b\u3093\u3002\u5b89\u5168\u306a P2P \u30e1\u30c3\u30b7\u30e5\u3092\u78ba\u7acb\u3067\u304d\u307e\u3059\u3002",
+                proto_traffic_distribution: "\u30d7\u30ed\u30c8\u30b3\u30eb\u30c8\u30e9\u30d5\u30a3\u30c3\u30af\u5206\u5e03",
+                resync_success: "SeqSync \u3068\u9375\u306e\u30ed\u30fc\u30c6\u30fc\u30b7\u30e7\u30f3\u304c\u958b\u59cb\u3055\u308c\u307e\u3057\u305f",
+                rx_frames_lbl: "\u53d7\u4fe1\u30d5\u30ec\u30fc\u30e0 (RX)",
+                rx_key_fp_lbl: "RxKey \u30d5\u30a3\u30f3\u30ac\u30fc\u30d7\u30ea\u30f3\u30c8",
+                select_peer_lbl: "\u30d4\u30a2\u9078\u629e:",
+                sliding_window_lbl: "\u30ea\u30d7\u30ec\u30a4\u9632\u6b62\u30b9\u30e9\u30a4\u30c7\u30a3\u30f3\u30b0\u30a6\u30a3\u30f3\u30c9\u30a6 (0..65535)",
+                sync_events_lbl: "\u540c\u671f\u30a4\u30d9\u30f3\u30c8",
+                synced_peers_lbl: "\u540c\u671f\u6e08\u307f\u30d4\u30a2",
+                tip_decrypt_errs: "\u26a0\ufe0f {count} \u4ef6\u306e\u5fa9\u53f7\u5931\u6557\u3092\u691c\u51fa\u3057\u307e\u3057\u305f\u3002{btn} \u3092\u30af\u30ea\u30c3\u30af\u3057\u3066\u78ba\u8a8d\u30fb\u518d\u540c\u671f\u3057\u3066\u304f\u3060\u3055\u3044\u3002",
+                tip_dup_ips: "\u26a0\ufe0f \u30c8\u30dd\u30ed\u30b8\u5185\u3067 {count} \u4ef6\u306e IP \u91cd\u8907 / \u30b5\u30d6\u30cd\u30c3\u30c8\u91cd\u8907\u304c\u691c\u51fa\u3055\u308c\u307e\u3057\u305f\u3002",
+                tip_tap_failed: "\u274c TAP \u30c7\u30d0\u30a4\u30b9\u81ea\u5df1\u8a3a\u65ad\u5931\u6557\uff1a\u30c9\u30e9\u30a4\u30d0\u3068\u6a29\u9650\u3092\u78ba\u8a8d\u3057\u3066\u304f\u3060\u3055\u3044\u3002",
+                traffic_comp_title: "\u30a4\u30fc\u30b5\u30cd\u30c3\u30c8\uff06\u30cd\u30c3\u30c8\u30ef\u30fc\u30af\u30c8\u30e9\u30d5\u30a3\u30c3\u30af\u69cb\u6210",
+                tx_frames_lbl: "\u9001\u4fe1\u30d5\u30ec\u30fc\u30e0 (TX)",
+                tx_key_fp_lbl: "TxKey \u30d5\u30a3\u30f3\u30ac\u30fc\u30d7\u30ea\u30f3\u30c8",
+                view_raw: ">_ \u30bf\u30fc\u30df\u30ca\u30eb",
+                view_visual: "\ud83d\udcca \u30d3\u30b8\u30e5\u30a2\u30eb\u30d5\u30ed\u30fc",
+
+                "btn_crypto_inspector": "\u6697\u53f7\u5316\uff06\u30b7\u30fc\u30b1\u30f3\u30b9\u8a3a\u65ad",
+                "btn_export_report": "\u8a3a\u65ad\u30ec\u30dd\u30fc\u30c8\u51fa\u529b",
+                "btn_global_resync": "\u5168\u4f53\u518d\u540c\u671f",
+                "btn_resync": "\u518d\u30cd\u30b4\u30b7\u30a8\u30fc\u30b7\u30e7\u30f3",
+                "btn_resync_this_peer": "\u3053\u306e\u30d4\u30a2\u3068\u518d\u540c\u671f",
+                "btn_resync_title": "SeqSync \u518d\u30cd\u30b4\u30b7\u30a8\u30fc\u30b7\u30e7\u30f3\u3068\u9375\u66f4\u65b0\u3092\u5f37\u5236",
+                "cat_tab_all": "\u3059\u3079\u3066",
+                "cat_tab_data": "\u30c7\u30fc\u30bf",
+                "cat_tab_diagnostics": "\u8a3a\u65ad",
+                "cat_tab_pubsub": "PubSub",
+                "cat_tab_routing": "\u30eb\u30fc\u30c6\u30a3\u30f3\u30b0",
+                "cat_tab_sync": "\u540c\u671f\u30fb\u30bb\u30ad\u30e5\u30ea\u30c6\u30a3",
+                "cat_tab_transport": "\u30c8\u30e9\u30f3\u30b9\u30dd\u30fc\u30c8",
+                "channel_peekmap_desc": "\u30d6\u30fc\u30c8\u30b9\u30c8\u30e9\u30c3\u30d7\u30c8\u30dd\u30ed\u30b8\u540c\u671f",
+                "channel_status_synced": "\u540c\u671f\u5b8c\u4e86",
+                "cipher_algo_lbl": "\u30cd\u30b4\u30b7\u30a8\u30fc\u30c8\u6e08\u307f\u6697\u53f7",
+                "crypto_inspector_title": "\u30d4\u30a2\u6697\u53f7\u5316\uff06\u30ea\u30d7\u30ec\u30a4\u9632\u6b62\u30b7\u30fc\u30b1\u30f3\u30b9\u691c\u67fb",
+                "diag_idle_desc": "\u30ea\u30a2\u30eb\u30bf\u30a4\u30e0 RTT \u30ec\u30a4\u30c6\u30f3\u30b7\u3001\u30b8\u30c3\u30bf\u30fc\u5b89\u5b9a\u6027\u3001\u30d1\u30b1\u30c3\u30c8\u30ed\u30b9\u3001\u30aa\u30fc\u30d0\u30fc\u30ec\u30a4\u4e2d\u7d99\u30c8\u30dd\u30ed\u30b8\u3092\u8a3a\u65ad\u3057\u307e\u3059\u3002",
+                "diag_idle_title": "\u8a3a\u65ad\u3092\u958b\u59cb\u3059\u308b\u306b\u306f\u30d4\u30a2\u307e\u305f\u306f\u30a2\u30c9\u30ec\u30b9\u3092\u9078\u629e\u3057\u3066\u304f\u3060\u3055\u3044",
+                "diagnostic_export_success": "\u8a3a\u65ad\u30ec\u30dd\u30fc\u30c8\u3092\u6b63\u5e38\u306b\u30a8\u30af\u30b9\u30dd\u30fc\u30c8\u3057\u307e\u3057\u305f\uff01",
+                "enc_not_active": "\u975e\u30a2\u30af\u30c6\u30a3\u30d6",
+                "enc_plaintext": "\u5e73\u6587 (\u6697\u53f7\u5316\u306a\u3057)",
+                "ephemeral_fp_lbl": "\u30a8\u30d5\u30a7\u30e1\u30e9\u30eb ECDH \u9375\u30d5\u30a3\u30f3\u30ac\u30fc\u30d7\u30ea\u30f3\u30c8",
+                "frames_unit": "\u30d5\u30ec\u30fc\u30e0",
+                "handshake_latency_lbl": "\u30cf\u30f3\u30c9\u30b7\u30a7\u30a4\u30af\u53ce\u675f\u6642\u9593",
+                "hops_label": "\u30d4\u30a2",
+                "lbl_crypto_grade": "\u6697\u53f7\u5316\u30b0\u30ec\u30fc\u30c9",
+                "lbl_dedup_drops": "\u30a6\u30a3\u30f3\u30c9\u30a6\u91cd\u8907\u6392\u9664",
+                "lbl_direct_ratio": "\u76f4\u63a5\u63a5\u7d9a\u7387",
+                "lbl_dup_conflicts": "IP \u7af6\u5408",
+                "mesh_health_desc": "\u76f4\u63a5\u30d1\u30b9\u6bd4\u7387\u3001\u6697\u53f7\u5316\u6574\u5408\u6027\u3001\u30d1\u30b1\u30c3\u30c8\u30ed\u30b9\u3001\u30eb\u30fc\u30c6\u30a3\u30f3\u30b0\u5b89\u5b9a\u6027\u3092\u7dcf\u5408\u8a55\u4fa1",
+                "mesh_health_score_lbl": "\u30e1\u30c3\u30b7\u30e5\u5065\u5168\u6027",
+                "mesh_health_title": "\u30aa\u30fc\u30d0\u30fc\u30ec\u30a4\u30ea\u30f3\u30af\u54c1\u8cea\uff06\u81ea\u5df1\u4fee\u5fa9\u30b9\u30c6\u30fc\u30bf\u30b9",
+                "mesh_status_optimal": "\u30e1\u30c3\u30b7\u30e5\u54c1\u8cea\u306f\u6700\u9069\u3067\u3059\uff1a\u3059\u3079\u3066\u306e\u63a5\u7d9a\u30d4\u30a2\u304c AEAD \u6697\u53f7\u5316\u3067\u5b89\u5168\u306b\u540c\u671f\u3055\u308c\u3066\u3044\u307e\u3059\u3002",
+                "no_peers_connected": "\u63a5\u7d9a\u30d4\u30a2\u304c\u3042\u308a\u307e\u305b\u3093\u3002\u5b89\u5168\u306a P2P \u30e1\u30c3\u30b7\u30e5\u3092\u78ba\u7acb\u3067\u304d\u307e\u3059\u3002",
+                "proto_traffic_distribution": "\u30d7\u30ed\u30c8\u30b3\u30eb\u30c8\u30e9\u30d5\u30a3\u30c3\u30af\u5206\u5e03",
+                "resync_success": "SeqSync \u3068\u9375\u306e\u30ed\u30fc\u30c6\u30fc\u30b7\u30e7\u30f3\u304c\u958b\u59cb\u3055\u308c\u307e\u3057\u305f",
+                "rx_frames_lbl": "\u53d7\u4fe1\u30d5\u30ec\u30fc\u30e0 (RX)",
+                "rx_key_fp_lbl": "RxKey \u30d5\u30a3\u30f3\u30ac\u30fc\u30d7\u30ea\u30f3\u30c8",
+                "select_peer_lbl": "\u30d4\u30a2\u9078\u629e:",
+                "sliding_window_lbl": "\u30ea\u30d7\u30ec\u30a4\u9632\u6b62\u30b9\u30e9\u30a4\u30c7\u30a3\u30f3\u30b0\u30a6\u30a3\u30f3\u30c9\u30a6 (0..65535)",
+                "sync_events_lbl": "\u540c\u671f\u30a4\u30d9\u30f3\u30c8",
+                "synced_peers_lbl": "\u540c\u671f\u6e08\u307f\u30d4\u30a2",
+                "tip_decrypt_errs": "\u26a0\ufe0f {count} \u4ef6\u306e\u5fa9\u53f7\u5931\u6557\u3092\u691c\u51fa\u3057\u307e\u3057\u305f\u3002{btn} \u3092\u30af\u30ea\u30c3\u30af\u3057\u3066\u78ba\u8a8d\u30fb\u518d\u540c\u671f\u3057\u3066\u304f\u3060\u3055\u3044\u3002",
+                "tip_dup_ips": "\u26a0\ufe0f \u30c8\u30dd\u30ed\u30b8\u5185\u3067 {count} \u4ef6\u306e IP \u91cd\u8907 / \u30b5\u30d6\u30cd\u30c3\u30c8\u91cd\u8907\u304c\u691c\u51fa\u3055\u308c\u307e\u3057\u305f\u3002",
+                "tip_tap_failed": "\u274c TAP \u30c7\u30d0\u30a4\u30b9\u81ea\u5df1\u8a3a\u65ad\u5931\u6557\uff1a\u30c9\u30e9\u30a4\u30d0\u3068\u6a29\u9650\u3092\u78ba\u8a8d\u3057\u3066\u304f\u3060\u3055\u3044\u3002",
+                "traffic_comp_title": "\u30a4\u30fc\u30b5\u30cd\u30c3\u30c8\uff06\u30cd\u30c3\u30c8\u30ef\u30fc\u30af\u30c8\u30e9\u30d5\u30a3\u30c3\u30af\u69cb\u6210",
+                "tx_frames_lbl": "\u9001\u4fe1\u30d5\u30ec\u30fc\u30e0 (TX)",
+                "tx_key_fp_lbl": "TxKey \u30d5\u30a3\u30f3\u30ac\u30fc\u30d7\u30ea\u30f3\u30c8",
+                "view_raw": ">_ \u30bf\u30fc\u30df\u30ca\u30eb",
+                "view_visual": "\ud83d\udcca \u30d3\u30b8\u30e5\u30a2\u30eb\u30d5\u30ed\u30fc",
+
                 default_node_name: "P2P TAP 仮想VPNノード",
                 login_title: "🔐 P2P TAP ダッシュボードログイン",
                 login_subtitle: "このダッシュボードは保護されています。続行するにはアクセストークンを入力してください。",
@@ -2304,6 +2771,7 @@
                 col_jitter_loss: "ジッター / 損失率",
                 col_status: "接続状態",
                 col_return_path: "リターンパス",
+                col_tap_path: "TAPパス",
                 conn_ok: "接続済み",
                 conn_relay_ok: "リレー正常",
                 conn_connecting: "接続中",
@@ -2312,7 +2780,14 @@
                 conn_unreachable: "到達不可",
                 return_ok: "リターン正常",
                 return_dead: "リターン断",
-                return_idle: "リターン不明",
+                return_idle: "待機中",
+                return_relay_only: "シグナリング/中継",
+                return_asymmetric: "片方向(Txのみ)",
+                return_mac_mismatch: "MAC不一致",
+                tp_ok: "TAP正常",
+                tp_fail: "TAP異常",
+                tp_mac_mismatch: "MAC不一致",
+                tp_unknown: "未プローブ",
                 col_actions: "操作",
                 topo_tx: "送信ルート (Tx ➔)",
                 topo_rx: "返信ルート (Rx ⬅️)",
@@ -2893,6 +3368,117 @@
                 topo_tt_uptime: "稼働時間：",
             },
             "de": {
+                score_loopback: "Loopback (Score 0)",
+                score_lan_direct: "LAN-Direkt (Score 10)",
+                score_wan_direct: "WAN-Direkt (Score 20)",
+                score_relay: "Relay-Weiterleitung (Score 100)",
+                priority_score_tooltip: "Routing-Prioritätswert: niedriger ist höher (0:Loopback, 10:LAN-Direkt, 20:WAN-Direkt, 100:Relay)",
+
+                btn_crypto_inspector: "Krypto- & Sequenz-Inspektor",
+                btn_export_report: "Bericht exportieren",
+                btn_global_resync: "Globale Neusynchronisierung",
+                btn_resync: "Neu aushandeln",
+                btn_resync_this_peer: "Diesen Peer neu aushandeln",
+                btn_resync_title: "SeqSync & Schl\u00fcsselrotation erzwingen",
+                cat_tab_all: "Alle",
+                cat_tab_data: "Daten",
+                cat_tab_diagnostics: "Diagnose",
+                cat_tab_pubsub: "PubSub",
+                cat_tab_routing: "Routing",
+                cat_tab_sync: "Sync & Sicherheit",
+                cat_tab_transport: "Transport",
+                channel_peekmap_desc: "Bootstrap-Topologie-Sync",
+                channel_status_synced: "Synchronisiert",
+                cipher_algo_lbl: "Ausgehandelte Chiffre",
+                crypto_inspector_title: "Peer-Kryptographie- & Replay-Schutz-Inspektor",
+                diag_idle_desc: "Echtzeit-RTT-Latenz, Jitter-Stabilit\u00e4t, Paketverlust und Overlay-Topologie analysieren.",
+                diag_idle_title: "Peer oder Adresse ausw\u00e4hlen, um Diagnose zu starten",
+                diagnostic_export_success: "Diagnosebericht erfolgreich exportiert!",
+                enc_not_active: "Nicht aktiv",
+                enc_plaintext: "Klartext (unverschl\u00fcsselt)",
+                ephemeral_fp_lbl: "Ephemerer ECDH-Schl\u00fcssel-Fingerabdruck",
+                frames_unit: "Frames",
+                handshake_latency_lbl: "Handshake-Latenz",
+                hops_label: "Peers",
+                lbl_crypto_grade: "Verschl\u00fcsselungsgrad",
+                lbl_dedup_drops: "Fenster-Deduplizierung",
+                lbl_direct_ratio: "Direktverbindungsquote",
+                lbl_dup_conflicts: "IP-Konflikte",
+                lbl_peers: "Peers",
+                mesh_health_desc: "Echtzeitbewertung von Direktpfadquote, Krypto-Integrit\u00e4t, Paketverlust und Routing-Stabilit\u00e4t",
+                mesh_health_score_lbl: "Mesh-Zustand",
+                mesh_health_title: "Overlay-Mesh-Linkqualit\u00e4t & Selbstheilungsstatus",
+                mesh_status_optimal: "Mesh-Linkqualit\u00e4t optimal: Alle verbundenen Peers sind sicher mit AEAD synchronisiert.",
+                no_peers_connected: "Keine Peers verbunden. Bereit f\u00fcr sicheres P2P-Mesh.",
+                proto_traffic_distribution: "Protokoll-Verkehrsverteilung",
+                resync_success: "SeqSync & Schl\u00fcsselrotation ausgel\u00f6st",
+                rx_frames_lbl: "Empfangene Frames (RX)",
+                rx_key_fp_lbl: "RxKey-Fingerabdruck",
+                select_peer_lbl: "Peer ausw\u00e4hlen:",
+                sliding_window_lbl: "Anti-Replay-Schiebefenster (0..65535)",
+                sync_events_lbl: "Sync-Ereignisse",
+                synced_peers_lbl: "Synchronisierte Peers",
+                tip_decrypt_errs: "\u26a0\ufe0f {count} Entschl\u00fcsselungsfehler aufgetreten. Klicken Sie auf {btn} zum Pr\u00fcfen & Neusynchronisieren.",
+                tip_dup_ips: "\u26a0\ufe0f {count} doppelte IP- / Subnetz-Konflikte in Mesh-Topologie erkannt.",
+                tip_tap_failed: "\u274c TAP-Ger\u00e4te-Selbsttest fehlgeschlagen: Treiber und Berechtigungen pr\u00fcfen.",
+                traffic_comp_title: "Ethernet- & Netzwerkverkehrszusammensetzung",
+                tx_frames_lbl: "Gesendete Frames (TX)",
+                tx_key_fp_lbl: "TxKey-Fingerabdruck",
+                view_raw: ">_ Terminal",
+                view_visual: "\ud83d\udcca Visueller Fluss",
+
+                "btn_crypto_inspector": "Krypto- & Sequenz-Inspektor",
+                "btn_export_report": "Bericht exportieren",
+                "btn_global_resync": "Globale Neusynchronisierung",
+                "btn_resync": "Neu aushandeln",
+                "btn_resync_this_peer": "Diesen Peer neu aushandeln",
+                "btn_resync_title": "SeqSync & Schl\u00fcsselrotation erzwingen",
+                "cat_tab_all": "Alle",
+                "cat_tab_data": "Daten",
+                "cat_tab_diagnostics": "Diagnose",
+                "cat_tab_pubsub": "PubSub",
+                "cat_tab_routing": "Routing",
+                "cat_tab_sync": "Sync & Sicherheit",
+                "cat_tab_transport": "Transport",
+                "channel_peekmap_desc": "Bootstrap-Topologie-Sync",
+                "channel_status_synced": "Synchronisiert",
+                "cipher_algo_lbl": "Ausgehandelte Chiffre",
+                "crypto_inspector_title": "Peer-Kryptographie- & Replay-Schutz-Inspektor",
+                "diag_idle_desc": "Echtzeit-RTT-Latenz, Jitter-Stabilit\u00e4t, Paketverlust und Overlay-Topologie analysieren.",
+                "diag_idle_title": "Peer oder Adresse ausw\u00e4hlen, um Diagnose zu starten",
+                "diagnostic_export_success": "Diagnosebericht erfolgreich exportiert!",
+                "enc_not_active": "Nicht aktiv",
+                "enc_plaintext": "Klartext (unverschl\u00fcsselt)",
+                "ephemeral_fp_lbl": "Ephemerer ECDH-Schl\u00fcssel-Fingerabdruck",
+                "frames_unit": "Frames",
+                "handshake_latency_lbl": "Handshake-Latenz",
+                "hops_label": "Peers",
+                "lbl_crypto_grade": "Verschl\u00fcsselungsgrad",
+                "lbl_dedup_drops": "Fenster-Deduplizierung",
+                "lbl_direct_ratio": "Direktverbindungsquote",
+                "lbl_dup_conflicts": "IP-Konflikte",
+                "mesh_health_desc": "Echtzeitbewertung von Direktpfadquote, Krypto-Integrit\u00e4t, Paketverlust und Routing-Stabilit\u00e4t",
+                "mesh_health_score_lbl": "Mesh-Zustand",
+                "mesh_health_title": "Overlay-Mesh-Linkqualit\u00e4t & Selbstheilungsstatus",
+                "mesh_status_optimal": "Mesh-Linkqualit\u00e4t optimal: Alle verbundenen Peers sind sicher mit AEAD synchronisiert.",
+                "no_peers_connected": "Keine Peers verbunden. Bereit f\u00fcr sicheres P2P-Mesh.",
+                "proto_traffic_distribution": "Protokoll-Verkehrsverteilung",
+                "resync_success": "SeqSync & Schl\u00fcsselrotation ausgel\u00f6st",
+                "rx_frames_lbl": "Empfangene Frames (RX)",
+                "rx_key_fp_lbl": "RxKey-Fingerabdruck",
+                "select_peer_lbl": "Peer ausw\u00e4hlen:",
+                "sliding_window_lbl": "Anti-Replay-Schiebefenster (0..65535)",
+                "sync_events_lbl": "Sync-Ereignisse",
+                "synced_peers_lbl": "Synchronisierte Peers",
+                "tip_decrypt_errs": "\u26a0\ufe0f {count} Entschl\u00fcsselungsfehler aufgetreten. Klicken Sie auf {btn} zum Pr\u00fcfen & Neusynchronisieren.",
+                "tip_dup_ips": "\u26a0\ufe0f {count} doppelte IP- / Subnetz-Konflikte in Mesh-Topologie erkannt.",
+                "tip_tap_failed": "\u274c TAP-Ger\u00e4te-Selbsttest fehlgeschlagen: Treiber und Berechtigungen pr\u00fcfen.",
+                "traffic_comp_title": "Ethernet- & Netzwerkverkehrszusammensetzung",
+                "tx_frames_lbl": "Gesendete Frames (TX)",
+                "tx_key_fp_lbl": "TxKey-Fingerabdruck",
+                "view_raw": ">_ Terminal",
+                "view_visual": "\ud83d\udcca Visueller Fluss",
+
                 default_node_name: "P2P TAP VPN-Knoten",
                 login_title: "🔐 P2P TAP Dashboard-Anmeldung",
                 login_subtitle: "Dieses Dashboard ist geschützt. Geben Sie Ihr Zugriffstoken ein, um fortzufahren.",
@@ -3003,6 +3589,7 @@
                 col_jitter_loss: "Jitter / Verlust",
                 col_status: "Verbindungsstatus",
                 col_return_path: "Rückweg",
+                col_tap_path: "TAP-Pfad",
                 conn_ok: "Verbunden",
                 conn_relay_ok: "Relay OK",
                 conn_connecting: "Verbinde",
@@ -3011,7 +3598,14 @@
                 conn_unreachable: "Nicht erreichbar",
                 return_ok: "Rückweg OK",
                 return_dead: "Rückweg unterbrochen",
-                return_idle: "Rückweg unbekannt",
+                return_idle: "Bereit / Standby",
+                return_relay_only: "Nur Relay",
+                return_asymmetric: "Einseitig (nur Tx)",
+                return_mac_mismatch: "MAC-Fehler",
+                tp_ok: "TAP OK",
+                tp_fail: "TAP Fehler",
+                tp_mac_mismatch: "MAC-Fehler",
+                tp_unknown: "Ungeprüft",
                 col_actions: "Aktionen",
                 topo_tx: "Hingang (Tx ➔)",
                 topo_rx: "Rückgang (Rx ⬅️)",
@@ -3592,6 +4186,117 @@
                 topo_tt_uptime: "Laufzeit:",
             },
             es: {
+                score_loopback: "Loopback (Score 0)",
+                score_lan_direct: "LAN Directo (Score 10)",
+                score_wan_direct: "WAN Directo (Score 20)",
+                score_relay: "Retransmisión Relay (Score 100)",
+                priority_score_tooltip: "Puntuación de prioridad de enrutamiento: menor es mayor prioridad (0:Loopback, 10:LAN Directo, 20:WAN Directo, 100:Relay)",
+
+                btn_crypto_inspector: "Inspector criptogr\u00e1fico y secuencias",
+                btn_export_report: "Exportar informe",
+                btn_global_resync: "Resincronizaci\u00f3n global",
+                btn_resync: "Renegociar",
+                btn_resync_this_peer: "Renegociar este par",
+                btn_resync_title: "Forzar SeqSync y rotaci\u00f3n de claves",
+                cat_tab_all: "Todos",
+                cat_tab_data: "Datos",
+                cat_tab_diagnostics: "Diagn\u00f3stico",
+                cat_tab_pubsub: "PubSub",
+                cat_tab_routing: "Enrutamiento",
+                cat_tab_sync: "Sincronizaci\u00f3n y seguridad",
+                cat_tab_transport: "Transporte",
+                channel_peekmap_desc: "Sincronizaci\u00f3n de topolog\u00eda bootstrap",
+                channel_status_synced: "Sincronizado",
+                cipher_algo_lbl: "Cifrado negociado",
+                crypto_inspector_title: "Inspector de criptograf\u00eda y secuencia antirrepetici\u00f3n",
+                diag_idle_desc: "Analice latencia RTT en tiempo real, estabilidad de jitter, p\u00e9rdida de paquetes y topolog\u00eda de retransmisi\u00f3n.",
+                diag_idle_title: "Seleccione un par o introduzca una direcci\u00f3n para iniciar el diagn\u00f3stico",
+                diagnostic_export_success: "\u00a1Informe de diagn\u00f3stico exportado con \u00e9xito!",
+                enc_not_active: "Inactivo",
+                enc_plaintext: "Texto plano (sin cifrar)",
+                ephemeral_fp_lbl: "Huella digital de clave ECDH ef\u00edmera",
+                frames_unit: "tramas",
+                handshake_latency_lbl: "Latencia de negociaci\u00f3n",
+                hops_label: "pares",
+                lbl_crypto_grade: "Nivel de cifrado",
+                lbl_dedup_drops: "Deduplicaci\u00f3n de ventana",
+                lbl_direct_ratio: "Proporci\u00f3n directa",
+                lbl_dup_conflicts: "Conflictos de IP",
+                lbl_peers: "pares",
+                mesh_health_desc: "Evaluaci\u00f3n en tiempo real de ruta directa, integridad criptogr\u00e1fica, p\u00e9rdida de paquetes y estabilidad de enrutamiento",
+                mesh_health_score_lbl: "Salud de la malla",
+                mesh_health_title: "Calidad del enlace de malla y estado de autorreparaci\u00f3n",
+                mesh_status_optimal: "Calidad de enlace \u00f3ptima: todos los pares conectados est\u00e1n sincronizados de forma segura con AEAD.",
+                no_peers_connected: "No hay pares conectados. Listo para establecer malla P2P segura.",
+                proto_traffic_distribution: "Distribuci\u00f3n del tr\u00e1fico de protocolos",
+                resync_success: "SeqSync y rotaci\u00f3n de claves activados",
+                rx_frames_lbl: "Tramas recibidas (RX)",
+                rx_key_fp_lbl: "Huella digital RxKey",
+                select_peer_lbl: "Seleccionar par:",
+                sliding_window_lbl: "Ventana deslizante antirrepetici\u00f3n (0..65535)",
+                sync_events_lbl: "Eventos de sincronizaci\u00f3n",
+                synced_peers_lbl: "Pares sincronizados",
+                tip_decrypt_errs: "\u26a0\ufe0f {count} fallo(s) de descifrado detectados. Haga clic en {btn} para inspeccionar y resincronizar.",
+                tip_dup_ips: "\u26a0\ufe0f {count} conflicto(s) de IP / subred duplicados en la topolog\u00eda.",
+                tip_tap_failed: "\u274c Error en autotest de dispositivo TAP: verifique controladores y permisos.",
+                traffic_comp_title: "Composici\u00f3n del tr\u00e1fico Ethernet y de red",
+                tx_frames_lbl: "Tramas enviadas (TX)",
+                tx_key_fp_lbl: "Huella digital TxKey",
+                view_raw: ">_ Terminal",
+                view_visual: "\ud83d\udcca Flujo visual",
+
+                "btn_crypto_inspector": "Inspector criptogr\u00e1fico y secuencias",
+                "btn_export_report": "Exportar informe",
+                "btn_global_resync": "Resincronizaci\u00f3n global",
+                "btn_resync": "Renegociar",
+                "btn_resync_this_peer": "Renegociar este par",
+                "btn_resync_title": "Forzar SeqSync y rotaci\u00f3n de claves",
+                "cat_tab_all": "Todos",
+                "cat_tab_data": "Datos",
+                "cat_tab_diagnostics": "Diagn\u00f3stico",
+                "cat_tab_pubsub": "PubSub",
+                "cat_tab_routing": "Enrutamiento",
+                "cat_tab_sync": "Sincronizaci\u00f3n y seguridad",
+                "cat_tab_transport": "Transporte",
+                "channel_peekmap_desc": "Sincronizaci\u00f3n de topolog\u00eda bootstrap",
+                "channel_status_synced": "Sincronizado",
+                "cipher_algo_lbl": "Cifrado negociado",
+                "crypto_inspector_title": "Inspector de criptograf\u00eda y secuencia antirrepetici\u00f3n",
+                "diag_idle_desc": "Analice latencia RTT en tiempo real, estabilidad de jitter, p\u00e9rdida de paquetes y topolog\u00eda de retransmisi\u00f3n.",
+                "diag_idle_title": "Seleccione un par o introduzca una direcci\u00f3n para iniciar el diagn\u00f3stico",
+                "diagnostic_export_success": "\u00a1Informe de diagn\u00f3stico exportado con \u00e9xito!",
+                "enc_not_active": "Inactivo",
+                "enc_plaintext": "Texto plano (sin cifrar)",
+                "ephemeral_fp_lbl": "Huella digital de clave ECDH ef\u00edmera",
+                "frames_unit": "tramas",
+                "handshake_latency_lbl": "Latencia de negociaci\u00f3n",
+                "hops_label": "pares",
+                "lbl_crypto_grade": "Nivel de cifrado",
+                "lbl_dedup_drops": "Deduplicaci\u00f3n de ventana",
+                "lbl_direct_ratio": "Proporci\u00f3n directa",
+                "lbl_dup_conflicts": "Conflictos de IP",
+                "mesh_health_desc": "Evaluaci\u00f3n en tiempo real de ruta directa, integridad criptogr\u00e1fica, p\u00e9rdida de paquetes y estabilidad de enrutamiento",
+                "mesh_health_score_lbl": "Salud de la malla",
+                "mesh_health_title": "Calidad del enlace de malla y estado de autorreparaci\u00f3n",
+                "mesh_status_optimal": "Calidad de enlace \u00f3ptima: todos los pares conectados est\u00e1n sincronizados de forma segura con AEAD.",
+                "no_peers_connected": "No hay pares conectados. Listo para establecer malla P2P segura.",
+                "proto_traffic_distribution": "Distribuci\u00f3n del tr\u00e1fico de protocolos",
+                "resync_success": "SeqSync y rotaci\u00f3n de claves activados",
+                "rx_frames_lbl": "Tramas recibidas (RX)",
+                "rx_key_fp_lbl": "Huella digital RxKey",
+                "select_peer_lbl": "Seleccionar par:",
+                "sliding_window_lbl": "Ventana deslizante antirrepetici\u00f3n (0..65535)",
+                "sync_events_lbl": "Eventos de sincronizaci\u00f3n",
+                "synced_peers_lbl": "Pares sincronizados",
+                "tip_decrypt_errs": "\u26a0\ufe0f {count} fallo(s) de descifrado detectados. Haga clic en {btn} para inspeccionar y resincronizar.",
+                "tip_dup_ips": "\u26a0\ufe0f {count} conflicto(s) de IP / subred duplicados en la topolog\u00eda.",
+                "tip_tap_failed": "\u274c Error en autotest de dispositivo TAP: verifique controladores y permisos.",
+                "traffic_comp_title": "Composici\u00f3n del tr\u00e1fico Ethernet y de red",
+                "tx_frames_lbl": "Tramas enviadas (TX)",
+                "tx_key_fp_lbl": "Huella digital TxKey",
+                "view_raw": ">_ Terminal",
+                "view_visual": "\ud83d\udcca Flujo visual",
+
                 default_node_name: "Nodo VPN P2P TAP",
                 login_title: "🔐 Inicio de sesión del panel P2P TAP",
                 login_subtitle: "Este panel está protegido. Introduce tu token de acceso para continuar.",
@@ -3702,6 +4407,7 @@
                 col_jitter_loss: "Jitter / Pérdida",
                 col_status: "Estado de conexión",
                 col_return_path: "Ruta de retorno",
+                col_tap_path: "Ruta TAP",
                 conn_ok: "Conectado",
                 conn_relay_ok: "Relé OK",
                 conn_connecting: "Conectando",
@@ -3710,7 +4416,14 @@
                 conn_unreachable: "Inalcanzable",
                 return_ok: "Retorno OK",
                 return_dead: "Retorno cortado",
-                return_idle: "Retorno desconocido",
+                return_idle: "En espera",
+                return_relay_only: "Solo relé",
+                return_asymmetric: "Unidireccional (Tx)",
+                return_mac_mismatch: "Error de MAC",
+                tp_ok: "TAP OK",
+                tp_fail: "TAP Fallo",
+                tp_mac_mismatch: "Error MAC",
+                tp_unknown: "Sin sondeo",
                 col_actions: "Acciones",
                 topo_tx: "Ruta Ida (Tx ➔)",
                 topo_rx: "Ruta Vuelta (Rx ⬅️)",
@@ -4291,6 +5004,117 @@
                 topo_tt_uptime: "Tiempo activo:",
             },
             "fr": {
+                score_loopback: "Boucle locale (Score 0)",
+                score_lan_direct: "LAN Direct (Score 10)",
+                score_wan_direct: "WAN Direct (Score 20)",
+                score_relay: "Relais (Score 100)",
+                priority_score_tooltip: "Score de priorité de routage : plus bas est prioritaire (0:Loopback, 10:LAN Direct, 20:WAN Direct, 100:Relais)",
+
+                btn_crypto_inspector: "Inspecteur crypto et s\u00e9quences",
+                btn_export_report: "Exporter le rapport",
+                btn_global_resync: "Resynchronisation globale",
+                btn_resync: "Ren\u00e9gocier",
+                btn_resync_this_peer: "Ren\u00e9gocier ce pair",
+                btn_resync_title: "Forcer SeqSync et rotation des cl\u00e9s",
+                cat_tab_all: "Tous",
+                cat_tab_data: "Donn\u00e9es",
+                cat_tab_diagnostics: "Diagnostics",
+                cat_tab_pubsub: "PubSub",
+                cat_tab_routing: "Routage",
+                cat_tab_sync: "Sync & S\u00e9curit\u00e9",
+                cat_tab_transport: "Transport",
+                channel_peekmap_desc: "Sync de topologie bootstrap",
+                channel_status_synced: "Synchronis\u00e9",
+                cipher_algo_lbl: "Chiffrement n\u00e9goci\u00e9",
+                crypto_inspector_title: "Inspecteur de cryptographie et s\u00e9quences anti-rejeu",
+                diag_idle_desc: "Analysez la latence RTT en temps r\u00e9el, la gigue, la perte de paquets et la topologie de relais.",
+                diag_idle_title: "S\u00e9lectionnez un pair ou entrez une adresse pour d\u00e9marrer le diagnostic",
+                diagnostic_export_success: "Rapport de diagnostic export\u00e9 avec succ\u00e8s !",
+                enc_not_active: "Inactif",
+                enc_plaintext: "Texte brut (non chiffr\u00e9)",
+                ephemeral_fp_lbl: "Empreinte de cl\u00e9 ECDH \u00e9ph\u00e9m\u00e8re",
+                frames_unit: "trames",
+                handshake_latency_lbl: "Latence de n\u00e9gociation",
+                hops_label: "pairs",
+                lbl_crypto_grade: "Niveau de chiffrement",
+                lbl_dedup_drops: "D\u00e9duplication de fen\u00eatre",
+                lbl_direct_ratio: "Taux direct",
+                lbl_dup_conflicts: "Conflits IP",
+                lbl_peers: "pairs",
+                mesh_health_desc: "\u00c9valuation en temps r\u00e9el du ratio direct, de l'int\u00e9grit\u00e9 crypto, de la perte de paquets et de la stabilit\u00e9 du routage",
+                mesh_health_score_lbl: "Sant\u00e9 du maillage",
+                mesh_health_title: "Qualit\u00e9 de liaison et statut d'auto-gu\u00e9rison",
+                mesh_status_optimal: "Qualit\u00e9 de liaison optimale : tous les pairs sont synchronis\u00e9s en toute s\u00e9curit\u00e9 avec AEAD.",
+                no_peers_connected: "Aucun pair connect\u00e9. Pr\u00eat \u00e0 \u00e9tablir un maillage P2P s\u00e9curis\u00e9.",
+                proto_traffic_distribution: "Distribution du trafic par protocole",
+                resync_success: "SeqSync et rotation des cl\u00e9s d\u00e9clench\u00e9s",
+                rx_frames_lbl: "Trames re\u00e7ues (RX)",
+                rx_key_fp_lbl: "Empreinte RxKey",
+                select_peer_lbl: "S\u00e9lectionner un pair :",
+                sliding_window_lbl: "Fen\u00eatre glissante anti-rejeu (0..65535)",
+                sync_events_lbl: "\u00c9v\u00e9nements de synchronisation",
+                synced_peers_lbl: "Pairs synchronis\u00e9s",
+                tip_decrypt_errs: "\u26a0\ufe0f {count} \u00e9chec(s) de d\u00e9chiffrement d\u00e9tect\u00e9(s). Cliquez sur {btn} pour inspecter et resynchroniser.",
+                tip_dup_ips: "\u26a0\ufe0f {count} conflit(s) d'IP / sous-r\u00e9seaux d\u00e9tect\u00e9s dans la topologie.",
+                tip_tap_failed: "\u274c \u00c9chec de l'autotest du p\u00e9riph\u00e9rique TAP : v\u00e9rifiez les pilotes et permissions.",
+                traffic_comp_title: "Composition du trafic Ethernet et r\u00e9seau",
+                tx_frames_lbl: "Trames envoy\u00e9es (TX)",
+                tx_key_fp_lbl: "Empreinte TxKey",
+                view_raw: ">_ Terminal",
+                view_visual: "\ud83d\udcca Flux visuel",
+
+                "btn_crypto_inspector": "Inspecteur crypto et s\u00e9quences",
+                "btn_export_report": "Exporter le rapport",
+                "btn_global_resync": "Resynchronisation globale",
+                "btn_resync": "Ren\u00e9gocier",
+                "btn_resync_this_peer": "Ren\u00e9gocier ce pair",
+                "btn_resync_title": "Forcer SeqSync et rotation des cl\u00e9s",
+                "cat_tab_all": "Tous",
+                "cat_tab_data": "Donn\u00e9es",
+                "cat_tab_diagnostics": "Diagnostics",
+                "cat_tab_pubsub": "PubSub",
+                "cat_tab_routing": "Routage",
+                "cat_tab_sync": "Sync & S\u00e9curit\u00e9",
+                "cat_tab_transport": "Transport",
+                "channel_peekmap_desc": "Sync de topologie bootstrap",
+                "channel_status_synced": "Synchronis\u00e9",
+                "cipher_algo_lbl": "Chiffrement n\u00e9goci\u00e9",
+                "crypto_inspector_title": "Inspecteur de cryptographie et s\u00e9quences anti-rejeu",
+                "diag_idle_desc": "Analysez la latence RTT en temps r\u00e9el, la gigue, la perte de paquets et la topologie de relais.",
+                "diag_idle_title": "S\u00e9lectionnez un pair ou entrez une adresse pour d\u00e9marrer le diagnostic",
+                "diagnostic_export_success": "Rapport de diagnostic export\u00e9 avec succ\u00e8s !",
+                "enc_not_active": "Inactif",
+                "enc_plaintext": "Texte brut (non chiffr\u00e9)",
+                "ephemeral_fp_lbl": "Empreinte de cl\u00e9 ECDH \u00e9ph\u00e9m\u00e8re",
+                "frames_unit": "trames",
+                "handshake_latency_lbl": "Latence de n\u00e9gociation",
+                "hops_label": "pairs",
+                "lbl_crypto_grade": "Niveau de chiffrement",
+                "lbl_dedup_drops": "D\u00e9duplication de fen\u00eatre",
+                "lbl_direct_ratio": "Taux direct",
+                "lbl_dup_conflicts": "Conflits IP",
+                "mesh_health_desc": "\u00c9valuation en temps r\u00e9el du ratio direct, de l'int\u00e9grit\u00e9 crypto, de la perte de paquets et de la stabilit\u00e9 du routage",
+                "mesh_health_score_lbl": "Sant\u00e9 du maillage",
+                "mesh_health_title": "Qualit\u00e9 de liaison et statut d'auto-gu\u00e9rison",
+                "mesh_status_optimal": "Qualit\u00e9 de liaison optimale : tous les pairs sont synchronis\u00e9s en toute s\u00e9curit\u00e9 avec AEAD.",
+                "no_peers_connected": "Aucun pair connect\u00e9. Pr\u00eat \u00e0 \u00e9tablir un maillage P2P s\u00e9curis\u00e9.",
+                "proto_traffic_distribution": "Distribution du trafic par protocole",
+                "resync_success": "SeqSync et rotation des cl\u00e9s d\u00e9clench\u00e9s",
+                "rx_frames_lbl": "Trames re\u00e7ues (RX)",
+                "rx_key_fp_lbl": "Empreinte RxKey",
+                "select_peer_lbl": "S\u00e9lectionner un pair :",
+                "sliding_window_lbl": "Fen\u00eatre glissante anti-rejeu (0..65535)",
+                "sync_events_lbl": "\u00c9v\u00e9nements de synchronisation",
+                "synced_peers_lbl": "Pairs synchronis\u00e9s",
+                "tip_decrypt_errs": "\u26a0\ufe0f {count} \u00e9chec(s) de d\u00e9chiffrement d\u00e9tect\u00e9(s). Cliquez sur {btn} pour inspecter et resynchroniser.",
+                "tip_dup_ips": "\u26a0\ufe0f {count} conflit(s) d'IP / sous-r\u00e9seaux d\u00e9tect\u00e9s dans la topologie.",
+                "tip_tap_failed": "\u274c \u00c9chec de l'autotest du p\u00e9riph\u00e9rique TAP : v\u00e9rifiez les pilotes et permissions.",
+                "traffic_comp_title": "Composition du trafic Ethernet et r\u00e9seau",
+                "tx_frames_lbl": "Trames envoy\u00e9es (TX)",
+                "tx_key_fp_lbl": "Empreinte TxKey",
+                "view_raw": ">_ Terminal",
+                "view_visual": "\ud83d\udcca Flux visuel",
+
                 default_node_name: "Nœud VPN P2P TAP",
                 login_title: "🔐 Connexion au tableau de bord P2P TAP",
                 login_subtitle: "Ce tableau de bord est protégé. Saisissez votre jeton d'accès pour continuer.",
@@ -4401,6 +5225,7 @@
                 col_jitter_loss: "Jitter / Perte",
                 col_status: "État de connexion",
                 col_return_path: "Chemin de retour",
+                col_tap_path: "Chemin TAP",
                 conn_ok: "Connecté",
                 conn_relay_ok: "Relais OK",
                 conn_connecting: "Connexion",
@@ -4409,7 +5234,14 @@
                 conn_unreachable: "Injoignable",
                 return_ok: "Retour OK",
                 return_dead: "Retour coupé",
-                return_idle: "Retour inconnu",
+                return_idle: "En veille",
+                return_relay_only: "Relais uniquement",
+                return_asymmetric: "Unidirectionnel (Tx)",
+                return_mac_mismatch: "Incohérence MAC",
+                tp_ok: "TAP OK",
+                tp_fail: "Échec TAP",
+                tp_mac_mismatch: "Incohérence MAC",
+                tp_unknown: "Non sondé",
                 col_actions: "Actions",
                 topo_tx: "Route Aller (Tx ➔)",
                 topo_rx: "Route Retour (Rx ⬅️)",
@@ -6302,6 +7134,16 @@
                 : `<span style="font-weight:600; color:var(--text-muted);">⚡ ${escapeHTML(peer.addr)}</span>
                    <span style="margin-left:6px; color:var(--text-muted);">${t('active_pathway_unknown') || 'No Live Connection'}</span>`;
 
+            const getAddrScoreInfo = (a) => {
+                if (!a) return { score: 999, label: 'Score 999', color: '#94a3b8' };
+                if (a.includes('/p2p-circuit')) return { score: 100, label: t('score_relay') || 'Relay (Score 100)', color: '#fbbf24' };
+                if (a.includes('127.0.0.1') || a.includes('/ip6/::1')) return { score: 0, label: t('score_loopback') || 'Loopback (Score 0)', color: '#a855f7' };
+                if (a.includes('192.168.') || a.includes('/ip4/10.') || a.includes('/ip4/172.') || a.includes('/ip6/fd')) {
+                    return { score: 10, label: t('score_lan_direct') || 'LAN Direct (Score 10)', color: '#34d399' };
+                }
+                return { score: 20, label: t('score_wan_direct') || 'WAN Direct (Score 20)', color: '#38bdf8' };
+            };
+
             const body = document.getElementById('multiaddrModalBody');
             body.innerHTML = `
                 <div style="font-size:0.78rem; color:var(--text-secondary); margin-bottom:8px;">
@@ -6312,9 +7154,11 @@
                     ${allAddrsList.map((a, idx) => {
                         const isActive = (a === peer.addr);
                         const tag = isActive ? '🟢 Active' : '⚪ Candidate';
+                        const sc = getAddrScoreInfo(a);
                         return `<div class="ma-entry${isActive ? ' active' : ''}" data-ma-index="${idx}" data-ma-addr="${escapeHTML(a)}">
                             <span class="ma-tag">[${tag}]</span>
-                            <span class="ma-addr-text">${a}</span>
+                            <span style="font-size:0.72rem; padding:1px 6px; border-radius:4px; margin-right:4px; font-weight:600; color:${sc.color}; background:rgba(255,255,255,0.06); border:1px solid ${sc.color}40;" title="Priority Score (0:Loopback, 10:LAN, 20:WAN, 100:Relay)">${sc.label}</span>
+                            <span class="ma-addr-text">${escapeHTML(a)}</span>
                             <span class="ma-rtt" style="display:none; margin-left:6px; font-size:0.68rem; font-weight:bold;"></span>
                         </div>`;
                     }).join('')}
@@ -6581,16 +7425,164 @@
             return `Known peers currently in the LSA-fed ActivePeers set:\n${items}`;
         }
 
+        /* ── Modern P2P Network Diagnostics (Visual Flow & Terminal) ── */
+        let currentDiagViewMode = 'visual';
+
+        function setDiagViewMode(mode) {
+            currentDiagViewMode = mode;
+            const visualBtn = document.getElementById('diagViewVisualBtn');
+            const rawBtn = document.getElementById('diagViewRawBtn');
+            const visualCont = document.getElementById('diagVisualContainer');
+            const rawCont = document.getElementById('pingOutput');
+
+            if (mode === 'visual') {
+                if (visualBtn) visualBtn.classList.add('active');
+                if (rawBtn) rawBtn.classList.remove('active');
+                if (visualCont) visualCont.style.display = 'block';
+                if (rawCont) rawCont.style.display = 'none';
+            } else {
+                if (visualBtn) visualBtn.classList.remove('active');
+                if (rawBtn) rawBtn.classList.add('active');
+                if (visualCont) visualCont.style.display = 'none';
+                if (rawCont) rawCont.style.display = 'block';
+            }
+        }
+
+        function renderVisualPingResult(d, target, ok) {
+            const cont = document.getElementById('diagVisualContainer');
+            if (!cont) return;
+
+            if (!ok || !d || !d.success) {
+                cont.innerHTML = `
+                    <div class="glass-card" style="padding:18px; display:flex; flex-direction:column; gap:12px; border-left:3px solid var(--danger);">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <strong style="color:var(--danger); font-size:1.05rem;">⚠️ Ping Target Unreachable</strong>
+                            <span style="font-size:0.75rem; background:rgba(239,68,68,0.15); color:#f87171; padding:2px 8px; border-radius:5px;">${escapeHTML(target)}</span>
+                        </div>
+                        <div style="font-size:0.85rem; color:var(--text-secondary);">
+                            ${d && d.error ? escapeHTML(d.error) : 'Target peer did not respond to P2P ping probe.'}
+                        </div>
+                        <div style="display:flex; gap:8px;">
+                            <button class="btn-glass" data-onclick="runPingDiagnostics()" style="padding:4px 12px; font-size:0.8rem; background:var(--accent-cyan-fill);">🔄 Retry Ping</button>
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+
+            const rtt = d.rtt_avg_ms || 0;
+            const rttColor = rtt < 50 ? 'var(--success)' : (rtt < 150 ? 'var(--warn)' : 'var(--danger)');
+            const transportBadge = d.is_relayed
+                ? `<span class="pill-badge role-bootstrap">🔄 ${t('topo_tt_circuit_relay') || 'Circuit Relay'}</span>`
+                : `<span class="pill-badge role-static">⚡ ${t('topo_tt_direct_link') || 'Direct P2P'}</span>`;
+
+            cont.innerHTML = `
+                <div class="glass-card" style="padding:18px; display:flex; flex-direction:column; gap:14px; border-left:3px solid var(--accent-cyan);">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                        <div>
+                            <strong style="font-size:1.1rem; color:var(--text-primary);">🎯 ${escapeHTML(d.node_name || d.peer_id_short || target)}</strong>
+                            <div style="font-family:monospace; font-size:0.75rem; color:var(--text-muted);">${escapeHTML(d.peer_id || target)}</div>
+                        </div>
+                        <div>${transportBadge}</div>
+                    </div>
+                    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:10px;">
+                        <div class="proto-stat-box">
+                            <span class="proto-stat-lbl">${t('common_rtt') || 'RTT Avg'}</span>
+                            <span class="proto-stat-val" style="color:${rttColor}; font-size:1.25rem;">${rtt > 0 ? rtt.toFixed(1) + ' ms' : '-'}</span>
+                        </div>
+                        <div class="proto-stat-box">
+                            <span class="proto-stat-lbl">Jitter (波动)</span>
+                            <span class="proto-stat-val" style="color:var(--accent-purple); font-size:1.1rem;">±${(d.jitter_ms || 0).toFixed(1)} ms</span>
+                        </div>
+                        <div class="proto-stat-box">
+                            <span class="proto-stat-lbl">Packet Loss</span>
+                            <span class="proto-stat-val" style="color:${(d.packet_loss || 0) > 0 ? 'var(--danger)' : 'var(--success)'}; font-size:1.1rem;">${((d.packet_loss || 0) * 100).toFixed(0)}%</span>
+                        </div>
+                        <div class="proto-stat-box">
+                            <span class="proto-stat-lbl">Probes (采样数)</span>
+                            <span class="proto-stat-val" style="color:var(--accent-cyan); font-size:1.1rem;">${d.probes || 4} pkts</span>
+                        </div>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size:0.78rem; color:var(--text-secondary); border-top:1px solid var(--border-subtle); padding-top:8px;">
+                        <span>RTT Min / Max: <strong>${(d.rtt_min_ms || 0).toFixed(1)} ms / ${(d.rtt_max_ms || 0).toFixed(1)} ms</strong></span>
+                        ${d.tap_ip ? `<span>TAP IP: <code style="color:var(--accent-cyan); font-weight:600;">${escapeHTML(d.tap_ip)}</code></span>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderVisualTraceResult(d, target, ok) {
+            const cont = document.getElementById('diagVisualContainer');
+            if (!cont) return;
+
+            if (!ok || !d || !d.hops || d.hops.length === 0) {
+                cont.innerHTML = `
+                    <div class="glass-card" style="padding:18px; display:flex; flex-direction:column; gap:12px; border-left:3px solid var(--warn);">
+                        <strong style="color:var(--warn); font-size:1.05rem;">⚠️ No Live Overlay Route Found</strong>
+                        <div style="font-size:0.85rem; color:var(--text-secondary);">Target ${escapeHTML(target)} is not directly reachable in Dijkstra forwarding matrix.</div>
+                        <div><button class="btn-glass" data-onclick="runTracerouteDiagnostics()" style="padding:4px 12px; font-size:0.8rem; background:var(--accent-cyan-fill);">🔄 Retry Traceroute</button></div>
+                    </div>
+                `;
+                return;
+            }
+
+            const hops = d.hops || [];
+            const hopsHtml = hops.map((h, idx) => {
+                const isFirst = (idx === 0);
+                const isLast = (idx === hops.length - 1);
+                const bg = isFirst ? 'rgba(56,189,248,0.12)' : (isLast ? 'rgba(52,211,153,0.12)' : 'rgba(167,139,250,0.12)');
+                const border = isFirst ? 'rgba(56,189,248,0.4)' : (isLast ? 'rgba(52,211,153,0.4)' : 'rgba(167,139,250,0.4)');
+                const color = isFirst ? '#38bdf8' : (isLast ? '#34d399' : '#a78bfa');
+                const icon = isFirst ? '💻' : (isLast ? '🎯' : '🔀');
+                const role = isFirst ? 'Local' : (isLast ? 'Destination' : 'Relay Hop');
+                return `
+                    <div style="display:flex; flex-direction:column; align-items:center; min-width:110px; text-align:center; padding:10px 14px; background:${bg}; border:1px solid ${border}; border-radius:10px;">
+                        <strong style="color:${color}; font-size:0.86rem;">${icon} ${escapeHTML(h.node_name || h.peer_id_short || ('Hop ' + (idx + 1)))}</strong>
+                        <span style="font-size:0.7rem; color:var(--text-muted); margin-top:2px;">${role}</span>
+                        ${h.tap_ip ? `<code style="font-size:0.7rem; color:var(--text-primary); margin-top:3px;">${escapeHTML(h.tap_ip)}</code>` : ''}
+                        ${h.link_rtt_ms ? `<span style="font-size:0.68rem; color:${color}; margin-top:4px;">~${h.link_rtt_ms} ms</span>` : ''}
+                    </div>
+                `;
+            }).join('<span style="color:var(--text-muted); font-size:1.2rem; margin:0 4px;">➔</span>');
+
+            cont.innerHTML = `
+                <div class="glass-card" style="padding:18px; display:flex; flex-direction:column; gap:14px; border-left:3px solid var(--accent-purple);">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                        <strong style="font-size:1.05rem; color:var(--text-primary);">🛣️ P2P Overlay Forwarding Path (${hops.length} Nodes)</strong>
+                        <span style="font-size:0.78rem; background:var(--glass-fill); padding:3px 10px; border-radius:6px; color:var(--accent-cyan); border:1px solid var(--border-subtle);">${d.is_direct ? '⚡ Direct Route' : '🔀 Multi-Hop Relay'}</span>
+                    </div>
+                    <div style="display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:8px; padding:14px 10px; background:rgba(0,0,0,0.2); border-radius:12px; border:1px solid var(--border-subtle);">
+                        ${hopsHtml}
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-secondary); border-top:1px solid var(--border-subtle); padding-top:8px;">
+                        <span>Path Latency: <strong style="color:var(--success); font-size:0.92rem;">${d.total_rtt_ms > 0 ? d.total_rtt_ms + ' ms' : '-'}</strong></span>
+                        ${d.saved_rtt_ms > 0 ? `<span style="color:var(--success); font-weight:600;">⚡ Relay Optimization Saved: -${d.saved_rtt_ms} ms</span>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
         function runPingDiagnostics() {
             const rawTarget = document.getElementById('pingTargetInput').value.trim() || '10.0.0.2';
             const target = sanitizePingTarget(rawTarget) || '10.0.0.2';
             const out = document.getElementById('pingOutput');
+            const visualCont = document.getElementById('diagVisualContainer');
+
+            if (visualCont) {
+                visualCont.innerHTML = `
+                    <div style="padding:32px; text-align:center; display:flex; flex-direction:column; align-items:center; gap:12px;">
+                        <div class="spinner" style="width:28px; height:28px; border:3px solid rgba(56,189,248,0.2); border-top-color:#38bdf8; border-radius:50%; animation:spin 0.8s linear infinite;"></div>
+                        <div style="color:var(--text-secondary); font-size:0.9rem;">Pinging <strong>${escapeHTML(target)}</strong> via P2P stream...</div>
+                    </div>
+                `;
+            }
+
             const lines = [
                 `P2P Ping → ${target}`,
                 `[libp2p ping stream — real RTT, not ICMP]`,
                 `Pinging...`,
             ];
-            out.innerText = lines.join('\n');
+            if (out) out.innerText = lines.join('\n');
 
             // Resolve a real peer_id if the user typed a TAP IP / node name.
             const resolved = resolveTargetToPeer(target);
@@ -6609,7 +7601,8 @@
                         const known = renderKnownPeersHint(d.known_peers);
                         if (known) lines.push('', known);
                         showPingFallback(lines, target, matchedPeer);
-                        out.innerText = lines.join('\n');
+                        if (out) out.innerText = lines.join('\n');
+                        renderVisualPingResult(result.data, target, false);
                         return;
                     }
                     const d = result.data;
@@ -6628,12 +7621,14 @@
                     if (d.transport_addr) lines.push(`Transport addr: ${d.transport_addr}`);
                     if (d.error) lines.push(`Note: ${d.error}`);
                     if (!d.success) lines.push('', `Peer ${target} did not reply. Check connectivity.`);
-                    out.innerText = lines.join('\n');
+                    if (out) out.innerText = lines.join('\n');
+                    renderVisualPingResult(d, target, true);
                 })
                 .catch(err => {
                     lines.push('', `Ping error: ${err.message || err}`);
                     showPingFallback(lines, target, matchedPeer);
-                    out.innerText = lines.join('\n');
+                    if (out) out.innerText = lines.join('\n');
+                    renderVisualPingResult({ error: err.message || String(err) }, target, false);
                 });
         }
 
@@ -6656,12 +7651,23 @@
             const rawTarget = document.getElementById('pingTargetInput').value.trim() || '10.0.0.2';
             const target = sanitizePingTarget(rawTarget) || '10.0.0.2';
             const out = document.getElementById('pingOutput');
+            const visualCont = document.getElementById('diagVisualContainer');
+
+            if (visualCont) {
+                visualCont.innerHTML = `
+                    <div style="padding:32px; text-align:center; display:flex; flex-direction:column; align-items:center; gap:12px;">
+                        <div class="spinner" style="width:28px; height:28px; border:3px solid rgba(167,139,250,0.2); border-top-color:#a78bfa; border-radius:50%; animation:spin 0.8s linear infinite;"></div>
+                        <div style="color:var(--text-secondary); font-size:0.9rem;">Tracing overlay route to <strong>${escapeHTML(target)}</strong>...</div>
+                    </div>
+                `;
+            }
+
             const lines = [
                 `P2P Overlay Traceroute → ${target}`,
                 `[libp2p has no native traceroute; traces LSA/Dijkstra forwarding path + per-leg transport]`,
                 `Tracing overlay path...`,
             ];
-            out.innerText = lines.join('\n');
+            if (out) out.innerText = lines.join('\n');
 
             // Resolve a real peer_id if the user typed a TAP IP / node name.
             const resolved = resolveTargetToPeer(target);
@@ -6680,7 +7686,8 @@
                         const known = renderKnownPeersHint(d.known_peers);
                         if (known) lines.push('', known);
                         renderCachedTraceroute(lines, target, queryID);
-                        out.innerText = lines.join('\n');
+                        if (out) out.innerText = lines.join('\n');
+                        renderVisualTraceResult(tr.data, target, false);
                         return;
                     }
                     const d = tr.data;
@@ -6703,12 +7710,14 @@
                     if (d.total_rtt_ms > 0) lines.push('', `Path RTT (sum of overlay edges): ~${d.total_rtt_ms} ms`);
                     if (!d.is_direct && d.saved_rtt_ms > 0) lines.push(`  [relay saved ${d.saved_rtt_ms} ms vs direct ${d.direct_rtt_ms} ms]`);
                     lines.push('', `---`, `For real ICMP traceroute: traceroute ${target}`);
-                    out.innerText = lines.join('\n');
+                    if (out) out.innerText = lines.join('\n');
+                    renderVisualTraceResult(d, target, true);
                 })
                 .catch(err => {
                     lines.push('', `API error: ${err.message || err}`);
                     renderCachedTraceroute(lines, target, queryID);
-                    out.innerText = lines.join('\n');
+                    if (out) out.innerText = lines.join('\n');
+                    renderVisualTraceResult(null, target, false);
                 });
         }
 
@@ -6837,7 +7846,30 @@
         // --- WebUI auth token handling (mirrors server-side bearer requirement) ---
         const AUTH_TOKEN_KEY = 'p2ptap_webui_token';
         function getAuthToken() {
-            try { return localStorage.getItem(AUTH_TOKEN_KEY) || ''; } catch (e) { return ''; }
+            try {
+                // 1. Check URL query parameters (?token=admin)
+                if (typeof window !== 'undefined' && window.location && window.location.search) {
+                    const params = new URLSearchParams(window.location.search);
+                    const urlToken = params.get('token');
+                    if (urlToken) {
+                        try { localStorage.setItem(AUTH_TOKEN_KEY, urlToken); } catch (e) {}
+                        return urlToken;
+                    }
+                }
+                // 2. Check URL hash fragment (#token=admin)
+                if (typeof window !== 'undefined' && window.location && window.location.hash) {
+                    const hashParams = new URLSearchParams(window.location.hash.substring(1));
+                    const hashToken = hashParams.get('token');
+                    if (hashToken) {
+                        try { localStorage.setItem(AUTH_TOKEN_KEY, hashToken); } catch (e) {}
+                        return hashToken;
+                    }
+                }
+                // 3. Fall back to localStorage
+                return localStorage.getItem(AUTH_TOKEN_KEY) || '';
+            } catch (e) {
+                return '';
+            }
         }
         function setAuthToken(tok) {
             try { localStorage.setItem(AUTH_TOKEN_KEY, tok); } catch (e) {}
@@ -6887,12 +7919,18 @@
             const err = document.getElementById('loginError');
             const tok = (input.value || '').trim();
             if (!tok) {
-                err.textContent = t('login_error') || 'Invalid token or request failed. Please try again.';
+                err.textContent = (typeof t === 'function' && t('login_error')) || 'Invalid token or request failed. Please try again.';
                 err.style.display = 'block';
                 return;
             }
             setAuthToken(tok);
             closeLoginModal(true);
+            // Reconnect WebSockets and refetch immediately with the new token
+            try { if (typeof pcapStream !== 'undefined') pcapStream.connect(); } catch (e) {}
+            try { if (typeof logStream !== 'undefined') logStream.connect(); } catch (e) {}
+            try { if (typeof fetchStats === 'function') fetchStats(); } catch (e) {}
+            try { if (typeof fetchLogs === 'function') fetchLogs(); } catch (e) {}
+            try { if (typeof pcapRefreshState === 'function') pcapRefreshState(); } catch (e) {}
         }
 
         // Allow Enter key to submit the login form.
@@ -6902,6 +7940,7 @@
                 submitLogin();
             }
         });
+
 
         async function promptForToken() {
             return await openLoginModal();
@@ -8030,15 +9069,20 @@
         }
 
         // returnPathBadge renders the asymmetric-routing return-path liveness for
-        // a peer — deliberately independent of the outbound ConnState verdict. It
-        // uses CSS classes (.rp-ok / .rp-dead / .rp-idle) wired in styles.css so
-        // the colours follow the active theme's CSS variables (no hardcoded rgba
-        // in the markup). The hover title carries the precise detail string.
+        // a peer — deliberately independent of the outbound ConnState verdict.
         function returnPathBadge(p) {
             const st = (p && p.return_path) || 'idle';
             const detail = (p && p.return_path_detail) || '';
-            const label = t('return_' + st);
+            const label = t('return_' + st) || st;
             return `<span class="pill-badge rp-badge rp-${st}" title="${escapeHTML(detail)}">${escapeHTML(label)}</span>`;
+        }
+
+        // tapDataPathBadge renders end-to-end TAP data-path health in the peer table.
+        function tapDataPathBadge(p) {
+            const st = (p && p.tap_data_path) || 'unknown';
+            const detail = (p && p.tap_data_path_detail) || '';
+            const label = t('tp_' + st) || (st === 'ok' ? 'TAP OK' : (st === 'fail' ? 'TAP Fail' : (st === 'mac_mismatch' ? 'MAC Mismatch' : 'Unprobed')));
+            return `<span class="pill-badge tp-badge tp-${st}" title="${escapeHTML(detail)}">${escapeHTML(label)}</span>`;
         }
 
         function getNodeColor(peer) {
@@ -8060,6 +9104,58 @@
         }
 
         /* ── Protocol Streams & Channels Monitor ───────────────────────── */
+        let currentProtoCategory = 'all';
+        let prevProtoTrackerSnapshot = {};
+
+        function filterProtoChannels(cat) {
+            currentProtoCategory = cat || 'all';
+            const tabs = document.querySelectorAll('#protoCategoryTabs .proto-tab');
+            tabs.forEach(tab => {
+                if (tab.getAttribute('data-cat') === currentProtoCategory) {
+                    tab.classList.add('active');
+                } else {
+                    tab.classList.remove('active');
+                }
+            });
+            if (window.__lastStatsData) {
+                renderProtocolChannels(window.__lastStatsData);
+            }
+        }
+
+        async function triggerSeqSyncResync(targetPeer, triggerBtn) {
+            const peerStr = targetPeer || 'all';
+            let btn = triggerBtn;
+            if (!btn && typeof event !== 'undefined' && event && event.target && event.target.closest) {
+                btn = event.target.closest('button');
+            }
+            if (btn && btn.style) {
+                btn.disabled = true;
+                btn.style.opacity = '0.6';
+            }
+            try {
+                const res = await safeFetchJSON('/api/seqsync/resync', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ peer_id: peerStr })
+                });
+                if (res.ok && res.data && res.data.status === 'ok') {
+                    showToast(`✅ ${t('resync_success') || 'SeqSync & Key Rotation triggered'}: ${res.data.synced_count} ${t('lbl_peers') || 'peers'}`, false);
+                } else {
+                    showToast(`⚠️ ${(res.data && res.data.error) || res.error || 'Resync failed'}`, true);
+                }
+                if (typeof fetchStats === 'function') {
+                    fetchStats();
+                }
+            } catch (err) {
+                showToast(`❌ ${err.message || 'Resync request error'}`, true);
+            } finally {
+                if (btn && btn.style) {
+                    btn.disabled = false;
+                    btn.style.opacity = '1';
+                }
+            }
+        }
+
         const channelCategoryConfig = {
             sync:         { icon: '🔄', color: '#38bdf8', borderColor: 'var(--accent-cyan-border)' },
             routing:      { icon: '🗺️', color: '#a78bfa', borderColor: 'var(--accent-purple-border)' },
@@ -8067,17 +9163,18 @@
             data:         { icon: '🚀', color: '#34d399', borderColor: 'var(--accent-green-border)' },
             security:     { icon: '🛡️', color: '#f87171', borderColor: 'var(--danger-border, #7f1d1d)' },
             transport:    { icon: '🕳️', color: '#c084fc', borderColor: 'var(--accent-purple-border)' },
-            diagnostics:  { icon: '🩺', color: '#94a3b8', borderColor: 'var(--border-subtle)' },
+            diagnostics:  { icon: '🩺', color: '#38bdf8', borderColor: 'var(--border-subtle)' },
             discovery:    { icon: '🔍', color: '#38bdf8', borderColor: 'var(--accent-cyan-border)' },
         };
 
         function channelStatusBadge(status) {
             if (status === 'active')    return `<span style="color:#34d399;font-weight:700;font-size:0.75rem;">● ${t('channel_status_active') || 'Active'}</span>`;
             if (status === 'running')   return `<span style="color:#38bdf8;font-weight:700;font-size:0.75rem;">● ${t('channel_status_running') || 'Running'}</span>`;
-            if (status === 'idle')      return `<span style="color:#94a3b8;font-weight:700;font-size:0.75rem;">◌ ${t('channel_status_idle') || 'Idle'}</span>`;
-            if (status === 'standby')   return `<span style="color:#fbbf24;font-weight:700;font-size:0.75rem;">⏸ ${t('channel_status_standby') || 'Standby'}</span>`;
+            if (status === 'synced')    return `<span style="color:#34d399;font-weight:700;font-size:0.75rem;">● ${t('channel_status_synced') || 'Synchronized'}</span>`;
             if (status === 'ready')     return `<span style="color:#a78bfa;font-weight:700;font-size:0.75rem;">● ${t('channel_status_ready') || 'Ready'}</span>`;
+            if (status === 'standby')   return `<span style="color:#fbbf24;font-weight:700;font-size:0.75rem;">⏸ ${t('channel_status_standby') || 'Standby'}</span>`;
             if (status === 'open-mode') return `<span style="color:#fbbf24;font-weight:700;font-size:0.75rem;">◌ ${t('channel_status_open') || 'Open'}</span>`;
+            if (status === 'idle')      return `<span style="color:#94a3b8;font-weight:700;font-size:0.75rem;">◌ ${t('channel_status_idle') || 'Idle'}</span>`;
             return `<span style="color:var(--text-muted);font-size:0.75rem;">◌ ${escapeHTML(status)}</span>`;
         }
 
@@ -8089,32 +9186,187 @@
             const badge = document.getElementById('activeStreamsBadge');
             if (badge) badge.textContent = `${streams.length} ${t('lbl_active_streams') || 'Streams'}`;
 
-            // --- Channels Grid ---
+            // --- Traffic Breakdown Bar ---
+            const trafficBar = document.getElementById('protoTrafficBar');
+            const trafficLegend = document.getElementById('protoTrafficLegend');
+            const totalSummary = document.getElementById('protoTotalTrafficSummary');
+            if (trafficBar && trafficLegend) {
+                let totalFrames = 0;
+                let totalBytes = 0;
+                channels.forEach(ch => {
+                    totalFrames += (ch.tx_frames || 0) + (ch.rx_frames || 0);
+                    totalBytes += (ch.tx_bytes || 0) + (ch.rx_bytes || 0);
+                });
+                if (totalSummary) {
+                    totalSummary.textContent = `${totalFrames.toLocaleString()} ${t('frames_unit') || 'frames'} (${formatBytes(totalBytes)})`;
+                }
+
+                if (totalFrames === 0) {
+                    const emptyBarHtml = `<div class="proto-traffic-segment" style="width:100%; background:rgba(255,255,255,0.08); border-radius:4px;"></div>`;
+                    if (trafficBar._lastHtml !== emptyBarHtml) {
+                        trafficBar._lastHtml = emptyBarHtml;
+                        trafficBar.innerHTML = emptyBarHtml;
+                    }
+                    const emptyLegendHtml = `<span class="proto-traffic-item"><span class="proto-traffic-dot" style="background:#64748b;"></span> ${t('common_idle') || 'Standby (0 frames recorded)'}</span>`;
+                    if (trafficLegend._lastHtml !== emptyLegendHtml) {
+                        trafficLegend._lastHtml = emptyLegendHtml;
+                        trafficLegend.innerHTML = emptyLegendHtml;
+                    }
+                } else {
+                    const activeChs = channels.filter(ch => ((ch.tx_frames || 0) + (ch.rx_frames || 0)) > 0);
+                    const newBarHtml = activeChs.map(ch => {
+                        const cfg = channelCategoryConfig[ch.category] || channelCategoryConfig.diagnostics;
+                        const chFrames = (ch.tx_frames || 0) + (ch.rx_frames || 0);
+                        const pct = ((chFrames / totalFrames) * 100).toFixed(1);
+                        return `<div class="proto-traffic-segment" style="width:${pct}%; background:${cfg.color};" title="${escapeHTML(ch.name)}: ${pct}% (${chFrames.toLocaleString()} frames)"></div>`;
+                    }).join('');
+                    if (trafficBar._lastHtml !== newBarHtml) {
+                        trafficBar._lastHtml = newBarHtml;
+                        trafficBar.innerHTML = newBarHtml;
+                    }
+
+                    const newLegendHtml = activeChs.map(ch => {
+                        const cfg = channelCategoryConfig[ch.category] || channelCategoryConfig.diagnostics;
+                        const chFrames = (ch.tx_frames || 0) + (ch.rx_frames || 0);
+                        const pct = ((chFrames / totalFrames) * 100).toFixed(1);
+                        return `<span class="proto-traffic-item"><span class="proto-traffic-dot" style="background:${cfg.color};"></span> <strong>${escapeHTML(ch.name)}</strong>: ${pct}% (${chFrames.toLocaleString()})</span>`;
+                    }).join('');
+                    if (trafficLegend._lastHtml !== newLegendHtml) {
+                        trafficLegend._lastHtml = newLegendHtml;
+                        trafficLegend.innerHTML = newLegendHtml;
+                    }
+                }
+            }
+
+            // --- Filter by Category ---
+            const filteredChannels = (currentProtoCategory === 'all')
+                ? channels
+                : channels.filter(ch => {
+                    if (currentProtoCategory === 'sync') return ch.category === 'sync' || ch.category === 'security';
+                    return ch.category === currentProtoCategory;
+                });
+
+            // --- Channels Grid (Flicker-Free Smart DOM Update) ---
             const grid = document.getElementById('protoChannelsGrid');
             if (grid) {
-                if (channels.length === 0) {
-                    grid.innerHTML = `<div class="empty-row" style="padding:16px;color:var(--text-muted);">${t('no_channels') || 'No active protocol channels'}</div>`;
+                if (filteredChannels.length === 0) {
+                    const emptyHtml = `<div class="empty-row" style="padding:16px;color:var(--text-muted);">${t('no_channels') || 'No active protocol channels'}</div>`;
+                    if (grid._lastCategoryKey !== 'empty') {
+                        grid._lastCategoryKey = 'empty';
+                        grid.innerHTML = emptyHtml;
+                    }
                 } else {
-                    grid.innerHTML = channels.map(ch => {
+                    const now = Date.now();
+                    const categoryKey = currentProtoCategory + ':' + filteredChannels.map(c => c.id).join(',');
+                    
+                    // If structural composition changed, build the persistent card skeleton
+                    if (grid._lastCategoryKey !== categoryKey) {
+                        grid._lastCategoryKey = categoryKey;
+                        grid.innerHTML = filteredChannels.map(ch => {
+                            const cfg = channelCategoryConfig[ch.category] || channelCategoryConfig.diagnostics;
+                            const normId = (ch.id || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+                            const dict = i18nDict[currentLang] || i18nDict.en || {};
+                            const enDict = i18nDict.en || {};
+                            const rawKey = 'channel_' + ch.id + '_name';
+                            const normKey = 'channel_' + normId + '_name';
+                            const chName = dict[rawKey] || dict[normKey] || enDict[rawKey] || enDict[normKey] || ch.name || ch.id;
+
+                            let actionBtn = '';
+                            if (normId === 'seqsync') {
+                                actionBtn = `<button class="proto-action-btn" data-onclick="triggerSeqSyncResync('all')" title="${t('btn_resync_title') || 'Force SeqSync & Key Rotation'}"><span>🔄</span> <span>${t('btn_resync') || '重同步'}</span></button>`;
+                            }
+
+                            return `
+                                <div class="glass-card proto-ch-card ext61" id="protoCard_${normId}" data-channel-id="${ch.id}" style="border-left:3px solid ${cfg.color}; display:flex; flex-direction:column; gap:8px; padding:14px 16px;">
+                                    <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
+                                        <div style="display:flex; align-items:center; gap:8px;">
+                                            <span class="proto-ch-icon" style="font-size:1.2rem;">${cfg.icon}</span>
+                                            <strong style="color:var(--text-primary); font-size:0.9rem;">${escapeHTML(chName)}</strong>
+                                        </div>
+                                        <div style="display:flex; align-items:center; gap:6px;">
+                                            <span class="proto-rate-slot"></span>
+                                            ${actionBtn}
+                                            <span class="proto-status-slot">${channelStatusBadge(ch.status)}</span>
+                                        </div>
+                                    </div>
+                                    <div style="font-family:monospace; font-size:0.72rem; color:var(--text-muted); word-break:break-all;">${escapeHTML(ch.protocol)}</div>
+                                    
+                                    <div class="proto-card-stats-grid">
+                                        <div class="proto-stat-box">
+                                            <span class="proto-stat-lbl">↑ ${t('tx_frames_lbl') || 'TX 帧量'}</span>
+                                            <span class="proto-stat-val proto-tx-val">0 <small style="font-size:0.68rem; font-weight:normal; color:var(--text-muted);">(0 B)</small></span>
+                                        </div>
+                                        <div class="proto-stat-box">
+                                            <span class="proto-stat-lbl">↓ ${t('rx_frames_lbl') || 'RX 帧量'}</span>
+                                            <span class="proto-stat-val proto-rx-val">0 <small style="font-size:0.68rem; font-weight:normal; color:var(--text-muted);">(0 B)</small></span>
+                                        </div>
+                                    </div>
+
+                                    <div style="display:flex; gap:8px; font-size:0.75rem; color:var(--text-secondary); align-items:center;">
+                                        <span class="proto-events-val">${t('sync_events_lbl') || 'Events'}: <strong>0</strong></span>
+                                        <span class="proto-errors-val"></span>
+                                        <span class="proto-meta-val" style="margin-left:auto;"></span>
+                                    </div>
+                                    <div class="proto-details-val" style="font-size:0.75rem; color:var(--text-dim); border-top:1px dashed rgba(255,255,255,0.06); padding-top:4px; display:none;"></div>
+                                </div>
+                            `;
+                        }).join('');
+                    }
+
+                    // In-place dynamic updates (Butter-smooth, zero flicker)
+                    filteredChannels.forEach(ch => {
                         const cfg = channelCategoryConfig[ch.category] || channelCategoryConfig.diagnostics;
+                        const normId = (ch.id || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+                        const card = document.getElementById('protoCard_' + normId);
+                        if (!card) return;
+
                         const totalStreams = ch.active_streams || 0;
                         const inStr  = ch.inbound_streams  || 0;
                         const outStr = ch.outbound_streams || 0;
-                        const normId = (ch.id || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-                        const rawKey = 'channel_' + ch.id + '_name';
-                        const normKey = 'channel_' + normId + '_name';
-                        const dict = i18nDict[currentLang] || i18nDict.en || {};
-                        const enDict = i18nDict.en || {};
-                        const chName = dict[rawKey] || dict[normKey] || enDict[rawKey] || enDict[normKey] || ch.name || ch.id;
+                        const syncedPeers = ch.synced_peers || 0;
+                        const txFrames = ch.tx_frames || 0;
+                        const rxFrames = ch.rx_frames || 0;
+                        const txBytes = formatBytes(ch.tx_bytes || 0);
+                        const rxBytes = formatBytes(ch.rx_bytes || 0);
+                        const syncEvents = ch.sync_events || 0;
+                        const errCount = ch.error_count || 0;
+                        const lastAgo = ch.last_active_ago || '';
                         const catName = t('category_' + ch.category) || ch.category;
+
+                        // Real-time rate calculation
+                        let rateHtml = '';
+                        const prev = prevProtoTrackerSnapshot[ch.id];
+                        if (prev && prev.ts) {
+                            const dt = Math.max((now - prev.ts) / 1000, 0.5);
+                            const dTxB = Math.max(0, (ch.tx_bytes || 0) - prev.tx_bytes) / dt;
+                            const dRxB = Math.max(0, (ch.rx_bytes || 0) - prev.rx_bytes) / dt;
+                            const dTxF = Math.max(0, (ch.tx_frames || 0) - prev.tx_frames) / dt;
+                            const dRxF = Math.max(0, (ch.rx_frames || 0) - prev.rx_frames) / dt;
+                            if (dTxB > 0 || dRxB > 0 || dTxF > 0 || dRxF > 0) {
+                                rateHtml = `<span class="proto-rate-pill" title="Live Rate">⚡ ↑${formatBytes(dTxB)}/s · ↓${formatBytes(dRxB)}/s</span>`;
+                            }
+                        }
+                        prevProtoTrackerSnapshot[ch.id] = {
+                            tx_bytes: ch.tx_bytes || 0,
+                            rx_bytes: ch.rx_bytes || 0,
+                            tx_frames: ch.tx_frames || 0,
+                            rx_frames: ch.rx_frames || 0,
+                            ts: now
+                        };
 
                         let detailsStr = ch.details || '';
                         if (normId === 'seqsync') {
-                            detailsStr = `Streams: ${totalStreams} (↓${inStr} ↑${outStr}) · ${t('channel_seqsync_desc') || 'Window Dedup & Replay Protection'}`;
+                            if (syncedPeers > 0) {
+                                detailsStr = `${t('synced_peers_lbl') || 'Synced Peers'}: ${syncedPeers} · ${t('channel_seqsync_desc') || 'Window Dedup & Replay Protection'}`;
+                            } else if (totalStreams > 0) {
+                                detailsStr = `Streams: ${totalStreams} (↓${inStr} ↑${outStr}) · ${t('channel_seqsync_desc') || 'Window Dedup & Replay Protection'}`;
+                            } else {
+                                detailsStr = `${t('channel_status_ready') || 'Ready'} · ${t('channel_seqsync_desc') || 'Window Dedup & Replay Protection'}`;
+                            }
                         } else if (normId === 'lsa') {
                             detailsStr = `Streams: ${totalStreams} (↓${inStr} ↑${outStr}) · ${t('channel_lsa_desc') || 'Dijkstra Shortest Path'}`;
                         } else if (normId === 'peekmap' || normId === 'peek-map') {
-                            detailsStr = `Streams: ${totalStreams} (↓${inStr} ↑${outStr}) · ${t('channel_peekmap_desc') || t('channel_peek-map_desc') || 'Bootstrap Topology Sync'}`;
+                            detailsStr = `Streams: ${totalStreams} (↓${inStr} ↑${outStr}) · ${t('channel_peekmap_desc') || t('channel_peekmap_desc') || 'Bootstrap Topology Sync'}`;
                         } else if (normId === 'data') {
                             const cipher = (data.obfs_algo || 'auto');
                             const mode = (data.obfs_mode || 'fixed');
@@ -8125,30 +9377,312 @@
                             detailsStr = `${t('channel_dcutr_desc') || 'Direct Connection Upgrade'} · Streams: ${totalStreams}`;
                         }
 
+                        const isLive = (totalStreams > 0 || txFrames > 0 || rxFrames > 0);
+                        const iconEl = card.querySelector('.proto-ch-icon');
+                        if (iconEl) {
+                            if (isLive) iconEl.classList.add('proto-pulse');
+                            else iconEl.classList.remove('proto-pulse');
+                        }
 
-                        return `
-                            <div class="glass-card ext61" style="border-left:3px solid ${cfg.color}; display:flex; flex-direction:column; gap:6px; padding:14px 16px;">
-                                <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
-                                    <div style="display:flex; align-items:center; gap:8px;">
-                                        <span style="font-size:1.2rem;">${cfg.icon}</span>
-                                        <strong style="color:var(--text-primary); font-size:0.9rem;">${escapeHTML(chName)}</strong>
-                                    </div>
-                                    ${channelStatusBadge(ch.status)}
-                                </div>
-                                <div style="font-family:monospace; font-size:0.72rem; color:var(--text-muted); word-break:break-all;">${escapeHTML(ch.protocol)}</div>
-                                <div style="display:flex; gap:10px; font-size:0.78rem; color:var(--text-secondary);">
-                                    <span>↓ ${inStr}  ↑ ${outStr}  ∑ ${totalStreams}</span>
-                                    <span style="margin-left:auto; background:var(--glass-fill); padding:1px 7px; border-radius:5px; font-size:0.7rem; color:${cfg.color};">${escapeHTML(catName)}</span>
-                                </div>
-                                ${detailsStr ? `<div style="font-size:0.75rem; color:var(--text-dim); margin-top:2px;">${escapeHTML(detailsStr)}</div>` : ''}
-                            </div>
-                        `;
-                    }).join('');
+                        const rateSlot = card.querySelector('.proto-rate-slot');
+                        if (rateSlot && rateSlot.innerHTML !== rateHtml) rateSlot.innerHTML = rateHtml;
+
+                        const statusSlot = card.querySelector('.proto-status-slot');
+                        const statusHtml = channelStatusBadge(ch.status);
+                        if (statusSlot && statusSlot.innerHTML !== statusHtml) statusSlot.innerHTML = statusHtml;
+
+                        const txValEl = card.querySelector('.proto-tx-val');
+                        const txHtml = `${txFrames.toLocaleString()} <small style="font-size:0.68rem; font-weight:normal; color:var(--text-muted);">(${txBytes})</small>`;
+                        if (txValEl && txValEl.innerHTML !== txHtml) txValEl.innerHTML = txHtml;
+
+                        const rxValEl = card.querySelector('.proto-rx-val');
+                        const rxHtml = `${rxFrames.toLocaleString()} <small style="font-size:0.68rem; font-weight:normal; color:var(--text-muted);">(${rxBytes})</small>`;
+                        if (rxValEl && rxValEl.innerHTML !== rxHtml) rxValEl.innerHTML = rxHtml;
+
+                        const eventsEl = card.querySelector('.proto-events-val');
+                        const eventsHtml = `${t('sync_events_lbl') || 'Events'}: <strong>${syncEvents}</strong>`;
+                        if (eventsEl && eventsEl.innerHTML !== eventsHtml) eventsEl.innerHTML = eventsHtml;
+
+                        const errsEl = card.querySelector('.proto-errors-val');
+                        const errsHtml = errCount > 0 ? `<span style="color:#f87171;">Errors: <strong>${errCount}</strong></span>` : '';
+                        if (errsEl && errsEl.innerHTML !== errsHtml) errsEl.innerHTML = errsHtml;
+
+                        const metaEl = card.querySelector('.proto-meta-val');
+                        const metaHtml = lastAgo ? `<span style="color:var(--text-dim); font-size:0.7rem;">🕒 ${escapeHTML(lastAgo)}</span>` : `<span style="background:var(--glass-fill); padding:1px 7px; border-radius:5px; font-size:0.7rem; color:${cfg.color};">${escapeHTML(catName)}</span>`;
+                        if (metaEl && metaEl.innerHTML !== metaHtml) metaEl.innerHTML = metaHtml;
+
+                        const detailsEl = card.querySelector('.proto-details-val');
+                        if (detailsEl) {
+                            if (detailsStr) {
+                                detailsEl.style.display = 'block';
+                                if (detailsEl.textContent !== detailsStr) detailsEl.textContent = detailsStr;
+                            } else {
+                                detailsEl.style.display = 'none';
+                            }
+                        }
+                    });
                 }
             }
 
+            renderStreamsTable(data);
+        }
 
-            // --- Streams Table ---
+        /* ── Mesh Link Quality & Health Score ─────────────────────────── */
+        function renderMeshHealthScore(data) {
+            const peers = data.active_peers || [];
+            const totalPeers = peers.length;
+            const directPeers = peers.filter(p => !p.is_relayed).length;
+            const directRatio = totalPeers > 0 ? (directPeers / totalPeers) : 1;
+            const decryptErrs = peers.reduce((sum, p) => sum + (p.obf_decrypt_errs || 0), 0);
+            const dupIPs = (data.duplicate_ips || []).length;
+            const dedupCount = (data.packet_stats ? data.packet_stats.dedup_count : 0);
+            const tapAvailable = !data.tap_self_test || data.tap_self_test.available !== false;
+
+            let score = 100;
+            if (!tapAvailable) score -= 50;
+            if (totalPeers > 0 && directRatio < 1) score -= Math.round((1 - directRatio) * 15);
+            if (decryptErrs > 0) score -= Math.min(30, decryptErrs * 5);
+            if (dupIPs > 0) score -= Math.min(40, dupIPs * 20);
+            score = Math.max(0, Math.min(100, score));
+
+            const scoreEl = document.getElementById('meshHealthScore');
+            if (scoreEl) {
+                scoreEl.textContent = `${score}%`;
+                if (score >= 90) scoreEl.style.color = '#34d399';
+                else if (score >= 70) scoreEl.style.color = '#38bdf8';
+                else if (score >= 50) scoreEl.style.color = '#fbbf24';
+                else scoreEl.style.color = '#f87171';
+            }
+
+            const metricsRow = document.getElementById('meshHealthMetricsRow');
+            if (metricsRow) {
+                const algoStr = data.obfs_algo || 'AES-GCM (PFS)';
+                metricsRow.innerHTML = `
+                    <span class="mesh-health-pill">🌐 ${t('lbl_direct_ratio') || 'Direct Ratio'}: <strong>${(directRatio * 100).toFixed(0)}%</strong> (${directPeers}/${totalPeers})</span>
+                    <span class="mesh-health-pill">🔐 ${t('lbl_crypto_grade') || 'Encryption'}: <strong>${escapeHTML(algoStr)}</strong></span>
+                    <span class="mesh-health-pill">🛡️ ${t('lbl_dedup_drops') || 'Window Dedup'}: <strong>${dedupCount.toLocaleString()}</strong></span>
+                    <span class="mesh-health-pill">⚠️ ${t('lbl_dup_conflicts') || 'IP Conflicts'}: <strong style="color:${dupIPs > 0 ? '#f87171' : '#34d399'}">${dupIPs}</strong></span>
+                `;
+            }
+
+            const tipsEl = document.getElementById('meshHealthTips');
+            if (tipsEl) {
+                const tips = [];
+                if (!tapAvailable) {
+                    tips.push(`<span class="mesh-health-tip-item" style="color:#f87171;">${t('tip_tap_failed') || '❌ TAP device self-test failed: verify kernel driver and permissions.'}</span>`);
+                }
+                if (dupIPs > 0) {
+                    const msg = (t('tip_dup_ips') || '⚠️ {count} duplicate IP conflict(s) detected in mesh topology.').replace('{count}', dupIPs);
+                    tips.push(`<span class="mesh-health-tip-item" style="color:#f87171;">${escapeHTML(msg)}</span>`);
+                }
+                if (decryptErrs > 0) {
+                    const btnLabel = t('btn_crypto_inspector') || 'Crypto & Sequence Inspector';
+                    const linkHtml = `<a href="javascript:void(0)" data-onclick="openCryptoInspector()" style="color:#38bdf8; text-decoration:underline; font-weight:600; cursor:pointer;">${escapeHTML(btnLabel)}</a>`;
+                    const template = t('tip_decrypt_errs') || '⚠️ {count} decryption failure(s) observed. Click {btn} to inspect & resync.';
+                    const finalHtml = template.replace('{count}', decryptErrs).replace('{btn}', linkHtml);
+                    tips.push(`<span class="mesh-health-tip-item" style="color:#fbbf24;">${finalHtml}</span>`);
+                }
+                if (totalPeers === 0) {
+                    tips.push(`<span class="mesh-health-tip-item">ℹ️ ${t('no_peers_connected') || 'No peers connected. Ready to establish secure P2P mesh.'}</span>`);
+                } else if (tips.length === 0) {
+                    tips.push(`<span class="mesh-health-tip-item" style="color:#34d399;">✅ ${t('mesh_status_optimal') || 'Mesh link quality optimal: all connected peers securely synchronized with forward-secret AEAD.'}</span>`);
+                }
+                tipsEl.innerHTML = tips.join('');
+            }
+        }
+
+        /* ── L2/L3 Traffic Composition ────────────────────────────────── */
+        function renderTrafficComposition(data) {
+            const ps = data.protocol_stats || {};
+            const ipv4 = ps.ipv4 || 0;
+            const ipv6 = ps.ipv6 || 0;
+            const arp  = ps.arp || 0;
+            const icmp = ps.icmp || 0;
+            const udp  = ps.udp || 0;
+            const tcp  = ps.tcp || 0;
+            const other = ps.other || 0;
+            const total = ipv4 + ipv6 + arp + icmp + udp + tcp + other;
+
+            const totalEl = document.getElementById('trafficCompTotalSummary');
+            if (totalEl) totalEl.textContent = `${total.toLocaleString()} pkts`;
+
+            const bar = document.getElementById('trafficCompBar');
+            const legend = document.getElementById('trafficCompLegend');
+            if (!bar || !legend) return;
+
+            if (total === 0) {
+                bar.innerHTML = `<div class="proto-traffic-segment" style="width:100%; background:rgba(255,255,255,0.08); border-radius:4px;"></div>`;
+                legend.innerHTML = `<span class="proto-traffic-item"><span class="proto-traffic-dot" style="background:#64748b;"></span> ${t('common_idle') || 'Standby (0 packets captured)'}</span>`;
+                return;
+            }
+
+            const protos = [
+                { name: 'IPv4', count: ipv4, color: '#38bdf8' },
+                { name: 'IPv6', count: ipv6, color: '#a78bfa' },
+                { name: 'ARP',  count: arp,  color: '#fbbf24' },
+                { name: 'ICMP', count: icmp, color: '#34d399' },
+                { name: 'UDP',  count: udp,  color: '#f472b6' },
+                { name: 'TCP',  count: tcp,  color: '#60a5fa' },
+                { name: 'Other',count: other,color: '#94a3b8' },
+            ].filter(p => p.count > 0);
+
+            bar.innerHTML = protos.map(p => {
+                const pct = ((p.count / total) * 100).toFixed(1);
+                return `<div class="proto-traffic-segment" style="width:${pct}%; background:${p.color};" title="${p.name}: ${pct}% (${p.count.toLocaleString()} pkts)"></div>`;
+            }).join('');
+
+            legend.innerHTML = protos.map(p => {
+                const pct = ((p.count / total) * 100).toFixed(1);
+                return `<span class="proto-traffic-item"><span class="proto-traffic-dot" style="background:${p.color};"></span> <strong>${p.name}</strong>: ${pct}% (${p.count.toLocaleString()})</span>`;
+            }).join('');
+        }
+
+        /* ── Peer Cryptography & Sequence Deep Inspector ─────────────── */
+        function openCryptoInspector(targetPeerID) {
+            const modal = document.getElementById('cryptoInspectorModal');
+            const select = document.getElementById('cryptoInspectorPeerSelect');
+            if (!modal || !select) return;
+
+            const peers = (latestStatsData && latestStatsData.active_peers) || [];
+            if (peers.length === 0) {
+                select.innerHTML = `<option value="">(${t('no_peers') || 'No connected peers'})</option>`;
+            } else {
+                select.innerHTML = peers.map(p => {
+                    const sel = (p.peer_id === targetPeerID) ? 'selected' : '';
+                    const label = p.node_name ? `${p.node_name} (${p.peer_id.slice(-8)})` : p.peer_id;
+                    return `<option value="${escapeHTML(p.peer_id)}" ${sel}>${escapeHTML(label)}</option>`;
+                }).join('');
+            }
+
+            const chosen = targetPeerID || select.value;
+            renderCryptoInspectorContent(chosen);
+            modal.classList.add('active');
+            modal.style.display = 'flex';
+        }
+
+        function closeCryptoInspectorModal() {
+            const modal = document.getElementById('cryptoInspectorModal');
+            if (modal) {
+                modal.classList.remove('active');
+                modal.style.display = 'none';
+            }
+        }
+
+        function renderCryptoInspectorContent(peerID) {
+            const body = document.getElementById('cryptoInspectorBody');
+            if (!body) return;
+
+            const peers = (latestStatsData && latestStatsData.active_peers) || [];
+            const peer = peers.find(p => p.peer_id === peerID) || peers[0];
+
+            if (!peer) {
+                body.innerHTML = `<div class="empty-row" style="padding:20px; text-align:center; color:var(--text-muted);">No peer selected or connected.</div>`;
+                return;
+            }
+
+            const maxSeq = peer.seq_max_seen || peer.rx_seq || 0;
+            const minValid = peer.seq_min_valid || (maxSeq > 65536 ? maxSeq - 65536 : 0);
+            const winUtilPct = ((peer.win_utilization || 0) * 100).toFixed(1);
+            const leaderStr = peer.obf_i_am_leader ? '👑 Leader (Initiates ECDH)' : '🤝 Follower (Responds via Ack)';
+            const convergeStr = peer.seqsync_converge_ms ? `${peer.seqsync_converge_ms} ms` : 'Ready / Connected';
+            const rekeyAgoStr = peer.obf_last_rekey_ago || 'At connect';
+            const cipherStr = peer.obf_algo ? `${peer.obf_algo.toUpperCase()} (PFS ECDH)` : (peer.obf_encrypted ? 'Encrypted' : 'Plaintext');
+
+            body.innerHTML = `
+                <div class="sliding-window-meter">
+                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.82rem;">
+                        <strong style="color:var(--text-primary);">📊 ${t('sliding_window_lbl') || 'Anti-Replay Sliding Window'}</strong>
+                        <span style="color:#38bdf8; font-family:monospace; font-weight:700;">Fill: ${winUtilPct}%</span>
+                    </div>
+                    <div class="seq-win-track">
+                        <div class="seq-win-range" style="left:10%; width:80%;"></div>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size:0.75rem; font-family:monospace; color:var(--text-muted);">
+                        <span>Min Valid: <strong>${minValid.toLocaleString()}</strong></span>
+                        <span>Current Max: <strong style="color:#34d399;">${maxSeq.toLocaleString()}</strong></span>
+                        <span>Replays Dropped: <strong style="color:#f87171;">${peer.replay_drops || 0}</strong></span>
+                    </div>
+                </div>
+
+                <div class="crypto-key-compare-grid">
+                    <div class="crypto-key-box">
+                        <span class="crypto-key-lbl">${t('tx_key_fp_lbl') || 'TxKey Fingerprint'}</span>
+                        <span class="crypto-key-val" style="color:#38bdf8;">${escapeHTML(peer.obf_tx_key_fp || '(derived in-memory)')}</span>
+                    </div>
+                    <div class="crypto-key-box">
+                        <span class="crypto-key-lbl">${t('rx_key_fp_lbl') || 'RxKey Fingerprint'}</span>
+                        <span class="crypto-key-val" style="color:#34d399;">${escapeHTML(peer.obf_rx_key_fp || '(derived in-memory)')}</span>
+                    </div>
+                    <div class="crypto-key-box">
+                        <span class="crypto-key-lbl">${t('ephemeral_fp_lbl') || 'Remote Ephemeral PubKey FP'}</span>
+                        <span class="crypto-key-val" style="color:#a78bfa;">${escapeHTML(peer.obf_remote_eph_fp || 'Negotiated via P256')}</span>
+                    </div>
+                    <div class="crypto-key-box">
+                        <span class="crypto-key-lbl">${t('cipher_algo_lbl') || 'Cipher & Mode'}</span>
+                        <span class="crypto-key-val" style="color:#fbbf24;">${escapeHTML(cipherStr)}</span>
+                    </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:10px; font-size:0.78rem; background:rgba(0,0,0,0.15); padding:10px 14px; border-radius:8px; border:1px solid var(--border-subtle);">
+                    <div><span style="color:var(--text-muted);">${t('handshake_latency_lbl') || 'Convergence'}:</span> <strong style="color:var(--text-primary); font-family:monospace;">${convergeStr}</strong></div>
+                    <div><span style="color:var(--text-muted);">Last Rotation:</span> <strong style="color:var(--text-primary); font-family:monospace;">${escapeHTML(rekeyAgoStr)}</strong></div>
+                    <div><span style="color:var(--text-muted);">Decryption Check:</span> <strong style="color:#34d399;">${peer.obf_decrypt_ok || 0} OK</strong> / <strong style="color:#f87171;">${peer.obf_decrypt_errs || 0} Errs</strong></div>
+                    <div><span style="color:var(--text-muted);">Handshake Role:</span> <strong style="color:#38bdf8;">${leaderStr}</strong></div>
+                </div>
+            `;
+        }
+
+        async function resyncSelectedPeerFromModal() {
+            const select = document.getElementById('cryptoInspectorPeerSelect');
+            const btn = document.getElementById('btnCryptoResyncThisPeer');
+            if (!select || !select.value) return;
+            await triggerSeqSyncResync(select.value, btn);
+            renderCryptoInspectorContent(select.value);
+        }
+
+        /* ── One-Click Diagnostic Report Export (OpenTelemetry-Compliant) ────── */
+        async function exportDiagnosticReport() {
+            try {
+                let report = null;
+                const snapRes = await safeFetchJSON('/api/diag/snapshot', {});
+                if (snapRes.ok && snapRes.data) {
+                    report = snapRes.data;
+                    report.topology_snapshot = latestTopologyData || {};
+                    report.client_meta = {
+                        user_agent: navigator.userAgent,
+                        screen: `${window.innerWidth}x${window.innerHeight}`,
+                        exported_at: new Date().toISOString(),
+                    };
+                } else {
+                    report = {
+                        title: "p2ptap Overlay Mesh Diagnostic Report",
+                        exported_at: new Date().toISOString(),
+                        service_name: "p2ptap",
+                        version: (latestStatsData && latestStatsData.version) || "unknown",
+                        stats: latestStatsData || {},
+                        topology_snapshot: latestTopologyData || {}
+                    };
+                }
+
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(report, null, 2));
+                const dlAnchor = document.createElement('a');
+                dlAnchor.setAttribute("href", dataStr);
+                const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
+                dlAnchor.setAttribute("download", `p2ptap-otel-diagnostic-report-${timeStr}.json`);
+                document.body.appendChild(dlAnchor);
+                dlAnchor.click();
+                dlAnchor.remove();
+
+                showToast(`📋 ${t('diagnostic_export_success') || 'Diagnostic report exported successfully!'}`, false);
+            } catch (err) {
+                showToast(`❌ Export failed: ${err.message}`, true);
+            }
+        }
+
+
+        /* ── Active Protocol Streams Table ───────────────────────────── */
+        function renderStreamsTable(data) {
+            const streams = (data && data.active_streams) || [];
             const query = (document.getElementById('streamSearchInput') || {}).value || '';
             const q = query.toLowerCase();
             const filtered = q
@@ -8164,6 +9698,7 @@
                 : streams;
 
             const tbody = document.getElementById('streamsTableBody');
+            if (!tbody) return;
             if (filtered.length === 0) {
                 const emptyHtml = `<tr><td colspan="5" class="empty-row" style="text-align:center;padding:20px;color:var(--text-muted);">${t('no_matching_streams') || 'No active protocol streams found'}</td></tr>`;
                 if (tbody._lastHtml !== emptyHtml) {
@@ -8274,7 +9809,27 @@
                 badge.style.border = "1px solid rgba(16,185,129,0.4)";
 
                 const name = exit.active_exit_peer_name || exit.active_peer_id.substring(0, 12) + '…';
-                const tapIP = exit.active_exit_tap_ip || exit.active_exit_ip || '—';
+                let tapIP = exit.active_exit_tap_ip || exit.active_exit_ip || '';
+                let tapIPv6 = exit.active_exit_tap_ipv6 || '';
+
+                if ((!tapIP || !tapIPv6) && Array.isArray(data.active_peers)) {
+                    const p = data.active_peers.find(x => x.peer_id === exit.active_peer_id);
+                    if (p) {
+                        if (!tapIP && p.tap_ip) tapIP = p.tap_ip;
+                        if (!tapIPv6 && p.tap_ipv6) tapIPv6 = p.tap_ipv6;
+                    }
+                }
+
+                let ipBadges = '';
+                if (tapIP) {
+                    ipBadges += `(<code>${escapeHTML(tapIP)}</code>)`;
+                }
+                if (tapIPv6) {
+                    ipBadges += ` (<code class="ipv6" style="color:var(--accent-purple, #c084fc); background:rgba(168,85,247,0.12);">${escapeHTML(tapIPv6)}</code>)`;
+                }
+                if (!ipBadges) {
+                    ipBadges = '(<code>—</code>)';
+                }
 
                 body.innerHTML = `
                     <div class="exit-active-banner">
@@ -8285,7 +9840,7 @@
                             </div>
                             <div class="exit-active-meta">
                                 ${t('exit_status_peer') || 'Gateway'}: <strong>${escapeHTML(name)}</strong>
-                                (<code>${escapeHTML(tapIP)}</code>)
+                                ${ipBadges}
                             </div>
                         </div>
                         <button class="exit-disconnect-btn" data-onclick="disconnectExitGateway()">
@@ -8293,6 +9848,7 @@
                         </button>
                     </div>
                 `;
+
             } else {
                 badge.innerText = "Inactive";
                 badge.className = "pill-badge role-peer";
@@ -9040,6 +10596,12 @@
                     document.getElementById('pktStatGateway').innerText = gp.gateway || 0;
                 }
 
+                // Render Mesh Link Quality & Health Scorecard
+                renderMeshHealthScore(data);
+
+                // Render L2/L3 Traffic Composition breakdown
+                renderTrafficComposition(data);
+
                 // Structured-SeqID diagnostics: synced peers + replay/window drops.
                 if (data.seq_stats) {
                     const ss = data.seq_stats;
@@ -9172,15 +10734,26 @@
                             </td>
                             <td>${connStateBadge(p)}</td>
                             <td>${returnPathBadge(p)}</td>
+                            <td>${tapDataPathBadge(p)}</td>
                             <td><code>${escapeHTML(p.peer_id)}</code></td>
                             <td style="position:relative;">${addrsHoverHtml}</td>
-                            <td><span class="pill-badge" style="padding:3px 10px; font-size:0.75rem">${p.transport || 'P2P'}</span></td>
+                            <td>
+                                <div style="display:flex; flex-direction:column; gap:3px; align-items:flex-start;">
+                                    <span class="pill-badge" style="padding:2px 8px; font-size:0.75rem;">${escapeHTML(p.transport || 'P2P')}</span>
+                                    ${p.transport_priority ? `
+                                        <span style="font-size:0.68rem; font-weight:600; padding:1px 5px; border-radius:4px; color:${p.transport_score === 10 ? '#34d399' : (p.transport_score === 0 ? '#a855f7' : (p.transport_score === 20 ? '#38bdf8' : '#fbbf24'))}; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.1);" title="${t('priority_score_tooltip') || 'Routing Priority Score: lower is higher priority (0:Loopback, 10:LAN Direct, 20:WAN Direct, 100:Relay)'}">
+                                            🎯 ${escapeHTML(p.transport_priority)}
+                                        </span>
+                                    ` : ''}
+                                </div>
+                            </td>
                             <td><span style="color:var(--accent-purple); font-size:0.82rem;" title="Connected at ${p.connected_at}">${p.connected_since || '-'}</span></td>
                             <td><span style="color:var(--accent-cyan); font-size:0.82rem;">${p.last_seen || 'Just now'}</span></td>
                             <td><strong style="color:${p.rtt_ms < 50 ? 'var(--success)' : (p.rtt_ms < 150 ? 'var(--warn)' : 'var(--danger)')}">${p.rtt_ms} ms</strong></td>
                             <td><span style="color:var(--accent-purple); font-size:0.8rem">±${jitterStr} ms</span> <span style="color:var(--text-muted); font-size:0.75rem">(${lossStr}%)</span></td>
                             <td>
                                 <div style="display:flex; gap:6px; align-items:center;">
+                                    <button class="btn-glass" style="padding:2px 8px; font-size:0.75rem; background:rgba(56, 189, 248, 0.15); border-color:rgba(56, 189, 248, 0.4); color:#38bdf8;" title="${t('btn_crypto_inspector') || 'Crypto & Seq Inspector'}" data-onclick="openCryptoInspector(${attrStr(p.peer_id)})">🔐</button>
                                     <button class="btn-glass" style="padding:2px 8px; font-size:0.75rem; background:var(--accent-cyan-fill); border-color:var(--accent-cyan-border);" data-onclick="openSpeedTestModal(${attrStr(p.peer_id)})">${t('speedtest_btn')}</button>
                                 </div>
                             </td>
@@ -9612,20 +11185,20 @@ window.buildSubnetRow = function(s, idx) {
     const gwIsV6 = gw && gw.includes(':');
 
     const isDisabled = s.disabled || (s.status && s.status.includes('Disabled'));
-    // A route is "non-operable" when it can never be installed in the local
-    // routing table — Pending Authorization (peer not in AllowedSubnetPeers)
-    // OR no usable gateway IP. These rows must be greyed out and unclickable.
+    // A route is "non-operable" ONLY when there is no usable gateway IP.
+    // Routes pending authorization can be clicked by the user to dynamically authorize them.
     const isPendingAuth = s.status && s.status.includes('Pending Authorization');
     const hasNoGateway = !gw || gw === '-';
-    const isNonOp = isPendingAuth || hasNoGateway;
+    const isNonOp = hasNoGateway;
     const isRoutable = !isNonOp;
+    const isToggleOff = isDisabled || isPendingAuth;
 
     const row = document.createElement('div');
     row.className = 'subnet-row'
         + (isDisabled ? ' is-disabled' : '')
         + (isPendingAuth ? ' is-pending' : '')
-        + (hasNoGateway && !isPendingAuth ? ' is-no-gateway' : '')
-        + (isRoutable && !isDisabled ? ' is-routable' : '');
+        + (hasNoGateway ? ' is-no-gateway' : '')
+        + (isRoutable && !isToggleOff ? ' is-routable' : '');
 
     // Left side: index, CIDR pill, via-info row.
     const left = document.createElement('div');
@@ -9689,14 +11262,14 @@ window.buildSubnetRow = function(s, idx) {
         // Click anywhere on the label → checkbox toggles → change event fires
         // → toggleSubnetRoute(cidr, !isDisabled) is invoked.
         const lbl = document.createElement('label');
-        lbl.className = 'subnet-switch' + (isDisabled ? ' is-off' : ' is-on');
+        lbl.className = 'subnet-switch' + (isToggleOff ? ' is-off' : ' is-on');
 
         const cb = document.createElement('input');
         cb.type = 'checkbox';
         cb.className = 'subnet-switch-input';
-        cb.checked = !isDisabled;
+        cb.checked = !isToggleOff;
         cb.setAttribute('aria-label',
-            isDisabled ? t('btn_enable_subnet') : t('btn_disable_subnet'));
+            isToggleOff ? t('btn_enable_subnet') : t('btn_disable_subnet'));
         cb.addEventListener('change', () => {
             // change fires AFTER the browser flips the checkbox, so cb.checked
             // is already the NEW desired state — forward it directly. (The
@@ -9784,7 +11357,12 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             });
             const btn = document.getElementById('autoScrollBtn');
             if (btn) {
-                btn.innerText = isAutoScroll ? (t('auto_scroll') || '📜 Auto-Scroll: ON') : (t('auto_scroll_off') || '📜 Auto-Scroll: OFF');
+                const span = btn.querySelector('span[data-i18n]') || btn.querySelector('span');
+                if (span) {
+                    span.textContent = isAutoScroll ? (t('auto_scroll') || '📜 Auto-Scroll: ON') : (t('auto_scroll_off') || '📜 Auto-Scroll: OFF');
+                } else {
+                    btn.innerText = isAutoScroll ? (t('auto_scroll') || '📜 Auto-Scroll: ON') : (t('auto_scroll_off') || '📜 Auto-Scroll: OFF');
+                }
             }
         }
 
@@ -10434,6 +12012,15 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             const mix = (c) => Math.round(c + (255 - c) * amt);
             return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
         }
+        function darkenHex(hex, amt) {
+            const h = hex.replace('#', '');
+            const r = parseInt(h.substring(0, 2), 16);
+            const g = parseInt(h.substring(2, 4), 16);
+            const b = parseInt(h.substring(4, 6), 16);
+            const mix = (c) => Math.round(Math.max(0, c * (1 - amt)));
+            return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
+        }
+
 
         // Build the hover / pinned-detail HTML for a topology node. Shared by
         // the floating tooltip and the click-to-inspect detail panel so the two
@@ -10452,15 +12039,17 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             };
             if (found.isSelf) {
                 const gwPkts = (latestStatsData && latestStatsData.gateway_packets && latestStatsData.gateway_packets.gateway) || 0;
-                return `<div class="tt-title"><span>💻 ${escapeHTML(found.name)}</span><span class="pill-badge role-static" style="font-size:0.7rem;padding:2px 8px;">${t('topo_tt_local_host')}</span></div>`
-                    + `<div class="tt-row"><span>${t('topo_tt_ipv4')}</span><span class="tt-val">${escapeHTML(found.tapIP || '-')}</span></div>`
-                    + `<div class="tt-row"><span>${t('topo_tt_ipv6')}</span><span class="tt-val">${escapeHTML(found.tapIPv6 || '-')}</span></div>`
+                return `<div class="tt-title"><span>💻 ${escapeHTML(found.name)}</span><span class="pill-badge role-static" style="font-size:0.68rem;padding:2px 8px;">${t('topo_tt_local_host')}</span></div>`
+                    + `<div class="tt-grid">`
+                    + `<div class="tt-row tt-full"><span>${t('topo_tt_ipv4')}</span><span class="tt-val">${escapeHTML(found.tapIP || '-')}</span></div>`
+                    + `<div class="tt-row tt-full"><span>${t('topo_tt_ipv6')}</span><span class="tt-val">${escapeHTML(found.tapIPv6 || '-')}</span></div>`
                     + (found.isExitServer ? `<div class="tt-row"><span>${t('topo_tt_enc')}</span><span class="tt-val" style="color:var(--warn);">🚪 ${t('topo_badge_exit_server')}</span></div>` : '')
                     + (found.transitCount > 0 ? `<div class="tt-row"><span>${t('topo_tt_route')}</span><span class="tt-val" style="color:var(--warn);">🌉 ${t('topo_badge_transit')} ×${found.transitCount}</span></div>` : '')
-                    + (found.totalTx > 0 || found.totalRx > 0 ? `<div class="tt-row"><span>${t('topo_summary_thru')}</span><span class="tt-val" style="color:var(--info);">⬆ ${formatSpeed(found.totalTx || 0)} ⬇ ${formatSpeed(found.totalRx || 0)}</span></div>` : '')
+                    + (found.totalTx > 0 || found.totalRx > 0 ? `<div class="tt-row tt-full"><span>${t('topo_summary_thru')}</span><span class="tt-val" style="color:var(--info);">⬆ ${formatSpeed(found.totalTx || 0)} ⬇ ${formatSpeed(found.totalRx || 0)}</span></div>` : '')
                     + `<div class="tt-row"><span>${t('topo_summary_gw')}</span><span class="tt-val" style="color:var(--accent-purple);">${gwPkts}</span></div>`
                     + (found.cluster ? `<div class="tt-row"><span>${t('topo_tt_cluster')}</span><span class="tt-val" style="color:var(--accent-purple)">${escapeHTML(clusterNameOf(found.cluster))}</span></div>` : '')
-                    + `<div class="tt-row"><span>${t('topo_tt_peer_id')}</span><span class="tt-val tt-val-id">${escapeHTML(localNodeInfo.peerID || '-')}</span></div>`;
+                    + `<div class="tt-row tt-full"><span>${t('topo_tt_peer_id')}</span><span class="tt-val tt-val-id">${escapeHTML(localNodeInfo.peerID || '-')}</span></div>`
+                    + `</div>`;
             }
             const p = found.peer || {};
             const roleClass = p.role === 'Bootstrap' ? 'role-bootstrap' : (p.role === 'Static' ? 'role-static' : 'role-peer');
@@ -10473,31 +12062,30 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             // Encryption / connection-state / path summaries for the tooltip.
             const encAlgo = p.obf_algo || 'none';
             const encColor = (p.obf_encrypted) ? '#34d399' : (encAlgo === 'none' ? '#94a3b8' : '#fbbf24');
-            const encTxt = p.obf_encrypted ? encAlgo : (encAlgo === 'none' ? '明文 (none)' : encAlgo + ' 未启用');
+            const encTxt = p.obf_encrypted ? encAlgo : (encAlgo === 'none' ? (t('enc_plaintext') || 'Plaintext (none)') : encAlgo + ' ' + (t('enc_not_active') || 'Not Active'));
             const encHtml = `<div class="tt-row"><span>${t('topo_tt_enc')}</span><span class="tt-val" style="color:${encColor}">${encTxt}</span></div>`;
             const connState = p.conn_state || 'unknown';
             const connColor = (connState === 'ok' || connState === 'relay_ok') ? '#34d399' : (connState === 'connecting' ? '#38bdf8' : '#f87171');
             const connHtml = `<div class="tt-row"><span>${t('topo_tt_conn')}</span><span class="tt-val" style="color:${connColor}">${escapeHTML(connState)}</span></div>`;
-            // Return-path liveness (asymmetric routing): shown right next to the
-            // outbound connection verdict so the operator sees when they disagree.
+            // Return-path liveness (asymmetric routing)
             const rpState = p.return_path || 'idle';
             const rpColor = rpState === 'ok' ? '#34d399' : (rpState === 'dead' ? '#f87171' : '#94a3b8');
             const rpHtml = `<div class="tt-row"><span>${t('col_return_path')}</span><span class="tt-val" style="color:${rpColor}" title="${escapeHTML(p.return_path_detail || '')}">${escapeHTML(t('return_' + rpState))}</span></div>`;
             const pathHtml = (found.relayPathNames && found.relayPathNames.length > 0)
-                ? `<div class="tt-row"><span>${t('topo_tt_route_via')}</span><span class="tt-val" style="color:var(--warn);">${t('topo_via')} ${escapeHTML(found.relayPathNames.join(' ➔ '))}</span></div>`
+                ? `<div class="tt-row tt-full"><span>${t('topo_tt_route_via')}</span><span class="tt-val" style="color:var(--warn);">${t('topo_via')} ${escapeHTML(found.relayPathNames.join(' ➔ '))}</span></div>`
                 : '';
 
             const matchedRoute = cachedRoutes.find(r => r.dest_peer === p.peer_id);
-            let routeHtml = `<div class="tt-row"><span>${t('topo_tt_route')}</span><span class="tt-val" style="color:var(--success);">🟢 ${t('topo_tt_direct_link')}</span></div>`;
+            let routeHtml = `<div class="tt-row tt-full"><span>${t('topo_tt_route')}</span><span class="tt-val" style="color:var(--success);">🟢 ${t('topo_tt_direct_link')}</span></div>`;
             if (found.isRelayed) {
-                routeHtml = `<div class="tt-row"><span>${t('topo_tt_route')}</span><span class="tt-val" style="color:var(--warn);">🔀 ${t('topo_tt_circuit_relay')}</span></div>`;
+                routeHtml = `<div class="tt-row tt-full"><span>${t('topo_tt_route')}</span><span class="tt-val" style="color:var(--warn);">🔀 ${t('topo_tt_circuit_relay')}</span></div>`;
             } else if (matchedRoute && !matchedRoute.is_direct) {
-                routeHtml = `<div class="tt-row"><span>${t('topo_tt_optimal_route')}</span><span class="tt-val" style="color:var(--accent-purple);">🔀 ${escapeHTML(matchedRoute.path_names.join(' ➔ '))}</span></div>`
-                    + `<div class="tt-row"><span>${t('topo_tt_route_gain')}</span><span class="tt-val" style="color:var(--success);">⚡ -${matchedRoute.saved_rtt_ms} ms</span></div>`;
+                routeHtml = `<div class="tt-row tt-full"><span>${t('topo_tt_optimal_route')}</span><span class="tt-val" style="color:var(--accent-purple);">🔀 ${escapeHTML(matchedRoute.path_names.join(' ➔ '))}</span></div>`
+                    + `<div class="tt-row tt-full"><span>${t('topo_tt_route_gain')}</span><span class="tt-val" style="color:var(--success);">⚡ -${matchedRoute.saved_rtt_ms} ms</span></div>`;
             }
 
             const isTransit = transitRelaySet.has(p.peer_id);
-            const transitBadge = isTransit ? `<span class="pill-badge role-bootstrap" style="font-size:0.7rem;padding:2px 8px;margin-left:4px;">🔀 ${t('topo_tt_transit_relay')}</span>` : '';
+            const transitBadge = isTransit ? `<span class="pill-badge role-bootstrap" style="font-size:0.68rem;padding:2px 8px;margin-left:4px;">🔀 ${t('topo_tt_transit_relay')}</span>` : '';
 
             // Per-link sequence / link-integrity section.
             const txSeq = found.txSeq || 0, rxSeq = found.rxSeq || 0;
@@ -10506,35 +12094,40 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             const skew = winMax > 0 ? (winMax - rxSeq) : 0;
             const linkBroken = skew >= 1024 || (dup > 0 && rxSeq < winMax);
             const seqColor = linkBroken ? '#f87171' : '#34d399';
-            const seqHtml = `<div class="tt-row"><span>${t('topo_tt_seq')}</span><span class="tt-val" style="color:${seqColor}">↑${txSeq} / ↓${rxSeq}</span></div>`
-                + (winMax > 0 ? `<div class="tt-row"><span>${t('topo_tt_dedup_window')}</span><span class="tt-val" style="color:${skew >= 1024 ? 'var(--danger)' : 'var(--text-secondary)'}">max=${winMax} (skew ${skew})</span></div>` : '')
-                + (dup > 0 ? `<div class="tt-row"><span>${t('topo_tt_dup_drops')}</span><span class="tt-val" style="color:var(--danger)">${dup}</span></div>` : '')
-                + (linkBroken ? `<div class="tt-row"><span>${t('topo_tt_link_integrity')}</span><span class="tt-val" style="color:var(--danger)">⚠️ ${t('topo_tt_blackhole')}</span></div>` : `<div class="tt-row"><span>${t('topo_tt_link_integrity')}</span><span class="tt-val" style="color:var(--success)">✅ ${t('topo_tt_healthy')}</span></div>`);
+            const linkIntegrityHtml = linkBroken
+                ? `<div class="tt-row"><span>${t('topo_tt_link_integrity')}</span><span class="tt-val" style="color:var(--danger)">⚠️ ${t('topo_tt_blackhole')}</span></div>`
+                : `<div class="tt-row"><span>${t('topo_tt_link_integrity')}</span><span class="tt-val" style="color:var(--success)">✅ ${t('topo_tt_healthy')}</span></div>`;
 
-            return `<div class="tt-title"><span>${nodeTitle}</span><div><span class="pill-badge ${roleClass}" style="font-size:0.7rem;padding:2px 8px;">${roleIcon} ${roleText}</span>${transitBadge}</div></div>`
+            const seqHtml = `<div class="tt-row tt-full"><span>${t('topo_tt_seq')}</span><span class="tt-val" style="color:${seqColor}">↑${txSeq} / ↓${rxSeq}</span></div>`
+                + (winMax > 0 ? `<div class="tt-row tt-full"><span>${t('topo_tt_dedup_window')}</span><span class="tt-val" style="color:${skew >= 1024 ? 'var(--danger)' : 'var(--text-secondary)'}">max=${winMax} (skew ${skew})</span></div>` : '')
+                + (dup > 0 ? `<div class="tt-row tt-full"><span>${t('topo_tt_dup_drops')}</span><span class="tt-val" style="color:var(--danger)">${dup}</span></div>` : '');
+
+            return `<div class="tt-title"><span>${nodeTitle}</span><div><span class="pill-badge ${roleClass}" style="font-size:0.68rem;padding:2px 8px;">${roleIcon} ${roleText}</span>${transitBadge}</div></div>`
+                + `<div class="tt-grid">`
+                + `<div class="tt-row tt-full"><span>${t('topo_tt_tap_ip')}</span><span class="tt-val">${escapeHTML(tapIPs)}</span></div>`
                 + `<div class="tt-row"><span>${t('topo_tt_os_arch')}</span><span class="tt-val">${escapeHTML(p.os_arch || 'linux')}</span></div>`
-                + `<div class="tt-row"><span>${t('topo_tt_tap_ip')}</span><span class="tt-val">${escapeHTML(tapIPs)}</span></div>`
+                + `<div class="tt-row"><span>${t('topo_tt_version')}</span><span class="tt-val">${escapeHTML(p.version || '-')}</span></div>`
                 + `<div class="tt-row"><span>${t('topo_tt_transport')}</span><span class="tt-val">${escapeHTML(p.transport || 'P2P')}</span></div>`
+                + (found.transportPath ? `<div class="tt-row"><span>${t('topo_tt_transport_path')}</span><span class="tt-val">${escapeHTML(found.transportPath)}</span></div>` : (found.relayHop ? `<div class="tt-row"><span>${t('topo_tt_relay_hop')}</span><span class="tt-val" style="color:var(--warn)">${escapeHTML(relayNameOf(found.relayHop))}</span></div>` : `<div class="tt-row"><span>${t('topo_tt_transport_path')}</span><span class="tt-val">direct</span></div>`))
                 + (found.cluster ? `<div class="tt-row"><span>${t('topo_tt_cluster')}</span><span class="tt-val" style="color:var(--accent-purple)">${escapeHTML(clusterNameOf(found.cluster))}</span></div>` : '')
                 + (found.bootHops > 0 ? `<div class="tt-row"><span>${t('topo_tt_boot_hops')}</span><span class="tt-val" style="color:var(--accent-cyan)">${found.bootHops}</span></div>` : '')
-                + (found.transportPath ? `<div class="tt-row"><span>${t('topo_tt_transport_path')}</span><span class="tt-val">${escapeHTML(found.transportPath)}</span></div>` : '')
-                + (found.relayHop ? `<div class="tt-row"><span>${t('topo_tt_relay_hop')}</span><span class="tt-val" style="color:var(--warn)">${escapeHTML(relayNameOf(found.relayHop))}</span></div>` : '')
                 + encHtml
                 + connHtml
                 + rpHtml
+                + linkIntegrityHtml
                 + `<div class="tt-row"><span>${t('topo_tt_rtt')}</span><span class="tt-val" style="color:${rttColor}">${p.rtt_ms || 0} ms</span></div>`
                 + `<div class="tt-row"><span>${t('topo_tt_jitter')}</span><span class="tt-val">${(p.jitter_ms || 0).toFixed(1)} ms</span></div>`
                 + `<div class="tt-row"><span>${t('topo_tt_loss')}</span><span class="tt-val" style="color:${(p.loss_rate_percent || 0) > 1 ? 'var(--danger)' : 'var(--text-secondary)'}">${(p.loss_rate_percent || 0).toFixed(1)}%</span></div>`
-                + `<div class="tt-row"><span>${t('topo_tt_live_rate')}</span><span class="tt-val" style="color:var(--success);">⬆️ ${formatSpeed(p.tx_speed || 0)} | ⬇️ ${formatSpeed(p.rx_speed || 0)}</span></div>`
-                + `<div class="tt-row"><span>${t('topo_tt_total')}</span><span class="tt-val">⬆ ${formatBytes(p.total_tx || 0)} ⬇ ${formatBytes(p.total_rx || 0)}</span></div>`
-                + routeHtml
-                + pathHtml
-                + `<div class="tt-row"><span>${t('topo_tt_version')}</span><span class="tt-val">${escapeHTML(p.version || '-')}</span></div>`
+                + `<div class="tt-row"><span>${t('topo_tt_uptime')}</span><span class="tt-val">${escapeHTML(p.uptime || '-')}</span></div>`
                 + `<div class="tt-row"><span>${t('topo_tt_since')}</span><span class="tt-val">${escapeHTML(p.connected_since || '-')}</span></div>`
                 + (p.geo_location ? `<div class="tt-row"><span>${t('topo_tt_geo')}</span><span class="tt-val">${escapeHTML(p.geo_location)}</span></div>` : '')
+                + `<div class="tt-row tt-full"><span>${t('topo_tt_live_rate')}</span><span class="tt-val" style="color:var(--success);">⬆ ${formatSpeed(p.tx_speed || 0)} | ⬇ ${formatSpeed(p.rx_speed || 0)}</span></div>`
+                + `<div class="tt-row tt-full"><span>${t('topo_tt_total')}</span><span class="tt-val">⬆ ${formatBytes(p.total_tx || 0)} ⬇ ${formatBytes(p.total_rx || 0)}</span></div>`
+                + routeHtml
+                + pathHtml
                 + seqHtml
-                + `<div class="tt-row"><span>${t('topo_tt_uptime')}</span><span class="tt-val">${escapeHTML(p.uptime || '-')}</span></div>`
-                + `<div class="tt-row"><span>${t('topo_tt_peer_id')}</span><span class="tt-val tt-val-id">${escapeHTML(p.peer_id || '-')}</span></div>`;
+                + `<div class="tt-row tt-full"><span>${t('topo_tt_peer_id')}</span><span class="tt-val tt-val-id">${escapeHTML(p.peer_id || '-')}</span></div>`
+                + `</div>`;
         }
 
         // --- Selection + filter (interaction) -------------------------------
@@ -10791,12 +12384,21 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 canvas.style.cursor = 'pointer';
 
                 if (!tt) return;
-                tt.style.display = 'block';
-                const sx = (found.x * topoZoom + topoPanX) + 18;
-                const sy = (found.y * topoZoom + topoPanY) - 10;
-                tt.style.left = sx + 'px';
-                tt.style.top = sy + 'px';
                 tt.innerHTML = buildTopoTooltipHTML(found);
+                tt.style.display = 'block';
+
+                const nodeCanvasX = (found.x * topoZoom + topoPanX);
+                const nodeCanvasY = (found.y * topoZoom + topoPanY);
+                const canvasW = canvas.clientWidth || 800;
+
+                if (nodeCanvasY < 160) {
+                    tt.style.transform = 'translate(-50%, 18px)';
+                } else {
+                    tt.style.transform = 'translate(-50%, -105%)';
+                }
+                const clampedX = Math.max(165, Math.min(canvasW - 165, nodeCanvasX));
+                tt.style.left = clampedX + 'px';
+                tt.style.top = nodeCanvasY + 'px';
             });
 
             canvas.addEventListener('mouseleave', () => {
@@ -11307,6 +12909,26 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             ctx.clearRect(0, 0, topoCanvasW, topoCanvasH);
             ctx.save();
             ctx.imageSmoothingEnabled = true;
+
+            // --- Cyber Grid & Ambient Canvas Background ---
+            if (!lightT) {
+                ctx.save();
+                ctx.strokeStyle = "rgba(255, 255, 255, 0.02)";
+                ctx.lineWidth = 1;
+                const gridSize = 36;
+                const offX = ((topoPanX * topoZoom) % gridSize + gridSize) % gridSize;
+                const offY = ((topoPanY * topoZoom) % gridSize + gridSize) % gridSize;
+                ctx.beginPath();
+                for (let x = offX; x < topoCanvasW; x += gridSize) {
+                    ctx.moveTo(x, 0); ctx.lineTo(x, topoCanvasH);
+                }
+                for (let y = offY; y < topoCanvasH; y += gridSize) {
+                    ctx.moveTo(0, y); ctx.lineTo(topoCanvasW, y);
+                }
+                ctx.stroke();
+                ctx.restore();
+            }
+
             ctx.translate(topoPanX, topoPanY);
             ctx.scale(topoZoom, topoZoom);
 
@@ -11323,71 +12945,86 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             topoClusterBoxes.forEach(b => {
                 ctx.save();
                 ctx.fillStyle = b.color;
-                ctx.globalAlpha = b.local ? 0.08 : 0.04;
+                ctx.globalAlpha = b.local ? 0.06 : 0.03;
                 ctx.beginPath();
                 if (ctx.roundRect) {
-                    ctx.roundRect(b.x, b.y, b.w, b.h, 12);
+                    ctx.roundRect(b.x, b.y, b.w, b.h, 16);
                 } else {
                     ctx.rect(b.x, b.y, b.w, b.h);
                 }
                 ctx.fill();
-                ctx.globalAlpha = b.local ? 0.75 : 0.45;
+
+                // Subtle neon boundary
+                ctx.globalAlpha = b.local ? 0.65 : 0.35;
                 ctx.strokeStyle = b.color;
                 ctx.lineWidth = b.local ? 1.5 : 1.0;
-                ctx.setLineDash([6, 4]);
+                ctx.setLineDash([8, 6]);
                 ctx.stroke();
                 ctx.setLineDash([]);
 
-                // Cluster label chip with rounded corners anchored at top-left inside box
+                // Glassmorphic cluster label chip anchored at top-left
                 const label = '🟣 ' + b.name + (b.count > 0 ? ` (${b.count})` : '');
-                ctx.font = "bold 10px system-ui, -apple-system, sans-serif";
-                const lw = topoMeasure(ctx, "bold 10px system-ui, -apple-system, sans-serif", label) + 18;
-                ctx.globalAlpha = b.local ? 0.95 : 0.8;
-                ctx.fillStyle = b.color;
+                ctx.font = "bold 11px system-ui, -apple-system, sans-serif";
+                const lw = topoMeasure(ctx, "bold 11px system-ui, -apple-system, sans-serif", label) + 20;
+                ctx.globalAlpha = b.local ? 0.92 : 0.75;
+                ctx.fillStyle = lightT ? "rgba(255,255,255,0.92)" : "rgba(18, 14, 38, 0.88)";
+                ctx.strokeStyle = b.color;
+                ctx.lineWidth = 1;
                 ctx.beginPath();
                 if (ctx.roundRect) {
-                    ctx.roundRect(b.x + 8, b.y + 6, lw, 18, 5);
+                    ctx.roundRect(b.x + 10, b.y + 8, lw, 22, 6);
                 } else {
-                    ctx.rect(b.x + 8, b.y + 6, lw, 18);
+                    ctx.rect(b.x + 10, b.y + 8, lw, 22);
                 }
                 ctx.fill();
-                ctx.fillStyle = "#ffffff";
+                ctx.stroke();
+
+                ctx.fillStyle = lightT ? "#7c3aed" : "#e9d5ff";
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'middle';
-                ctx.fillText(label, b.x + 16, b.y + 15);
+                ctx.fillText(label, b.x + 20, b.y + 19);
                 ctx.textBaseline = 'alphabetic';
                 ctx.restore();
             });
 
-
+            // Draw Links and Staggered Glassmorphic Badges
             for (let i = 0; i < nodes.length; i++) {
                 const target = nodes[i];
-                if (!target.parentId || !nodeByID[target.parentId]) continue; // self or orphan
+                if (!target.parentId || !nodeByID[target.parentId]) continue;
                 const parent = nodeByID[target.parentId];
                 const edgeKey = parent.id + '|' + target.id;
                 const edgeHi = topoSelectedId !== null && topoSelectedEdgeSet.has(edgeKey);
                 const edgeDim = topoFilterMode !== 'all' && !topoNodeMatchesFilter(target);
+
+                // Sleek link line
                 ctx.beginPath();
                 ctx.moveTo(parent.x, parent.y);
                 ctx.lineTo(target.x, target.y);
                 ctx.strokeStyle = edgeHi ? (target.isRelayed ? '#f59e0b' : '#38bdf8') : target.linkColor;
-                ctx.lineWidth = edgeHi ? (target.isRelayed ? 2.4 : 3.4) : (target.isRelayed ? 1.8 : 2.8);
-                if (target.lineStyle === 'overlay') ctx.setLineDash([10, 5]);
+                ctx.lineWidth = edgeHi ? (target.isRelayed ? 2.6 : 3.4) : (target.isRelayed ? 1.6 : 2.2);
+                if (target.lineStyle === 'overlay') ctx.setLineDash([8, 5]);
                 else if (target.lineStyle === 'circuit') ctx.setLineDash([4, 4]);
                 else ctx.setLineDash([]);
-                if (edgeHi) { ctx.shadowColor = target.isRelayed ? '#f59e0b' : '#38bdf8'; ctx.shadowBlur = 12; }
-                else ctx.shadowBlur = 0;
-                ctx.globalAlpha = edgeHi ? 0.95 : (edgeDim ? 0.12 : (topoSelectedId !== null ? 0.18 : 0.55));
+
+                if (edgeHi) {
+                    ctx.shadowColor = target.isRelayed ? '#f59e0b' : '#38bdf8';
+                    ctx.shadowBlur = 12;
+                } else {
+                    ctx.shadowColor = target.linkColor;
+                    ctx.shadowBlur = 4;
+                }
+                ctx.globalAlpha = edgeHi ? 0.95 : (edgeDim ? 0.12 : (topoSelectedId !== null ? 0.18 : 0.65));
                 ctx.stroke();
                 ctx.shadowBlur = 0;
                 ctx.globalAlpha = 1.0;
 
-                const midX = (parent.x + target.x) / 2;
-                const midY = (parent.y + target.y) / 2;
-                // Pre-existing bug fix: the field actually set on each node by
-                // mkNode is seqWinMax (from backend `seq_win_max`), not rxSeqMax.
-                // The previous check was silently dead because rxSeqMax was
-                // always undefined → 0 → false.
+                // ── Staggered position along the link ray to prevent horizontal bar collision! ──
+                // Sibling badges gently stagger at 42%, 56%, 38%, 62%, 50% along each ray
+                const staggerOffsets = [0.42, 0.58, 0.36, 0.64, 0.48, 0.52];
+                const tDist = leafNodes <= 2 ? 0.50 : staggerOffsets[i % staggerOffsets.length];
+                const midX = parent.x + (target.x - parent.x) * tDist;
+                const midY = parent.y + (target.y - parent.y) * tDist;
+
                 const seqWinMaxForBlackhole = typeof target.seqWinMax === 'number' ? target.seqWinMax : 0;
                 const blackhole = seqWinMaxForBlackhole > 0 &&
                     ((seqWinMaxForBlackhole - target.rxSeq) >= 1024 || (target.dedupDrops > 0 && target.rxSeq < seqWinMaxForBlackhole));
@@ -11403,7 +13040,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                     : '';
                 const typeLine = target.isRelayed
                     ? ((t('topo_via') || 'via') + (relayFirst ? ' ' + relayFirst : ''))
-                    : (t('topo_summary_direct') || 'direct');
+                    : (t('topo_summary_direct') || '直连');
                 const dropTxt = target.dedupDrops > 0 ? ` · dup:${target.dedupDrops}` : '';
                 const seqWinMax = typeof target.seqWinMax === 'number' ? target.seqWinMax : 0;
                 const skew = seqWinMax > 0 ? (seqWinMax - target.rxSeq) : 0;
@@ -11414,179 +13051,212 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 // Skip when dimmed by active filter/selection
                 if (edgeDim || (topoSelectedId !== null && !edgeHi)) continue;
 
-                // Pre-measure widths
-                const wRate = rateLine ? topoMeasure(ctx, "bold 9px system-ui, -apple-system, sans-serif", rateLine) : 0;
-                const wMeta = topoMeasure(ctx, "8px system-ui, -apple-system, sans-serif", metaLine);
+                // Measure widths
+                const wRate = rateLine ? topoMeasure(ctx, "bold 9px ui-monospace, monospace", rateLine) : 0;
+                const wMeta = topoMeasure(ctx, "9px system-ui, -apple-system, sans-serif", metaLine);
                 const contentW = Math.max(wRate, wMeta);
 
-                const padX = 8, padY = 3, lineH = 11;
+                const padX = 8, padY = 4, lineH = 12;
                 const numLines = rateLine ? 2 : 1;
-                const boxW = Math.max(54, contentW + padX * 2);
+                const boxW = Math.max(58, contentW + padX * 2);
                 const boxH = padY * 2 + numLines * lineH;
                 const boxX = midX - boxW / 2;
                 const boxY = midY - boxH / 2;
 
                 ctx.save();
-                ctx.fillStyle = lightT ? "rgba(255,255,255,0.94)" : "rgba(10, 15, 30, 0.88)";
-                ctx.strokeStyle = blackhole ? "#f87171" : (edgeHi ? "#38bdf8" : target.linkColor);
-                ctx.lineWidth = 1;
+                // Frosted Dark Glass Pill
+                ctx.shadowColor = edgeHi ? "#38bdf8" : "rgba(0,0,0,0.5)";
+                ctx.shadowBlur = edgeHi ? 10 : 6;
+                ctx.fillStyle = lightT ? "rgba(255,255,255,0.95)" : "rgba(10, 16, 32, 0.88)";
+                ctx.strokeStyle = blackhole ? "#f87171" : (edgeHi ? "#38bdf8" : (target.isRelayed ? "rgba(245, 158, 11, 0.6)" : "rgba(56, 189, 248, 0.4)"));
+                ctx.lineWidth = edgeHi ? 1.6 : 1;
                 ctx.beginPath();
                 if (ctx.roundRect) {
-                    ctx.roundRect(boxX, boxY, boxW, boxH, 6);
+                    ctx.roundRect(boxX, boxY, boxW, boxH, 7);
                 } else {
                     ctx.rect(boxX, boxY, boxW, boxH);
                 }
                 ctx.fill();
                 ctx.stroke();
+                ctx.shadowBlur = 0;
 
-                let yCursor = boxY + padY + 8;
+                let yCursor = boxY + padY + 9;
                 ctx.textAlign = "center";
                 if (rateLine) {
                     ctx.fillStyle = blackhole ? (lightT ? "#dc2626" : "#f87171") : (target.isRelayed ? (lightT ? "#b45309" : "#fcd34d") : (lightT ? "#0284c7" : "#38bdf8"));
-                    ctx.font = "bold 9px system-ui, -apple-system, sans-serif";
+                    ctx.font = "bold 9px ui-monospace, monospace";
                     ctx.fillText(rateLine, midX, yCursor);
                     yCursor += lineH;
                 }
-                ctx.font = "8px system-ui, -apple-system, sans-serif";
+                ctx.font = "9px system-ui, -apple-system, sans-serif";
                 ctx.fillStyle = blackhole ? (lightT ? "#dc2626" : "#fca5a5") : (lightT ? "#475569" : "#94a3b8");
                 ctx.fillText(metaLine, midX, yCursor);
                 ctx.restore();
             }
 
-            // --- Real-Rate Data-Flow Particles (smooth @60fps) ---
-            // Particle speed and density are driven by the REAL per-link byte
-            // rate reported by the backend (target.rxSpeed inbound peer->self,
-            // target.txSpeed outbound self->peer). Idle links (rate < ~1KB/s)
-            // show no flow, so the chart reflects actual traffic truthfully.
+            // --- Real-Rate Data-Flow Glowing Particles (smooth @60fps) ---
             const nowMs = (ts || performance.now());
             const dt = Math.max(0, Math.min(0.1, (nowMs - topoLastFrameTs) / 1000)) || 0.016;
             topoLastFrameTs = nowMs;
             const tsec = nowMs / 1000;
             const selfNode = nodes[0];
+
             for (let i = 0; i < nodes.length; i++) {
                 const target = nodes[i];
-                // Particles flow along the actual tree edge (node <-> parent),
-                // not always to self. For the root (self) this loop is a no-op
-                // here; its traffic to children is drawn when iterating children.
                 if (!target.parentId || !nodeByID[target.parentId]) continue;
                 const parent = nodeByID[target.parentId];
                 if (!topoFlowState[target.id]) topoFlowState[target.id] = { in: Math.random(), out: Math.random() };
 
-                // Map real byte rate -> visual velocity factor (0.08 .. 2.2).
-                // Inbound = from the peer toward its parent (up the tree); outbound
-                // = toward the peer from its parent (down the tree).
-                const inboundRate = target.rxSpeed || 0;   // peer -> parent (RX)
-                const outboundRate = target.txSpeed || 0;  // parent -> peer (TX)
-                const inVel = inboundRate <= TOPO_IDLE_BPS ? 0 : Math.min(2.2, 0.12 + inboundRate / (256 * 1024));
-                const outVel = outboundRate <= TOPO_IDLE_BPS ? 0 : Math.min(2.2, 0.12 + outboundRate / (256 * 1024));
+                const inboundRate = target.rxSpeed || 0;
+                const outboundRate = target.txSpeed || 0;
+                const inVel = inboundRate <= TOPO_IDLE_BPS ? 0 : Math.min(2.4, 0.15 + inboundRate / (256 * 1024));
+                const outVel = outboundRate <= TOPO_IDLE_BPS ? 0 : Math.min(2.4, 0.15 + outboundRate / (256 * 1024));
 
-                // Advance each direction's phase by real-rate * dt.
                 topoFlowState[target.id].in = (topoFlowState[target.id].in + inVel * dt) % 1.0;
                 topoFlowState[target.id].out = (topoFlowState[target.id].out + outVel * dt) % 1.0;
 
-                // Particle density scales with rate: more traffic => more dots.
                 const inCount = inVel === 0 ? 0 : Math.min(6, 2 + Math.floor(inboundRate / (64 * 1024)));
                 const outCount = outVel === 0 ? 0 : Math.min(6, 2 + Math.floor(outboundRate / (64 * 1024)));
 
-                // Inbound particles travel from peer (target) -> parent (up the tree).
+                // Inbound particles (peer -> parent)
                 for (let k = 0; k < inCount; k++) {
                     let p = (topoFlowState[target.id].in + k / inCount) % 1.0;
                     const alpha = 0.35 + 0.65 * Math.sin(Math.PI * p);
                     const px = target.x + (parent.x - target.x) * p;
                     const py = target.y + (parent.y - target.y) * p;
                     ctx.beginPath();
-                    ctx.arc(px, py, 4.0, 0, 2 * Math.PI);
+                    ctx.arc(px, py, 4.2, 0, 2 * Math.PI);
                     ctx.fillStyle = target.particleColor;
                     ctx.globalAlpha = alpha;
                     ctx.shadowColor = target.glowColor;
-                    ctx.shadowBlur = 10;
+                    ctx.shadowBlur = 12;
                     ctx.fill();
                 }
-                // Outbound particles travel from parent -> peer (target, down the tree).
+                // Outbound particles (parent -> peer)
                 for (let k = 0; k < outCount; k++) {
                     let p = (topoFlowState[target.id].out + k / outCount) % 1.0;
                     const alpha = 0.35 + 0.65 * Math.sin(Math.PI * p);
                     const px = parent.x + (target.x - parent.x) * p;
                     const py = parent.y + (target.y - parent.y) * p;
                     ctx.beginPath();
-                    ctx.arc(px, py, 4.0, 0, 2 * Math.PI);
+                    ctx.arc(px, py, 4.2, 0, 2 * Math.PI);
                     ctx.fillStyle = target.particleColor;
                     ctx.globalAlpha = alpha;
                     ctx.shadowColor = target.glowColor;
-                    ctx.shadowBlur = 10;
+                    ctx.shadowBlur = 12;
                     ctx.fill();
                 }
             }
             ctx.shadowBlur = 0;
             ctx.globalAlpha = 1.0;
 
-            // --- Nodes ---
-            // (crowded / leafNodes hoisted above the link-rendering block so
-            // edge labels can also drop the peer-name header when dense.)
+            // --- High-Tech 3D Spherical Nodes & Spaced Typography ---
             for (let i = 0; i < nodes.length; i++) {
                 const n = nodes[i];
                 const nodeRadius = topoNodeRadius(n, leafNodes);
-                const nameSize = nodeRadius >= 14 ? 12 : nodeRadius >= 10 ? 10 : nodeRadius >= 8 ? 9 : 8;
-                const nameGap = nodeRadius + (nodeRadius >= 12 ? 14 : nodeRadius + 6);
+                const nameSize = nodeRadius >= 14 ? 12 : nodeRadius >= 10 ? 11 : nodeRadius >= 8 ? 9 : 8;
+                const nameGap = nodeRadius + 14;
                 const nodeHi = topoSelectedId !== null && topoSelectedPathSet.has(n.id);
                 const nodeDim = topoFilterMode !== 'all' && !topoNodeMatchesFilter(n);
                 ctx.globalAlpha = nodeDim ? 0.18 : (nodeHi ? 1.0 : (topoSelectedId !== null ? 0.3 : 1.0));
 
                 if (n.isSelf) {
-                    const glowRadius = nodeRadius + 3 + Math.sin(tsec * 3) * 2.5;
+                    // Double concentric pulse for Root/Self Node
+                    const pulseR = nodeRadius + 5 + Math.sin(tsec * 2.6) * 3.5;
                     ctx.beginPath();
-                    ctx.arc(n.x, n.y, glowRadius, 0, 2 * Math.PI);
-                    ctx.fillStyle = "rgba(99, 102, 241, 0.25)";
+                    ctx.arc(n.x, n.y, pulseR, 0, 2 * Math.PI);
+                    ctx.fillStyle = "rgba(99, 102, 241, 0.22)";
                     ctx.fill();
+
+                    // Outer orbit tech ring
+                    ctx.beginPath();
+                    ctx.arc(n.x, n.y, nodeRadius + 9, 0, 2 * Math.PI);
+                    ctx.strokeStyle = "rgba(129, 140, 248, 0.35)";
+                    ctx.lineWidth = 1.2;
+                    ctx.setLineDash([6, 8]);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
                 }
-                // Radial gradient fill gives each node a subtle lit / 3D look.
+
+                // 3D Glass Sphere with Radial Highlight
                 const baseFill = n.isSelf ? "#6366f1" : (n.isBoot ? "#a855f7" : (n.isRelayed ? "#f59e0b" : "#10b981"));
-                const strokeCol = n.isSelf ? (lightT ? "#4338ca" : "#a5b4fc") : (n.isBoot ? (lightT ? "#7c3aed" : "#c4b5fd") : (n.isRelayed ? (lightT ? "#b45309" : "#fde68a") : (lightT ? "#047857" : "#6ee7b7")));
-                const grad = ctx.createRadialGradient(n.x - nodeRadius * 0.35, n.y - nodeRadius * 0.35, nodeRadius * 0.2, n.x, n.y, nodeRadius);
-                grad.addColorStop(0, lightenHex(baseFill, lightT ? 0.35 : 0.45));
-                grad.addColorStop(1, baseFill);
+                const strokeCol = n.isSelf ? (lightT ? "#4338ca" : "#c7d2fe") : (n.isBoot ? (lightT ? "#7c3aed" : "#ddd6fe") : (n.isRelayed ? (lightT ? "#b45309" : "#fef3c7") : (lightT ? "#047857" : "#a7f3d0")));
+                const grad = ctx.createRadialGradient(n.x - nodeRadius * 0.35, n.y - nodeRadius * 0.35, nodeRadius * 0.15, n.x, n.y, nodeRadius);
+                grad.addColorStop(0, lightenHex(baseFill, lightT ? 0.40 : 0.55));
+                grad.addColorStop(0.6, baseFill);
+                grad.addColorStop(1, darkenHex(baseFill, 0.25));
+
                 ctx.beginPath();
                 ctx.arc(n.x, n.y, nodeRadius, 0, 2 * Math.PI);
                 ctx.fillStyle = grad;
                 ctx.strokeStyle = nodeHi ? (lightT ? "#0ea5e9" : "#38bdf8") : strokeCol;
-                ctx.lineWidth = nodeHi ? (nodeRadius >= 12 ? 4 : 3) : (nodeRadius >= 12 ? 3 : 2);
-                if (nodeHi) { ctx.shadowColor = lightT ? "#0ea5e9" : "#38bdf8"; ctx.shadowBlur = 14; }
-                else ctx.shadowBlur = 0;
+                ctx.lineWidth = nodeHi ? 3.5 : 2.2;
+                if (nodeHi) {
+                    ctx.shadowColor = lightT ? "#0ea5e9" : "#38bdf8";
+                    ctx.shadowBlur = 16;
+                } else {
+                    ctx.shadowColor = baseFill;
+                    ctx.shadowBlur = 8;
+                }
                 ctx.fill();
                 ctx.stroke();
                 ctx.shadowBlur = 0;
 
-                // Boot node: dashed outer ring (pure shape, no glyph).
+                // Boot node: elegant dashed outer halo
                 if (n.isBoot) {
                     ctx.beginPath();
-                    ctx.arc(n.x, n.y, nodeRadius + 4, 0, 2 * Math.PI);
+                    ctx.arc(n.x, n.y, nodeRadius + 5, 0, 2 * Math.PI);
                     ctx.strokeStyle = lightT ? "#7c3aed" : "#c4b5fd";
                     ctx.lineWidth = 1.5;
-                    ctx.setLineDash([3, 3]);
+                    ctx.setLineDash([4, 4]);
                     ctx.stroke();
                     ctx.setLineDash([]);
                 }
-                // Static peer: small square badge in the top-right quadrant.
+                // Static peer: elegant glowing pin badge at top-right
                 if (n.isStatic) {
-                    const bs = Math.max(6, nodeRadius * 0.55);
-                    ctx.fillStyle = lightT ? "#1d4ed8" : "#60a5fa";
-                    ctx.fillRect(n.x + nodeRadius * 0.7 - bs / 2, n.y - nodeRadius * 0.7 - bs / 2, bs, bs);
+                    const pinX = n.x + nodeRadius * 0.72;
+                    const pinY = n.y - nodeRadius * 0.72;
+                    ctx.fillStyle = "#3b82f6";
+                    ctx.beginPath();
+                    ctx.arc(pinX, pinY, 5, 0, 2 * Math.PI);
+                    ctx.fill();
+                    ctx.strokeStyle = "#ffffff";
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
                 }
 
+                // ── Node Labels with Clear Vertical Hierarchy ──
+                let labelY = n.y + nameGap;
+                // Node Name
                 ctx.fillStyle = lightT ? "#0f172a" : "#f8fafc";
                 ctx.font = "bold " + nameSize + "px system-ui, -apple-system, sans-serif";
                 ctx.textAlign = "center";
-                ctx.fillText(topoShortLabel(n.name), n.x, n.y + nameGap);
+                ctx.fillText(topoShortLabel(n.name), n.x, labelY);
+                labelY += nameSize + 4;
+
                 if (n.isSelf) {
-                    let labelY = n.y + nameGap + nameSize + 4;
                     if (!crowded) {
+                        // IP Address Tag (Sleek Frosted Cyan Tag)
                         if (n.tapIP) {
-                            ctx.fillStyle = "#38bdf8";
-                            ctx.font = "10px monospace";
-                            ctx.fillText(n.tapIP, n.x, labelY);
-                            labelY += 14;
+                            const ipText = n.tapIP;
+                            ctx.font = "bold 10px ui-monospace, monospace";
+                            const ipW = topoMeasure(ctx, "bold 10px ui-monospace, monospace", ipText) + 12;
+                            ctx.save();
+                            ctx.fillStyle = "rgba(56, 189, 248, 0.12)";
+                            ctx.strokeStyle = "rgba(56, 189, 248, 0.4)";
+                            ctx.lineWidth = 1;
+                            ctx.beginPath();
+                            if (ctx.roundRect) ctx.roundRect(n.x - ipW / 2, labelY - 10, ipW, 16, 4);
+                            else ctx.rect(n.x - ipW / 2, labelY - 10, ipW, 16);
+                            ctx.fill();
+                            ctx.stroke();
+                            ctx.fillStyle = lightT ? "#0284c7" : "#38bdf8";
+                            ctx.textAlign = "center";
+                            ctx.fillText(ipText, n.x, labelY + 2);
+                            ctx.restore();
+                            labelY += 16;
                         }
-                        // Role badges: exit-server and/or L2 transit switch.
+                        // Role badges
                         const badges = [];
                         if (n.isExitServer) badges.push('🚪 ' + t('topo_badge_exit_server'));
                         if (n.transitCount > 0) badges.push('🌉 ' + t('topo_badge_transit') + ' ×' + n.transitCount);
@@ -11597,25 +13267,25 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                             labelY += 14;
                         }
                     }
-                    // Aggregate throughput through self (transit visibility).
+                    // Aggregate throughput through self
                     if (n.totalTx > 0 || n.totalRx > 0) {
                         ctx.fillStyle = lightT ? "#0369a1" : "#7dd3fc";
-                        ctx.font = (crowded ? 8 : 9) + "px system-ui, -apple-system, sans-serif";
+                        ctx.font = (crowded ? 8 : 9) + "px ui-monospace, monospace";
                         ctx.fillText('⬆ ' + formatSpeed(n.totalTx) + '  ⬇ ' + formatSpeed(n.totalRx), n.x, labelY);
                     }
-                }
- else {
-                    // Per-peer live Rx/Tx rate beneath the node name.
-                    const peerTx = typeof n.txSpeed === 'number' ? n.txSpeed : 0; // self -> peer
-                    const peerRx = typeof n.rxSpeed === 'number' ? n.rxSpeed : 0; // peer -> self
+                } else {
+                    // Per-peer live Rx/Tx rate beneath the node name
+                    const peerTx = typeof n.txSpeed === 'number' ? n.txSpeed : 0;
+                    const peerRx = typeof n.rxSpeed === 'number' ? n.rxSpeed : 0;
                     ctx.fillStyle = lightT ? "#475569" : "#94a3b8";
-                    ctx.font = (nodeRadius >= 10 ? 9 : 8) + "px system-ui, -apple-system, sans-serif";
-                    ctx.fillText("⬆ " + formatSpeed(peerTx) + "  ⬇ " + formatSpeed(peerRx), n.x, n.y + nameGap + nameSize + 3);
-                    // Exit-server peer marker (small, above the node name).
+                    ctx.font = (nodeRadius >= 10 ? 9 : 8) + "px ui-monospace, monospace";
+                    ctx.fillText("⬆ " + formatSpeed(peerTx) + "  ⬇ " + formatSpeed(peerRx), n.x, labelY);
+
+                    // Exit-server peer marker
                     if (n.peer && n.peer.is_exit_node) {
                         ctx.fillStyle = lightT ? "#6d28d9" : "#c4b5fd";
                         ctx.font = (nodeRadius >= 10 ? 10 : 8) + "px system-ui, -apple-system, sans-serif";
-                        ctx.fillText('🚪', n.x, n.y - nodeRadius - 5);
+                        ctx.fillText('🚪', n.x, n.y - nodeRadius - 6);
                     }
                 }
             }
@@ -11627,6 +13297,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 ctx.textAlign = "center";
                 ctx.fillText(t('topo_standalone'), centerX, centerY + 55);
             }
+
 
             ctx.restore();
             topoNeedsRedraw = false; // drew this frame; idle throttle can now gate us
@@ -11779,10 +13450,11 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             // the badge stays in sync even when the WebSocket briefly
             // disconnects, but the response is tiny (~80 bytes).
             try {
-                const res = await fetch('/api/pcap/state', withAuth());
-                if (!res.ok) return;
+                const res = await fetchWithTimeout('/api/pcap/state', {}, 3000);
+                if (!res || !res.ok) return;
                 applyPcapStateToBadge(await res.json());
             } catch (e) { /* ignore */ }
+
         }
 
         // ---- pcapStream: WebSocket client for /api/pcap/stream ----
@@ -12958,4 +14630,15 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             if (bwChartState.history.length) drawBandwidthChart(bwChartState.history);
             if (ppsChartState.history.length) drawPacketRateChart(ppsChartState.history);
         });
-    
+
+        window.filterProtoChannels = filterProtoChannels;
+        window.triggerSeqSyncResync = triggerSeqSyncResync;
+        window.openCryptoInspector = openCryptoInspector;
+        window.closeCryptoInspectorModal = closeCryptoInspectorModal;
+        window.renderCryptoInspectorContent = renderCryptoInspectorContent;
+        window.resyncSelectedPeerFromModal = resyncSelectedPeerFromModal;
+        window.exportDiagnosticReport = exportDiagnosticReport;
+        window.setDiagViewMode = setDiagViewMode;
+        window.runPingDiagnostics = runPingDiagnostics;
+        window.runTracerouteDiagnostics = runTracerouteDiagnostics;
+

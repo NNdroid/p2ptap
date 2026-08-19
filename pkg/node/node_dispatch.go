@@ -1,29 +1,91 @@
 package node
 
 import (
+	"context"
 	"fmt"
 	"net"
+	"runtime"
 	"runtime/debug"
 	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"strings"
 
-	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/routing"
 )
 
 // dispatchWorkerCount is the size of the bounded dispatch worker pool that drains
 // the normal egress queue. It is package-level so dispatchNonblocking can report
 // the real worker count in its backpressure warnings (instead of a hard-coded 4).
-const dispatchWorkerCount = 16
+// It scales with the host's logical CPU count so egress throughput tracks the
+// available cores instead of being pinned at a fixed 16 on large hosts (or
+// over-provisioned on tiny ones). Clamped to a sane [4, 64] range.
+var dispatchWorkerCount = defaultDispatchWorkerCount()
+
+func defaultDispatchWorkerCount() int {
+	c := runtime.NumCPU()
+	switch {
+	case c < 4:
+		return 4
+	case c > 64:
+		return 64
+	default:
+		return c
+	}
+}
 
 // dispatchDropWarnThreshold throttles backpressure warnings: we only log once the
 // drop counter crosses this many NEW drops since the last report, so a flooded
 // link does not spam the log. A nonzero count is the operator-visible signal that
 // the egress queue is saturated and ping/Iperf frames are being silently dropped.
 const dispatchDropWarnThreshold = 10
+
+// Peer-egress stall circuit-breaker.
+//
+// A stream write to a wedged/slow peer blocks for the full 5s write deadline
+// (see writeFragsToStreams). dispatchWorkerCount == NumCPU, so a handful of
+// wedged peers can pin EVERY worker and stall egress for perfectly healthy
+// peers — the failure looks like "the whole mesh went slow" when only one link
+// is broken.
+//
+// Once a peer's write times out we short-circuit its remaining queued tasks for
+// peerStallCooldown instead of blocking a worker on it. The peer is still
+// reconnected by triggerThrottledReconnect, so this only decides WHERE the
+// frames are dropped: in the queue (cheap, worker stays free) rather than after
+// a 5s block (expensive, starves everyone else).
+const peerStallCooldown = 3 * time.Second
+
+// markPeerStalled records that pid's egress just timed out. Logging is
+// edge-triggered: a peer already inside its cooldown window is re-armed
+// silently so a persistently wedged link cannot spam the log once per frame.
+func (n *Node) markPeerStalled(pid peer.ID) {
+	if v, ok := n.peerStall.Load(pid); ok {
+		if t, _ := v.(time.Time); time.Since(t) < peerStallCooldown {
+			n.peerStall.Store(pid, time.Now()) // re-arm the window, stay quiet
+			return
+		}
+	}
+	n.peerStall.Store(pid, time.Now())
+	log.Warn("peer %s egress stalled (write timeout): short-circuiting its queued sends for %v so dispatch workers stay free",
+		n.peerIDString(pid), peerStallCooldown)
+}
+
+// peerStalled reports whether pid is inside its post-stall cooldown, i.e.
+// whether a dispatch worker should skip sending to it right now.
+func (n *Node) peerStalled(pid peer.ID) bool {
+	v, ok := n.peerStall.Load(pid)
+	if !ok {
+		return false
+	}
+	t, _ := v.(time.Time)
+	if time.Since(t) >= peerStallCooldown {
+		n.peerStall.Delete(pid)
+		return false
+	}
+	return true
+}
 
 func (n *Node) dispatchNonblocking(task dispatchTask) {
 	// Urgent frames skip the normal backlog and go straight to the priority
@@ -110,14 +172,23 @@ func (n *Node) dispatchWorker(id int) {
 			}
 		}
 	}()
+	// Batch-drain grouping is REUSED across wake-ups. A busy worker wakes up
+	// thousands of times per second, and the old code allocated a fresh map
+	// (plus one slice per key) on every single one — steady, pointless GC
+	// pressure on the egress hot path. Keys are bounded by (peer count × kind),
+	// so keeping them and truncating their slices costs nothing.
+	batches := make(map[batchTasksKey][]dispatchTask, 4)
 	for {
 		select {
 		case <-n.ctx.Done():
 			return
 		case task := <-n.dispatchCh:
 			// Batch drain: collect up to 32 pending tasks grouped by target.
-			batches := make(map[batchTasksKey][]dispatchTask)
-			batches[batchTasksKey{kind: task.kind, target: task.target}] = []dispatchTask{task}
+			for k, v := range batches {
+				batches[k] = v[:0] // keep capacity, drop the previous contents
+			}
+			batches[batchTasksKey{kind: task.kind, target: task.target}] =
+				append(batches[batchTasksKey{kind: task.kind, target: task.target}], task)
 
 		drainLoop:
 			for i := 0; i < 31; i++ {
@@ -131,8 +202,14 @@ func (n *Node) dispatchWorker(id int) {
 			}
 
 			for key, tasks := range batches {
+				// Empty groups are leftovers from an earlier wake-up whose key
+				// has no tasks this round — skip them (tasks[0] below assumes
+				// a non-empty group).
+				if len(tasks) == 0 {
+					continue
+				}
 				switch key.kind {
-				case 0: // unicast — async to avoid blocking worker on slow stream writes
+				case 0: // unicast — executed synchronously by the worker goroutine
 					batch := make([][]byte, 0, len(tasks))
 					origLens := make([]int, 0, len(tasks))
 					for _, t := range tasks {
@@ -141,58 +218,71 @@ func (n *Node) dispatchWorker(id int) {
 					}
 					target := key.target
 					dstMAC := tasks[0].dstMAC
+					// Stall circuit-breaker: this peer's write already timed out
+					// recently, so a send would only block this worker for the
+					// full write deadline. Drop here instead — the buffers are
+					// returned to the pool and the worker stays available for
+					// healthy peers. Recovery is driven by the reconnect that
+					// triggerThrottledReconnect already fires on send failure.
+					if n.peerStalled(target) {
+						for i, t := range tasks {
+							if t.owned {
+								releaseFrameBuf(batch[i])
+							}
+						}
+						continue
+					}
 					if len(batch) == 1 {
 						data := batch[0]
 						origLen := origLens[0]
 						owned := tasks[0].owned
-						go func() {
-							defer func() {
-								if owned {
-									releaseFrameBuf(data)
-								}
-							}()
-							if err := n.Dispatcher.SendToPeer(n.ctx, target, data); err != nil {
-								log.Debug("Tx unicast send error to peer %s: %v", target.String(), err)
-								n.handleUnicastFailure(target, dstMAC, err)
-							} else {
-								n.Collector.RecordSent(origLen)
+						if err := n.Dispatcher.SendToPeer(n.ctx, target, data); err != nil {
+							// A write deadline hit means the link is wedged:
+							// arm the stall breaker so the NEXT queued frame for
+							// this peer does not cost another worker the full
+							// deadline. Other error kinds (no addresses, stream
+							// reset) are fast failures and must not trip it.
+							if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+								n.markPeerStalled(target)
 							}
-						}()
+							log.Debug("Tx unicast send error to peer %s: %v", target.String(), err)
+							n.handleUnicastFailure(target, dstMAC, err)
+						} else {
+							n.Collector.RecordSent(origLen)
+						}
+						if owned {
+							releaseFrameBuf(data)
+						}
 					} else {
-						go func() {
-							defer func() {
-								for i, t := range tasks {
-									if t.owned {
-										releaseFrameBuf(batch[i])
-									}
-								}
-							}()
-							if err := n.Dispatcher.SendBatchToPeer(n.ctx, target, batch); err != nil {
-								log.Debug("Tx batched unicast send error to peer %s (n=%d): %v",
-									target.String(), len(batch), err)
-								n.handleUnicastFailure(target, dstMAC, err)
-							} else {
-								for _, ol := range origLens {
-									n.Collector.RecordSent(ol)
-								}
+						if err := n.Dispatcher.SendBatchToPeer(n.ctx, target, batch); err != nil {
+							if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+								n.markPeerStalled(target)
 							}
-						}()
+							log.Debug("Tx batched unicast send error to peer %s (n=%d): %v",
+								target.String(), len(batch), err)
+							n.handleUnicastFailure(target, dstMAC, err)
+						} else {
+							for _, ol := range origLens {
+								n.Collector.RecordSent(ol)
+							}
+						}
+						for i, t := range tasks {
+							if t.owned {
+								releaseFrameBuf(batch[i])
+							}
+						}
 					}
-				case 1: // broadcast — async to avoid blocking worker on wg.Wait()
+				case 1: // broadcast — executed directly by worker
 					// Broadcast fans out one L2 frame to N peers; count TX once per task.
 					if len(tasks) == 1 {
 						data := tasks[0].data
 						origLen := tasks[0].origLen
 						owned := tasks[0].owned
-						go func() {
-							defer func() {
-								if owned {
-									releaseFrameBuf(data)
-								}
-							}()
-							n.Dispatcher.BroadcastToAllPeers(n.ctx, data)
-							n.Collector.RecordSent(origLen)
-						}()
+						n.Dispatcher.BroadcastToAllPeers(n.ctx, data)
+						n.Collector.RecordSent(origLen)
+						if owned {
+							releaseFrameBuf(data)
+						}
 					} else {
 						batch := make([][]byte, 0, len(tasks))
 						origLens := make([]int, 0, len(tasks))
@@ -200,19 +290,15 @@ func (n *Node) dispatchWorker(id int) {
 							batch = append(batch, t.data)
 							origLens = append(origLens, t.origLen)
 						}
-						go func() {
-							defer func() {
-								for i, t := range tasks {
-									if t.owned {
-										releaseFrameBuf(batch[i])
-									}
-								}
-							}()
-							n.Dispatcher.BroadcastBatchToAllPeers(n.ctx, batch)
-							for _, ol := range origLens {
-								n.Collector.RecordSent(ol)
+						n.Dispatcher.BroadcastBatchToAllPeers(n.ctx, batch)
+						for _, ol := range origLens {
+							n.Collector.RecordSent(ol)
+						}
+						for i, t := range tasks {
+							if t.owned {
+								releaseFrameBuf(batch[i])
 							}
-						}()
+						}
 					}
 				case 2: // relay — persistent pool per relayHop (eliminates per-frame stream open)
 					for _, t := range tasks {
@@ -220,11 +306,18 @@ func (n *Node) dispatchWorker(id int) {
 						n.relayPool.Submit(t.relayHop, t.relayData,
 							// onSent: track stats at origin
 							func() { n.Collector.RecordSent(t.origLen) },
-							// onFail: fallback to direct unicast
+							// onFail: non-blocking fallback to direct unicast
 							func() {
-								if derr := n.Dispatcher.SendToPeer(n.ctx, t.target, t.data); derr == nil {
-									n.Collector.RecordSent(t.origLen)
+								if n.peerStalled(t.target) {
+									return
 								}
+								go func() {
+									ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
+									defer cancel()
+									if derr := n.Dispatcher.SendToPeer(ctx, t.target, t.data); derr == nil {
+										n.Collector.RecordSent(t.origLen)
+									}
+								}()
 							},
 						)
 					}
@@ -314,43 +407,38 @@ func (n *Node) sendDispatchTask(task dispatchTask) {
 		data := task.data
 		origLen := task.origLen
 		owned := task.owned
-		go func() {
-			// Pooled payloads (owned==true, from acquireFrameBuf) MUST be returned
-			// once the send completes, exactly as dispatchWorker does. Without this
-			// the priority path permanently drained the frame pool, so every urgent
-			// frame forced a fresh allocation and the GC churned under load.
-			defer func() {
-				if owned {
-					releaseFrameBuf(data)
-				}
-			}()
-			if err := n.Dispatcher.SendToPeer(n.ctx, target, data); err != nil {
-				log.Debug("Tx urgent unicast send error to peer %s: %v", target.String(), err)
-				n.handleUnicastFailure(target, dstMAC, err)
-			} else {
-				n.Collector.RecordSent(origLen)
-			}
-		}()
+		if err := n.Dispatcher.SendToPeer(n.ctx, target, data); err != nil {
+			log.Debug("Tx urgent unicast send error to peer %s: %v", target.String(), err)
+			n.handleUnicastFailure(target, dstMAC, err)
+		} else {
+			n.Collector.RecordSent(origLen)
+		}
+		if owned {
+			releaseFrameBuf(data)
+		}
 	case 1: // broadcast
 		data := task.data
 		origLen := task.origLen
 		owned := task.owned
-		go func() {
-			defer func() {
-				if owned {
-					releaseFrameBuf(data)
-				}
-			}()
-			n.Dispatcher.BroadcastToAllPeers(n.ctx, data)
-			n.Collector.RecordSent(origLen)
-		}()
+		n.Dispatcher.BroadcastToAllPeers(n.ctx, data)
+		n.Collector.RecordSent(origLen)
+		if owned {
+			releaseFrameBuf(data)
+		}
 	case 2: // relay
 		n.relayPool.Submit(task.relayHop, task.relayData,
 			func() { n.Collector.RecordSent(task.origLen) },
 			func() {
-				if derr := n.Dispatcher.SendToPeer(n.ctx, task.target, task.data); derr == nil {
-					n.Collector.RecordSent(task.origLen)
+				if n.peerStalled(task.target) {
+					return
 				}
+				go func() {
+					ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
+					defer cancel()
+					if derr := n.Dispatcher.SendToPeer(ctx, task.target, task.data); derr == nil {
+						n.Collector.RecordSent(task.origLen)
+					}
+				}()
 			},
 		)
 	}
@@ -390,6 +478,9 @@ func (n *Node) getCachedRoutes() map[peer.ID]routing.RouteInfo {
 	// Double-check: another goroutine may have populated the cache between the RUnlock and Lock.
 	if time.Since(n.cachedRoutesAt) < 2*time.Second && n.cachedRoutes != nil {
 		return n.cachedRoutes
+	}
+	if n.Router == nil {
+		return nil
 	}
 	n.cachedRoutes = n.Router.ComputeRoutes()
 	n.cachedRoutesAt = time.Now()
@@ -432,13 +523,25 @@ func (n *Node) invalidateRouteCache() {
 // reachable peer in an overlay-relay envelope just because the application
 // peerMap has not been populated yet (SeqSync handshake window).
 func (n *Node) isDirectlyConnected(targetPeer peer.ID) bool {
-	if n.Host == nil {
+	if n.Host == nil || targetPeer == n.Host.ID() {
 		return false
 	}
-	if targetPeer == n.Host.ID() {
-		return false // never "connected" to self
+	if n.Host.Network().Connectedness(targetPeer) != network.Connected {
+		return false
 	}
-	return n.Host.Network().Connectedness(targetPeer) == network.Connected
+	n.directConnectedMu.Lock()
+	direct, recorded := n.directConnected[targetPeer]
+	n.directConnectedMu.Unlock()
+	if recorded {
+		return direct
+	}
+	// Fallback check on live conns if not yet recorded in directConnected map
+	for _, conn := range n.Host.Network().ConnsToPeer(targetPeer) {
+		if !strings.Contains(conn.RemoteMultiaddr().String(), "/p2p-circuit") {
+			return true
+		}
+	}
+	return false
 }
 
 // sealRelayEnvelopeForHop wraps an overlay-relay envelope in a p2ptap obfuscate
@@ -473,9 +576,11 @@ func (n *Node) sealRelayEnvelopeForHop(hop peer.ID, envelope []byte) ([]byte, er
 		return nil, fmt.Errorf("seal relay envelope for hop %s: packer not initialised", hop.String())
 	}
 	seqID := n.Packer.NextSeqID(n.txEpochForPeer(hop))
-	// Same headroom idiom as fragmentFrame: obfuscate header plus the largest
-	// padding any Mode can add stays well inside 4096 bytes.
-	outBuf := make([]byte, len(envelope)+obfuscate.HeaderLen+4096)
+	// Size the buffer to the exact upper bound Pack can emit for this envelope
+	// instead of a blanket +4096 slack — eliminates a 4KB heap alloc per relayed
+	// frame on the hot path (MaxPackedLen mirrors Pack's own size guards, so it
+	// is safe by construction).
+	outBuf := make([]byte, n.Packer.MaxPackedLen(len(envelope)))
 	totalLen, err := n.Packer.Pack(seqID, envelope, outBuf)
 	if err != nil {
 		return nil, fmt.Errorf("pack relay envelope for hop %s: %w", hop.String(), err)
@@ -506,124 +611,92 @@ func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
 	if n.isDirectlyConnected(targetPeer) {
 		return ""
 	}
+
+	// 1. Provenance-aware routing: if the target peer was discovered via Peek-Map or
+	// delivered frames from a specific bootstrap/relay node that we are connected to with an active
+	// boot-relay uplink or overlay relay capability, route directly through THAT hop node
+	// instead of picking an arbitrary one! This is essential in multi-boot topologies
+	// to prevent sending return frames to a boot node where the target peer is NOT registered.
+	if orig, ok := n.lookupPeekMapOrigin(targetPeer); ok && orig.Via != "" && orig.Via != targetPeer && (n.Host == nil || orig.Via != n.Host.ID()) {
+		if n.isBootstrapPeer(orig.Via) {
+			if n.hasBootRelayUplink(orig.Via) && !n.isBootRelayBlacklisted(orig.Via) {
+				return orig.Via
+			}
+		} else if n.supportsOverlayRelay(orig.Via) && !n.isOverlayRelayBlacklisted(orig.Via) {
+			return orig.Via
+		}
+	}
+
+	// 2. Routing table from LSAs (Dijkstra shortest path)
 	if routes := n.getCachedRoutes(); len(routes) > 0 {
-		// A directly-connected target must NOT be relayed (self-as-hopper would
-		// wrap its own frames in a relay envelope and drop the payload). Skip
-		// any route whose NextHop is the target itself.
 		if r, ok := routes[targetPeer]; ok && r.NextHop != "" &&
-			r.NextHop != targetPeer && r.NextHop != n.Host.ID() &&
-			n.supportsOverlayRelay(r.NextHop) {
-			return r.NextHop
+			r.NextHop != targetPeer && (n.Host == nil || r.NextHop != n.Host.ID()) {
+			if n.isBootstrapPeer(r.NextHop) {
+				if n.hasBootRelayUplink(r.NextHop) && !n.isBootRelayBlacklisted(r.NextHop) {
+					return r.NextHop
+				}
+			} else if n.supportsOverlayRelay(r.NextHop) && !n.isOverlayRelayBlacklisted(r.NextHop) {
+				return r.NextHop
+			}
 		}
 	}
-	// Fallback when the route table has no entry for the target yet (LSA not
-	// propagated, or the per-tick route cache was invalidated mid-convergence):
-	// pick any connected peer that supports overlay relay as the hop. Prefer
-	// bootstrap peers (stable relay servers), but do NOT require one — this is
-	// what lets a node configured with ONLY StaticPeers (no BootstrapPeers at
-	// all) still relay through a directly-connected static peer to reach a
-	// relay-only peer. Without it, such a node has no hop and every relayed
-	// control stream / data frame to a relay-only peer is abandoned.
-	//
-	// NOTE: the old code rejected every candidate via isDirectlyConnected(pID),
-	// which is ALWAYS true for peers returned by Network().Conns() (those are
-	// open libp2p connections by definition) — making this whole branch dead
-	// code. Fixed by only excluding the target and self.
+
+	// 3. Fallback when the route table has no entry for the target yet:
+	// pick any connected peer that supports overlay relay or has a live boot-relay uplink.
 	var fallback peer.ID
-	// A connected bootstrap peer that has NO boot-relay uplink is useless for
-	// egress (there is no stream to write the relay envelope onto — canEgressToPeer
-	// and sendToPeerViaBootRelay both gate on hasBootRelayUplink). We remember
-	// the first such boot only as a last resort and kick its auth/uplink open so
-	// the path self-heals, but we must NOT return it ahead of a boot that DOES
-	// have an uplink: otherwise relayHopForTarget returns WHBbjX (connected but
-	// no uplink) while canEgressToPeer then rejects it → every reply to a relay-
-	// only peer is silently dropped even though an uplinked boot (e.g. 92NZj)
-	// is right there and the boot backbone would bridge to the target's boot.
+	var fallbackBoot peer.ID
 	var bootHopNoUplink peer.ID
-	for _, c := range n.Host.Network().Conns() {
-		pID := c.RemotePeer()
-		if pID == targetPeer || pID == n.Host.ID() {
-			continue
-		}
-		if n.Host.Network().Connectedness(pID) != network.Connected ||
-			!n.supportsOverlayRelay(pID) ||
-			n.isOverlayRelayBlacklisted(pID) {
-			continue
-		}
-		if n.isBootstrapPeer(pID) {
-			// A boot whose relay-over-backbone uplink has repeatedly failed to
-			// establish (it is not really a boot-relay server) is blacklisted —
-			// skip it so frames fall through to a working hop instead of being
-			// silently dropped every time (the WHBbjX class of bug).
-			if n.isBootRelayBlacklisted(pID) {
-				continue
-			}
-			// Prefer a connected boot that ALREADY has a boot-relay uplink.
-			// The boot backbone federates boots in the same PSK network, so an
-			// uplinked boot reaches the target's boot and bridges the frame.
-			if n.hasBootRelayUplink(pID) {
-				return pID
-			}
-			if bootHopNoUplink == "" {
-				bootHopNoUplink = pID
-			}
-			continue
-		}
-		// Non-boot peers must actually know the target in their link-state
-		// neighbourhood, otherwise forwarding into them is forwarding into the
-		// void. GetEdge(graph[hop][target]) is the precise "can this hop reach
-		// the target?" signal, and it is what stops a totally-unknown peer
-		// (e.g. the "bogus" regression case) from becoming egressable just
-		// because some random connected peer exists.
-		if _, ok := n.Router.GetEdge(pID, targetPeer); !ok {
-			continue
-		}
-		if fallback == "" {
-			fallback = pID // remember first non-boot candidate as last resort
-		}
-	}
-	// No overlay-relay hop found above. If the target is reachable ONLY through a
-	// boot that is a relay-over-backbone bridge (a custom boot, NOT a Circuit-
-	// Relay v2 node), return that boot as the hop. The caller then routes the
-	// frame through the boot-relay uplink (see sendToPeerViaBootRelay /
-	// openBootRelayControlStream). This is what lets two NAT'd peers in the same
-	// PSK network — connected to the same (or a federated) boot but with no
-	// direct path and no overlay-relay peer between them — exchange data and
-	// complete their SeqSync handshake. Reachability is purely a function of the
-	// persistent boot-relay uplink being alive (hasBootRelayUplink).
-	//
-	// A standard Circuit-Relay v2 boot never satisfies hasBootRelayUplink (we
-	// only open /p2ptap/boot-relay/1.0.0 uplinks to custom boots that handle it),
-	// so it is skipped here and the classic circuit path (openStreamViaRelay)
-	// remains the fallback for those deployments.
-	if !n.isDirectlyConnected(targetPeer) {
+
+	if n.Host != nil {
 		for _, c := range n.Host.Network().Conns() {
 			pID := c.RemotePeer()
-			if pID == targetPeer || pID == n.Host.ID() {
+			if pID == targetPeer || (n.Host != nil && pID == n.Host.ID()) {
 				continue
 			}
-			if n.isBootRelayBlacklisted(pID) {
+			if n.Host.Network().Connectedness(pID) != network.Connected {
 				continue
 			}
-			if !n.isBootstrapPeer(pID) || !n.hasBootRelayUplink(pID) {
+			if n.isBootstrapPeer(pID) {
+				if n.isBootRelayBlacklisted(pID) {
+					continue
+				}
+				if n.hasBootRelayUplink(pID) {
+					if fallbackBoot == "" {
+						fallbackBoot = pID
+					}
+				} else if bootHopNoUplink == "" {
+					bootHopNoUplink = pID
+				}
 				continue
 			}
-			return pID
+			if !n.supportsOverlayRelay(pID) || n.isOverlayRelayBlacklisted(pID) {
+				continue
+			}
+			if _, ok := n.Router.GetEdge(pID, targetPeer); !ok {
+				continue
+			}
+			if fallback == "" {
+				fallback = pID
+			}
 		}
 	}
-	// Last resort: a connected boot exists but its boot-relay uplink was never
-	// opened (e.g. it was discovered via routing/LSA/peek-map federation rather
-	// than from the explicit BootstrapPeers list, so ensureRelayAuth was never
-	// triggered for it). Kick the auth/uplink open; it is idempotent/guarded, so
-	// repeated calls are cheap. This frame may still drop once, but subsequent
-	// frames egress once the uplink is up (self-healing). Skip a boot that is
-	// blacklisted — it will never host an uplink, so returning it would just
-	// drop every frame again.
+
+	// Prefer overlay-relay peer if graph edge confirms reachability
+	if fallback != "" {
+		return fallback
+	}
+
+	// Otherwise use the connected boot with an active uplink
+	if fallbackBoot != "" {
+		return fallbackBoot
+	}
+
+	// Last resort: a connected boot exists but its boot-relay uplink was never opened
 	if bootHopNoUplink != "" && !n.isBootRelayBlacklisted(bootHopNoUplink) {
 		go n.ensureRelayAuth(peer.AddrInfo{ID: bootHopNoUplink})
 		return bootHopNoUplink
 	}
-	return fallback
+	return ""
 }
 
 // supportsOverlayRelay reports whether the peer advertises the application-level

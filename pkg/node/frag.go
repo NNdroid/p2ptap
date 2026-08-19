@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"p2ptap/pkg/obfuscate"
 )
 
@@ -46,11 +47,16 @@ const (
 	maxReasmBytes  = obfuscate.MaxFrameSize
 )
 
+type reasmKey struct {
+	peerID  peer.ID
+	origSeq uint32
+}
+
 // fragReassembler buffers incoming fragments and emits complete obfuscated
 // frames once every fragment of a group has arrived.
 type fragReassembler struct {
 	mu     sync.Mutex
-	bufs   map[uint32]*reasmBuf
+	bufs   map[reasmKey]*reasmBuf
 	seqGen uint32
 }
 
@@ -63,7 +69,7 @@ type reasmBuf struct {
 }
 
 func newFragReassembler() *fragReassembler {
-	return &fragReassembler{bufs: make(map[uint32]*reasmBuf)}
+	return &fragReassembler{bufs: make(map[reasmKey]*reasmBuf)}
 }
 
 // nextOrigSeq allocates a monotonically increasing sequence for a new frame
@@ -81,8 +87,14 @@ func (f *fragReassembler) nextOrigSeq() uint32 {
 // Frames that already fit under maxPayload are returned untouched (true
 // zero-overhead common path): the receiver detects the absence of a frag
 // header and passes them through.
-func (n *Node) fragmentFrame(packed []byte, frag *fragReassembler, txEpoch uint64) [][]byte {
-	maxPayload := n.maxFragPayload()
+//
+// When maxPayload > 0 it is used as the fragment size limit (allows callers
+// to specify a larger limit for TCP/yamux streams). Otherwise the node-default
+// (derived from Config.MTU / QUIC path-MTU) is used.
+func (n *Node) fragmentFrame(packed []byte, frag *fragReassembler, txEpoch uint64, maxPayload int) [][]byte {
+	if maxPayload <= 0 {
+		maxPayload = n.maxFragPayload()
+	}
 	if len(packed) <= maxPayload {
 		// Common case: no fragmentation needed. Send the frame as-is; the
 		// receiver's tryReassemble sees no frag magic and passes it through.
@@ -110,7 +122,7 @@ func (n *Node) fragmentFrame(packed []byte, frag *fragReassembler, txEpoch uint6
 		chunk := packed[start:end]
 		hdr := make([]byte, 0, len(chunk)+fragHeaderLen)
 		hdr = appendFragHeader(hdr, seq, uint16(i), uint16(total), chunk)
-		outBuf := make([]byte, len(hdr)+4096)
+		outBuf := make([]byte, n.Packer.MaxPackedLen(len(hdr)))
 		// A FRESH seqID per fragment envelope. The AEAD nonce is derived from the
 		// frame header (magic + seqID + obfType + paddingLen-high), so the previous
 		// hard-coded 0 gave EVERY fragment envelope — across every message ever sent
@@ -150,6 +162,7 @@ func isFragPayload(payload []byte) bool {
 }
 
 // reassemble processes one fragment (the deobfuscated outer payload).
+// Keyed per remotePeer to prevent cross-peer origSeq collision.
 //
 //   - If the payload is NOT a fragment envelope: returns (nil, true) so the
 //     caller treats payload as the finished TAP frame directly.
@@ -158,11 +171,7 @@ func isFragPayload(payload []byte) bool {
 //   - if the group is now complete -> returns (reassembledPacked, true),
 //     where reassembledPacked is the ORIGINAL obfuscated frame; the caller
 //     deobfuscates it (a second Unpack) to obtain the TAP frame.
-//
-// The single Unpack of the outer envelope is done by the caller, so this
-// method only parses the clear-text frag header and updates the reassembly
-// buffer.
-func (f *fragReassembler) reassemble(payload []byte) (finalPacked []byte, complete bool) {
+func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte) (finalPacked []byte, complete bool) {
 	if !isFragPayload(payload) {
 		// Not a fragment: the caller already has the finished TAP frame.
 		return nil, true
@@ -171,7 +180,6 @@ func (f *fragReassembler) reassemble(payload []byte) (finalPacked []byte, comple
 	origSeq := binary.BigEndian.Uint32(payload[2:6])
 	fragIndex := binary.BigEndian.Uint16(payload[6:8])
 	fragTotal := binary.BigEndian.Uint16(payload[8:10])
-	// chunkLen := binary.BigEndian.Uint16(payload[10:12]) // trusted; slice directly
 	chunk := payload[fragHeaderLen:]
 
 	f.mu.Lock()
@@ -185,12 +193,13 @@ func (f *fragReassembler) reassemble(payload []byte) (finalPacked []byte, comple
 	if fragTotal > maxFragTotal {
 		// Attacker-controlled part count; refuse to allocate a giant parts
 		// slice. Legitimate frames never exceed maxFragTotal.
-		log.Debug("Rx: dropping fragment group origSeq=%d with excessive fragTotal=%d (>%d)",
-			origSeq, fragTotal, maxFragTotal)
+		log.Debug("Rx: dropping fragment group from %s origSeq=%d with excessive fragTotal=%d (>%d)",
+			remotePeer.String(), origSeq, fragTotal, maxFragTotal)
 		return nil, false
 	}
 
-	rb, ok := f.bufs[origSeq]
+	key := reasmKey{peerID: remotePeer, origSeq: origSeq}
+	rb, ok := f.bufs[key]
 	if !ok || rb.deadline.Before(time.Now()) {
 		// Bound concurrent groups: if we are at capacity, evict the oldest
 		// group before opening a new one so memory stays capped even between
@@ -205,7 +214,7 @@ func (f *fragReassembler) reassemble(payload []byte) (finalPacked []byte, comple
 			size:     0,
 			deadline: time.Now().Add(reasmTimeout),
 		}
-		f.bufs[origSeq] = rb
+		f.bufs[key] = rb
 	}
 	if int(fragIndex) < rb.total && rb.parts[fragIndex] == nil {
 		chunkCopy := make([]byte, len(chunk))
@@ -214,8 +223,8 @@ func (f *fragReassembler) reassemble(payload []byte) (finalPacked []byte, comple
 		// would exceed this is corrupt or hostile; abort it rather than buffer
 		// unbounded bytes.
 		if rb.size+len(chunkCopy) > maxReasmBytes {
-			log.Debug("Rx: fragment group origSeq=%d exceeded max reassembly bytes; aborting", origSeq)
-			delete(f.bufs, origSeq)
+			log.Debug("Rx: fragment group from %s origSeq=%d exceeded max reassembly bytes; aborting", remotePeer.String(), origSeq)
+			delete(f.bufs, key)
 			return nil, false
 		}
 		rb.size += len(chunkCopy)
@@ -235,7 +244,7 @@ func (f *fragReassembler) reassemble(payload []byte) (finalPacked []byte, comple
 	for _, p := range rb.parts {
 		reassembled = append(reassembled, p...)
 	}
-	delete(f.bufs, origSeq)
+	delete(f.bufs, key)
 	return reassembled, true
 }
 
@@ -243,7 +252,7 @@ func (f *fragReassembler) reassemble(payload []byte) (finalPacked []byte, comple
 // deadline. Called by reassemble when at the concurrent-group cap so memory
 // stays bounded even between reaper ticks. Caller MUST hold f.mu.
 func (f *fragReassembler) evictOldestGroup() {
-	var oldestKey uint32
+	var oldestKey reasmKey
 	var oldest time.Time
 	first := true
 	for k, rb := range f.bufs {
@@ -276,8 +285,9 @@ func (f *fragReassembler) reap() {
 // obfuscation overhead so that each re-obfuscated fragment fits comfortably
 // under the QUIC path MTU (~1250 bytes) without IP fragmentation.
 func (n *Node) maxFragPayload() int {
-	if n.Config != nil && n.Config.Obfuscation.MaxFragSize > 0 {
-		v := n.Config.Obfuscation.MaxFragSize
+	c := n.config()
+	if c != nil && c.Obfuscation.MaxFragSize > 0 {
+		v := c.Obfuscation.MaxFragSize
 		if v < 256 {
 			v = 256
 		}
@@ -286,7 +296,7 @@ func (n *Node) maxFragPayload() int {
 		}
 		return v
 	}
-	mtu := n.Config.MTU
+	mtu := c.MTU
 	if mtu <= 0 {
 		mtu = 1500
 	}
@@ -302,4 +312,24 @@ func (n *Node) maxFragPayload() int {
 		p = 512
 	}
 	return p
+}
+
+// maxFragPayloadTCP is the fragment-payload threshold used when the underlying
+// transport is a reliable byte-stream (TCP + yamux). TCP has no datagram MTU
+// constraint, so we use a large value to avoid pointless fragmentation and the
+// associated double-AEAD overhead. Capped at 65400 bytes: well below the 1 MiB
+// maxFrameLen limit but large enough that virtually no standard Ethernet frame
+// (~1514 bytes) ever triggers fragmentation on a TCP link.
+const maxFragPayloadTCP = 65400
+
+// maxFragPayloadForPS returns the per-peer fragment-payload threshold appropriate
+// for the active streams in ps. For purely TCP links the threshold is
+// maxFragPayloadTCP (no UDP path-MTU constraint). For QUIC, WebRTC, or mixed
+// transports the standard QUIC-safe limit is used. When ps is nil, falls back
+// to the standard limit.
+func (n *Node) maxFragPayloadForPS(ps *PeerStreams) int {
+	if ps != nil && ps.prefersTCPFragPayload() {
+		return maxFragPayloadTCP
+	}
+	return n.maxFragPayload()
 }

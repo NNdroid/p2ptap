@@ -20,51 +20,60 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockWriteStream struct {
-	buf      bytes.Buffer
-	writeErr error
-	deadline time.Time
+	buf        bytes.Buffer
+	writeErr   error
+	failWrites int // fail this many initial Write calls, then behave normally
+	deadline   time.Time
 }
 
-func (s *mockWriteStream) Read([]byte) (int, error)       { return 0, io.EOF }
+func (s *mockWriteStream) Read([]byte) (int, error) { return 0, io.EOF }
 func (s *mockWriteStream) Write(p []byte) (int, error) {
+	if s.failWrites > 0 {
+		s.failWrites--
+		if s.writeErr != nil {
+			return 0, s.writeErr
+		}
+		return 0, io.ErrUnexpectedEOF
+	}
 	if s.writeErr != nil {
 		return 0, s.writeErr
 	}
 	return s.buf.Write(p)
 }
-func (s *mockWriteStream) Close() error                       { return nil }
-func (s *mockWriteStream) Reset() error                       { return nil }
+func (s *mockWriteStream) Close() error                                         { return nil }
+func (s *mockWriteStream) Reset() error                                         { return nil }
 func (s *mockWriteStream) ResetWithError(errCode network.StreamErrorCode) error { return nil }
-func (s *mockWriteStream) CloseRead() error                   { return nil }
-func (s *mockWriteStream) CloseWrite() error                  { return nil }
-func (s *mockWriteStream) SetDeadline(t time.Time) error      { s.deadline = t; return nil }
-func (s *mockWriteStream) SetReadDeadline(t time.Time) error  { return nil }
-func (s *mockWriteStream) SetWriteDeadline(t time.Time) error { s.deadline = t; return nil }
-func (s *mockWriteStream) Conn() network.Conn                 { return &mockNetConn{} }
-func (s *mockWriteStream) ID() string                         { return "mock:1" }
-func (s *mockWriteStream) Protocol() protocol.ID              { return "" }
-func (s *mockWriteStream) SetProtocol(id protocol.ID) error   { return nil }
-func (s *mockWriteStream) Stat() network.Stats                { return network.Stats{Direction: network.DirOutbound} }
-func (s *mockWriteStream) Scope() network.StreamScope         { return nil }
+func (s *mockWriteStream) CloseRead() error                                     { return nil }
+func (s *mockWriteStream) CloseWrite() error                                    { return nil }
+func (s *mockWriteStream) SetDeadline(t time.Time) error                        { s.deadline = t; return nil }
+func (s *mockWriteStream) SetReadDeadline(t time.Time) error                    { return nil }
+func (s *mockWriteStream) SetWriteDeadline(t time.Time) error                   { s.deadline = t; return nil }
+func (s *mockWriteStream) Conn() network.Conn                                   { return &mockNetConn{} }
+func (s *mockWriteStream) ID() string                                           { return "mock:1" }
+func (s *mockWriteStream) Protocol() protocol.ID                                { return "" }
+func (s *mockWriteStream) SetProtocol(id protocol.ID) error                     { return nil }
+func (s *mockWriteStream) Stat() network.Stats                                  { return network.Stats{Direction: network.DirOutbound} }
+func (s *mockWriteStream) Scope() network.StreamScope                           { return nil }
+
 // mockNetConn is a minimal network.Conn implementation returned by mockWriteStream.Conn().
 type mockNetConn struct{}
 
-func (c *mockNetConn) Close() error                            { return nil }
-func (c *mockNetConn) LocalPeer() peer.ID                      { return "" }
-func (c *mockNetConn) RemotePeer() peer.ID                     { return "" }
-func (c *mockNetConn) RemotePublicKey() libp2pcrypto.PubKey    { return nil }
-func (c *mockNetConn) LocalMultiaddr() ma.Multiaddr            { return nil }
-func (c *mockNetConn) RemoteMultiaddr() ma.Multiaddr           { return nil }
-func (c *mockNetConn) Stat() network.ConnStats                 { return network.ConnStats{} }
-func (c *mockNetConn) ID() string                              { return "mock-conn" }
+func (c *mockNetConn) Close() error                                      { return nil }
+func (c *mockNetConn) LocalPeer() peer.ID                                { return "" }
+func (c *mockNetConn) RemotePeer() peer.ID                               { return "" }
+func (c *mockNetConn) RemotePublicKey() libp2pcrypto.PubKey              { return nil }
+func (c *mockNetConn) LocalMultiaddr() ma.Multiaddr                      { return nil }
+func (c *mockNetConn) RemoteMultiaddr() ma.Multiaddr                     { return nil }
+func (c *mockNetConn) Stat() network.ConnStats                           { return network.ConnStats{} }
+func (c *mockNetConn) ID() string                                        { return "mock-conn" }
 func (c *mockNetConn) NewStream(context.Context) (network.Stream, error) { return nil, nil }
-func (c *mockNetConn) GetStreams() []network.Stream            { return nil }
-func (c *mockNetConn) IsClosed() bool                          { return false }
-func (c *mockNetConn) Scope() network.ConnScope                { return nil }
-func (c *mockNetConn) CloseWithError(network.ConnErrorCode) error { return nil }
-func (c *mockNetConn) TransportStat() interface{}               { return nil }
-func (c *mockNetConn) As(target interface{}) bool               { return false }
-func (c *mockNetConn) ConnState() network.ConnectionState       { return network.ConnectionState{} }
+func (c *mockNetConn) GetStreams() []network.Stream                      { return nil }
+func (c *mockNetConn) IsClosed() bool                                    { return false }
+func (c *mockNetConn) Scope() network.ConnScope                          { return nil }
+func (c *mockNetConn) CloseWithError(network.ConnErrorCode) error        { return nil }
+func (c *mockNetConn) TransportStat() interface{}                        { return nil }
+func (c *mockNetConn) As(target interface{}) bool                        { return false }
+func (c *mockNetConn) ConnState() network.ConnectionState                { return network.ConnectionState{} }
 
 // ---------------------------------------------------------------------------
 // Tests

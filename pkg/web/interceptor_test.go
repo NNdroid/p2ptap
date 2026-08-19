@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,14 +12,31 @@ import (
 )
 
 type mockWriter struct {
+	mu      sync.Mutex
 	written [][]byte
 }
 
 func (m *mockWriter) Write(b []byte) (int, error) {
 	buf := make([]byte, len(b))
 	copy(buf, b)
+	m.mu.Lock()
 	m.written = append(m.written, buf)
+	m.mu.Unlock()
 	return len(b), nil
+}
+
+func (m *mockWriter) snapshot() [][]byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([][]byte, len(m.written))
+	copy(out, m.written)
+	return out
+}
+
+func (m *mockWriter) reset() {
+	m.mu.Lock()
+	m.written = nil
+	m.mu.Unlock()
 }
 
 func TestTAPInterceptorARP(t *testing.T) {
@@ -50,17 +68,16 @@ func TestTAPInterceptorARP(t *testing.T) {
 
 	writer := &mockWriter{}
 	handled := it.MatchAndHandle(arpReq, writer)
-	t.Logf("[interceptor] MatchAndHandle returned handled=%v, replies=%d", handled, len(writer.written))
-
 	if !handled {
 		t.Fatalf("Expected ARP request for 10.0.0.254 to be intercepted")
 	}
 
-	if len(writer.written) != 1 {
-		t.Fatalf("Expected 1 ARP reply written, got %d", len(writer.written))
+	replies := writer.snapshot()
+	if len(replies) != 1 {
+		t.Fatalf("Expected 1 ARP reply written, got %d", len(replies))
 	}
 
-	reply := writer.written[0]
+	reply := replies[0]
 	if binary.BigEndian.Uint16(reply[20:22]) != 2 { // Opcode Reply
 		t.Errorf("Expected ARP Reply opcode 2, got %d", binary.BigEndian.Uint16(reply[20:22]))
 	}
@@ -96,21 +113,21 @@ func TestTAPInterceptorHTTP(t *testing.T) {
 	// TCP Header
 	binary.BigEndian.PutUint16(synFrame[34:36], 54321) // Src Port
 	binary.BigEndian.PutUint16(synFrame[36:38], 80)    // Dst Port
-	binary.BigEndian.PutUint32(synFrame[38:42], 100)  // Seq
+	binary.BigEndian.PutUint32(synFrame[38:42], 100)   // Seq
 	synFrame[46] = 0x50                                // Data offset 5
 	synFrame[47] = 0x02                                // SYN Flag
 
 	handled := it.MatchAndHandle(synFrame, writer)
-	t.Logf("[interceptor] SYN handled=%v replies=%d", handled, len(writer.written))
 	if !handled {
 		t.Fatalf("Expected TCP SYN to be intercepted")
 	}
 
-	if len(writer.written) != 1 {
-		t.Fatalf("Expected SYN-ACK reply, got %d written frames", len(writer.written))
+	synReplies := writer.snapshot()
+	if len(synReplies) != 1 {
+		t.Fatalf("Expected SYN-ACK reply, got %d written frames", len(synReplies))
 	}
 
-	synAck := writer.written[0]
+	synAck := synReplies[0]
 	tcpFlags := synAck[47]
 	if tcpFlags != 0x12 { // SYN-ACK
 		t.Errorf("Expected SYN-ACK flags 0x12, got 0x%02x", tcpFlags)
@@ -119,30 +136,30 @@ func TestTAPInterceptorHTTP(t *testing.T) {
 	}
 
 	// Step 2: Send HTTP GET / Request
-	writer.written = nil
+	writer.reset()
 	httpReqData := []byte("GET / HTTP/1.1\r\nHost: 10.0.0.254\r\n\r\n")
 
 	httpFrame := make([]byte, 54+len(httpReqData))
 	copy(httpFrame[0:54], synFrame)
 	binary.BigEndian.PutUint16(httpFrame[16:18], uint16(40+len(httpReqData)))
-	httpFrame[47] = 0x18                               // PSH-ACK Flag
+	httpFrame[47] = 0x18                              // PSH-ACK Flag
 	binary.BigEndian.PutUint32(httpFrame[38:42], 101) // Seq
 	copy(httpFrame[54:], httpReqData)
 
 	handled = it.MatchAndHandle(httpFrame, writer)
-	t.Logf("[interceptor] HTTP GET handled=%v replies=%d", handled, len(writer.written))
 	if !handled {
 		t.Fatalf("Expected HTTP Request to be intercepted")
 	}
 
 	time.Sleep(50 * time.Millisecond)
 
-	if len(writer.written) < 1 {
+	httpReplies := writer.snapshot()
+	if len(httpReplies) < 1 {
 		t.Fatalf("Expected HTTP response frame written")
 	}
 
 	// Verify HTTP Response Contains HTML
-	httpRespFrame := writer.written[0]
+	httpRespFrame := httpReplies[0]
 	respData := httpRespFrame[54:]
 	if !bytes.Contains(respData, []byte("HTTP/1.1 200 OK")) {
 		t.Errorf("Expected HTTP 200 OK response, got: %s", string(respData))
@@ -178,16 +195,16 @@ func TestTAPInterceptorIPv6(t *testing.T) {
 	copy(ndpReq[62:78], net.ParseIP("fd00::254").To16()) // Target IP
 
 	handled := it.MatchAndHandle(ndpReq, writer)
-	t.Logf("[interceptor] NDP handled=%v replies=%d", handled, len(writer.written))
 	if !handled {
 		t.Fatalf("Expected ICMPv6 NDP for fd00::254 to be intercepted")
 	}
 
-	if len(writer.written) != 1 {
-		t.Fatalf("Expected 1 ICMPv6 NA reply written, got %d", len(writer.written))
+	ndpReplies := writer.snapshot()
+	if len(ndpReplies) != 1 {
+		t.Fatalf("Expected 1 ICMPv6 NA reply written, got %d", len(ndpReplies))
 	}
 
-	naReply := writer.written[0]
+	naReply := ndpReplies[0]
 	if naReply[54] != 136 { // ICMPv6 NA (136)
 		t.Errorf("Expected ICMPv6 NA type 136, got %d", naReply[54])
 	}
@@ -198,7 +215,7 @@ func TestTAPInterceptorIPv6(t *testing.T) {
 	t.Logf("[interceptor] ✓ NDP NA type=136 senderIP=%s", senderIP)
 
 	// Step 2: IPv6 TCP SYN to [fd00::254]:80
-	writer.written = nil
+	writer.reset()
 	synFrame := make([]byte, 74)
 	copy(synFrame[0:6], InterceptorMAC)
 	copy(synFrame[6:12], []byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01})
@@ -214,21 +231,21 @@ func TestTAPInterceptorIPv6(t *testing.T) {
 	// TCP Header
 	binary.BigEndian.PutUint16(synFrame[54:56], 54321) // Src Port
 	binary.BigEndian.PutUint16(synFrame[56:58], 80)    // Dst Port
-	binary.BigEndian.PutUint32(synFrame[58:62], 200)  // Seq
+	binary.BigEndian.PutUint32(synFrame[58:62], 200)   // Seq
 	synFrame[66] = 0x50                                // Data offset 5
 	synFrame[67] = 0x02                                // SYN Flag
 
 	handled = it.MatchAndHandle(synFrame, writer)
-	t.Logf("[interceptor] IPv6 SYN handled=%v replies=%d", handled, len(writer.written))
 	if !handled {
 		t.Fatalf("Expected IPv6 TCP SYN to be intercepted")
 	}
 
-	if len(writer.written) != 1 {
+	synReplies := writer.snapshot()
+	if len(synReplies) != 1 {
 		t.Fatalf("Expected IPv6 SYN-ACK reply written")
 	}
 
-	synAck := writer.written[0]
+	synAck := synReplies[0]
 	if synAck[67] != 0x12 { // SYN-ACK
 		t.Errorf("Expected IPv6 SYN-ACK flags 0x12, got 0x%02x", synAck[67])
 	} else {

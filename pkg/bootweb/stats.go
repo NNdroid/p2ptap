@@ -359,11 +359,23 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 			physicalIP := ""
 			transport := "unknown"
 			direction := "inbound"
-			allMultiaddrs := make([]string, 0, len(conns))
+			allMultiaddrs := make([]string, 0)
+			seenAddrs := make(map[string]bool)
 
 			for _, c := range conns {
-				ma := c.RemoteMultiaddr()
-				allMultiaddrs = append(allMultiaddrs, ma.String())
+				maStr := c.RemoteMultiaddr().String()
+				if !seenAddrs[maStr] {
+					seenAddrs[maStr] = true
+					allMultiaddrs = append(allMultiaddrs, maStr)
+				}
+			}
+
+			for _, ma := range h.Peerstore().Addrs(pid) {
+				maStr := ma.String()
+				if !seenAddrs[maStr] {
+					seenAddrs[maStr] = true
+					allMultiaddrs = append(allMultiaddrs, maStr)
+				}
 			}
 
 			if len(conns) > 0 {

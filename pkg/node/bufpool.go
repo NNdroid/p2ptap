@@ -1,47 +1,92 @@
 package node
 
-import "sync"
+import (
+	"sync"
+)
 
-// frameBufPool reuses the per-TAP-frame payload buffers that flow through the
-// egress path. A frame read from the TAP device is copied out of the shared
-// read buffer (which the very next TAP read would overwrite) into one of these
-// before being handed to the async dispatch worker. That copy is mandatory —
-// the read buffer is reused while the worker runs in a different goroutine, so
-// without a private copy the worker would read torn data. Pooling the copy
-// removes a per-frame heap allocation from the hottest path in the daemon.
-//
-// Go 1.21+ keeps sub-32 KiB pooled entries out of the GC mark/scan set, so this
-// also cuts collector work, not only allocation count — exactly the lever that
-// lowers steady-state CPU when the tunnel is busy.
+// frameBufPool reuses standard-sized (MTU 1500) TAP frame buffers.
 var frameBufPool = sync.Pool{
 	New: func() any {
-		// A typical Ethernet frame is ≤ 1514 bytes; size a little above so the
-		// common case needs no grow, while jumbo frames (up to ~9 KiB) simply
-		// fall through to a fresh allocation without wasting memory here.
-		b := make([]byte, 0, 2048)
-		return b
+		return make([]byte, 0, 2048)
+	},
+}
+
+// jumboFrameBufPool reuses Jumbo (MTU 9000) frame buffers.
+var jumboFrameBufPool = sync.Pool{
+	New: func() any {
+		return make([]byte, 0, 9216)
+	},
+}
+
+// cipherBufPool reuses working slices for SealTo/OpenTo zero-allocation encryption/decryption.
+var cipherBufPool = sync.Pool{
+	New: func() any {
+		return make([]byte, 0, 2048+32)
+	},
+}
+
+// sealedBufPool reuses full-sized wire frame buffers up to MaxSealedFrameSize.
+var sealedBufPool = sync.Pool{
+	New: func() any {
+		return make([]byte, 0, 65552)
 	},
 }
 
 // acquireFrameBuf returns a buffer with len == size, reusing a pooled one when
 // its capacity fits. Ownership transfers to the dispatch worker, which releases
-// it with releaseFrameBuf once the frame has been transmitted. Buffers obtained
-// elsewhere (e.g. urgent frames from callers, relay fallbacks) must NOT be
-// released through this pool — see dispatchTask.owned.
+// it with releaseFrameBuf once the frame has been transmitted.
 func acquireFrameBuf(size int) []byte {
-	b, ok := frameBufPool.Get().([]byte)
-	if !ok || cap(b) < size {
-		return make([]byte, size)
+	if size <= 2048 {
+		if b, ok := frameBufPool.Get().([]byte); ok && cap(b) >= size {
+			return b[:size]
+		}
+	} else if size <= 9216 {
+		if b, ok := jumboFrameBufPool.Get().([]byte); ok && cap(b) >= size {
+			return b[:size]
+		}
 	}
-	return b[:size]
+	return make([]byte, size)
 }
 
-// releaseFrameBuf returns a frame buffer to the pool. It first drops the live
-// payload reference so the GC can reclaim the underlying array when the pooled
-// entry ages out, while keeping the capacity for the next reuse.
+// releaseFrameBuf returns a frame buffer to the appropriate pool.
 func releaseFrameBuf(b []byte) {
-	// Trim to zero length but preserve capacity: the caller must no longer
-	// reference the payload after releasing.
-	b = b[:0]
-	frameBufPool.Put(b)
+	if cap(b) >= 9216 {
+		jumboFrameBufPool.Put(b[:0])
+	} else if cap(b) >= 2048 {
+		frameBufPool.Put(b[:0])
+	}
+}
+
+// AcquireCipherBuf retrieves a reusable buffer for zero-alloc AEAD SealTo/OpenTo.
+func AcquireCipherBuf(size int) []byte {
+	if size <= 2080 {
+		if b, ok := cipherBufPool.Get().([]byte); ok && cap(b) >= size {
+			return b[:size]
+		}
+	}
+	return make([]byte, size)
+}
+
+// ReleaseCipherBuf returns a cipher working buffer to the pool.
+func ReleaseCipherBuf(b []byte) {
+	if cap(b) >= 2080 {
+		cipherBufPool.Put(b[:0])
+	}
+}
+
+// AcquireSealedBuf retrieves a wire frame buffer for full-frame packing.
+func AcquireSealedBuf(size int) []byte {
+	if size <= 65552 {
+		if b, ok := sealedBufPool.Get().([]byte); ok && cap(b) >= size {
+			return b[:size]
+		}
+	}
+	return make([]byte, size)
+}
+
+// ReleaseSealedBuf returns a sealed wire buffer to the pool.
+func ReleaseSealedBuf(b []byte) {
+	if cap(b) >= 65552 {
+		sealedBufPool.Put(b[:0])
+	}
 }

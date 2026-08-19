@@ -42,12 +42,12 @@ func TestBuildAndVerifyICMPEchoReplyRoundTrip(t *testing.T) {
 	peerIP := net.ParseIP("10.0.0.3").To4()
 	const id uint16 = 0x5A70
 
-	req, err := buildICMPEchoRequest(localMAC, peerMAC, localIP, peerIP, id)
+	req, err := buildICMPEchoRequest(localMAC, peerMAC, localIP, peerIP, id, nil)
 	if err != nil {
 		t.Fatalf("buildICMPEchoRequest: %v", err)
 	}
-	if len(req) != 50 {
-		t.Fatalf("unexpected request length %d, want 50", len(req))
+	if len(req) != 42 {
+		t.Fatalf("unexpected request length %d, want 42", len(req))
 	}
 
 	reply := craftEchoReply(req)
@@ -70,7 +70,7 @@ func TestMaybeDeliverProbeReplyDetectsProbe(t *testing.T) {
 	peerIP := net.ParseIP("10.0.0.3").To4()
 	const id uint16 = 0x5A70
 
-	req, _ := buildICMPEchoRequest(localMAC, peerMAC, localIP, peerIP, id)
+	req, _ := buildICMPEchoRequest(localMAC, peerMAC, localIP, peerIP, id, nil)
 	reply := craftEchoReply(req)
 	// identifier check below references icmpStart+4; recompute once here.
 	ihl := int(reply[14]&0x0f) * 4

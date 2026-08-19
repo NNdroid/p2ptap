@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -85,6 +87,99 @@ func (n *Node) rediscoverPeer(pid peer.ID) {
 }
 
 const relayAuthProtocol = "/p2ptap/auth/1.0.0"
+
+// relayOnlyDirectUpgradeInterval is how often relayOnlyDirectUpgradeLoop
+// retries a DIRECT (force-direct, circuit-excluded) dial for peers currently
+// pinned to a relay. A peer whose first connection lost the dial race (or whose
+// hole punch was cancelled mid-flight) gets a fresh NAT traversal attempt on
+// every tick instead of staying on relay forever.
+const relayOnlyDirectUpgradeInterval = 45 * time.Second
+
+// relayOnlyDirectUpgradeLoop periodically attempts to upgrade relay-only peers
+// to a direct connection. It is the recovery path for the "pinned to relay"
+// state: once a direct connection succeeds, the ConnectedF handler calls
+// clearRelayOnlyPeer and the Router link flips from LinkCircuit to LinkDirect.
+func (n *Node) relayOnlyDirectUpgradeLoop() {
+	defer n.wg.Done()
+	ticker := time.NewTicker(relayOnlyDirectUpgradeInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			n.relayOnlyMu.RLock()
+			relayOnly := make([]peer.ID, 0, len(n.relayOnlyPeers))
+			for pid := range n.relayOnlyPeers {
+				relayOnly = append(relayOnly, pid)
+			}
+			n.relayOnlyMu.RUnlock()
+
+			for _, pid := range relayOnly {
+				if pid == n.Host.ID() || n.isBootstrapPeer(pid) {
+					continue
+				}
+				if n.isDirectlyConnected(pid) {
+					// Already direct (ConnectedF may not have flipped the mark
+					// yet); clear the stale relay-only flag ourselves.
+					n.clearRelayOnlyPeer(pid)
+					continue
+				}
+				n.attemptDirectUpgrade(pid)
+			}
+		}
+	}
+}
+
+// attemptDirectUpgrade performs one force-direct dial (no circuit addresses)
+// to a relay-only peer using its stored or DHT-rediscovered direct addresses.
+func (n *Node) attemptDirectUpgrade(pid peer.ID) {
+	// Direct candidates: peerstore addrs minus loopback minus circuit addrs.
+	addrs := filterLoopbackAddrs(n.Host.Peerstore().Addrs(pid))
+	direct := make([]multiaddr.Multiaddr, 0, len(addrs))
+	for _, a := range addrs {
+		if !strings.Contains(a.String(), "/p2p-circuit") {
+			direct = append(direct, a)
+		}
+	}
+	if len(direct) == 0 && n.DHT != nil {
+		// No usable direct addrs (expired TTL): rediscover via DHT.
+		ctx, cancel := context.WithTimeout(n.ctx, 8*time.Second)
+		info, err := n.DHT.FindPeer(ctx, pid)
+		cancel()
+		if err == nil {
+			for _, a := range filterLoopbackAddrs(info.Addrs) {
+				if !strings.Contains(a.String(), "/p2p-circuit") {
+					direct = append(direct, a)
+				}
+			}
+		}
+	}
+	if len(direct) == 0 {
+		return
+	}
+
+	direct = prioritizeMultiaddrs(direct)
+	n.Host.Peerstore().AddAddrs(pid, direct, peerstore.AddressTTL)
+
+	timeout := n.Config.HolePunchTimeout
+	if timeout <= 0 || timeout > 10*time.Second {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(n.ctx, timeout)
+	defer cancel()
+	// ForceDirectDial keeps the swarm from racing the peerstore's circuit addrs
+	// (which would instantly "win" and report a false direct upgrade).
+	if err := n.Host.Connect(network.WithForceDirectDial(ctx, "p2ptap-relay-upgrade"), peer.AddrInfo{ID: pid, Addrs: direct}); err != nil {
+		log.Debug("Direct upgrade for relay-only peer %s failed this round: %v", pid.ShortString(), err)
+		return
+	}
+	if n.isDirectlyConnected(pid) {
+		log.Info("Relay-only peer %s upgraded to DIRECT connection", pid.String())
+		n.clearRelayOnlyPeer(pid)
+	}
+}
 
 // authenticateWithRelay performs PSK challenge-response with a relay/bootstrap server.
 // isRefresh=true marks a periodic keep-alive refresh (logs at DEBUG); the initial
@@ -241,37 +336,38 @@ func (n *Node) reconnectPeer(pid peer.ID) {
 	// Aggressively clear dial backoff
 	n.clearSwarmBackoff(pid)
 
-	// Get stored addresses from peerstore, dropping loopback (127.0.0.0/8,
-	// ::1) — dialing loopback would target THIS host, not the peer.
+	// Get stored addresses from peerstore, dropping loopback (127.0.0.0/8, ::1)
 	addrs := filterLoopbackAddrs(n.Host.Peerstore().Addrs(pid))
-	// A peer may be known only by PeerID (learned via LSA / peek-map) or its
-	// stored circuit address may have expired, leaving no dialable address in
-	// the peerstore. In that case synthesize relay circuit addresses from any
-	// connected bootstrap relay so we can STILL reach it — this is exactly what
-	// dialInParallel already does for the initial dial. Without this,
-	// handleUnicastFailure's "no addresses" path calls reconnectPeer and we
-	// give up here, permanently orphaning a peer that is actually reachable
-	// through the relay (both ends attached to the same boot). We only give up
-	// when there is genuinely no connected relay to bridge through.
-	if len(addrs) == 0 {
-		if relayAddrs := n.SynthesizeRelayCircuitAddrs(pid); len(relayAddrs) > 0 {
-			addrs = relayAddrs
-			n.Host.Peerstore().AddAddrs(pid, relayAddrs, peerstore.AddressTTL)
-			log.Debug("Reconnect %s: no stored addrs, synthesized %d relay circuit addr(s) from connected bootstrap", pid.ShortString(), len(relayAddrs))
-		}
+
+	// Always synthesize fresh relay circuit addresses from any connected bootstrap relay
+	// alongside direct addresses. This ensures NAT'd peers that cannot be dialed directly
+	// can still be reached over circuit relays, preventing permanent "unreachable" disconnect deadlocks.
+	if relayAddrs := n.SynthesizeRelayCircuitAddrs(pid); len(relayAddrs) > 0 {
+		addrs = append(addrs, relayAddrs...)
+		n.Host.Peerstore().AddAddrs(pid, relayAddrs, peerstore.AddressTTL)
+		log.Debug("Reconnect %s: synthesized %d relay circuit addr(s)", pid.ShortString(), len(relayAddrs))
 	}
 	if len(addrs) == 0 {
 		log.Warn("No stored (non-loopback) addrs for peer %s and no connected relay available, cannot reconnect", pid.String())
 		return
 	}
 
-	// Disconnect first
+	// Invalidate stale streams and reset handshake state before reconnecting
+	n.Dispatcher.RemovePeer(pid)
+	n.echoPool.Invalidate(pid)
+	n.clearCachedHandshakeEph(pid)
+	n.peerReady.Delete(pid)
+
+	// Close any stale / hung swarm connections so libp2p doesn't treat the peer
+	// as already connected and no-op the subsequent dial.
 	if err := n.Host.Network().ClosePeer(pid); err != nil {
 		log.Debug("ClosePeer %s: %v", pid.String(), err)
 	}
 
 	addrInfo := peer.AddrInfo{ID: pid, Addrs: addrs}
-	go n.connectWithRetry(addrInfo, "healthcheck", 3*time.Second, 3)
+	go func() {
+		_ = n.dialInParallel(n.ctx, addrInfo, "reconnect")
+	}()
 }
 
 // openStreamViaRelay establishes a control stream to target through a circuit
@@ -304,9 +400,14 @@ func (n *Node) openStreamViaRelay(target peer.ID, proto protocol.ID) (network.St
 	}
 
 	if n.isRelayOnlyPeer(target) {
-		// Drop the unreachable direct addresses so the swarm only tries the
-		// circuit path for this peer.
-		n.Host.Peerstore().ClearAddrs(target)
+		// Do NOT ClearAddrs here. Clearing permanently discarded the peer's
+		// direct addresses, so nothing could ever dial it directly again — a
+		// relay-only peer stayed relay-only forever. The circuit addr added
+		// below wins the swarm's address race against any black-holed direct
+		// address (circuit setup is near-instant on an already-connected relay
+		// hop), so there is no hang cost in keeping the direct addrs around;
+		// relayOnlyDirectUpgradeLoop uses them to periodically retry direct.
+		log.Debug("Keeping direct addrs for relay-only peer %s (direct upgrade loop will retry them)", target.ShortString())
 	}
 	n.Host.Peerstore().AddAddrs(target, relayAddrs, peerstore.AddressTTL)
 
@@ -354,25 +455,125 @@ func (n *Node) triggerThrottledReconnect(pid peer.ID) {
 	n.reconnectPeer(pid)
 }
 
+// triggerOnDemandConnect triggers active connection or re-keying when egress traffic
+// is blocked by canEgressToPeer, with a 5-second cooldown per peer.
+func (n *Node) triggerOnDemandConnect(pid peer.ID) {
+	if pid == "" || pid == n.Host.ID() {
+		return
+	}
+	n.reconnectTimeMu.Lock()
+	if n.lastReconnectTime == nil {
+		n.lastReconnectTime = make(map[peer.ID]time.Time)
+	}
+	last, exists := n.lastReconnectTime[pid]
+	if exists && time.Since(last) < 5*time.Second {
+		n.reconnectTimeMu.Unlock()
+		return
+	}
+	n.lastReconnectTime[pid] = time.Now()
+	n.reconnectTimeMu.Unlock()
+
+	go func() {
+		log.Debug("On-demand egress trigger for peer %s (connectedness=%v)", pid.ShortString(), n.Host.Network().Connectedness(pid))
+		if n.Host.Network().Connectedness(pid) == network.Connected {
+			// Already connected at transport layer, trigger rekey to unblock cipher / ready state
+			n.triggerPeerRekey(pid)
+		} else {
+			// Not connected, attempt parallel dial with stored addrs + synthesized relay circuit addrs
+			addrs := filterLoopbackAddrs(n.Host.Peerstore().Addrs(pid))
+			if relayAddrs := n.SynthesizeRelayCircuitAddrs(pid); len(relayAddrs) > 0 {
+				addrs = append(addrs, relayAddrs...)
+				n.Host.Peerstore().AddAddrs(pid, relayAddrs, peerstore.AddressTTL)
+			}
+			if len(addrs) > 0 {
+				_ = n.dialInParallel(n.ctx, peer.AddrInfo{ID: pid, Addrs: addrs}, "on-demand")
+			}
+		}
+	}()
+}
+
 // PingPongKeepaliveInterval defines how often we send echo-based liveness probes.
 // Unified with the old HealthCheck loop, so 10s is plenty (was 5s) and halves the
 // probe frequency vs. the previous 5s+30s dual-storm.
 const PingPongKeepaliveInterval = 10 * time.Second
-const pingPongStreamTimeout = 3 * time.Second // stream creation timeout (reduced from 5s)
-const pingPongWriteTimeout = 2 * time.Second  // write "PING" timeout (reduced from 3s)
-const pingPongReadTimeout = 3 * time.Second   // read echo timeout (reduced from 8s; was > tick interval)
-const pingPongMaxFailures = 3
+const pingPongStreamTimeout = 5 * time.Second // stream creation timeout
+const pingPongWriteTimeout = 4 * time.Second  // write "PING" timeout
+const pingPongReadTimeout = 6 * time.Second   // read echo timeout (supports WAN/jitter)
+const pingPongMaxFailures = 4
 const pingPongMaxConcurrent = 8 // max concurrent peer probes per tick
+
+// pingPongFailCounter returns pid's fail counter from the current published
+// snapshot, or nil if the peer has no entry yet. Lock-free (hot-path reader).
+func (n *Node) pingPongFailCounter(pid peer.ID) *atomic.Int32 {
+	if m := n.pingPongFailCount.Load(); m != nil {
+		return (*m)[pid]
+	}
+	return nil
+}
+
+// pingPongFailCounterFor returns pid's fail counter, creating and publishing a
+// new CoW snapshot if needed. Slow path — only the first failure for a peer
+// reaches this; a missing entry already means "zero consecutive failures".
+func (n *Node) pingPongFailCounterFor(pid peer.ID) *atomic.Int32 {
+	if c := n.pingPongFailCounter(pid); c != nil {
+		return c
+	}
+	n.pingPongFailMu.Lock()
+	defer n.pingPongFailMu.Unlock()
+	// Double-check: a concurrent prober may have published while we waited.
+	if m := n.pingPongFailCount.Load(); m != nil {
+		if c, ok := (*m)[pid]; ok {
+			return c
+		}
+	}
+	var next map[peer.ID]*atomic.Int32
+	if m := n.pingPongFailCount.Load(); m != nil {
+		next = make(map[peer.ID]*atomic.Int32, len(*m)+1)
+		for k, v := range *m {
+			next[k] = v
+		}
+	} else {
+		next = make(map[peer.ID]*atomic.Int32, 1)
+	}
+	c := &atomic.Int32{}
+	next[pid] = c
+	n.pingPongFailCount.Store(&next)
+	return c
+}
+
+// deletePingPongFailCount removes pid's fail counter via CoW republish.
+// Structural change only (10s keepalive tick / post-reconnect cleanup).
+func (n *Node) deletePingPongFailCount(pid peer.ID) {
+	n.pingPongFailMu.Lock()
+	defer n.pingPongFailMu.Unlock()
+	m := n.pingPongFailCount.Load()
+	if m == nil {
+		return
+	}
+	if _, ok := (*m)[pid]; !ok {
+		return
+	}
+	next := make(map[peer.ID]*atomic.Int32, len(*m))
+	for k, v := range *m {
+		if k == pid {
+			continue
+		}
+		next[k] = v
+	}
+	n.pingPongFailCount.Store(&next)
+}
 
 // resetPingPongFailCountForPeer resets the ping-pong failure counter for a peer.
 // This is called from handleStream when data is actively flowing, preventing false
 // positives where yamux flow control delays echo streams but the connection is healthy.
+//
+// HOT PATH (once per inbound frame): lock-free snapshot read, and the per-peer
+// Store(0) only fires while a counter is actually non-zero — a healthy steady
+// state costs no writes at all. Missing entry == zero failures, so no creation.
 func (n *Node) resetPingPongFailCountForPeer(pid peer.ID) {
-	n.pingPongFailMu.Lock()
-	if count, ok := n.pingPongFailCount[pid]; ok && count > 0 {
-		n.pingPongFailCount[pid] = 0
+	if c := n.pingPongFailCounter(pid); c != nil && c.Load() != 0 {
+		c.Store(0)
 	}
-	n.pingPongFailMu.Unlock()
 	// Any inbound data from pid means its return path to us is alive.
 	n.notePeerRx(pid)
 }
@@ -425,16 +626,13 @@ func (n *Node) peerPingPongLoop() {
 			connected := make(map[peer.ID]bool, len(peers))
 			var probePeers []peer.ID
 			for _, pid := range peers {
-				if pid == n.Host.ID() {
+				if pid == n.Host.ID() || n.isBootstrapPeer(pid) {
 					continue
 				}
 				connected[pid] = true
-				// Include all peers (both normal P2P peers and Bootstrap Relay servers)
-				// to maintain active UDP/TCP NAT hole-punch mapping.
+				// Only probe non-bootstrap connected P2P mesh peers
 				if n.Host.Network().Connectedness(pid) != network.Connected {
-					n.pingPongFailMu.Lock()
-					delete(n.pingPongFailCount, pid)
-					n.pingPongFailMu.Unlock()
+					n.deletePingPongFailCount(pid)
 					continue
 				}
 				probePeers = append(probePeers, pid)
@@ -446,12 +644,29 @@ func (n *Node) peerPingPongLoop() {
 			// (openStreamViaRelay), so their link is not silently cut.
 			n.relayOnlyMu.RLock()
 			for pid := range n.relayOnlyPeers {
-				if pid == n.Host.ID() || connected[pid] {
+				if pid == n.Host.ID() || connected[pid] || n.isBootstrapPeer(pid) {
 					continue
 				}
 				probePeers = append(probePeers, pid)
 			}
 			n.relayOnlyMu.RUnlock()
+
+			// Also probe peers known in peerMeta that are reachable via relay/overlay
+			// but don't have a direct libp2p swarm connection.
+			n.peerMeta.Range(func(key, val any) bool {
+				pid := key.(peer.ID)
+				if pid == n.Host.ID() || connected[pid] || n.isRelayOnlyPeer(pid) || n.isBootstrapPeer(pid) {
+					return true
+				}
+				meta := val.(PeerMeta)
+				if meta.TapIP == "" && meta.TapIPv6 == "" {
+					return true // skip pure signalling bootstrap nodes
+				}
+				if hop := n.relayHopForTarget(pid); hop != "" {
+					probePeers = append(probePeers, pid)
+				}
+				return true
+			})
 
 			// Data-plane health for boot-relay hops: a boot may be
 			// transport-Connected (so its echo keepalive passes) yet have NO live
@@ -475,17 +690,17 @@ func (n *Node) peerPingPongLoop() {
 
 			// Cleanup stale entries (but keep relay-only peers so their
 			// 3-strike count survives transient circuit drops).
-			n.pingPongFailMu.Lock()
-			for pid := range n.pingPongFailCount {
-				if n.Host.Network().Connectedness(pid) == network.Connected {
-					continue
+			if m := n.pingPongFailCount.Load(); m != nil {
+				for pid := range *m {
+					if n.Host.Network().Connectedness(pid) == network.Connected {
+						continue
+					}
+					if n.isRelayOnlyPeer(pid) {
+						continue
+					}
+					n.deletePingPongFailCount(pid)
 				}
-				if n.isRelayOnlyPeer(pid) {
-					continue
-				}
-				delete(n.pingPongFailCount, pid)
 			}
-			n.pingPongFailMu.Unlock()
 		}
 	}
 }
@@ -494,6 +709,21 @@ func (n *Node) peerPingPongLoop() {
 // It reuses a persistent per-peer echo stream (echoPool) instead of opening a fresh
 // NewStream on every tick — the old per-tick NewStream-per-peer storm is gone.
 func (n *Node) pingPongProbePeer(pid peer.ID) {
+	if pid == "" || pid == n.Host.ID() || n.isBootstrapPeer(pid) {
+		return
+	}
+
+	// Passive liveness detection: if real traffic (user frames, TCP/UDP/ICMP, LSA, etc.)
+	// was received from pid in the last 15 seconds, we ALREADY have proof the return path is alive.
+	// Suppressing redundant synthetic echo probes prevents multiplexer contention, queue stalls,
+	// and false reconnects during active data transmission.
+	if n.peerRxWithin(pid, 15*time.Second) {
+		if c := n.pingPongFailCounter(pid); c != nil {
+			c.Store(0)
+		}
+		return
+	}
+
 	pingPayload := []byte{0x50, 0x49, 0x4E, 0x47} // "PING"
 	start := time.Now()
 	replyBuf := make([]byte, 16)
@@ -519,35 +749,36 @@ func (n *Node) pingPongProbePeer(pid peer.ID) {
 	})
 
 	if ok {
-		n.pingPongFailMu.Lock()
-		n.pingPongFailCount[pid] = 0
-		n.pingPongFailMu.Unlock()
+		// Success: reset if a counter exists and record return-path liveness
+		if c := n.pingPongFailCounter(pid); c != nil {
+			c.Store(0)
+		}
+		n.notePeerRx(pid)
 		return
 	}
 
 	// WithStream returned false => stream open failed or bad echo (cache dropped).
-	n.pingPongFailMu.Lock()
-	n.pingPongFailCount[pid]++
-	fc := n.pingPongFailCount[pid]
-	n.pingPongFailMu.Unlock()
+	fc := n.pingPongFailCounterFor(pid).Add(1)
 	if fc >= pingPongMaxFailures {
-		if n.peerRxWithin(pid, pingPongReadTimeout*3) {
-			// We have received OTHER inbound frames from pid recently, so our
-			// outbound path to it clearly works — the failed echo means pid's
-			// RETURN path to us is broken (asymmetric routing: its return hop
-			// differs from our outbound hop and is stalled). A reconnect may not
-			// fix a return-path break at the peer; the operator must check pid's
-			// relay stream / TAP egress.
-			log.Warn("Ping-pong keepalive failed %d times for %s — but return-path frames still arriving recently ⇒ OUTBOUND OK, RETURN dead at peer (asymmetric routing); forcing reconnect, but check %s's relay stream / TAP egress",
-				fc, pid.String(), pid.ShortString())
-		} else {
-			log.Warn("Ping-pong keepalive failed %d times for %s — no recent inbound frames ⇒ OUTBOUND dead (or fully partitioned); forcing reconnect",
-				fc, pid.String())
+		if n.peerRxWithin(pid, 45*time.Second) {
+			// Inbound data frames are actively arriving or arrived recently from pid!
+			// The data-plane return path is healthy. Only the echo stream had an issue.
+			// Do NOT tear down the working connection!
+			log.Debug("Ping-pong echo stream failed for %s, but inbound data frames arrived recently; refreshing echo stream instead of reconnecting", pid.ShortString())
+			n.echoPool.Invalidate(pid)
+			n.pingPongFailCounterFor(pid).Store(0)
+			return
+		}
+
+		log.Warn("Ping-pong keepalive failed %d times for %s — no recent inbound frames; triggering reconnect",
+			fc, pid.String())
+		if hop := n.relayHopForTarget(pid); hop != "" && n.isBootstrapPeer(hop) {
+			log.Warn("Ping-pong keepalive failed %d times for relay peer %s via boot %s — re-verifying boot uplink",
+				fc, pid.ShortString(), hop.ShortString())
+			go n.ensureRelayAuth(peer.AddrInfo{ID: hop})
 		}
 		n.reconnectPeer(pid)
-		n.pingPongFailMu.Lock()
-		delete(n.pingPongFailCount, pid)
-		n.pingPongFailMu.Unlock()
+		n.deletePingPongFailCount(pid)
 	} else {
 		log.Debug("Ping-pong failed for %s (%d/%d)", pid.String(), fc, pingPongMaxFailures)
 	}
@@ -556,6 +787,13 @@ func (n *Node) pingPongProbePeer(pid peer.ID) {
 // dialLimiter caps concurrent in-flight dials so a discovery/mDNS burst cannot
 // turn into a connection storm (each dial also connects to every bootstrap relay).
 var dialLimiter = make(chan struct{}, 16)
+
+// directRaceGracePeriod is how long dialInParallel keeps waiting for the direct
+// dial after the relay race has already succeeded. Relay circuits usually win
+// the raw race (the bootstrap hop is already connected) while NAT traversal
+// takes seconds; without this grace window every hole punch would be cancelled
+// mid-flight and peers would stay pinned to relay forever.
+const directRaceGracePeriod = 3 * time.Second
 
 // dialingMu guards dialingDone. A peer with an entry is already being dialed;
 // concurrent callers wait on the channel and reuse the result instead of
@@ -606,6 +844,70 @@ func allAddrsLoopback(addrs []multiaddr.Multiaddr) bool {
 	return true
 }
 
+// prioritizeMultiaddrs sorts candidate multiaddrs by connectivity likelihood and performance:
+// 1. Public Global Unicast IPv6 (2000::/3) with QUIC/UDP (score: 130) or TCP (score: 110)
+//    -> Native public route, zero NAT traversal overhead, near 100% direct connect rate.
+// 2. Public IPv4 with QUIC/UDP (score: 90)
+//    -> 0-RTT and optimal UDP hole punching protocol for NAT traversal.
+// 3. Public IPv4 with WebRTC (score: 80)
+// 4. Public IPv4 with TCP (score: 70)
+// 5. Private / CGNAT IPv4 / ULA IPv6 (score: 30-40)
+// Loopback addresses are excluded.
+func prioritizeMultiaddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
+	if len(addrs) <= 1 {
+		return addrs
+	}
+	type scoredAddr struct {
+		addr  multiaddr.Multiaddr
+		score int
+	}
+	scored := make([]scoredAddr, 0, len(addrs))
+	for _, a := range addrs {
+		ip, err := manet.ToIP(a)
+		if err != nil || ip.IsLoopback() {
+			continue
+		}
+		s := a.String()
+		score := 0
+		isV6 := ip.To4() == nil
+		isPrivate := ip.IsPrivate() || ip.IsLinkLocalUnicast()
+
+		if isV6 {
+			if !isPrivate && ip.IsGlobalUnicast() {
+				score += 100 // Public Global IPv6
+			} else {
+				score += 20 // ULA or Link-Local IPv6
+			}
+		} else {
+			if !isPrivate {
+				score += 60 // Public IPv4
+			} else {
+				score += 30 // Private RFC1918 / CGNAT IPv4
+			}
+		}
+
+		if strings.Contains(s, "/quic-v1") || strings.Contains(s, "/quic") {
+			score += 30
+		} else if strings.Contains(s, "/webrtc-direct") {
+			score += 20
+		} else if strings.Contains(s, "/tcp/") {
+			score += 10
+		}
+
+		scored = append(scored, scoredAddr{addr: a, score: score})
+	}
+
+	sort.SliceStable(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	res := make([]multiaddr.Multiaddr, len(scored))
+	for i, sa := range scored {
+		res[i] = sa.addr
+	}
+	return res
+}
+
 // dialInParallel attempts to dial a peer concurrently via direct connection and
 // Circuit Relay, returning whichever succeeds first. This eliminates the sequential
 // 3-10s latency penalty when falling back to relay.
@@ -613,6 +915,9 @@ func allAddrsLoopback(addrs []multiaddr.Multiaddr) bool {
 // cancelled via raceCtx to prevent a second connection from being established
 // and causing a libp2p transport conflict/disconnect.
 func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType string) error {
+	// Filter loopback addresses and prioritize high-success direct multiaddrs (IPv6/QUIC first)
+	pi.Addrs = prioritizeMultiaddrs(filterLoopbackAddrs(pi.Addrs))
+
 	// Aggressive: Clear any dial backoff and refresh multiaddrs in Peerstore.
 	// NOTE: we intentionally do NOT ClearAddrs here. Clearing would discard
 	// addresses the peerstore already learned via DHT/mDNS/relay, forcing future
@@ -668,11 +973,15 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 
 	ch := make(chan result, 2)
 
-	// Race: direct connection
+	// Race: direct connection. WithForceDirectDial keeps this leg TRULY direct:
+	// circuit-relay addresses previously synthesized into the peerstore (10-min
+	// AddressTTL) would otherwise be raced by the swarm inside this very call, so
+	// a fast circuit win would be misreported as "connected via direct".
 	go func() {
-		directCtx, cancel := context.WithTimeout(raceCtx, 5*time.Second)
+		directCtx, cancel := context.WithTimeout(raceCtx, n.Config.HolePunchTimeout)
+
 		defer cancel()
-		err := n.Host.Connect(directCtx, pi)
+		err := n.Host.Connect(network.WithForceDirectDial(directCtx, "p2ptap-direct-race"), pi)
 		select {
 		case ch <- result{err: err, mode: "direct"}:
 		case <-raceCtx.Done():
@@ -689,105 +998,98 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 	localOnly := allAddrsLoopback(pi.Addrs)
 	relayLaunched := false
 	if !localOnly {
-		// Race: Circuit Relay connection via known relay addresses
+		// Prepare a context for the relay race with configurable timeout
+		relayCtx, relayCancel := context.WithTimeout(raceCtx, n.Config.HolePunchTimeout)
+		defer relayCancel()
+
 		// Relay path needs more time: connect to relay (1.5s) + auth (2s) + circuit connect
 		relayLaunched = true
 		go func() {
-		relayCtx, cancel := context.WithTimeout(raceCtx, 15*time.Second)
-		defer cancel()
+			// race and the relay-priority control path now use the exact same shape.
+			for _, bStr := range n.Config.BootstrapPeers {
+				bMA, berr := multiaddr.NewMultiaddr(bStr)
+				if berr != nil {
+					continue
+				}
+				bInfo, berr := peer.AddrInfoFromP2pAddr(bMA)
+				if berr != nil {
+					continue
+				}
+				if n.Host.Network().Connectedness(bInfo.ID) != network.Connected {
+					bCtx, bCancel := context.WithTimeout(relayCtx, 3*time.Second)
+					_ = n.Host.Connect(bCtx, *bInfo)
+					bCancel()
+				}
+			}
+			// Single source of truth for circuit-addr composition (shared with
+			// openStreamViaRelay / reconnectPeer / LSA-meta path).
+			relayAddrs := n.SynthesizeRelayCircuitAddrs(pi.ID)
 
-		// Ensure each bootstrap relay is connected (best-effort, 3s each)
-		// before we synthesize circuit addrs through it. SynthesizeRelayCircuitAddrs
-		// is the single source of truth for circuit-addr composition and only
-		// emits addrs for relays we are actually Connected to, so the initial dial
-		// race and the relay-priority control path now use the exact same shape.
-		for _, bStr := range n.Config.BootstrapPeers {
-			bMA, berr := multiaddr.NewMultiaddr(bStr)
-			if berr != nil {
-				continue
+			if len(relayAddrs) == 0 {
+				select {
+				case ch <- result{err: fmt.Errorf("no active relay available"), mode: "relay"}:
+				case <-raceCtx.Done():
+				}
+				return
 			}
-			bInfo, berr := peer.AddrInfoFromP2pAddr(bMA)
-			if berr != nil {
-				continue
-			}
-			if n.Host.Network().Connectedness(bInfo.ID) != network.Connected {
-				bCtx, bCancel := context.WithTimeout(relayCtx, 3*time.Second)
-				_ = n.Host.Connect(bCtx, *bInfo)
-				bCancel()
-			}
-		}
-		// Single source of truth for circuit-addr composition (shared with
-		// openStreamViaRelay / reconnectPeer / LSA-meta path).
-		relayAddrs := n.SynthesizeRelayCircuitAddrs(pi.ID)
 
-		if len(relayAddrs) == 0 {
+			// Use the default peerstore TTL (10m), NOT a short 15s value: a
+			// relay-only peer's circuit address must survive between reconnect
+			// attempts, otherwise the address expires and every dial falls back
+			// to re-synthesizing + re-dialing, causing reconnect churn.
+			n.Host.Peerstore().AddAddrs(pi.ID, relayAddrs, peerstore.AddressTTL)
+			// Connect with a relay-only AddrInfo so the relay race does not also fan
+			// out direct dials to the destination's private/public addrs (that produced
+			// the noisy "concurrent active dial through the same relay" dedup lines and
+			// wasted dial budget — the direct race is already run by the parallel
+			// goroutine above).
+			relayInfo := peer.AddrInfo{ID: pi.ID, Addrs: relayAddrs}
+			// Circuitv2 semantics (relay.go: NewStream with WithNoDial fails): the
+			// relay holds a VALID reservation but has NO live connection to the
+			// destination right now, so it returns 203 (CONNECTION_FAILED) and cannot
+			// bridge. This is usually transient — the destination may be mid-reconnect
+			// to the relay — so we retry once after a short backoff to self-heal
+			// instead of giving up the relay leg immediately. The destination is the
+			// one responsible for keeping its link to the relay warm; this retry only
+			// absorbs the brief window while it does.
+			var relayErr error
+			const maxRelayRetries = 3
+		relayRetry:
+			for attempt := 0; attempt < maxRelayRetries; attempt++ {
+				relayErr = n.Host.Connect(relayCtx, relayInfo)
+				if relayErr == nil {
+					break
+				}
+				// Transient relay errors: 203 (CONNECTION_FAILED) or PERMISSION_DENIED / relay_denied.
+				// When the destination node has just connected and is in the middle of PSK authentication,
+				// or is mid-reconnect, retry with exponential backoff (1s -> 2s -> 4s) so the dial
+				// completes seamlessly once auth finishes.
+				errLower := strings.ToLower(relayErr.Error())
+				isTransient := strings.Contains(errLower, "203") ||
+					strings.Contains(errLower, "connection_failed") ||
+					strings.Contains(errLower, "permission_denied") ||
+					strings.Contains(errLower, "relay_denied") ||
+					strings.Contains(errLower, "denied")
+				if !isTransient {
+					break
+				}
+				if attempt+1 < maxRelayRetries {
+					backoff := time.Duration(1<<uint(attempt)) * 1 * time.Second // 1s, 2s, 4s
+					log.Debug("Relay circuit to %s returned transient rejection (%v): destination may still be handshaking/authenticating. Retrying in %v (attempt %d/%d)...", pi.ID.String(), relayErr, backoff, attempt+1, maxRelayRetries)
+					select {
+					case <-time.After(backoff):
+					case <-raceCtx.Done():
+						relayErr = raceCtx.Err()
+						break relayRetry
+					}
+					n.clearSwarmBackoff(pi.ID) // drop any dial backoff accrued on the failed attempt
+				}
+			}
 			select {
-			case ch <- result{err: fmt.Errorf("no active relay available"), mode: "relay"}:
+			case ch <- result{err: relayErr, mode: "circuit-relay"}:
 			case <-raceCtx.Done():
 			}
-			return
-		}
-
-		// Use the default peerstore TTL (10m), NOT a short 15s value: a
-		// relay-only peer's circuit address must survive between reconnect
-		// attempts, otherwise the address expires and every dial falls back
-		// to re-synthesizing + re-dialing, causing reconnect churn.
-		n.Host.Peerstore().AddAddrs(pi.ID, relayAddrs, peerstore.AddressTTL)
-		// Connect with a relay-only AddrInfo so the relay race does not also fan
-		// out direct dials to the destination's private/public addrs (that produced
-		// the noisy "concurrent active dial through the same relay" dedup lines and
-		// wasted dial budget — the direct race is already run by the parallel
-		// goroutine above).
-		relayInfo := peer.AddrInfo{ID: pi.ID, Addrs: relayAddrs}
-		// Circuitv2 semantics (relay.go: NewStream with WithNoDial fails): the
-		// relay holds a VALID reservation but has NO live connection to the
-		// destination right now, so it returns 203 (CONNECTION_FAILED) and cannot
-		// bridge. This is usually transient — the destination may be mid-reconnect
-		// to the relay — so we retry once after a short backoff to self-heal
-		// instead of giving up the relay leg immediately. The destination is the
-		// one responsible for keeping its link to the relay warm; this retry only
-		// absorbs the brief window while it does.
-		var relayErr error
-		const maxRelayRetries = 3
-	relayRetry:
-		for attempt := 0; attempt < maxRelayRetries; attempt++ {
-			relayErr = n.Host.Connect(relayCtx, relayInfo)
-			if relayErr == nil {
-				break
-			}
-			// Transient relay errors: 203 (CONNECTION_FAILED) or PERMISSION_DENIED / relay_denied.
-			// When the destination node has just connected and is in the middle of PSK authentication,
-			// or is mid-reconnect, retry with exponential backoff (1s -> 2s -> 4s) so the dial
-			// completes seamlessly once auth finishes.
-			errLower := strings.ToLower(relayErr.Error())
-			isTransient := strings.Contains(errLower, "203") ||
-				strings.Contains(errLower, "connection_failed") ||
-				strings.Contains(errLower, "permission_denied") ||
-				strings.Contains(errLower, "relay_denied") ||
-				strings.Contains(errLower, "denied")
-			if !isTransient {
-				break
-			}
-			if attempt+1 < maxRelayRetries {
-				backoff := time.Duration(1<<uint(attempt)) * 1 * time.Second // 1s, 2s, 4s
-				log.Debug("Relay circuit to %s returned transient rejection (%v): destination may still be handshaking/authenticating. Retrying in %v (attempt %d/%d)...", pi.ID.String(), relayErr, backoff, attempt+1, maxRelayRetries)
-				select {
-				case <-time.After(backoff):
-				case <-raceCtx.Done():
-					relayErr = raceCtx.Err()
-					break relayRetry
-				}
-				n.clearSwarmBackoff(pi.ID) // drop any dial backoff accrued on the failed attempt
-			}
-		}
-		if relayErr != nil {
-			log.Debug("Relay circuit to %s failed: %v (the destination must hold an active connection to this relay — list it as a bootstrap/relay so its keep-alive re-reserves and keeps the link warm).", pi.ID.String(), relayErr)
-		}
-		select {
-		case ch <- result{err: relayErr, mode: "circuit-relay"}:
-		case <-raceCtx.Done():
-		}
-	}()
+		}()
 	}
 
 	// Wait for first successful result
@@ -799,6 +1101,33 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 	}
 
 	if first.err == nil {
+		// DIRECT-FIRST preference: when the relay race won (it usually starts
+		// faster because the bootstrap hop is already connected), do NOT settle
+		// immediately — keep waiting for the direct dial result up to a grace
+		// window. The already-established relay connection costs nothing while we
+		// wait, and a direct success here means NAT traversal actually worked and
+		// we return it as the winning path instead of pinning the peer to relay.
+		if first.mode == "circuit-relay" && relayLaunched {
+			timer := time.NewTimer(directRaceGracePeriod)
+			select {
+			case second := <-ch:
+				if second.err == nil && second.mode == "direct" {
+					log.Info("%s peer %s connected via direct (direct preferred over relay winner)", peerType, pi.ID.String())
+					if peerType == "bootstrap" {
+						go n.ensureRelayAuth(pi)
+					}
+					raceCancel()
+					return nil
+				}
+				// Direct failed or was cancelled — accept the relay winner below.
+			case <-timer.C:
+				// Grace expired: NAT traversal is slow/black-holed; accept relay.
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			}
+			timer.Stop()
+		}
 		log.Info("%s peer %s connected via %s (parallel race winner)", peerType, pi.ID.String(), first.mode)
 		if peerType == "bootstrap" {
 			go n.ensureRelayAuth(pi)

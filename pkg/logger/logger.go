@@ -44,16 +44,41 @@ type Logger struct {
 }
 
 var (
-	globalLevel Level = LevelInfo
-	globalMu    sync.RWMutex
-	colorize    bool = true
+	globalLevel atomic.Int32
+	colorize    atomic.Bool
 )
+
+func init() {
+	globalLevel.Store(int32(LevelInfo))
+	// Colorize only when stderr is a real console (a character device). When
+	// output is redirected to a file or pipe (systemd/journald, `> log 2>&1`,
+	// a service daemon that rewires os.Stderr to a file), ANSI escape codes
+	// would be embedded literally and corrupt the log. Callers that redirect
+	// stderr AFTER init (e.g. the Windows service) must additionally call
+	// SetColorize(false), which this default cannot see at init time.
+	colorize.Store(stderrIsTerminal())
+}
+
+// stderrIsTerminal reports whether os.Stderr points at a character device (a
+// console). Pipes, regular files and sockets are NOT character devices, so this
+// correctly disables color when logging to anything that is not an interactive
+// terminal. Portable across Unix and Windows without extra dependencies.
+func stderrIsTerminal() bool {
+	fi, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
 
 // SetGlobalLevel sets the minimum log level for all loggers
 func SetGlobalLevel(level Level) {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-	globalLevel = level
+	globalLevel.Store(int32(level))
+}
+
+// SetColorize enables or disables terminal colorization
+func SetColorize(c bool) {
+	colorize.Store(c)
 }
 
 // ParseLevel parses a string log level (case-insensitive)
@@ -80,15 +105,11 @@ func New(module string) *Logger {
 }
 
 func (l *Logger) getLevel() Level {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	return globalLevel
+	return Level(globalLevel.Load())
 }
 
 func (l *Logger) getColorize() bool {
-	globalMu.RLock()
-	defer globalMu.RUnlock()
-	return colorize
+	return colorize.Load()
 }
 
 // LogEntry represents a structured log line for WebUI live streaming
@@ -99,10 +120,13 @@ type LogEntry struct {
 	Message   string `json:"message"`
 }
 
+const ringBufferMax = 150
+
 var (
-	ringBufferMax = 150
-	ringBuffer    = make([]LogEntry, 0, 150)
-	ringBufferMu  sync.RWMutex
+	ringEntries  = make([]LogEntry, ringBufferMax)
+	ringStart    = 0
+	ringCount    = 0
+	ringBufferMu sync.RWMutex
 )
 
 // LogEvent is one delivery to a live-log subscriber. Exactly one of Entry /
@@ -183,10 +207,13 @@ func broadcastLog(ev LogEvent) {
 
 func pushLogEntry(entry LogEntry) {
 	ringBufferMu.Lock()
-	if len(ringBuffer) >= ringBufferMax {
-		ringBuffer = ringBuffer[1:]
+	if ringCount < ringBufferMax {
+		ringEntries[(ringStart+ringCount)%ringBufferMax] = entry
+		ringCount++
+	} else {
+		ringEntries[ringStart] = entry
+		ringStart = (ringStart + 1) % ringBufferMax
 	}
-	ringBuffer = append(ringBuffer, entry)
 	ringBufferMu.Unlock()
 	// Fan out to live-stream subscribers. We copy entry onto the heap so a
 	// delayed reader can never observe a stale stack slot, then broadcast with
@@ -201,19 +228,22 @@ func pushLogEntry(entry LogEntry) {
 func GetRecentLogs(limit int) []LogEntry {
 	ringBufferMu.RLock()
 	defer ringBufferMu.RUnlock()
-	n := len(ringBuffer)
-	if limit <= 0 || limit > n {
-		limit = n
+	if limit <= 0 || limit > ringCount {
+		limit = ringCount
 	}
 	res := make([]LogEntry, limit)
-	copy(res, ringBuffer[n-limit:])
+	startIdx := (ringStart + ringCount - limit) % ringBufferMax
+	for i := 0; i < limit; i++ {
+		res[i] = ringEntries[(startIdx+i)%ringBufferMax]
+	}
 	return res
 }
 
 // ClearLogs clears all entries in the log ring buffer
 func ClearLogs() {
 	ringBufferMu.Lock()
-	ringBuffer = make([]LogEntry, 0, ringBufferMax)
+	ringStart = 0
+	ringCount = 0
 	ringBufferMu.Unlock()
 	// Notify live subscribers AFTER releasing ringBufferMu so a slow consumer
 	// cannot stall the caller.

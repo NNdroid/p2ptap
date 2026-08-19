@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -54,7 +55,11 @@ func DetectDefaultEgressInterface() {
 	defaultEgressMu.Unlock()
 
 	if err != nil {
-		protectLog.Warn("failed to detect default egress interface at startup: %v (P2P sockets may loop into the TAP tunnel under Exit Node)", err)
+		if runtime.GOOS == "android" {
+			protectLog.Debug("default egress interface detection skipped on Android (sockets protected via VpnService): %v", err)
+		} else {
+			protectLog.Warn("failed to detect default egress interface at startup: %v (P2P sockets may loop into the TAP tunnel under Exit Node)", err)
+		}
 	} else {
 		protectLog.Info("default egress interface detected at startup: %s (ifIndex %d)", name, idx)
 	}
@@ -157,7 +162,15 @@ func shouldProtect(address string) bool {
 	if ip == nil {
 		return true // DNS name: not loopback/link-local, protect it
 	}
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+	if ip.IsLoopback() {
+		return false
+	}
+	if runtime.GOOS == "android" {
+		// On Android, all physical P2P transport sockets (including dials to 10.x.x.x LAN peers)
+		// MUST be protected via VpnService.protect(fd) so they never loop into the TUN interface.
+		return true
+	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 		return false
 	}
 	// TAP/mesh overlay addresses must NOT be pinned to the physical NIC. A
@@ -234,7 +247,7 @@ func isOverlayIPAddress(address string) bool {
 // up (best-effort protection, matching the WebUI listener hook semantics).
 func listenerProtectControl(network, address string, c syscall.RawConn) error {
 	ifName := listenerInterfaceForAddress(address)
-	if ifName == "" {
+	if ifName == "" && runtime.GOOS != "android" {
 		return nil
 	}
 	var sockErr error

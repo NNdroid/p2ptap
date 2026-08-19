@@ -105,6 +105,12 @@ func TestARPPingRepro(t *testing.T) {
 			// ARP reply: ethertype 0x0806, opcode 2 at [20:22].
 			if len(f) >= 42 && binary.BigEndian.Uint16(f[12:14]) == 0x0806 &&
 				binary.BigEndian.Uint16(f[20:22]) == 2 {
+				// Accept only a reply from the IP we asked about (ARP sender
+				// protocol address at f[28:32]); a stray reply for another
+				// host would otherwise bind the wrong MAC.
+				if !net.IP(f[28:32]).Equal(net.ParseIP("10.0.0.2").To4()) {
+					continue
+				}
 				bMac = net.HardwareAddr(append([]byte(nil), f[22:28]...)) // sender MAC in reply = B's MAC
 				t.Logf("ARP reply received on A: B's MAC=%s", bMac.String())
 				gotReply = true

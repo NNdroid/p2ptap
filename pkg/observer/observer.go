@@ -18,6 +18,8 @@ package observer
 import (
 	"net"
 	"time"
+
+	"p2ptap/pkg/config"
 )
 
 // ————————————————————————————————————————————————————————————————
@@ -160,21 +162,31 @@ type Collector interface {
 // CollectorConfig carries the wiring callbacks the node provides to the web
 // collector so web handlers can resolve/add peers and react to hot-reload.
 type CollectorConfig struct {
-	ResolvePeerAddrs      func(peerIDStr string) []string
-	OnExitNodeChanged     func()
-	OnObfuscationChanged  func()
-	OnSubnetsChanged      func()
+	ResolvePeerAddrs     func(peerIDStr string) []string
+	OnExitNodeChanged    func()
+	OnObfuscationChanged func()
+	OnSubnetsChanged     func()
+	// OnConfigReload delivers the FULL new configuration on WebUI save. The
+	// node publishes it through SetConfig (atomic snapshot) and then applies
+	// the runtime side-effects (exit-node NAT, obfuscation packer, subnet
+	// announcements). Keeping this single entry point lets the data plane read
+	// the freshly-published snapshot instead of a stale copy, which the
+	// granular On*Changed callbacks alone cannot express.
+	OnConfigReload        func(cfg *config.Config)
 	TestPeerMultiaddrs    func(peerIDStr string) []MultiaddrTestResultEntry
 	ProbePeerConnectivity func(peerIDStr string) *PeerConnectivityResult
 	ProbePeerEcho         func(peerIDStr string) *PeerEchoResultDTO
 	ProbePeerEchoAddr     func(peerIDStr string, targetAddrStr string) *PeerEchoResultDTO
+	ProbePeerSpeedTest    func(peerIDStr string) *SpeedTestResultDTO
 	ProbeTapForward       func(peerIDStr string) *TapProbeResultDTO
 	AddStaticPeer         func(multiaddrStr string) error
 	// DiagnoseLink performs a deep transport-layer link check on a single
 	// multiaddr (validity → DNS → TCP/QUIC → libp2p transport → Noise/TLS →
 	// peer-id match → connection). Returns nil if the node has not wired it.
-	DiagnoseLink          func(multiaddrStr string) *LinkDiagnosis
-	OnSubnetToggle        func(cidr string, enable bool) error
+	DiagnoseLink   func(multiaddrStr string) *LinkDiagnosis
+	OnSubnetToggle func(cidr string, enable bool) error
+	// ForceSeqSync triggers a forced SeqSync handshake and key rotation for a peer (or all connected peers if empty).
+	ForceSeqSync func(peerIDStr string) (int, error)
 	// GetACLStats is called on every /api/stats read. The node wires this
 	// to Node.GetACLStats so the WebUI sees live firewall counters without
 	// the web package having to import node.
@@ -196,39 +208,41 @@ type TxRxStats struct {
 }
 
 type PeerInfoDTO struct {
-	PeerID          string   `json:"peer_id"`
-	NodeName        string   `json:"node_name"`
-	Role            string   `json:"role"` // "Bootstrap", "Static", "Peer"
-	IsRelayed       bool     `json:"is_relayed"`
+	PeerID    string `json:"peer_id"`
+	NodeName  string `json:"node_name"`
+	Role      string `json:"role"` // "Bootstrap", "Static", "Peer"
+	IsRelayed bool   `json:"is_relayed"`
 	// RelayOnly is true when the peer has NO usable direct path (its known
 	// addresses are private/loopback/unreachable) and is only reachable through
 	// a circuit or overlay relay. It is derived from the node's internal
 	// relayOnlyPeers set, which is marked on circuit-relay connect and cleared
 	// once a direct transport appears. Exposing it lets the WebUI tell the
 	// operator "this peer can never go direct" instead of just "relayed".
-	RelayOnly       bool `json:"relay_only"`
-	IsExitNode      bool     `json:"is_exit_node"`
-	ExitNAT         bool     `json:"exit_nat"`
-	TxSpeed         uint64   `json:"tx_speed"`
-	RxSpeed         uint64   `json:"rx_speed"`
-	TotalTx         uint64   `json:"total_tx"`
-	TotalRx         uint64   `json:"total_rx"`
-	TapIP           string   `json:"tap_ip"`
-	TapIPv6         string   `json:"tap_ipv6"`
-	OSArch          string   `json:"os_arch"`
-	Version         string   `json:"version"`
-	Uptime          string   `json:"uptime"`
-	ConnectedAt     string   `json:"connected_at"`
-	ConnectedSince  string   `json:"connected_since"`
-	LastSeen        string   `json:"last_seen"`
-	Reachability    string   `json:"reachability"`
-	Addr            string   `json:"addr"`
-	AllAddrs        []string `json:"all_addrs"`
-	Transport       string   `json:"transport"`
-	RTTMs           int64    `json:"rtt_ms"`
-	JitterMs        float64  `json:"jitter_ms"`
-	LossRatePercent float64  `json:"loss_rate_percent"`
-	GeoLocation     string   `json:"geo_location"`
+	RelayOnly         bool     `json:"relay_only"`
+	IsExitNode        bool     `json:"is_exit_node"`
+	ExitNAT           bool     `json:"exit_nat"`
+	TxSpeed           uint64   `json:"tx_speed"`
+	RxSpeed           uint64   `json:"rx_speed"`
+	TotalTx           uint64   `json:"total_tx"`
+	TotalRx           uint64   `json:"total_rx"`
+	TapIP             string   `json:"tap_ip"`
+	TapIPv6           string   `json:"tap_ipv6"`
+	OSArch            string   `json:"os_arch"`
+	Version           string   `json:"version"`
+	Uptime            string   `json:"uptime"`
+	ConnectedAt       string   `json:"connected_at"`
+	ConnectedSince    string   `json:"connected_since"`
+	LastSeen          string   `json:"last_seen"`
+	Reachability      string   `json:"reachability"`
+	Addr              string   `json:"addr"`
+	AllAddrs          []string `json:"all_addrs"`
+	Transport         string   `json:"transport"`
+	TransportScore    int      `json:"transport_score"`
+	TransportPriority string   `json:"transport_priority"`
+	RTTMs             int64    `json:"rtt_ms"`
+	JitterMs          float64  `json:"jitter_ms"`
+	LossRatePercent   float64  `json:"loss_rate_percent"`
+	GeoLocation       string   `json:"geo_location"`
 	// Per-link sequence tracking (for topology star-chart visualization).
 	TxSeq      uint64 `json:"tx_seq"`      // latest seqID sent TO this peer
 	RxSeq      uint64 `json:"rx_seq"`      // latest seqID received FROM this peer
@@ -239,9 +253,21 @@ type PeerInfoDTO struct {
 	WindowResets   uint64  `json:"window_resets"`   // window re-anchors (sync/jump)
 	WinUtilization float64 `json:"win_utilization"` // 0..1 live window fill
 	// Per-peer encryption/obfuscation (negotiated via SeqSync ECDH handshake):
-	ObfNegotiated bool   `json:"obf_negotiated"` // true if a cipher was established
-	ObfAlgo       string `json:"obf_algo"`       // "none" | "aes-gcm" | "chacha20"
-	ObfEncrypted  bool   `json:"obf_encrypted"`  // true if a real AEAD is in use (not plaintext)
+	ObfNegotiated   bool   `json:"obf_negotiated"` // true if a cipher was established
+	ObfAlgo         string `json:"obf_algo"`       // "none" | "aes-gcm" | "chacha20"
+	ObfEncrypted    bool   `json:"obf_encrypted"`  // true if a real AEAD is in use (not plaintext)
+	ObfLocalEphFP   string `json:"obf_local_eph_fp"`
+	ObfRemoteEphFP  string `json:"obf_remote_eph_fp"`
+	ObfTxKeyFP      string `json:"obf_tx_key_fp"`
+	ObfRxKeyFP      string `json:"obf_rx_key_fp"`
+	ObfDecryptOK    uint64 `json:"obf_decrypt_ok"`
+	ObfDecryptErrs  uint64 `json:"obf_decrypt_errs"`
+	ObfLastRekeyAgo string `json:"obf_last_rekey_ago"`
+	ObfIAmLeader    bool   `json:"obf_i_am_leader"`
+	SeqMinValid     uint64 `json:"seq_min_valid"`
+	SeqMaxSeen      uint64 `json:"seq_max_seen"`
+	SeqEpoch        uint64 `json:"seq_epoch"`
+	SeqPeerEpoch    uint64 `json:"seq_peer_epoch"`
 	// SeqSyncConvergeMs is the measured handshake convergence latency: time from
 	// the first SeqSync handshake attempt to the link becoming usable (ready).
 	// 0 means unknown/not yet measured. High/unknown values under relay/NAT are a
@@ -274,6 +300,27 @@ type PeerInfoDTO struct {
 	ReturnPath       string `json:"return_path"`
 	ReturnPathDetail string `json:"return_path_detail"` // e.g. "回程正常 · 3 秒前收到帧" / "回程断 · 18 秒无回程帧"
 	LastRxISO        string `json:"last_rx_iso"`        // RFC3339 of last inbound frame; "" if never received
+	// TapMAC is the peer's ADVERTISED TAP MAC from its synced metadata — what we
+	// *believe* its TAP device uses. Compare against ObservedTapMAC to detect a
+	// broadcast-vs-actual mismatch (a common silent TAP break).
+	TapMAC string `json:"tap_mac"`
+	// ObservedTapMAC is the RAW source MAC we actually received on inbound frames
+	// from the peer (captured before metadata normalization). "" if not yet seen.
+	ObservedTapMAC string `json:"observed_tap_mac"`
+	// TapMACMismatch is true when ObservedTapMAC is present and differs from
+	// TapMAC. A mismatch means the peer emits frames from a different MAC than it
+	// advertises — the probe frame is addressed to the advertised MAC the peer's
+	// OS never answers at, so the TAP probe fails even though the link is fine.
+	TapMACMismatch bool `json:"tap_mac_mismatch"`
+	// TapDataPath exposes the peer's end-to-end TAP data-path health for the
+	// WebUI "TAP Path" column, derived from the observed-MAC mismatch and the
+	// most recent genuine TAP probe. Values:
+	//   ok            – last TAP probe PASSED (peer TAP genuinely up & answering)
+	//   mac_mismatch  – observed MAC differs from advertised; probe would fail
+	//   fail          – last TAP probe FAILED (peer TAP path broken)
+	//   unknown       – no probe run yet (and no observed MAC) to judge
+	TapDataPath       string `json:"tap_data_path"`
+	TapDataPathDetail string `json:"tap_data_path_detail"` // human-readable supplement
 }
 
 type SpeedTestResultDTO struct {
@@ -306,7 +353,7 @@ type TracerouteHop struct {
 	NodeName    string `json:"node_name"`
 	TapIP       string `json:"tap_ip,omitempty"`
 	TapIPv6     string `json:"tap_ipv6,omitempty"`
-	Role        string `json:"role"`       // "local" | "relay" | "destination"
+	Role        string `json:"role"`         // "local" | "relay" | "destination"
 	IsExitNode  bool   `json:"is_exit_node"` // hops that are running an Exit Node
 	IsRelayHop  bool   `json:"is_relay_hop"` // true for intermediate transit nodes
 	// Link TO this hop from the previous hop (empty for index 0):
@@ -349,16 +396,16 @@ type PingResultDTO struct {
 	TapIP         string   `json:"tap_ip,omitempty"`
 	TapIPv6       string   `json:"tap_ipv6,omitempty"`
 	Success       bool     `json:"success"`
-	Probes        int      `json:"probes"`          // number of ping samples attempted
-	RTTMinMs      float64  `json:"rtt_min_ms"`      // 0 if no replies
+	Probes        int      `json:"probes"`     // number of ping samples attempted
+	RTTMinMs      float64  `json:"rtt_min_ms"` // 0 if no replies
 	RTTAvgMs      float64  `json:"rtt_avg_ms"`
 	RTTMaxMs      float64  `json:"rtt_max_ms"`
-	JitterMs      float64  `json:"jitter_ms"`       // avg absolute RTT deviation
-	PacketLoss    float64  `json:"packet_loss"`     // 0..1 fraction of lost probes
-	IsRelayed     bool     `json:"is_relayed"`      // underlying conn traverses a circuit relay
-	TransportPath string   `json:"transport_path"`  // "direct" | "circuit-relay" | "overlay-relay"
+	JitterMs      float64  `json:"jitter_ms"`                // avg absolute RTT deviation
+	PacketLoss    float64  `json:"packet_loss"`              // 0..1 fraction of lost probes
+	IsRelayed     bool     `json:"is_relayed"`               // underlying conn traverses a circuit relay
+	TransportPath string   `json:"transport_path"`           // "direct" | "circuit-relay" | "overlay-relay"
 	TransportAddr string   `json:"transport_addr,omitempty"` // remote libp2p multiaddr
-	RelayPath     []string `json:"relay_path,omitempty"`      // relay peer IDs traversed (excl. dest)
+	RelayPath     []string `json:"relay_path,omitempty"`     // relay peer IDs traversed (excl. dest)
 	Error         string   `json:"error,omitempty"`
 }
 
@@ -379,10 +426,11 @@ type MultiaddrTestResultEntry struct {
 
 // LinkStep is one stage of the deep transport-level multiaddr link diagnosis.
 // The 7 canonical stages are:
-//   1 multiaddr valid (parse)        5 Noise/TLS handshake
-//   2 DNS resolves                   6 Peer ID matches expected
-//   3 TCP/QUIC socket established    7 libp2p connection success
-//   4 libp2p transport success
+//
+//	1 multiaddr valid (parse)        5 Noise/TLS handshake
+//	2 DNS resolves                   6 Peer ID matches expected
+//	3 TCP/QUIC socket established    7 libp2p connection success
+//	4 libp2p transport success
 type LinkStep struct {
 	Index      int    `json:"index"`       // 1..7 (stable stage number)
 	Key        string `json:"key"`         // stable machine key, e.g. "multiaddr_valid"
@@ -394,13 +442,14 @@ type LinkStep struct {
 
 // LinkDiagnosis is the full result of a transport-layer link check on a single
 // multiaddr. Overall is one of "ok", "partial" or "fail":
-//   ok      – all applicable stages passed
-//   partial – some stages passed but at least one was skipped (e.g. no peer id)
-//   fail    – at least one applicable stage failed
+//
+//	ok      – all applicable stages passed
+//	partial – some stages passed but at least one was skipped (e.g. no peer id)
+//	fail    – at least one applicable stage failed
 type LinkDiagnosis struct {
 	Input       string     `json:"input"`
-	TargetPeer  string     `json:"target_peer,omitempty"` // resolved peer id (from /p2p/<id>), if present
-	Transport   string     `json:"transport,omitempty"`   // detected transport, e.g. "tcp", "quic-v1"
+	TargetPeer  string     `json:"target_peer,omitempty"`  // resolved peer id (from /p2p/<id>), if present
+	Transport   string     `json:"transport,omitempty"`    // detected transport, e.g. "tcp", "quic-v1"
 	ResolvedIPs []string   `json:"resolved_ips,omitempty"` // IPs from DNS expansion
 	Overall     string     `json:"overall"`
 	Summary     string     `json:"summary,omitempty"`
@@ -423,8 +472,8 @@ type PeerConnectivityResult struct {
 
 // PeerEchoResultDTO holds the result of a real end-to-end P2P echo stream test.
 type PeerEchoResultDTO struct {
-	PeerID         string    `json:"peer_id"`
-	NodeName       string    `json:"node_name"`
+	PeerID   string `json:"peer_id"`
+	NodeName string `json:"node_name"`
 	// RequestedAddr is the multiaddr that the caller explicitly asked to be
 	// tested (empty when only the peer's any-working address was probed).
 	// Always populated alongside TransportAddr so the WebUI can show the
@@ -448,13 +497,16 @@ type PeerEchoResultDTO struct {
 // This exercises the TAP -> overlay -> peer -> reply path that a real ping uses,
 // which a plain application-layer echo (PeerEchoResultDTO) does NOT cover.
 type TapProbeResultDTO struct {
-	PeerID    string `json:"peer_id"`
-	PeerName  string `json:"peer_name"`
-	TapIP     string `json:"tap_ip"`
-	Success   bool   `json:"success"`
-	RTTMills  int64  `json:"rtt_ms"`
-	SentBytes int    `json:"sent_bytes"`
-	Error     string `json:"error,omitempty"`
+	PeerID              string `json:"peer_id"`
+	PeerName            string `json:"peer_name"`
+	TapIP               string `json:"tap_ip"`
+	Success             bool   `json:"success"`
+	RTTMills            int64  `json:"rtt_ms"`
+	SentBytes           int    `json:"sent_bytes"`
+	ReachedPeerTAP      bool   `json:"reached_peer_tap"`
+	MacMismatchDetected bool   `json:"mac_mismatch_detected"`
+	ProbeMacUsed        string `json:"probe_mac_used,omitempty"`
+	Error               string `json:"error,omitempty"`
 }
 
 type PeerMetaDTO struct {
@@ -513,12 +565,12 @@ type ARPInfoDTO struct {
 }
 
 type IPInfoDTO struct {
-	IP           string `json:"ip"`
-	MAC          string `json:"mac,omitempty"`
-	Protocol     string `json:"protocol,omitempty"` // "IPv4" or "IPv6"
-	IPType       string `json:"ip_type,omitempty"`  // "local", "peer", "subnet", "exit", "special", "wan"
-	NodeName     string `json:"node_name"`
-	PeerID       string `json:"peer_id"`
+	IP       string `json:"ip"`
+	MAC      string `json:"mac,omitempty"`
+	Protocol string `json:"protocol,omitempty"` // "IPv4" or "IPv6"
+	IPType   string `json:"ip_type,omitempty"`  // "local", "peer", "subnet", "exit", "special", "wan"
+	NodeName string `json:"node_name"`
+	PeerID   string `json:"peer_id"`
 	// SubnetCIDR / SubnetOwner / SubnetPeerID are populated when this IP falls
 	// inside a peer's advertised subnet (the longest matching prefix wins).
 	// They let the UI label e.g. "192.168.100.3 → 192.168.100.0/24 via fah0-vm0-ndbbd0"
@@ -789,15 +841,23 @@ type ACLDropDTO struct {
 
 // ProtocolChannelDTO captures high-level status and metrics of a P2P protocol subsystem/channel.
 type ProtocolChannelDTO struct {
-	ID              string `json:"id"`               // e.g. "seqsync", "lsa", "peekmap", "data", "auth", "dcutr", "echo"
-	Name            string `json:"name"`             // Friendly name, e.g. "Sequence Sync (SeqSync)"
-	Protocol        string `json:"protocol"`         // e.g. "/p2ptap/seqsync/1.0.0"
-	Category        string `json:"category"`         // "sync" | "routing" | "pubsub" | "data" | "security" | "transport" | "diagnostics"
-	Status          string `json:"status"`           // "active" | "running" | "idle" | "standby"
-	ActiveStreams   int    `json:"active_streams"`   // total active open streams count
-	InboundStreams  int    `json:"inbound_streams"`  // inbound streams
-	OutboundStreams int    `json:"outbound_streams"` // outbound streams
-	Details         string `json:"details"`          // summary metrics
+	ID              string `json:"id"`                        // e.g. "seqsync", "lsa", "peekmap", "data", "auth", "dcutr", "echo"
+	Name            string `json:"name"`                      // Friendly name, e.g. "Sequence Sync (SeqSync)"
+	Protocol        string `json:"protocol"`                  // e.g. "/p2ptap/seqsync/1.0.0"
+	Category        string `json:"category"`                  // "sync" | "routing" | "pubsub" | "data" | "security" | "transport" | "diagnostics"
+	Status          string `json:"status"`                    // "active" | "running" | "idle" | "standby"
+	ActiveStreams   int    `json:"active_streams"`            // total active open streams count
+	InboundStreams  int    `json:"inbound_streams"`           // inbound streams
+	OutboundStreams int    `json:"outbound_streams"`          // outbound streams
+	SyncedPeers     int    `json:"synced_peers,omitempty"`    // number of active synchronized peers
+	TxFrames        uint64 `json:"tx_frames"`                 // total transmitted frames / messages
+	RxFrames        uint64 `json:"rx_frames"`                 // total received frames / messages
+	TxBytes         uint64 `json:"tx_bytes"`                  // total transmitted bytes
+	RxBytes         uint64 `json:"rx_bytes"`                  // total received bytes
+	SyncEvents      uint64 `json:"sync_events,omitempty"`     // handshake / sync / key rotation events
+	ErrorCount      uint64 `json:"error_count,omitempty"`     // error / drop / desync count
+	LastActiveAgo   string `json:"last_active_ago,omitempty"` // human-readable last active (e.g. "2s ago")
+	Details         string `json:"details"`                   // summary metrics
 }
 
 // ProtocolStreamDTO captures runtime details of an active stream/channel on a live P2P connection.
@@ -807,42 +867,65 @@ type ProtocolStreamDTO struct {
 	PeerID       string `json:"peer_id"`
 	PeerIDShort  string `json:"peer_id_short"`
 	PeerName     string `json:"peer_name"`
-	Direction    string `json:"direction"`     // "inbound" | "outbound"
-	Transport    string `json:"transport"`     // "QUIC" / "TCP" / "Relay"
+	Direction    string `json:"direction"` // "inbound" | "outbound"
+	Transport    string `json:"transport"` // "QUIC" / "TCP" / "Relay"
 	RemoteAddr   string `json:"remote_addr"`
-	Status       string `json:"status"`        // "active" | "established"
+	Status       string `json:"status"` // "active" | "established"
 }
 
 type StatsResponse struct {
-	NodeName             string                   `json:"node_name"`
-	PeerID               string                   `json:"peer_id"`
-	Version              string                   `json:"version"`
-	TapIP                string                   `json:"tap_ip"`
-	TapIPv6              string                   `json:"tap_ipv6"`
-	TransportStrategy    string                   `json:"transport_strategy"`
-	ListenAddrs          []string                 `json:"listen_addrs"`
-	NATStatus            string                   `json:"nat_status"`
-	ExitNode             ExitNodeInfoDTO          `json:"exit_node"`
-	ActivePeers          []PeerInfoDTO            `json:"active_peers"`
-	MACTable             []MACInfoDTO             `json:"mac_table"`
-	ARPTable             []ARPInfoDTO             `json:"arp_table"`
-	IPTable              []IPInfoDTO              `json:"ip_table"`
-	RoutesTable          []RouteInfoDTO           `json:"routes_table"`
-	PacketStats          PacketStatsDTO           `json:"packet_stats"`
-	ProtocolStats        ProtocolStatsDTO         `json:"protocol_stats"`
-	GatewayPackets       GatewayPacketStatsDTO    `json:"gateway_packets"`
-	SeqStats             SeqStatsDTO              `json:"seq_stats"`
-	Security             SecurityStatusDTO        `json:"security"`
-	ACL                  ACLStatsDTO              `json:"acl"`
-	System               SystemHealthDTO          `json:"system"`
-	Speed                SpeedStatsDTO            `json:"speed"`
-	SpeedHistory         []SpeedSampleDTO         `json:"speed_history"`
-	SubnetRoutes         []SubnetRouteDTO         `json:"subnet_routes"`
-	PeerMetas            []PeerMetaDTO            `json:"peer_metas"`
-	MeshMatrix           []MeshMatrixCellDTO      `json:"mesh_matrix"`
-	ProtocolChannels     []ProtocolChannelDTO     `json:"protocol_channels"`
-	ActiveStreams        []ProtocolStreamDTO      `json:"active_streams"`
+	NodeName          string                `json:"node_name"`
+	PeerID            string                `json:"peer_id"`
+	Version           string                `json:"version"`
+	TapIP             string                `json:"tap_ip"`
+	TapIPv6           string                `json:"tap_ipv6"`
+	TransportStrategy string                `json:"transport_strategy"`
+	ListenAddrs       []string              `json:"listen_addrs"`
+	NATStatus         string                `json:"nat_status"`
+	ExitNode          ExitNodeInfoDTO       `json:"exit_node"`
+	ActivePeers       []PeerInfoDTO         `json:"active_peers"`
+	MACTable          []MACInfoDTO          `json:"mac_table"`
+	ARPTable          []ARPInfoDTO          `json:"arp_table"`
+	IPTable           []IPInfoDTO           `json:"ip_table"`
+	RoutesTable       []RouteInfoDTO        `json:"routes_table"`
+	PacketStats       PacketStatsDTO        `json:"packet_stats"`
+	ProtocolStats     ProtocolStatsDTO      `json:"protocol_stats"`
+	GatewayPackets    GatewayPacketStatsDTO `json:"gateway_packets"`
+	SeqStats          SeqStatsDTO           `json:"seq_stats"`
+	Security          SecurityStatusDTO     `json:"security"`
+	ACL               ACLStatsDTO           `json:"acl"`
+	System            SystemHealthDTO       `json:"system"`
+	Speed             SpeedStatsDTO         `json:"speed"`
+	SpeedHistory      []SpeedSampleDTO      `json:"speed_history"`
+	SubnetRoutes      []SubnetRouteDTO      `json:"subnet_routes"`
+	PeerMetas         []PeerMetaDTO         `json:"peer_metas"`
+	MeshMatrix        []MeshMatrixCellDTO   `json:"mesh_matrix"`
+	ProtocolChannels  []ProtocolChannelDTO  `json:"protocol_channels"`
+	ActiveStreams     []ProtocolStreamDTO   `json:"active_streams"`
 	// DuplicateIPConflicts surfaces duplicate-IP and overlapping-subnet
 	// conflicts (with arbitration verdicts) detected by the node.
 	DuplicateIPConflicts []DuplicateIPConflictDTO `json:"duplicate_ip_conflicts"`
+}
+
+// TelemetrySpanDTO represents a lightweight OpenTelemetry-compatible span for datapath tracing.
+type TelemetrySpanDTO struct {
+	TraceID      string            `json:"trace_id"`
+	SpanID       string            `json:"span_id"`
+	ParentSpanID string            `json:"parent_span_id,omitempty"`
+	Name         string            `json:"name"`
+	ServiceName  string            `json:"service_name"`
+	Timestamp    time.Time         `json:"timestamp"`
+	DurationUs   int64             `json:"duration_us"`
+	Status       string            `json:"status"` // "ok" | "error"
+	Attributes   map[string]string `json:"attributes,omitempty"`
+}
+
+// DiagnosticSnapshotDTO packages a comprehensive OpenTelemetry-compliant system diagnostic snapshot.
+type DiagnosticSnapshotDTO struct {
+	Title       string             `json:"title"`
+	ExportedAt  time.Time          `json:"exported_at"`
+	ServiceName string             `json:"service_name"`
+	Version     string             `json:"version"`
+	Stats       *StatsResponse     `json:"stats"`
+	Spans       []TelemetrySpanDTO `json:"spans"`
 }

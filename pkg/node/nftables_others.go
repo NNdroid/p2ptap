@@ -1,4 +1,5 @@
-//go:build !linux
+//go:build !linux || android
+// +build !linux android
 
 package node
 
@@ -56,6 +57,11 @@ func (m *NFTManager) EnableIPForwarding() error {
 // On Windows the user should configure ICS or routing manually.
 // On macOS the user should enable Internet Sharing or configure pf.
 func (m *NFTManager) SetupExitNodeNAT(wanIfName, tapIfName string, mss int) error {
+	return nil
+}
+
+// SetupSubnetRouterNAT is a no-op on non-Linux platforms.
+func (m *NFTManager) SetupSubnetRouterNAT(tapIfName string) error {
 	return nil
 }
 

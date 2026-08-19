@@ -5,6 +5,7 @@ package node
 import (
 	"fmt"
 	"net"
+	"syscall"
 )
 
 // androidProtectFunc is registered by the Android binding layer
@@ -22,15 +23,14 @@ func SetAndroidProtectFunc(fn func(fd int) bool) {
 }
 
 func protectSocketOS(fd uintptr, wanIfName string) error {
-	if androidProtectFunc == nil {
-		// No protector registered. On Android this risks a routing loop, but we
-		// fall back to a best-effort no-op rather than breaking the dial. The
-		// app is expected to register a protector via SetAndroidProtectFunc.
-		return nil
+	if androidProtectFunc != nil {
+		if !androidProtectFunc(int(fd)) {
+			return fmt.Errorf("android VpnService.protect(fd=%d) returned false", fd)
+		}
 	}
-	if !androidProtectFunc(int(fd)) {
-		return fmt.Errorf("android VpnService.protect(fd=%d) returned false", fd)
-	}
+	// Tune socket buffers for high performance throughput on Android (4MB send/recv buffers)
+	_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4*1024*1024)
+	_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, 4*1024*1024)
 	return nil
 }
 

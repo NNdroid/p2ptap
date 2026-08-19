@@ -56,7 +56,7 @@ var trayI18n = map[string]TrayDict{
 		"err_set_exit_msg": "设置出口网关 %s (%s) 失败:\n%v\n\n提示: 设置系统网关需要以管理员身份运行！",
 		"err_svc_uninstall_msg": "卸载 Windows 服务失败:\n%v\n\n提示: 请以管理员身份运行 p2ptap-tray.exe！",
 		"err_autostart_title": "开机自启动设置错误",
-		"err_autostart_msg": "更新注册表 Run 项失败:\n%v",
+		"err_autostart_msg": "更新开机自启动计划任务失败:\n%v",
 	},
 	"zh-TW": {
 		"open_webui":       "🌐 打開 Web 控制台 (Open WebUI)",
@@ -104,7 +104,7 @@ var trayI18n = map[string]TrayDict{
 		"err_set_exit_msg": "設定出口網關 %s (%s) 失敗:\n%v\n\n提示: 設定系統閘道需要以管理員身分執行！",
 		"err_svc_uninstall_msg": "解除安裝 Windows 服務失敗:\n%v\n\n提示: 請以管理員身分執行 p2ptap-tray.exe！",
 		"err_autostart_title": "開機自啟動設定錯誤",
-		"err_autostart_msg": "更新註冊表 Run 項失敗:\n%v",
+		"err_autostart_msg": "更新開機自啟動排程工作失敗:\n%v",
 	},
 	"en": {
 		"open_webui":       "🌐 Open Web Console (WebUI)",
@@ -152,7 +152,7 @@ var trayI18n = map[string]TrayDict{
 		"err_set_exit_msg": "Failed to set gateway %s (%s):\n%v\n\nHint: Setting system gateway requires running as Administrator!",
 		"err_svc_uninstall_msg": "Failed to uninstall Windows service:\n%v\n\nHint: Please run p2ptap-tray.exe as Administrator!",
 		"err_autostart_title": "Auto-Start Setting Error",
-		"err_autostart_msg": "Failed to update Registry Run key:\n%v",
+		"err_autostart_msg": "Failed to update the auto-start scheduled task:\n%v",
 	},
 	"ja": {
 		"open_webui":       "🌐 Webダッシュボードを開く",
@@ -199,7 +199,7 @@ var trayI18n = map[string]TrayDict{
 		"err_set_exit_msg": "出口ゲートウェイ %s (%s) の設定に失敗しました:\n%v\n\nヒント: システムゲートウェイの設定には管理者権限が必要です！",
 		"err_svc_uninstall_msg": "Windows サービスのアンインストールに失敗しました:\n%v\n\nヒント: p2ptap-tray.exe を管理者として実行してください！",
 		"err_autostart_title": "自動開始設定エラー",
-		"err_autostart_msg": "レジストリ Run キーの更新に失敗しました:\n%v",
+		"err_autostart_msg": "スケジュールタスクの更新に失敗しました:\n%v",
 	},
 	"de": {
 		"open_webui":       "🌐 Web-Konsole öffnen (WebUI)",
@@ -246,7 +246,7 @@ var trayI18n = map[string]TrayDict{
 		"err_set_exit_msg": "Setzen des Gateways %s (%s) fehlgeschlagen:\n%v\n\nHinweis: Das Setzen des System-Gateways erfordert Administratorrechte!",
 		"err_svc_uninstall_msg": "Deinstallation des Windows-Dienstes fehlgeschlagen:\n%v\n\nHinweis: Bitte p2ptap-tray.exe als Administrator ausführen!",
 		"err_autostart_title": "Autostart-Einstellungsfehler",
-		"err_autostart_msg": "Aktualisieren des Registry-Run-Schlüssels fehlgeschlagen:\n%v",
+		"err_autostart_msg": "Aktualisieren der Autostart-Aufgabe (Task Scheduler) fehlgeschlagen:\n%v",
 	},
 	"es": {
 		"open_webui":       "🌐 Abrir Consola Web (WebUI)",
@@ -293,7 +293,7 @@ var trayI18n = map[string]TrayDict{
 		"err_set_exit_msg": "Error al configurar la puerta de enlace %s (%s):\n%v\n\nSugerencia: Configurar la puerta de enlace requiere permisos de Administrador!",
 		"err_svc_uninstall_msg": "Error al desinstalar el servicio de Windows:\n%v\n\nSugerencia: ¡Ejecute p2ptap-tray.exe como Administrador!",
 		"err_autostart_title": "Error de Configuración de Inicio Automático",
-		"err_autostart_msg": "Error al actualizar la clave Run del Registro:\n%v",
+		"err_autostart_msg": "Error al actualizar la tarea programada de inicio automático:\n%v",
 	},
 	"fr": {
 		"open_webui":       "🌐 Ouvrir la Console Web (WebUI)",
@@ -340,7 +340,7 @@ var trayI18n = map[string]TrayDict{
 		"err_set_exit_msg": "Échec de la configuration de la passerelle %s (%s) :\n%v\n\nAstuce : La configuration de la passerelle système requiert les droits Administrateur !",
 		"err_svc_uninstall_msg": "Échec de la désinstallation du service Windows :\n%v\n\nAstuce : Exécutez p2ptap-tray.exe en tant qu'Administrateur !",
 		"err_autostart_title": "Erreur de Configuration du Démarrage Auto",
-		"err_autostart_msg": "Échec de la mise à jour de la clé Run du Registre :\n%v",
+		"err_autostart_msg": "Échec de la mise à jour de la tâche planifiée de démarrage auto :\n%v",
 	},
 }
 

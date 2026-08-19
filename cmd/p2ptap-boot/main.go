@@ -26,6 +26,7 @@ import (
 	"p2ptap/pkg/routing"
 	"p2ptap/pkg/version"
 
+	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -35,7 +36,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	connmgr "github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
-	"github.com/libp2p/go-libp2p"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -47,6 +47,7 @@ var (
 	gSessions         *sessionTracker
 	gTraffic          *trafficHistory
 	gGeoIP            *GeoIPResolver
+	gSecurity         *SecurityManager
 	gPeerConnectTimes sync.Map // peer.ID → time.Time (when peer first connected)
 	// relayAllowedDedup prevents flooding the alert buffer with relay_allowed
 	// events when the same src→dst pair is established in rapid succession.
@@ -118,9 +119,9 @@ const PeekMapUpdate = "update" // a node's identity/subnets; hub rebroadcasts to
 // inspects Payload.
 type PeekMapMessage struct {
 	Type    string          `json:"type"`
-	From    string          `json:"from"`                       // sender peer.ID (set by boot hub)
-	NetID   string          `json:"net_id,omitempty"`           // network isolation tag (PSK mode); empty in open mode
-	Payload json.RawMessage `json:"payload,omitempty"`          // opaque node info, not inspected by hub
+	From    string          `json:"from"`              // sender peer.ID (set by boot hub)
+	NetID   string          `json:"net_id,omitempty"`  // network isolation tag (PSK mode); empty in open mode
+	Payload json.RawMessage `json:"payload,omitempty"` // opaque node info, not inspected by hub
 }
 
 // bootNodeInfo is the minimal identity the boot node publishes about itself over
@@ -318,11 +319,11 @@ func (h *peekMapHub) fanout(frame []byte, exclude peer.ID, skipMesh bool, netID 
 // connected yet.
 func (h *peekMapHub) publishBootInfo(self host.Host, nodeName, version string) {
 	info := bootNodeInfo{
-		PeerID:     self.ID().String(),
-		NodeName:   nodeName,
-		OS:         runtime.GOOS,
-		Arch:       runtime.GOARCH,
-		Version:    version,
+		PeerID:      self.ID().String(),
+		NodeName:    nodeName,
+		OS:          runtime.GOOS,
+		Arch:        runtime.GOARCH,
+		Version:     version,
 		HopDistance: 0,
 		Addrs:       hostAddrStrings(self),
 		IsBoot:      true,
@@ -488,7 +489,6 @@ func (f *pskACLFilter) AllowReserve(p peer.ID, a multiaddr.Multiaddr) bool {
 	return authed
 }
 
-
 // AllowConnect decides whether a peer can connect through the relay to a
 // destination. Both ends must be authenticated AND in the same network; a node in
 // PSK network A must never be able to relay through to a node in PSK network B.
@@ -639,10 +639,15 @@ func (r *relayRouter) unregisterMesh(p peer.ID) {
 // route bridges one boot-relay frame. fromMesh distinguishes a frame that
 // arrived over the backbone (local-delivery-only) from one that arrived from a
 // local client uplink (may be delivered locally OR flooded to the backbone).
-func (r *relayRouter) route(data []byte, fromMesh bool) {
+func (r *relayRouter) route(data []byte, fromMesh bool, fromPeer peer.ID) {
 	netID, _, _, finalDst, srcPeer, ttl, _, err := routing.UnpackBootRelayFrame(data)
 	if err != nil {
 		log.Debug("[boot-relay] unpack error: %v", err)
+		return
+	}
+	// Anti-spoofing: a local client uplink must not forge a srcPeer other than its own peer ID.
+	if !fromMesh && srcPeer != fromPeer {
+		log.Warn("[boot-relay] drop spoofed frame: stream peer %s claims src %s", fromPeer.ShortString(), srcPeer.ShortString())
 		return
 	}
 	// Source isolation: a LOCAL client uplink must come from an authenticated
@@ -652,6 +657,18 @@ func (r *relayRouter) route(data []byte, fromMesh bool) {
 	// the destination's network is dropped on local delivery).
 	if !fromMesh && r.pskEnabled && r.acl.NetworkOf(srcPeer) == "" {
 		log.Debug("[boot-relay] drop unauthenticated source %s", srcPeer.ShortString())
+		return
+	}
+	// Anti-spoofing (source-network): the in-band netID is set by the sender and
+	// is fully forgeable, so it MUST equal the authenticated sender's real
+	// network. Without this, an authenticated member of net A could stamp
+	// netID=B on a frame aimed at a net-B peer: it would pass the destination
+	// check (netID==NetworkOf(dst)==B) and be injected into net B as a B member.
+	// The dst-side check alone cannot catch this because it compares against the
+	// (forged) netID rather than the true sender network.
+	if !fromMesh && r.pskEnabled && netID != r.acl.NetworkOf(srcPeer) {
+		log.Warn("[boot-relay] drop spoofed netID: authenticated source %s (net=%s) claims netID=%s",
+			srcPeer.ShortString(), r.acl.NetworkOf(srcPeer), netID)
 		return
 	}
 	// Loop guard: never bridge a frame back to its own origin.
@@ -719,6 +736,18 @@ func (r *relayRouter) route(data []byte, fromMesh bool) {
 func makeBootRelayHandler(rr *relayRouter) func(network.Stream) {
 	return func(s network.Stream) {
 		remotePeer := s.Conn().RemotePeer()
+		if rr.pskEnabled {
+			if !rr.acl.IsAuthenticated(remotePeer) {
+				rr.acl.waitForAuth(remotePeer, 2*time.Second)
+			}
+			if !rr.acl.IsAuthenticated(remotePeer) {
+				log.Debug("[boot-relay] rejecting unauthenticated client %s", remotePeer.ShortString())
+				bootAlerts.Add("warn", "boot_relay_denied", remotePeer.ShortString(),
+					fmt.Sprintf("Boot-relay access denied: %s not authenticated", remotePeer.ShortString()))
+				_ = s.Close()
+				return
+			}
+		}
 		rr.registerClient(remotePeer, s)
 		bootAlerts.Add("info", "boot_relay_join", remotePeer.ShortString(),
 			fmt.Sprintf("Boot-relay client connected: %s", remotePeer.ShortString()))
@@ -735,11 +764,10 @@ func makeBootRelayHandler(rr *relayRouter) func(network.Stream) {
 			if err != nil || n == 0 {
 				return
 			}
-			rr.route(buf[:n], false)
+			rr.route(buf[:n], false, remotePeer)
 		}
 	}
 }
-
 
 // makeBootRelayBackboneHandler is the server side of a peer boot's backbone
 // uplink. Frames arriving here are local-delivery-only.
@@ -758,7 +786,7 @@ func makeBootRelayBackboneHandler(rr *relayRouter) func(network.Stream) {
 			if err != nil || n == 0 {
 				return
 			}
-			rr.route(buf[:n], true)
+			rr.route(buf[:n], true, remotePeer)
 		}
 	}
 }
@@ -774,7 +802,7 @@ type RelayCtrlHeader struct {
 
 // makeRelayCtrlHandler handles /p2ptap/relay-ctrl/1.0.0 control streams on the boot node.
 // It allows clients to establish overlay control tunnels (SeqSync / Meta / LSA) through the boot node.
-func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter) func(network.Stream) {
+func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter, hub *peekMapHub) func(network.Stream) {
 	return func(s network.Stream) {
 		defer s.Close()
 		remotePeer := s.Conn().RemotePeer()
@@ -792,6 +820,12 @@ func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter) func(network.Stream) {
 			return
 		}
 
+		// Anti-spoofing: direct local client cannot initiate a control tunnel pretending to be another peer
+		if hub != nil && !hub.isMesh(remotePeer) && hdr.Origin != remotePeer {
+			log.Warn("[relay-ctrl] spoofing attempt: direct client %s claims origin %s; dropping", remotePeer.ShortString(), hdr.Origin.ShortString())
+			return
+		}
+
 		if acl != nil {
 			if !acl.IsAuthenticated(remotePeer) {
 				return
@@ -800,7 +834,6 @@ func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter) func(network.Stream) {
 				return
 			}
 		}
-
 
 		if hdr.Hops >= 8 {
 			return
@@ -844,7 +877,6 @@ func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter) func(network.Stream) {
 	}
 }
 
-
 func proxyStreams(s1, s2 network.Stream) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -860,7 +892,6 @@ func proxyStreams(s1, s2 network.Stream) {
 	}()
 	wg.Wait()
 }
-
 
 // bootRelayMeshUplinkLoop keeps a boot-relay backbone uplink open to ONE peer
 // boot (mirrors meshUplinkLoop). The remote boot symmetrically subscribes to us,
@@ -944,10 +975,9 @@ func runBootRelayMeshUplink(ctx context.Context, h host.Host, rr *relayRouter, i
 			return fmt.Errorf("read: %w", err)
 		}
 		// Frames from the remote boot are for OUR local clients only.
-		rr.route(buf[:n], true)
+		rr.route(buf[:n], true, info.ID)
 	}
 }
-
 
 func main() {
 	if exePath, err := os.Executable(); err == nil {
@@ -1064,6 +1094,7 @@ func main() {
 	}
 
 	// 2. Setup PSK ACL filter for relay
+	gSecurity = newSecurityManager()
 	aclFilter := newPSKACLFilter(pskEnabled)
 	aclFilter.SetHost(h)
 
@@ -1206,10 +1237,9 @@ func main() {
 	relayRouter := newRelayRouter(aclFilter, pskEnabled)
 	h.SetStreamHandler(BootRelayProtocolID, makeBootRelayHandler(relayRouter))
 	h.SetStreamHandler(BootRelayBackboneProtocolID, makeBootRelayBackboneHandler(relayRouter))
-	h.SetStreamHandler(RelayCtrlProtocolID, makeRelayCtrlHandler(h, aclFilter))
+	h.SetStreamHandler(RelayCtrlProtocolID, makeRelayCtrlHandler(h, aclFilter, hub))
 	fmt.Printf("[+] Boot-relay & relay-control handlers registered (protocols: %s, %s, %s)\n",
 		BootRelayProtocolID, BootRelayBackboneProtocolID, RelayCtrlProtocolID)
-
 
 	// 8. Log peer connection/disconnection events.
 	// Protect() every connected peer from the ConnManager so relay links are
@@ -1274,6 +1304,9 @@ func main() {
 				hub.unregister(peerID)
 				peerInfoCache.Delete(peerID)
 				h.Peerstore().ClearAddrs(peerID)
+				if gSecurity != nil {
+					gSecurity.PeekMap.Remove(peerID)
+				}
 				// Clean up relay sessions and compute online duration.
 				if gSessions != nil {
 					gSessions.RemoveForPeer(peerID)
@@ -1287,7 +1320,6 @@ func main() {
 			}
 		},
 	})
-
 
 	// 9. Relay keepalive: periodically echo-ping every connected peer so that
 	// NAT/firewall UDP mappings stay open and dead links surface quickly. This
@@ -1677,17 +1709,16 @@ func extractIPFromMultiaddrStr(maStr string) string {
 	return ""
 }
 
-
 // computePSKHash derives a 32-byte authentication token from PSK using SHA-256
 // seqSyncMsg mirrors the JSON wire format used by pkg/node's seqsync protocol.
 // Field tags MUST stay in sync with node.SeqSyncMsg; only the fields the boot
 // node actually populates are read here, but the same JSON keys are produced.
 type seqSyncMsg struct {
-	Type      string `json:"t"` // "sync" | "request" | "ack" | "ready"
-	NodeID    string `json:"n"` // sender PeerID (string)
-	MySeq     uint64 `json:"s"` // next structured SeqID (0 — boot never sends TAP frames)
-	ConnEpoch uint64 `json:"e"` // per-instance epoch for anti-replay
-	Timestamp int64  `json:"ts"`
+	Type       string `json:"t"` // "sync" | "request" | "ack" | "ready"
+	NodeID     string `json:"n"` // sender PeerID (string)
+	MySeq      uint64 `json:"s"` // next structured SeqID (0 — boot never sends TAP frames)
+	ConnEpoch  uint64 `json:"e"` // per-instance epoch for anti-replay
+	Timestamp  int64  `json:"ts"`
 	ObfEnabled bool   `json:"oe"`  // false: boot performs no per-peer encryption
 	ObfAlgos   []byte `json:"oas"` // nil
 	ObfMode    string `json:"ob"`  // ""
@@ -1724,11 +1755,11 @@ func handleSeqSyncStream(s network.Stream) {
 	// ConnEpoch are sufficient: the boot node issues no TAP frames, so the
 	// client's anchorDedupForPeer just records these as the boot peer's window.
 	ack := seqSyncMsg{
-		Type:      "ack",
-		NodeID:    s.Conn().LocalPeer().String(),
-		MySeq:     0,
-		ConnEpoch: connEpochBoot(),
-		Timestamp: time.Now().UnixMilli(),
+		Type:       "ack",
+		NodeID:     s.Conn().LocalPeer().String(),
+		MySeq:      0,
+		ConnEpoch:  connEpochBoot(),
+		Timestamp:  time.Now().UnixMilli(),
 		ObfEnabled: false,
 	}
 	if err := json.NewEncoder(s).Encode(ack); err != nil {
@@ -1743,9 +1774,9 @@ func handleSeqSyncStream(s network.Stream) {
 	// JSON value either.
 	if err := json.NewDecoder(io.LimitReader(s, 4096)).Decode(&ready); err == nil && ready.Type == "ready" {
 		_ = json.NewEncoder(s).Encode(seqSyncMsg{
-			Type:      "ready",
-			NodeID:    s.Conn().LocalPeer().String(),
-			Timestamp: time.Now().UnixMilli(),
+			Type:       "ready",
+			NodeID:     s.Conn().LocalPeer().String(),
+			Timestamp:  time.Now().UnixMilli(),
 			ObfEnabled: false,
 		})
 	}
@@ -1795,12 +1826,26 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 	_ = s.SetReadDeadline(time.Now().Add(30 * time.Second))
 
 	remotePeer := s.Conn().RemotePeer()
+	phyIP := extractIPFromMultiaddrStr(s.Conn().RemoteMultiaddr().String())
 	log.Debug("[auth] incoming PSK auth request from %s via %s", remotePeer.String(), s.Conn().RemoteMultiaddr().String())
+
+	// 1. Check if the IP or Peer ID is currently in a temporary ban state due to brute force
+	if gSecurity != nil && gSecurity.Auth.IsBanned(phyIP, remotePeer) {
+		log.Warn("[auth] connection dropped from banned IP/peer: %s (%s)", remotePeer.ShortString(), phyIP)
+		_, _ = s.Write([]byte{0x00})
+		return
+	}
 
 	// Read 32-byte auth token from peer
 	var token [32]byte
 	if _, err := io.ReadFull(s, token[:]); err != nil {
 		log.Debug("[auth] peer %s sent incomplete auth data: %v", remotePeer.String(), err)
+		if gSecurity != nil {
+			_, delay := gSecurity.Auth.RecordFailure(phyIP, remotePeer)
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+		}
 		_, _ = s.Write([]byte{0x00}) // Auth failed response
 		return
 	}
@@ -1817,6 +1862,10 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 	// 32-byte hash matched.
 	for _, e := range entries {
 		if subtle.ConstantTimeCompare(token[:], e.hash[:]) == 1 {
+			// Success! Clear any failure count for this IP/peer
+			if gSecurity != nil {
+				gSecurity.Auth.RecordSuccess(phyIP, remotePeer)
+			}
 			// PSK matches — assess version/envelope compatibility. A plain build
 			// difference with an identical envelope is safe (Warn, allowed); only
 			// a genuinely incompatible envelope (no common version) is Danger,
@@ -1853,8 +1902,24 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 		}
 	}
 
+	// Mismatched PSK: record failure and apply progressive backoff / ban
 	log.Debug("[auth] peer %s provided an incorrect PSK (no matching network)", remotePeer.String())
-	bootAlerts.Add("error", "auth_failed", remotePeer.ShortString(), fmt.Sprintf("Peer %s failed PSK authentication (no matching network)", remotePeer.ShortString()))
+	if gSecurity != nil {
+		banned, delay := gSecurity.Auth.RecordFailure(phyIP, remotePeer)
+		if banned {
+			bootAlerts.Add("error", "auth_banned", remotePeer.ShortString(),
+				fmt.Sprintf("🛑 触发防暴力破解封禁: %s (%s) 认证错误过多，临时封禁 5 分钟", remotePeer.ShortString(), phyIP))
+		} else {
+			bootAlerts.Add("error", "auth_failed", remotePeer.ShortString(),
+				fmt.Sprintf("Peer %s failed PSK authentication (no matching network)", remotePeer.ShortString()))
+		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+	} else {
+		bootAlerts.Add("error", "auth_failed", remotePeer.ShortString(),
+			fmt.Sprintf("Peer %s failed PSK authentication (no matching network)", remotePeer.ShortString()))
+	}
 	_, _ = s.Write([]byte{0x00}) // Auth failed response
 }
 
@@ -1994,7 +2059,6 @@ func makePeekMapHandler(h host.Host, hub *peekMapHub, nodeName string) func(netw
 			_ = s.Close()
 		}()
 
-
 		// Streaming JSON decoder: the client sends newline-delimited
 		// PeekMapMessage values via json.NewEncoder(s).Encode, which may arrive
 		// split across reads OR several values coalesced into one TCP segment.
@@ -2016,6 +2080,16 @@ func makePeekMapHandler(h host.Host, hub *peekMapHub, nodeName string) func(netw
 			if err := dec.Decode(&msg); err != nil {
 				log.Debug("[peek-map] listener for %s closed: %v", remotePeer.ShortString(), err)
 				return
+			}
+			// Message payload size limit (max 64KB per message to prevent memory/broadcast amplification)
+			if len(msg.Payload) > 64*1024 {
+				log.Warn("[peek-map] payload exceeds 64KB limit from %s (%d bytes); dropping", remotePeer.ShortString(), len(msg.Payload))
+				continue
+			}
+			// Token-bucket rate limiting for direct peers to prevent broadcast storming
+			if gSecurity != nil && !hub.isMesh(remotePeer) && !gSecurity.PeekMap.Allow(remotePeer) {
+				log.Debug("[peek-map] rate limit exceeded for peer %s, dropping update", remotePeer.ShortString())
+				continue
 			}
 			// Re-stamp the sender so receivers trust the source, then rebroadcast
 			// to every other client.
@@ -2153,8 +2227,8 @@ func parseMeshPeers(spec string, self peer.ID) []peer.AddrInfo {
 // down does not turn into a dial storm, and a permanently misconfigured entry
 // costs one goroutine parked on a long sleep.
 func meshUplinkLoop(ctx context.Context, h host.Host, hub *peekMapHub, info peer.AddrInfo, selfName string) {
-	backoff := 2 * time.Second
-	const maxBackoff = 60 * time.Second
+	backoff := 250 * time.Millisecond
+	const maxBackoff = 30 * time.Second
 	for {
 		if ctx.Err() != nil {
 			return
@@ -2163,11 +2237,13 @@ func meshUplinkLoop(ctx context.Context, h host.Host, hub *peekMapHub, info peer
 		if ctx.Err() != nil {
 			return
 		}
-		log.Debug("[mesh] uplink to %s ended (%v), retrying in %v", info.ID.ShortString(), err, backoff)
+		jitter := time.Duration(mathrand.Int64N(int64(250 * time.Millisecond)))
+		sleepDur := backoff + jitter
+		log.Debug("[mesh] uplink to %s ended (%v), retrying in %v", info.ID.ShortString(), err, sleepDur)
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(backoff):
+		case <-time.After(sleepDur):
 		}
 		if backoff < maxBackoff {
 			backoff *= 2
@@ -2183,6 +2259,13 @@ func meshUplinkLoop(ctx context.Context, h host.Host, hub *peekMapHub, info peer
 func runMeshUplink(ctx context.Context, h host.Host, hub *peekMapHub, info peer.AddrInfo, selfName string) error {
 	h.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
 
+	// Break simultaneous-dial collision between peer boots
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(time.Duration(mathrand.Int64N(int64(150 * time.Millisecond)))):
+	}
+
 	dialCtx, cancelDial := context.WithTimeout(ctx, 20*time.Second)
 	defer cancelDial()
 	if err := h.Connect(dialCtx, info); err != nil {
@@ -2193,6 +2276,7 @@ func runMeshUplink(ctx context.Context, h host.Host, hub *peekMapHub, info peer.
 	h.ConnManager().Protect(info.ID, "mesh-boot")
 
 	s, err := h.NewStream(ctx, info.ID, PeekMapProtocolID)
+
 	if err != nil {
 		return fmt.Errorf("open peek-map stream: %w", err)
 	}
@@ -2387,6 +2471,11 @@ func runMaintenanceSweeper(ctx context.Context, h host.Host, acl *pskACLFilter, 
 					}
 				}
 				hub.mu.Unlock()
+			}
+
+			// 8. Sweep security rate limiters and expired bans
+			if gSecurity != nil {
+				gSecurity.Cleanup()
 			}
 		}
 	}

@@ -224,6 +224,19 @@ func (r *Router) UpdateDirectLink(target peer.ID, rttMs int64, class LinkClass) 
 
 	r.graph[r.localPeerID][target] = LinkEdge{Weight: rttMs, Class: class}
 	r.lastUpdated[r.localPeerID] = time.Now()
+
+	// Reciprocal edge guarantee: in a P2P overlay, establishing a direct transport
+	// connection between local node and target means physical bidirectional connectivity
+	// exists. Ensure target -> localPeerID has at least an initial reciprocal edge if
+	// target has not yet broadcast an LSA, preventing asymmetric directed graph blackholes
+	// in Dijkstra route evaluation and overlay relay transit checks.
+	if r.graph[target] == nil {
+		r.graph[target] = make(map[peer.ID]LinkEdge)
+	}
+	if _, exists := r.graph[target][r.localPeerID]; !exists {
+		r.graph[target][r.localPeerID] = LinkEdge{Weight: rttMs, Class: class}
+		r.lastUpdated[target] = time.Now()
+	}
 }
 
 // UpdateLinkRTT refreshes only the observed latency of an existing edge,

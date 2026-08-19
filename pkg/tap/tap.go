@@ -41,6 +41,16 @@ type TAPDevice interface {
 	SelfTest() map[string]interface{}
 }
 
+// ActualMACProvider is implemented by TAP backends that can query the
+// operating system for the interface's current hardware address.  MAC() is a
+// general-purpose, best-effort accessor; this narrower interface lets callers
+// enforce the stronger startup invariant where the platform supports it:
+// packets rewritten for the local TAP must use the MAC the kernel currently
+// owns, not merely the value that was requested during setup.
+type ActualMACProvider interface {
+	ActualMAC() (string, error)
+}
+
 // MemTAP is an in-memory virtual TAP interface pair for CI/CD testing and permissionless environments
 type MemTAP struct {
 	name       string

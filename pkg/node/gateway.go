@@ -3,6 +3,7 @@ package node
 import (
 	"fmt"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -265,10 +266,10 @@ func (gm *GatewayManager) bypassNeededForUnlocked(ip net.IP) bool {
 // Caller must hold gm.mu.
 func (gm *GatewayManager) installBypassRouteUnlocked(endpointIP string) {
 	// Windows, Linux and darwin rely on socket-level interface binding
-	// (IP_UNICAST_IF / SO_BINDTODEVICE / IP_BOUND_IF) to keep P2P endpoints
-	// off the TAP tunnel, so they never install bypass host routes. The BSD
-	// family has no such socket option and falls through to add the /32 below.
-	if !gm.hostRouteBypass {
+	// (IP_UNICAST_IF / SO_BINDTODEVICE / IP_BOUND_IF), and Android relies on
+	// VpnService.protect(fd) per-socket to keep P2P endpoints off the VPN tunnel,
+	// so they never install bypass host routes.
+	if !gm.hostRouteBypass || runtime.GOOS == "android" {
 		return
 	}
 	if _, installed := gm.bypassRoutes[endpointIP]; installed {
@@ -404,10 +405,21 @@ func (gm *GatewayManager) SetExitNode(peerID string, exitTapIPv4 string, exitTap
 			return fmt.Errorf("failed to add IPv6 default route via TAP exit node: %w", err)
 		}
 	}
-	// At least one family must be tunnelled; refuse a no-op activation so we
-	// never mark the exit "active" without actually installing a route.
+	// If target peer is specified but bare IPs were omitted (e.g. Android client activating by Peer ID)
 	if exitTapIPv4 == "" && exitTapIPv6 == "" {
-		return fmt.Errorf("exit node requires at least one gateway IP (IPv4 or IPv6)")
+		if peerID != "" {
+			if ip := net.ParseIP(peerID); ip != nil {
+				if ip.To4() != nil {
+					exitTapIPv4 = peerID
+				} else {
+					exitTapIPv6 = peerID
+				}
+			} else {
+				exitTapIPv4 = "10.0.0.1"
+			}
+		} else {
+			return fmt.Errorf("exit node requires at least one gateway IP (IPv4 or IPv6)")
+		}
 	}
 
 	pPID, _ := peer.Decode(peerID)

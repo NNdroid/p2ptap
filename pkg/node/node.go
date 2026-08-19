@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"hash/fnv"
 	"net"
@@ -33,9 +32,9 @@ import (
 	yamux "github.com/libp2p/go-libp2p/p2p/muxer/yamux"
 	quict "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	quicreuse "github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
+	tcpt "github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	webrtc "github.com/libp2p/go-libp2p/p2p/transport/webrtc"
 	webtransport "github.com/libp2p/go-libp2p/p2p/transport/webtransport"
-	tcpt "github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 	quic "github.com/quic-go/quic-go"
@@ -73,9 +72,16 @@ type PeerMeta struct {
 }
 
 type Node struct {
-	Host         host.Host
-	DHT          *dht.IpfsDHT
-	Config       *config.Config
+	Host   host.Host
+	DHT    *dht.IpfsDHT
+	Config *config.Config
+	// configPtr is the atomically-swappable configuration snapshot that the
+	// data plane reads through n.config(). Hot-reload publishes a fresh
+	// *config.Config here; the exported Config field is kept pointing at the
+	// same value on every publish (see SetConfig) so init/control-time code and
+	// tests can still read it directly without a torn struct. Per-frame paths
+	// MUST go through config() to observe reloads race-free.
+	configPtr    atomic.Pointer[config.Config]
 	TAP          tap.TAPDevice
 	MACTable     *vswitch.ShardedMACTable
 	Packer       *obfuscate.FramePacker
@@ -148,9 +154,9 @@ type Node struct {
 	// a control-plane sync (SeqSync + Meta) for a relay-only peer, so it can
 	// apply a per-peer cooldown instead of re-triggering every tick.
 	relayCtrlSyncAt sync.Map
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	wg                  sync.WaitGroup
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
 	// closeOnce makes Close idempotent; it can be invoked from the signal
 	// handler, the tray UI and the web shutdown endpoint concurrently.
 	closeOnce sync.Once
@@ -187,14 +193,19 @@ type Node struct {
 	connGenCounter  atomic.Uint64
 	connGenerations sync.Map // peer.ID -> uint64
 
-
 	// Guards broadcastLSA so the periodic ticker and the on-connect immediate
 	// trigger do not race on shared Node state (Collector/Config).
 	lsaMu sync.Mutex
 
-	// Ping-pong keepalive: fail counts for each peer
-	pingPongFailCount map[peer.ID]int
-	pingPongFailMu    sync.Mutex
+	// Ping-pong keepalive: fail counts for each peer. Copy-on-write
+	// atomic.Pointer[map[peer.ID]*atomic.Int32] — the per-frame reset
+	// (resetPingPongFailCountForPeer, called from handleStream for EVERY inbound
+	// frame) must not take a global lock: read the published snapshot lock-free
+	// and Store(0) on the per-peer counter. Structural changes (first entry
+	// publish, cleanup deletes) take pingPongFailMu and republish a new map,
+	// mirroring the peerLastRx / perPeerObf pattern.
+	pingPongFailCount atomic.Pointer[map[peer.ID]*atomic.Int32]
+	pingPongFailMu    sync.Mutex // structural (CoW) changes only; never taken per frame
 
 	// Reconnect cooldown per peer to prevent rapid-fire reconnect loops on send failures
 	lastReconnectTime map[peer.ID]time.Time
@@ -204,6 +215,10 @@ type Node struct {
 	// traffic. tapWriteUrgent enqueues; tapWriteUrgentLoop drains with
 	// priority so diagnostics are not starved behind a busy forwarding queue.
 	urgentWriteCh chan []byte
+	// tapWriteMu serializes every kernel TAP injection.  A single device write
+	// boundary prevents stream handlers, relay delivery, metadata announcements,
+	// and diagnostics from concurrently writing to the same native TAP fd.
+	tapWriteMu sync.Mutex
 
 	// urgentDispatchCh is the symmetric priority queue for the SEND side:
 	// time-critical P2P frames (e.g. TAP-probe requests) are queued here and
@@ -220,8 +235,19 @@ type Node struct {
 	// probe is actually in flight (no per-frame cost when idle). probeMu
 	// serialises concurrent probes so they never steal each other's replies.
 	probeReplyCh chan []byte
-	probeActive   int32
-	probeMu       sync.Mutex
+	probeActive  int32
+	probeMu      sync.Mutex
+
+	// TAP-probe peer-side ACK channel (方案 B). When the peer detects our probe
+	// request frame at its TAP write boundary it sends an out-of-band
+	// control-plane ack so we can tell "frame reached peer TAP but OS didn't
+	// answer" apart from "frame never arrived". probeAckCh carries the signal;
+	// probeAckToken/probeAckSeq form the per-probe matching token (accessed
+	// atomically so the stream-handler goroutine can read the token without
+	// racing the prober goroutine that writes it under probeMu).
+	probeAckCh    chan struct{}
+	probeAckToken uint64
+	probeAckSeq   uint64
 
 	reconnectTimeMu sync.Mutex
 
@@ -268,9 +294,56 @@ type Node struct {
 	// and return paths independently, so a healthy outbound path proves nothing
 	// about whether the peer can route frames back). Used by the ping-pong
 	// probe to distinguish "outbound dead" from "return dead at the peer".
-	peerLastRx map[peer.ID]time.Time
-	peerRxMu   sync.RWMutex
-	bootRelayNetID   string
+	//
+	// PERF: copy-on-write map of per-peer atomic unix-nano timestamps. The
+	// previous shape (map[peer.ID]time.Time guarded by a global RWMutex) took a
+	// GLOBAL write lock on EVERY inbound frame from EVERY peer, serialising all
+	// receive goroutines against each other — the cost grew with both pps and
+	// peer count. Now the per-frame path is one atomic load of the map pointer
+	// plus an atomic store on that peer's own counter: no global lock, no
+	// allocation. Only inserting or removing a peer (rare) copies the map under
+	// peerRxMu, matching the perPeerObf copy-on-write pattern already used here.
+	peerLastRx atomic.Pointer[map[peer.ID]*atomic.Int64]
+	peerRxMu   sync.Mutex // structural (CoW) changes only; never taken per frame
+
+	// relayHopRx records the last time a peer CARRIED an inbound relay frame to
+	// us (i.e. appeared as the remotePeer/hop on an overlay-relay stream that
+	// delivered a frame we received or forwarded). This is the correct
+	// return-path-liveness signal for a RELAY HOP used as a next-hop by
+	// relayStreamPool: peerLastRx only updates for frames that ORIGINATE at a
+	// peer, so a pure-forwarding hop that relays traffic on behalf of remote
+	// origins never updates its own peerLastRx — checking it would mis-clear the
+	// pool's failure streak for a hop that is genuinely dead. Same CoW shape as
+	// peerLastRx (per-peer atomic, no global lock on the per-frame path).
+	relayHopRx   atomic.Pointer[map[peer.ID]*atomic.Int64]
+	relayHopRxMu sync.Mutex // structural (CoW) changes only; never taken per frame
+
+	// peerStall records peers whose last stream write hit the write deadline,
+	// so dispatch workers can skip them briefly instead of blocking. See
+	// markPeerStalled in node_dispatch.go for why this protects global
+	// throughput. Written only on timeout (rare); read once per egress task.
+	peerStall sync.Map // peer.ID -> time.Time (last stall)
+
+	// peerIDStrs caches the base58 rendering of peer IDs for per-frame callers
+	// (RecordRxSeq / checkACL / CaptureFrameWithPeers). See peer_idstr.go —
+	// pid.String() costs ~933ns and 2 allocs, and the receive path must not pay
+	// that on every frame. Control paths may still call pid.String() directly.
+	peerIDStrs peerIDStrings
+	// peerObservedTapMAC records the RAW source MAC we actually received on
+	// inbound frames from p, captured BEFORE the metadata-TapMAC normalization
+	// in node_streams.go. Comparing it against p's advertised TapMAC (from peer
+	// metadata) exposes a "broadcast-vs-actual MAC mismatch" — a frequent cause
+	// of silent TAP data-path breaks (the probe frame is addressed to the
+	// advertised MAC the peer's OS never answers at).
+	peerObservedTapMAC map[peer.ID]net.HardwareAddr
+	// peerTapProbe records the outcome of the most recent genuine end-to-end TAP
+	// forwarding probe (ProbeTapForward) toward p. A recent PASS means p's TAP
+	// device is genuinely up and answering; a recent FAIL means p's TAP path is
+	// broken. This lets the WebUI surface "peer TAP up/down" without an operator
+	// visiting the peer machine. Zero value => probe never run (unknown).
+	peerTapProbe   map[peer.ID]tapProbeOutcome
+	peerProbeMu    sync.RWMutex
+	bootRelayNetID string
 	// bootRelayCtrlMu guards bootRelayCtrlStreams. bootRelayCtrlStreams maps a
 	// per-conversation convID to the multiplexed control stream simulator that
 	// tunnels the inner control protocol (SeqSync / LSA / Meta / Echo) over the
@@ -278,8 +351,8 @@ type Node struct {
 	// leader's handshake and a follower's rekeyReq nudge (same peer, same proto)
 	// never share a byte pipe. It is how NAT'd peers complete their handshake
 	// with a relay-only peer whose only path is the boot-relay.
-	bootRelayCtrlMu       sync.Mutex
-	bootRelayCtrlStreams  map[string]*bootRelayCtrlStream
+	bootRelayCtrlMu      sync.Mutex
+	bootRelayCtrlStreams map[string]*bootRelayCtrlStream
 
 	// lsaPool and metaPool reuse ONE long-lived stream per peer for the
 	// periodic control traffic (LSA topology broadcast + metadata handshake).
@@ -294,8 +367,9 @@ type Node struct {
 
 	// lastLSAJSON caches the JSON of the last broadcast LSA so we can skip
 	// re-broadcasting when the topology/identity is unchanged (gossip throttle).
-	lastLSAJSON []byte
-	lastLSAMu   sync.Mutex
+	lastLSAJSON        []byte
+	lastLSABroadcastAt time.Time
+	lastLSAMu          sync.Mutex
 
 	// lsaSeq is the SINGLE source of monotonically increasing LSA sequence
 	// numbers for this node. It MUST be shared by every broadcastLSA call site
@@ -488,6 +562,74 @@ type Node struct {
 	// seqsyncConvergeMs records, per peer, the measured convergence latency in
 	// milliseconds once the handshake completed (markPeerReady). 0 means unknown.
 	seqsyncConvergeMs sync.Map // peer.ID → *atomic.Uint64
+
+	// protoTracker encapsulates lock-free atomic packet/byte counters and event
+	// telemetry for every protocol channel (Data, SeqSync, LSA, PeekMap, etc.).
+	protoTracker *ProtocolTrafficTracker
+
+	// manuallyAuthSubnets tracks subnets dynamically authorized via the WebUI
+	// so users can enable routing to an advertised subnet without editing config.json.
+	manuallyAuthSubnetsMu sync.RWMutex
+	manuallyAuthSubnets   map[string]bool
+}
+
+func (n *Node) manuallyAuthorizeSubnet(cidr string) {
+	n.manuallyAuthSubnetsMu.Lock()
+	defer n.manuallyAuthSubnetsMu.Unlock()
+	if n.manuallyAuthSubnets == nil {
+		n.manuallyAuthSubnets = make(map[string]bool)
+	}
+	n.manuallyAuthSubnets[cidr] = true
+}
+
+func (n *Node) manuallyRevokeSubnet(cidr string) {
+	n.manuallyAuthSubnetsMu.Lock()
+	defer n.manuallyAuthSubnetsMu.Unlock()
+	if n.manuallyAuthSubnets != nil {
+		delete(n.manuallyAuthSubnets, cidr)
+	}
+}
+
+func (n *Node) isSubnetManuallyAuthorized(cidr string) bool {
+	n.manuallyAuthSubnetsMu.RLock()
+	defer n.manuallyAuthSubnetsMu.RUnlock()
+	if n.manuallyAuthSubnets == nil {
+		return false
+	}
+	return n.manuallyAuthSubnets[cidr]
+}
+
+// findSubnetGateway finds the advertising peer for a given subnet CIDR and returns its clean gateway IP.
+func (n *Node) findSubnetGateway(cidr string) (gw string, pid peer.ID) {
+	_, parsedNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", ""
+	}
+	isV4 := parsedNet.IP.To4() != nil
+
+	n.peerMeta.Range(func(key, value any) bool {
+		pID, _ := key.(peer.ID)
+		if n.Host != nil && pID == n.Host.ID() {
+			return true
+		}
+		meta, ok := value.(PeerMeta)
+		if !ok {
+			return true
+		}
+		for _, sub := range meta.AdvertisedSubnets {
+			if sub == cidr {
+				if isV4 {
+					gw = strings.Split(meta.TapIP, "/")[0]
+				} else {
+					gw = strings.Split(meta.TapIPv6, "/")[0]
+				}
+				pid = pID
+				return false
+			}
+		}
+		return true
+	})
+	return gw, pid
 }
 
 // recordPeerRxDecrypt records the outcome of decrypting a frame from remotePeer.
@@ -496,16 +638,35 @@ func (n *Node) recordPeerRxDecrypt(remotePeer peer.ID, ok bool) {
 	if !ok {
 		m = &n.peerRxDecryptErrs
 	}
-	v, _ := m.LoadOrStore(remotePeer, &atomic.Uint64{})
+	// PERF: Load-then-LoadOrStore, NOT a bare LoadOrStore. Go evaluates the
+	// value argument at the CALL SITE, so `LoadOrStore(k, &atomic.Uint64{})`
+	// heap-allocates a counter on EVERY call even though that value is thrown
+	// away whenever the key already exists — i.e. on every frame after the
+	// first. Loading first makes the steady-state path allocation-free.
+	// This runs once per received frame, so the difference is measurable.
+	// (Verified equivalent: TestARPPingThreeNode fails identically with and
+	// without this form, so it is not the cause of that pre-existing failure.)
+	v, loaded := m.Load(remotePeer)
+	if !loaded {
+		v, _ = m.LoadOrStore(remotePeer, &atomic.Uint64{})
+	}
 	v.(*atomic.Uint64).Add(1)
 	// Recent-window: a success clears the peer's recent error count so an old
 	// handshake-window failure can never stick the connection in "Decrypt Fail".
 	if ok {
 		if rv, ok2 := n.peerRxDecryptRecentErrs.Load(remotePeer); ok2 {
-			rv.(*atomic.Uint64).Store(0)
+			// PERF: skip the atomic store when it is already zero — that is the
+			// overwhelmingly common case, and a pointless write to a shared
+			// cache line on every frame costs real time with many peers.
+			if c := rv.(*atomic.Uint64); c.Load() != 0 {
+				c.Store(0)
+			}
 		}
 	} else {
-		rv, _ := n.peerRxDecryptRecentErrs.LoadOrStore(remotePeer, &atomic.Uint64{})
+		rv, loaded := n.peerRxDecryptRecentErrs.Load(remotePeer)
+		if !loaded {
+			rv, _ = n.peerRxDecryptRecentErrs.LoadOrStore(remotePeer, &atomic.Uint64{})
+		}
 		rv.(*atomic.Uint64).Add(1)
 	}
 }
@@ -617,7 +778,6 @@ func (r *bcastDedupRing) isDuplicate(h uint64) bool {
 	return false
 }
 
-
 // fnvHash64 returns a FNV-1a 64-bit hash of data (fast, good distribution).
 func fnvHash64(data []byte) uint64 {
 	h := fnv.New64a()
@@ -727,6 +887,9 @@ func replaceIPInMultiaddr(addr multiaddr.Multiaddr, newIP string) (multiaddr.Mul
 // libp2p true multi-NIC inbound: each listener ends up on its own NIC, and the
 // per-NIC socket hook pins its reply path off the TAP.
 func expandListenAddr(addr multiaddr.Multiaddr) []multiaddr.Multiaddr {
+	if runtime.GOOS == "android" {
+		return []multiaddr.Multiaddr{addr}
+	}
 	var family string
 	if ip4, err := addr.ValueForProtocol(multiaddr.P_IP4); err == nil {
 		family = "ip4"
@@ -775,6 +938,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	}
 
 	var tapDev tap.TAPDevice
+	var ownedTAP bool // true when WE created tapDev and are responsible for closing it on a construction error
 	var err error
 	if overrideTAP != nil {
 		tapDev = overrideTAP
@@ -784,20 +948,20 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			cancel()
 			return nil, fmt.Errorf("failed to create TAP device: %w", err)
 		}
+		ownedTAP = true
 	}
 
-	// Learn the TAP device's real MAC if the config did not explicitly specify
-	// one. The device always has a MAC (auto-assigned by the OS/driver), and it
-	// must be advertised to peers via metadata so the proxy-ARP can answer with
-	// the peer's REAL MAC instead of a synthetic one. Without this, relay peers
-	// would report an empty TapMAC and their own TAP IPs (e.g. 10.0.0.2) would
-	// be unreachable across the mesh. node.localMac is derived from cfg.TapMAC
-	// later (after node is constructed).
-	if cfg.TapMAC == "" {
-		if devMAC := tapDev.MAC(); devMAC != "" {
-			cfg.TapMAC = devMAC
-			log.Info("TAP MAC auto-detected from device %s: %s", cfg.TapName, devMAC)
+	// On Linux, MAC() is backed by a fresh netlink read.  Treat that as a
+	// startup invariant: rewriteRxDstMAC must never inject frames addressed to a
+	// configured-but-not-actually-owned MAC, or the kernel can drop them at L2.
+	// Other backends do not necessarily expose a kernel readback, so retain their
+	// existing best-effort auto-detection behavior.
+	if err := verifyTAPMAC(cfg, tapDev); err != nil {
+		cancel()
+		if ownedTAP {
+			_ = tapDev.Close()
 		}
+		return nil, err
 	}
 
 	// Register the TAP interface so socket protection never binds P2P sockets
@@ -831,16 +995,19 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 
 	yamuxOpt := *yamux.DefaultTransport
 	yamuxOpt.MaxStreamWindowSize = 16 * 1024 * 1024 // 16 MB stream window for Gigabit+ throughput
+	// Disable yamux's own keepalive: p2ptap has its own ping-pong keepalive loop
+	// every 10 seconds that is far more sophisticated (reconnect-aware, failure-counted).
+	// yamux's 30s keepalive sends a frame that competes with data frames on the TCP connection
+	// and can cause 10s stalls when the TCP send buffer is full during burst traffic.
+	yamuxOpt.EnableKeepAlive = false
+	// Keep write timeout tight: 5s means a truly wedged connection is detected
+	// within 5s (not 10s/30s), releasing the yamux send goroutine quickly.
+	yamuxOpt.ConnectionWriteTimeout = 5 * time.Second
 
 	opts := []libp2p.Option{
 		libp2p.Muxer("/yamux/1.0.0", &yamuxOpt),
 		libp2p.NATPortMap(),
 		libp2p.EnableNATService(),
-		// Force reachability to private: ensures relay addresses are always advertised
-		// and DCUtR hole punching is used even when AutoNAT is unreliable.
-		// Without this, libp2p may misidentify a NAT'd node as "public" and skip
-		// relay advertisement, causing connection failures for peers behind NAT.
-		libp2p.ForceReachabilityPrivate(),
 		libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 			filtered := filterAdvertisedAddrs(addrs, cfg.TapIP, cfg.TapIPv6, cfg.WebUI.ListenIP, cfg.WebUI.ListenIPv6)
 			if len(filtered) > 0 {
@@ -848,6 +1015,18 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			}
 			return addrs
 		}),
+	}
+
+	// Reachability: by default let AutoNAT auto-detect. A node with a public IP
+	// then advertises its direct addresses so peers can dial it DIRECTLY instead
+	// of always going through a relay (direct-first). Forcing private on every
+	// node suppressed public address advertisement entirely and pinned
+	// public-IP peers to relay. ForcePrivateReachability is the opt-in escape
+	// hatch for networks where AutoNAT is unreliable; it restores the old
+	// always-advertise-relay behavior (DCUtR hole punching still applies).
+	if cfg.ForcePrivateReachability {
+		log.Info("ForcePrivateReachability=true: host always advertises relay addresses (AutoNAT deemed unreliable)")
+		opts = append(opts, libp2p.ForceReachabilityPrivate())
 	}
 
 	// Circuit relay + DCUtR hole-punching. Gated by Transports.DisableRelay so a
@@ -1009,6 +1188,14 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	h, err := libp2p.New(opts...)
 	if err != nil {
 		cancel()
+		// We created the TAP device ourselves but the libp2p host failed to come
+		// up, so no Node was built to own (and later close) it. Release the
+		// handle now — otherwise every failed-start attempt leaks an OS TAP
+		// interface/handle. A caller-supplied overrideTAP is NOT ours to close.
+		if ownedTAP && tapDev != nil {
+			_ = tapDev.Close()
+			tapDev = nil
+		}
 		return nil, fmt.Errorf("failed to create libp2p host: %w", err)
 	}
 	log.Info("libp2p host created, PeerID: %s", h.ID().String())
@@ -1088,12 +1275,12 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		relayLatency:        make(map[peer.ID]time.Duration),
 		relayAuthInProgress: make(map[peer.ID]bool),
 		directConnected:     make(map[peer.ID]bool),
-		pingPongFailCount:   make(map[peer.ID]int),
 		aclStats:            newACLStats(),
 		dispatchCh:          make(chan dispatchTask, 8192), // bounded buffer: 8192 frames for high-throughput scaling
 		urgentWriteCh:       make(chan []byte, 64),         // urgent TAP-inject queue (diagnostics)
 		urgentDispatchCh:    make(chan dispatchTask, 64),   // urgent SEND queue (symmetric to receive)
 		probeReplyCh:        make(chan []byte, 8),          // TAP-probe echo-reply capture (see probeActive)
+		probeAckCh:          make(chan struct{}, 4),        // TAP-probe peer-side ack (方案 B)
 		perPeerLastTx:       make(map[peer.ID]uint64),
 		perPeerLastRx:       make(map[peer.ID]uint64),
 		perPeerTxSpeed:      make(map[peer.ID]uint64),
@@ -1105,6 +1292,9 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		arpIndex:            &arpIndex{v4: make(map[uint32]arpIndexEntry), v6: make(map[[16]byte]arpIndexEntry)},
 		lsaCache:            make(map[peer.ID]*routing.LinkStatePayload),
 	}
+	// Publish the initial configuration snapshot into the atomic slot the data
+	// plane reads through config(). SetConfig (hot-reload) later swaps it.
+	node.configPtr.Store(cfg)
 	// Seed the LSA sequence counter from wall-clock nanoseconds so a RESTARTED
 	// node never re-uses a sequence its peers already recorded (they would
 	// reject every LSA from us as stale until CleanStaleNodes purged us, i.e.
@@ -1118,9 +1308,14 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	node.bootRelayStarted = make(map[peer.ID]struct{})
 	node.bootRelayBlacklist = make(map[peer.ID]time.Time)
 	node.overlayRelayBlacklist = make(map[peer.ID]time.Time)
-	node.peerLastRx = make(map[peer.ID]time.Time)
+	// peerLastRx is an atomic.Pointer (copy-on-write) and needs no
+	// initialisation — a nil snapshot is handled by notePeerRx/lastRxFrom.
+	node.peerObservedTapMAC = make(map[peer.ID]net.HardwareAddr)
+	node.peerTapProbe = make(map[peer.ID]tapProbeOutcome)
 	node.bootRelayCtrlStreams = make(map[string]*bootRelayCtrlStream)
 	node.bootRelayNetID = routing.NetworkIDFromPSK(node.Config.PSK)
+	node.protoTracker = NewProtocolTrafficTracker()
+	node.manuallyAuthSubnets = make(map[string]bool)
 	node.lsaPool = newLSAStreamPool(node, LSAProtocolID)
 	node.metaPool = newLSAStreamPool(node, meta.MetaProtocolID)
 	node.echoPool = newLSAStreamPool(node, EchoProtocolID)
@@ -1221,6 +1416,15 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		return eps
 	})
 
+	if macSetter, ok := node.TAP.(interface {
+		SetMACLookup(func(net.IP) net.HardwareAddr)
+	}); ok {
+		macSetter.SetMACLookup(func(ip net.IP) net.HardwareAddr {
+			_, mac := node.resolvePeerIDByIP(ip)
+			return mac
+		})
+	}
+
 	// Populate TAP interface state for WebUI diagnostics
 	collector.SetTAPState(&observer.TAPStateDTO{
 		InterfaceName:   cfg.TapName,
@@ -1278,6 +1482,9 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			log.Debug("Advertised subnets changed (%v) — re-announcing over peek-map", node.Config.AdvertisedSubnets)
 			go node.publishPeekMapSelf()
 		},
+		OnConfigReload: func(cfg *config.Config) {
+			node.applyHotReload(cfg)
+		},
 		TestPeerMultiaddrs: func(peerIDStr string) []observer.MultiaddrTestResultEntry {
 			return node.TestMultiaddrLatency(peerIDStr)
 		},
@@ -1290,6 +1497,9 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		ProbePeerEchoAddr: func(peerIDStr string, targetAddrStr string) *observer.PeerEchoResultDTO {
 			return node.ProbePeerEchoAddr(peerIDStr, targetAddrStr)
 		},
+		ProbePeerSpeedTest: func(peerIDStr string) *observer.SpeedTestResultDTO {
+			return node.ProbePeerSpeedTest(peerIDStr)
+		},
 		ProbeTapForward: func(peerIDStr string) *observer.TapProbeResultDTO {
 			pid, err := peer.Decode(peerIDStr)
 			if err != nil {
@@ -1300,14 +1510,20 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				res.Success = false
 			}
 			return &observer.TapProbeResultDTO{
-				PeerID:    res.PeerID,
-				PeerName:  res.PeerName,
-				TapIP:     res.TapIP,
-				Success:   res.Success,
-				RTTMills:  res.RTTMills,
-				SentBytes: res.SentBytes,
-				Error:     res.Error,
+				PeerID:              res.PeerID,
+				PeerName:            res.PeerName,
+				TapIP:               res.TapIP,
+				Success:             res.Success,
+				RTTMills:            res.RTTMills,
+				SentBytes:           res.SentBytes,
+				ReachedPeerTAP:      res.ReachedPeerTAP,
+				MacMismatchDetected: res.MacMismatchDetected,
+				ProbeMacUsed:        res.ProbeMacUsed,
+				Error:               res.Error,
 			}
+		},
+		ForceSeqSync: func(peerIDStr string) (int, error) {
+			return node.ForceSeqSync(peerIDStr)
 		},
 		AddStaticPeer: func(multiaddrStr string) error {
 			ma, err := multiaddr.NewMultiaddr(multiaddrStr)
@@ -1325,9 +1541,15 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		},
 		OnSubnetToggle: func(cidr string, enable bool) error {
 			if node.Gateway != nil {
-				_, err := node.Gateway.ToggleSubnetRoute(cidr, enable)
-				if err != nil {
-					return err
+				if enable {
+					node.manuallyAuthorizeSubnet(cidr)
+					gw, _ := node.findSubnetGateway(cidr)
+					if gw != "" {
+						_, _ = node.Gateway.AddSubnetRoute(cidr, gw)
+					}
+				} else {
+					node.manuallyRevokeSubnet(cidr)
+					_, _ = node.Gateway.ToggleSubnetRoute(cidr, false)
 				}
 				node.reconcileSubnetRoutes()
 				node.updateWebCollectorState()
@@ -1495,6 +1717,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	h.SetStreamHandler(EchoProtocolID, node.handleEcho)
 	log.Debug("Stream handler registered for Echo protocol: %s", EchoProtocolID)
 
+	// 方案 B: peer-side TAP-probe ack. When the peer receives our probe request
+	// frame at its TAP write boundary it opens this control stream back to us
+	// (tunnelled through relay-ctrl / boot-circuit when needed) so we can tell
+	// "frame reached peer TAP but OS didn't answer" from "frame never arrived".
+	h.SetStreamHandler(TapProbeAckProtocolID, node.handleTapProbeAck)
+	log.Debug("Stream handler registered for TAP-probe ACK protocol: %s", TapProbeAckProtocolID)
+
 	node.registerSeqSyncHandler()
 	log.Debug("Stream handler registered for SeqSync protocol: %s", SeqSyncProtocolID)
 
@@ -1562,6 +1791,17 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 					rttMs = 10
 				}
 				node.Router.UpdateDirectLink(pID, rttMs, routing.LinkDirect)
+
+				// Direct link came up: drop any circuit-routed data streams so
+				// traffic upgrades to direct IMMEDIATELY. Without this the lazy
+				// stream lifecycle (streams are only reopened on write failure)
+				// would keep Tx pinned to a healthy circuit stream forever, and
+				// the echo/LSA/meta persistent streams would stay on circuit too.
+				if node.Dispatcher.PurgeCircuitStreams(pID) > 0 {
+					node.lsaPool.Invalidate(pID)
+					node.metaPool.Invalidate(pID)
+					node.echoPool.Invalidate(pID)
+				}
 			}
 
 			// ── Bootstrap peer: PSK auth then peek-map. Stop here. ──────────
@@ -1612,6 +1852,8 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			}
 
 			// ── Non-bootstrap peer: rekey + LSA + snapshot + meta ───────────
+			node.clearCachedHandshakeEph(pID)
+			node.peerReady.Delete(pID)
 
 			// Trigger metadata sync immediately for circuit-relay peers which may
 			// not appear in broadcastMetadata's peer scan at connect time.
@@ -1651,85 +1893,47 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				return
 			}
 
-			// All transports gone — debounce: if we had a direct connection that just
-			// dropped, wait 2s to see if it comes back (e.g. due to dialInParallel race).
+			// All transports gone — debounce: wait 3s to see if a transport comes back
+			// (e.g. due to dialInParallel race, transient relay reconnect, or interface flap).
 			node.directConnectedMu.Lock()
-			hadDirect := node.directConnected[pID]
 			delete(node.directConnected, pID)
 			node.directConnectedMu.Unlock()
 
-			if hadDirect {
-				debounceID := pID
-				curGen, _ := node.connGenerations.Load(debounceID)
-				go func() {
-					time.Sleep(2 * time.Second)
-					if latestGen, ok := node.connGenerations.Load(debounceID); ok && latestGen != curGen {
-						log.Debug("Peer %s reconnected with new generation, aborting stale disconnect purge", debounceID.String())
-						return
-					}
-					if node.Host.Network().Connectedness(debounceID) == network.Connected ||
-						len(node.Host.Network().ConnsToPeer(debounceID)) > 0 {
-						log.Debug("Peer %s recovered within debounce window, not purging", debounceID.String())
-						node.directConnectedMu.Lock()
-						node.directConnected[debounceID] = true
-						node.directConnectedMu.Unlock()
-						return
-					}
-					log.Info("Peer disconnected: %s (last transport lost, purging links, metadata & MAC table)", debounceID.String())
-					node.Router.RemoveDirectLink(debounceID)
-					node.deletePeerMeta(debounceID)
-					node.MACTable.CleanPeer(debounceID)
-					node.Dispatcher.RemovePeer(debounceID)
-					node.dedupPeersMu.Lock()
-					delete(node.dedupPeers, debounceID)
-					node.dedupPeersMu.Unlock()
-					node.removePeerObf(debounceID)
-					node.reconcileSubnetRoutes()
-					// Drop cached persistent control streams so the next use re-opens
-					// cleanly instead of hitting a dead stream (10s NewStream timeout).
-					node.lsaPool.Invalidate(debounceID)
-					node.metaPool.Invalidate(debounceID)
-					node.echoPool.Invalidate(debounceID)
-					// Re-flood LSA so peers drop the now-stale edge to this peer
-					// instead of holding a phantom link. Fresh seq + reset gossip
-					// throttle guarantees propagation even if our neighbour set is
-					// otherwise unchanged.
-					go func() {
-						node.lsaMu.Lock()
-						defer node.lsaMu.Unlock()
-						node.lastLSAMu.Lock()
-						node.lastLSAJSON = nil
-						node.lastLSAMu.Unlock()
-						node.broadcastLSA(node.nextLSASeq())
-					}()
-				}()
-			} else {
-
-			log.Info("Peer disconnected: %s via %s (last transport lost, purging links, metadata & MAC table)", pID.String(), addrStr)
-			node.Router.RemoveDirectLink(pID)
-			node.deletePeerMeta(pID)
-			node.MACTable.CleanPeer(pID)
-			node.Dispatcher.RemovePeer(pID)
-			node.dedupPeersMu.Lock()
-			delete(node.dedupPeers, pID)
-			node.dedupPeersMu.Unlock()
-			node.removePeerObf(pID)
-			node.reconcileSubnetRoutes()
-			// Drop cached persistent control streams (see above).
-			node.lsaPool.Invalidate(pID)
-			node.metaPool.Invalidate(pID)
-			node.echoPool.Invalidate(pID)
-			// Re-flood LSA so peers drop the now-stale edge to this peer
-			// instead of holding a phantom link (see debounce branch above).
+			debounceID := pID
+			curGen, _ := node.connGenerations.Load(debounceID)
 			go func() {
-				node.lsaMu.Lock()
-				defer node.lsaMu.Unlock()
-				node.lastLSAMu.Lock()
-				node.lastLSAJSON = nil
-				node.lastLSAMu.Unlock()
-				node.broadcastLSA(node.nextLSASeq())
+				time.Sleep(3 * time.Second)
+				if latestGen, ok := node.connGenerations.Load(debounceID); ok && latestGen != curGen {
+					log.Debug("Peer %s reconnected with new generation, aborting stale disconnect purge", debounceID.String())
+					return
+				}
+				if node.Host.Network().Connectedness(debounceID) == network.Connected ||
+					len(node.Host.Network().ConnsToPeer(debounceID)) > 0 {
+					log.Debug("Peer %s recovered within debounce window, not purging", debounceID.String())
+					return
+				}
+				log.Info("Peer disconnected: %s via %s (transport lost, cleaning link-state & streams)", debounceID.String(), addrStr)
+				node.Router.RemoveDirectLink(debounceID)
+				node.MACTable.CleanPeer(debounceID)
+				node.Dispatcher.RemovePeer(debounceID)
+				node.removePeerObf(debounceID)
+				// Drop cached persistent control streams so the next use re-opens cleanly.
+				node.lsaPool.Invalidate(debounceID)
+				node.metaPool.Invalidate(debounceID)
+				node.echoPool.Invalidate(debounceID)
+				// Re-flood LSA so peers drop the now-stale direct edge to this peer
+				// instead of holding a phantom link. Fresh seq + reset gossip
+				// throttle guarantees propagation even if our neighbour set is
+				// otherwise unchanged.
+				go func() {
+					node.lsaMu.Lock()
+					defer node.lsaMu.Unlock()
+					node.lastLSAMu.Lock()
+					node.lastLSAJSON = nil
+					node.lastLSAMu.Unlock()
+					node.broadcastLSA(node.nextLSASeq())
+				}()
 			}()
-			}
 		},
 	})
 
@@ -1758,6 +1962,43 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	}()
 
 	return node, nil
+}
+
+// verifyTAPMAC aligns cfg.TapMAC with a verified kernel value when the TAP
+// backend can provide one.  Returning an error is intentional: continuing with
+// a stale configured MAC makes overlay-to-TAP delivery appear successful while
+// Linux discards the rewritten Ethernet frame before IP/ARP sees it.
+func verifyTAPMAC(cfg *config.Config, dev tap.TAPDevice) error {
+	if verifier, ok := dev.(tap.ActualMACProvider); ok {
+		actual, err := verifier.ActualMAC()
+		if err != nil {
+			return fmt.Errorf("read actual MAC for TAP device %q: %w", dev.Name(), err)
+		}
+		actualAddr, err := net.ParseMAC(actual)
+		if err != nil || len(actualAddr) != 6 {
+			return fmt.Errorf("TAP device %q reported invalid actual MAC %q", dev.Name(), actual)
+		}
+		if cfg.TapMAC != "" {
+			expected, err := net.ParseMAC(cfg.TapMAC)
+			if err != nil || len(expected) != 6 {
+				return fmt.Errorf("invalid configured TAP MAC %q", cfg.TapMAC)
+			}
+			if !bytes.Equal(expected, actualAddr) {
+				return fmt.Errorf("TAP MAC mismatch on %q: config requests %s, kernel reports %s; refusing to start because received frames would be rewritten to the wrong destination MAC", dev.Name(), expected, actualAddr)
+			}
+		}
+		cfg.TapMAC = actualAddr.String()
+		log.Info("TAP MAC verified on %s: %s", dev.Name(), cfg.TapMAC)
+		return nil
+	}
+
+	if cfg.TapMAC == "" {
+		if devMAC := dev.MAC(); devMAC != "" {
+			cfg.TapMAC = devMAC
+			log.Info("TAP MAC auto-detected from device %s: %s", dev.Name(), devMAC)
+		}
+	}
+	return nil
 }
 
 // SetupWebUI wires the WebUI layer into the node. It is idempotent and only
@@ -1806,29 +2047,26 @@ func (n *Node) SetupWebUI() error {
 		}
 	}
 
-	// 2. Start Native OS WebServer for any non-virtual, local IPs
-	if (localIP != "" || localIPv6 != "") && n.StartWebServer != nil {
+	// 2. Start Native OS WebServer for any non-virtual, local IPs (or loopback fallback)
+	if n.StartWebServer != nil {
 		bindIP := localIP
+		if bindIP == "" && (isVirtualV4 || isVirtualV6) {
+			// In virtual IP mode, ALSO spin up native webserver on 127.0.0.1 loopback
+			// so the local host / tray client / CLI can always reach /api/stats
+			bindIP = "127.0.0.1"
+		}
 		bindIPv6 := localIPv6
 		if bindIPv6 == "" || bindIPv6 == "auto" {
 			bindIPv6 = "::" // Bind to all IPv6 addresses if not specified
 		}
-		log.Info("WebUI listening on (v4: %s, v6: %s) on port %d (native OS stack mode)", bindIP, bindIPv6, cfg.WebUI.Port)
-		// NOTE: the WebUI is an *inbound* management listener. It must NOT be
-		// pinned to the egress NIC via SO_BINDTODEVICE/IP_UNICAST_IF — doing so
-		// (GetSocketControlHookTolerant) restricts the socket to a single
-		// physical interface and breaks access from other interfaces (e.g. the
-		// LAN on a multi-homed router, where the dashboard IP lives on a
-		// different NIC than the egress one), presenting as "listening on *:port
-		// but connection refused from a local IP". The protect hook exists for
-		// *outbound* P2P transport sockets to avoid TAP-default-route loops; an
-		// inbound listener has no such loop, so we pass nil and let it bind
-		// wildcard on every interface.
-		webSrv, err := n.StartWebServer(n.Collector, bindIP, bindIPv6, cfg.WebUI.Port, cfg, cfg.ConfigPath, nil)
-		if err != nil {
-			return err
+		if bindIP != "" || bindIPv6 != "" {
+			log.Info("WebUI listening on (v4: %s, v6: %s) on port %d (native OS stack mode)", bindIP, bindIPv6, cfg.WebUI.Port)
+			webSrv, err := n.StartWebServer(n.Collector, bindIP, bindIPv6, cfg.WebUI.Port, cfg, cfg.ConfigPath, nil)
+			if err != nil {
+				return err
+			}
+			n.WebSrv = webSrv
 		}
-		n.WebSrv = webSrv
 	}
 
 	return nil
@@ -1929,6 +2167,12 @@ func (n *Node) Start() {
 	go n.peerPingPongLoop()
 	log.Debug("Unified ping-pong/health probe loop started")
 
+	// Periodically retry a force-direct dial for peers currently pinned to a
+	// relay, so a lost dial race does not become a permanent relay assignment.
+	n.wg.Add(1)
+	go n.relayOnlyDirectUpgradeLoop()
+	log.Debug("Relay-only direct upgrade loop started")
+
 	// Start P2P metadata synchronization loop
 	n.wg.Add(1)
 	go n.metaSyncLoop()
@@ -1954,9 +2198,11 @@ func (n *Node) Start() {
 		log.Info("DHT discovery loop started for PSK network")
 	}
 
-	// Setup Exit Node NAT if enabled in config
+	// Setup Exit Node NAT or Subnet Router NAT if enabled in config
 	if n.Config.ExitNode.Enable {
 		_ = n.NFTManager.SetupExitNodeNAT(n.Config.ExitNode.WANInterface, n.Config.TapName, computeExitMSS(n.Config.MTU, n.Config.Obfuscation.Mode))
+	} else if len(n.Config.AdvertisedSubnets) > 0 {
+		_ = n.NFTManager.SetupSubnetRouterNAT(n.Config.TapName)
 	}
 
 	// Start roam handling: watch for NIC changes and rotate listeners.
@@ -1998,442 +2244,8 @@ func lenOpt(m *map[peer.ID]*PeerObf) int {
 	return len(*m)
 }
 
-// peerObf is the lock-free hot-path lookup used by every TX/RX packet. It loads
-// the current copy-on-write table once and reads the peer entry; no mutex is
-// taken, so concurrent encryption on many peers never contends.
-func (n *Node) peerObf(p peer.ID) *PeerObf {
-	tbl := n.perPeerObf.Load()
-	if tbl == nil {
-		return nil
-	}
-	return (*tbl)[p]
-}
-
-// obfCipherForPeer returns the per-peer cipher used to ENCRYPT frames sent TO
-// the given peer (the TX direction). Returns nil if no encryption was negotiated
-// (encryption disabled or handshake not yet completed) — callers must then fall
-// back to plaintext obfuscation. Lock-free: a single atomic load of the table.
-// Note: receiving frames uses obfDecryptCipherForPeer (the RX direction), which
-// is a DISTINCT key by design — see PeerObf for the rationale.
-// obfRekeyFrameThreshold is the number of frames a single negotiated key may
-// protect before we proactively rotate it. It is kept comfortably below the
-// 2^32 size of the structured nonce counter field so a (key, nonce) pair can
-// never be reused — the one catastrophic failure mode of AES-GCM / ChaCha20.
-// It bounds BOTH the global safety-net delta (negotiatedAtSeq) and the
-// per-peer frame count (framesSinceRekey) — see obfCipherForPeer.
-const obfRekeyFrameThreshold = uint64(0xFFFFFFFF) - (1 << 28)
-
-// sealPeerFrame encrypts data with the per-peer cipher AND accounts the frame
-// against that peer's proactive re-key budget. It is the ONE place every
-// AEAD-encrypted frame to a specific peer flows through, so the per-peer count
-// it maintains is exact: each physical frame (including every fragment re-seal)
-// bumps framesSinceRekey once, matching one-to-one the number of nonces spent
-// under this key. Counting per-peer (not the process-wide FramePacker counter)
-// means a chatty peer rotates promptly while a quiet peer keeps its key longer
-// — but the GLOBAL safety net in obfCipherForPeer still guarantees rotation
-// before the 32-bit structured counter (shared node-wide) could wrap and reuse
-// a nonce for a quiet peer, so per-peer counting can never break nonce safety.
-func (n *Node) sealPeerFrame(p peer.ID, cipher obfuscate.ObfCipher, data []byte) ([]byte, error) {
-	if cipher == nil {
-		return nil, fmt.Errorf("sealPeerFrame: nil cipher for peer %s — refusing to ship frame unsealed", p.String())
-	}
-	enc, err := obfuscate.EncryptPayloadRegion(data, cipher)
-	if err != nil {
-		return nil, err
-	}
-	if po := n.peerObf(p); po != nil {
-		po.framesSinceRekey.Add(1)
-	}
-	return enc, nil
-}
-
-func (n *Node) obfCipherForPeer(p peer.ID) obfuscate.ObfCipher {
-	po := n.peerObf(p)
-	if po == nil || !po.negotiated {
-		log.Debug("Tx: NO negotiated cipher for %s (po=%v) — sending payload in PLAINTEXT (obfuscation only, NOT encrypted)",
-			p.String(), po != nil)
-		return nil
-	}
-	// Proactively rotate the per-peer key before a nonce could be reused under
-	// this key. Two independent triggers, each a single atomic load; the actual
-	// re-handshake is fire-and-forget and guarded per-peer so it cannot spam.
-	//
-	//  1. GLOBAL safety net: the AEAD nonce is derived from the frame header's
-	//     32-bit structured-counter field, which is shared node-wide (only the
-	//     12-bit per-peer epoch differs). So even a quiet peer that has sent
-	//     few frames of its own must rotate once THIS node has shipped ~2^32
-	//     frames total — otherwise the global counter recycles and reuses a
-	//     (key, nonce) pair for it. negotiatedAtSeq anchors this delta.
-	//  2. PER-PEER trigger: a chatty peer rotates promptly even when the node as
-	//     a whole is quiet (e.g. one busy peer among many idle ones). It counts
-	//     only frames actually sealed to this peer (framesSinceRekey), which is
-	//     a strictly tighter signal than the global delta for that case.
-	if n.Packer != nil {
-		if delta := n.Packer.CurrentCounter() - po.negotiatedAtSeq; delta > obfRekeyFrameThreshold {
-			log.Debug("Tx: proactive re-key (global counter) triggered for %s (counter delta=%d > threshold=%d); re-handshaking in background",
-				p.String(), delta, obfRekeyFrameThreshold)
-			n.triggerPeerRekey(p)
-		}
-	}
-	if po.framesSinceRekey.Load() > obfRekeyFrameThreshold {
-		log.Debug("Tx: proactive re-key (per-peer frame count) triggered for %s (framesSinceRekey=%d > threshold=%d); re-handshaking in background",
-			p.String(), po.framesSinceRekey.Load(), obfRekeyFrameThreshold)
-		n.triggerPeerRekey(p)
-	}
-	log.Debug("Tx: encrypting to %s with algo=%s forward-secret=%v txKeyFP=%s",
-		p.String(), obfuscate.AlgoName(po.algo), po.pfsPubKey != nil, obfuscate.KeyFingerprint(po.txKey))
-	return po.txCipher
-}
-
-// triggerPeerRekey schedules a background SeqSync re-handshake for peer p to
-// rotate its per-peer AEAD key before the structured nonce counter wraps under
-// the current key. It is a no-op if a re-key is already in flight for that
-// peer, and silently does nothing if the peer is disconnected.
-func (n *Node) triggerPeerRekey(p peer.ID) {
-	if n.Host.Network().Connectedness(p) != network.Connected && n.relayHopForTarget(p) == "" {
-		return
-	}
-	if n.isResyncLeader(p) {
-		// LEADER: own the single handshake round for this peer pair. The leader
-		// rule is what guarantees exactly ONE handshake stream is ever opened for
-		// a given re-key event — without it, both peers can independently call
-		// ForceSyncSeq (each accumulating 8 decrypt failures) and open streams to
-		// each other simultaneously, producing four divergent ECDH secrets and a
-		// permanent decrypt-fail loop. isResyncLeader is deterministic by PeerID,
-		// so the two ends always agree on who initiates and the round can never
-		// cross generations. The rekeyPeers single-flight below additionally
-		// serialises rounds on this node so a single node never runs two at once.
-		if _, busy := n.rekeyPeers.LoadOrStore(p, struct{}{}); busy {
-			return
-		}
-		go func() {
-			defer n.rekeyPeers.Delete(p)
-			log.Debug("SeqSync: starting re-key loop for %s (iAmResyncLeader=%v) — driving handshake to break any decrypt-fail deadlock", p.String(), n.isResyncLeader(p))
-			// Persistent retry: SyncSeqToPeer already retries 8× with backoff, but if
-			// every attempt fails (e.g. the circuit-relay is congested and NewStream
-			// keeps timing out) we must NOT give up — a single abandoned round leaves
-			// the link permanently dead even after the relay heals. Keep retrying with
-			// a backoff while the peer stays connected; stop only when the handshake
-			// succeeds or the peer goes away. Circuit-relay paths get shorter retry
-			// intervals because they are often unstable (connection resets every
-			// ~500ms) and the 20s default is far too long to converge.
-		for {
-			// A relay-only peer is never "directly connected" yet is still
-			// reachable through an overlay-relay hop (or a boot circuit), so we
-			// must NOT bail on the NotConnected state — otherwise the LEADER
-			// would abandon the single authoritative handshake round for that
-			// peer and the A↔C cipher (relayed through B) would never converge.
-			// Only give up when the peer is genuinely unreachable: not directly
-			// connected AND with no usable relay hop. This matches the guard in
-			// triggerPeerRekey above and the retry guard inside SyncSeqToPeer.
-			if n.Host.Network().Connectedness(p) != network.Connected &&
-				n.relayHopForTarget(p) == "" {
-				return
-			}
-			if err := n.SyncSeqToPeer(p); err == nil {
-					log.Info("SeqSync: rotated/anchored encryption key with %s (re-key converged)", p.String())
-					n.lastRekeySuccess.Store(p, time.Now())
-					return
-				}
-				retryDelay := 20 * time.Second
-				if n.peerHasCircuitRelayConn(p) || n.relayHopForTarget(p) != "" {
-					retryDelay = 5 * time.Second
-				}
-				log.Warn("SeqSync: re-key to %s failed; retrying in %v (peer still connected, awaiting relay recovery)", p.String(), retryDelay)
-				select {
-				case <-n.ctx.Done():
-					return
-				case <-time.After(retryDelay):
-				}
-			}
-		}()
-		return
-	}
-	// FOLLOWER: do NOT open our own re-key stream. Two independent initiators is
-	// exactly the crossed-handshake that produces four divergent ECDH secrets and
-	// a permanent decrypt-fail loop. Instead nudge the leader to initiate: the
-	// leader's handleSeqSync answers a rekeyReq by calling triggerPeerRekey on
-	// its (leader) side, which opens the single handshake stream; we then answer
-	// it as the responder and converge onto the SAME key the leader negotiates.
-	// This also breaks the old follower-deadlock: a follower that sees dropped
-	// frames but whose leader does not would otherwise never trigger a re-key
-	// (the leader, receiving the follower's frames fine, had no reason to) — now
-	// the follower's rekeyReq forces the leader to act.
-	n.sendRekeyRequest(p)
-	// NAT / hard-reachability fallback: if the leader cannot dial us (e.g. a
-	// symmetric NAT where only inbound streams work) the rekeyReq above never
-	// converges — the leader's handshake stream to us keeps failing. After a
-	// sustained window of no readiness, escalate to initiating our own handshake
-	// as a last resort. This re-opens the brief crossed-handshake window, but the
-	// RX key ring absorbs the transient mismatched generation and both sides
-	// settle on one key shortly after, so the link self-heals rather than dying.
-	if _, pending := n.rekeyEscalation.LoadOrStore(p, struct{}{}); !pending {
-		go func() {
-			defer n.rekeyEscalation.Delete(p)
-			select {
-			case <-n.ctx.Done():
-				return
-			case <-time.After(30 * time.Second):
-			}
-			if n.Host.Network().Connectedness(p) != network.Connected {
-				return
-			}
-			if n.isPeerReady(p) {
-				return
-			}
-			log.Warn("SeqSync: follower rekeyReq to leader for %s did not converge in 30s; escalating to self-initiated handshake (NAT fallback)", p.String())
-			_ = n.SyncSeqToPeer(p)
-		}()
-	}
-}
-
-// sendRekeyRequest sends a lightweight rekeyReq nudge to the leader for peer p,
-// prompting the leader to initiate the single authoritative handshake round. It
-// is best-effort and rate-limited (rekeyReqCooldown) so a burst of decrypt
-// failures cannot spam the leader; it opens its own short-lived control stream
-// and does NOT negotiate any key itself (the leader does that on its own round).
-func (n *Node) sendRekeyRequest(p peer.ID) {
-	if v, loaded := n.rekeyReqCooldown.LoadOrStore(p, time.Now()); loaded {
-		if time.Since(v.(time.Time)) < 3*time.Second {
-			return
-		}
-		n.rekeyReqCooldown.Store(p, time.Now())
-	}
-	log.Debug("SeqSync: follower sending rekeyReq to leader for %s (nudging leader to initiate re-key)", p.String())
-	go func() {
-		ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
-		defer cancel()
-		// Use the unified control-stream opener so a relay-only leader (reachable
-		// only through an overlay hop) still receives the nudge — a plain direct
-		// NewStream would fail for such a peer and the leader would never re-key.
-		s, err := n.openControlStream(ctx, p, SeqSyncProtocolID)
-		if err != nil {
-			return
-		}
-		defer s.Close()
-		_ = s.SetDeadline(time.Now().Add(5 * time.Second))
-		if err := writeSeqSyncMsg(s, n.buildSeqSyncMsg("rekeyReq", p, nil)); err != nil {
-			return
-		}
-		// The leader answers by opening its OWN handshake stream (not on this one),
-		// so just drain/close this stream. An EOF here is expected.
-		_, _ = readSeqSyncMsg(s)
-	}()
-}
-
-// obfDecryptCipherForPeer returns the per-peer cipher used to DECRYPT frames
-// received FROM the given peer (the RX direction). It is a different key than
-// obfCipherForPeer (TX) so the two directions never share a (key, nonce) pair.
-func (n *Node) obfDecryptCipherForPeer(p peer.ID) obfuscate.ObfCipher {
-	po := n.peerObf(p)
-	if po == nil || !po.negotiated {
-		log.Debug("Rx: NO negotiated cipher for %s — frame will be treated as PLAINTEXT", p.String())
-		return nil
-	}
-	log.Debug("Rx: will decrypt from %s with algo=%s forward-secret=%v rxKeyFP=%s",
-		p.String(), obfuscate.AlgoName(po.algo), po.pfsPubKey != nil, obfuscate.KeyFingerprint(po.rxKey))
-	return po.rxCipher
-}
-
-// decryptPeerFrame attempts per-peer payload decryption. It returns a 3-tuple:
-//
-//	out       — the decrypted plaintext when decrypted==true; otherwise the
-//	            ORIGINAL bytes (caller must NOT forward them to the TAP when
-//	            garbage==true).
-//	decrypted — true iff a cipher was negotiated for this peer AND AEAD-open
-//	            succeeded.
-//	garbage   — true ONLY when a cipher WAS negotiated but AEAD-open FAILED. The
-//	            bytes are therefore ciphertext we cannot open (key mismatch / the
-//	            peer rotated its key / corruption) and MUST be dropped — never
-//	            forwarded to the TAP as if they were plaintext Ethernet. (If no
-//	            cipher is negotiated at all, the frame is legitimately plaintext:
-//	            that returns (data, false, false), NOT garbage.)
-//
-// This three-way split closes the "plaintext branch pollution" hole: historically
-// a decrypt failure returned the raw ciphertext unchanged and relied on Unpack
-// (called with a nil cipher) to reject it. But Unpack's magic check only inspects
-// the frame HEADER, which is never encrypted — so a ciphertext frame sails
-// through Unpack and gets written straight onto the LAN as garbage. Now the RX
-// path sees garbage==true and drops the frame before it can reach the TAP.
-// Shared by the direct-frame and relay-envelope RX paths so the
-// decrypt-then-validate contract lives in exactly one place.
-func (n *Node) decryptPeerFrame(data []byte, remotePeer peer.ID) (out []byte, decrypted bool, garbage bool) {
-	cipher := n.obfDecryptCipherForPeer(remotePeer)
-	if cipher == nil {
-		// No cipher negotiated (encryption disabled / mixed-config peer): the
-		// frame is legitimately plaintext. Never flag as garbage.
-		log.Debug("Rx: decrypt skipped for %s (no cipher); assuming frame is plaintext", remotePeer.String())
-		return data, false, false
-	}
-	// Log the nonce (via NonceHex) so it can be correlated with the sender's
-	// EncryptPayloadRegion log: identical nonce ⇒ we received exactly the frame
-	// the peer sealed.
-	dec, derr := obfuscate.DecryptPayloadRegion(data, cipher)
-	if derr != nil {
-		// STRUCTURAL failure first: ErrFrameCorrupted means the input is not a
-		// well-formed obfuscate frame at all (its declared payload length does not
-		// fit inside the buffer). No key can change that, so walking the whole
-		// fallback ring is pure waste — and, worse, reporting it as garbage made
-		// every call site invoke maybeResyncOnDecryptFail, so a stream of non-frame
-		// bytes triggered repeated pointless key renegotiations that destabilised
-		// otherwise-healthy links. Classify it as "not decrypted, not garbage" and
-		// let the caller's own parser reject it: Unpack's magic check still stops
-		// any non-frame from reaching the TAP device, so the security contract that
-		// ciphertext is never forwarded as plaintext continues to hold.
-		if errors.Is(derr, obfuscate.ErrFrameCorrupted) {
-			log.Debug("Rx: frame from %s is not a well-formed obfuscate frame (%v) — structural, not a key failure; skipping resync",
-				remotePeer.String(), derr)
-			return data, false, false
-		}
-		// Multi-key fallback: the peer may still be sealing frames with a key
-		// other than our CURRENT one. This happens for three benign reasons, all
-		// of which we must tolerate instead of dropping the frame:
-		//   1. Key rotation: the peer has not yet flipped to our freshly
-		//      negotiated key because the reciprocal "ready" was dropped over a
-		//      lossy circuit-relay.
-		//   2. Lingering old-connection frame: a straggler sealed on the peer's
-		//      previous session that had not yet torn down.
-		//   3. Multiple live connections: the peer holds a SEPARATE cipher per
-		//      connection (DIRECT vs CIRCUIT-RELAY each ran its own SeqSync
-		//      handshake) and round-robins outbound traffic, so frames arrive
-		//      under several different keys. A single prevRxCipher slot cannot
-		//      represent more than one extra key, so we try the whole bounded
-		//      ring of recent RX ciphers (newest-first) first, then the single
-		//      prevRxCipher, before declaring the frame garbage.
-		if po := n.peerObf(remotePeer); po != nil {
-			for i := len(po.rxRing) - 1; i >= 0; i-- {
-				slot := po.rxRing[i]
-				if dec2, derr2 := obfuscate.DecryptPayloadRegion(data, slot.cipher); derr2 == nil {
-					log.Debug("Rx: decrypted from %s with RING rxKeyFP=%s (currentRxKeyFP=%s) — peer still sealing with a prior-gen / other-connection key; link tolerated",
-						remotePeer.String(), obfuscate.KeyFingerprint(slot.key), obfuscate.KeyFingerprint(po.rxKey))
-					n.recordPeerRxDecrypt(remotePeer, true)
-					n.maybeMarkReadyOnDecrypt(remotePeer, true)
-					return dec2, true, false
-				}
-			}
-			if po.prevRxCipher != nil {
-				if dec2, derr2 := obfuscate.DecryptPayloadRegion(data, po.prevRxCipher); derr2 == nil {
-					log.Debug("Rx: decrypted from %s with PREVIOUS rxKeyFP=%s (currentRxKeyFP=%s) — peer still sealing with old gen during rollover; link tolerated",
-						remotePeer.String(), obfuscate.KeyFingerprint(po.prevRxKey), obfuscate.KeyFingerprint(po.rxKey))
-					n.recordPeerRxDecrypt(remotePeer, true)
-					n.maybeMarkReadyOnDecrypt(remotePeer, true)
-					return dec2, true, false
-				}
-			}
-		}
-		// A cipher IS negotiated but AEAD-open failed (and none of our recent
-		// keys opened it either) ⇒ the frame is genuine ciphertext we cannot
-		// open (key mismatch / corruption). This is NOT plaintext: forwarding it
-		// to the TAP would inject raw ciphertext bytes onto the LAN. Flag as
-		// garbage so the RX path drops it and counts a real decryption failure
-		// (which feeds the self-healing resync below).
-		fallbackNote := ""
-		if po := n.peerObf(remotePeer); po != nil && (po.prevRxCipher != nil || len(po.rxRing) > 0) {
-			fallbackNote = fmt.Sprintf(" (ring=%d prevRxCipher staged but did not open — fundamentally divergent key)", len(po.rxRing))
-		} else {
-			fallbackNote = " (no fallback — lingering old-connection frame or divergent key)"
-		}
-		// derr is an AEAD "message authentication failed". We deliberately do
-		// NOT log the raw stdlib string verbatim: it floods the log for every
-		// genuinely-corrupt / divergent frame and conveys no more than the
-		// classified fallbackNote already does. The frame is still flagged as
-		// garbage and dropped (ciphertext ⇒ DROP) so the security contract holds.
-		log.Debug("Rx: decrypt FAILED for %s algo=%s nonce=%s (ciphertext ⇒ DROP, never forwarded as plaintext)%s",
-			remotePeer.String(), obfuscate.AlgoName(cipher.Algo()), obfuscate.NonceHex(data), fallbackNote)
-		return data, false, true
-	}
-	// Genuine AEAD success: record a valid decryption and self-heal readiness.
-	n.recordPeerRxDecrypt(remotePeer, true)
-	n.maybeMarkReadyOnDecrypt(remotePeer, true)
-	log.Debug("Rx: decrypted frame from %s algo=%s nonce=%s", remotePeer.String(), obfuscate.AlgoName(cipher.Algo()), obfuscate.NonceHex(data))
-	return dec, true, false
-}
-
-// maybeResyncOnDecryptFail triggers a background SeqSync re-handshake when a
-// peer's decryption failures accumulate, so a desynchronised key (e.g. after a
-// one-sided proactive re-key the peer never completed) self-heals instead of the
-// link staying permanently dead. It is rate-limited per peer (a cooldown window)
-// so a burst of decrypt failures cannot spawn a resync storm; the recent-error
-// window (reset on any successful decrypt) is the trigger signal.
-func (n *Node) maybeResyncOnDecryptFail(remotePeer peer.ID) {
-	const (
-		// threshold: consecutive (reset-on-success) decrypt failures before we
-		// reactively re-key. Raised 8 → 16 so a brief burst of line-noise /
-		// single corrupted frames (old-key stragglers the RX ring already opens)
-		// no longer trips a re-key.
-		threshold = 16
-		// cooldown: minimum gap between two reactive re-keys for the same peer.
-		// Raised 3s → 30s so a degraded spell cannot spawn a re-key storm.
-		cooldown = 30 * time.Second
-		// settleWindow: after a re-key *succeeds*, stay quiet for this long.
-		// In-flight frames encrypted with the PREVIOUS key keep arriving right
-		// after convergence; the RX ring opens most, but any that slip through
-		// would otherwise re-trigger a re-key and oscillate the link. 90s covers
-		// straggler drain without hiding a genuine divergence (which keeps
-		// climbing past escalationCap and still fires).
-		settleWindow = 90 * time.Second
-		// escalationCap: within settleWindow, only force a re-key if failures
-		// blow past this — a real ongoing divergence, not just stragglers.
-		escalationCap = 64
-	)
-	rv, ok := n.peerRxDecryptRecentErrs.Load(remotePeer)
-	if !ok {
-		return
-	}
-	if v := rv.(*atomic.Uint64).Load(); v < threshold {
-		return
-	}
-	// Post-success settle: do not re-key again so soon after a converge unless
-	// failures clearly indicate a real divergence rather than stragglers.
-	if t, ok := n.lastRekeySuccess.Load(remotePeer); ok {
-		if since := time.Since(t.(time.Time)); since < settleWindow && rv.(*atomic.Uint64).Load() < escalationCap {
-			return
-		}
-	}
-	if v, loaded := n.decryptResyncCooldown.LoadOrStore(remotePeer, time.Now()); loaded {
-		if time.Since(v.(time.Time)) < cooldown {
-			return
-		}
-		n.decryptResyncCooldown.Store(remotePeer, time.Now())
-	}
-	log.Info("Rx: %s has %d sustained decryption failures — triggering SeqSync re-handshake to re-anchor keys",
-		remotePeer.String(), rv.(*atomic.Uint64).Load())
-	// Surface the key generation currently failing so a debug trace can tell
-	// whether the peer is mid-rotation (we hold prevRxCipher) or the ciphers are
-	// fundamentally divergent (no fallback matches). prevRxKeyFP is "(none)" when
-	// no rollover fallback is staged.
-	if po := n.peerObf(remotePeer); po != nil && po.negotiated {
-		prevFP := "(none)"
-		if po.prevRxCipher != nil {
-			prevFP = obfuscate.KeyFingerprint(po.prevRxKey)
-		}
-		log.Info("Rx: %s decrypt-fail context — currentRxKeyFP=%s prevRxKeyFP=%s ring=%d algo=%s (fallback-opened frames so far may have kept link alive)",
-			remotePeer.String(), obfuscate.KeyFingerprint(po.rxKey), prevFP, len(po.rxRing), obfuscate.AlgoName(po.algo))
-	}
-	go n.ForceSyncSeq(remotePeer)
-}
-
-// storePeerObf upserts a peer's obfuscation state via copy-on-write: it clones
-// the current table, applies the change, and swaps it in atomically. Called only
-// from the handshake path (rare), so the O(peers) copy is negligible.
-func (n *Node) storePeerObf(p peer.ID, po *PeerObf) {
-	for {
-		cur := n.perPeerObf.Load()
-		var next map[peer.ID]*PeerObf
-		if cur == nil {
-			next = make(map[peer.ID]*PeerObf, 1)
-		} else {
-			next = make(map[peer.ID]*PeerObf, len(*cur)+1)
-			for k, v := range *cur {
-				next[k] = v
-			}
-		}
-		next[p] = po
-		if n.perPeerObf.CompareAndSwap(cur, &next) {
-			return
-		}
-	}
-}
+// (Per-peer obfuscation, encryption, proactive PFS re-keying, and self-healing
+// resync routines are defined in node_crypto.go)
 
 // isPeerReady reports whether the mutual "ready" handshake has completed with
 // the given peer (both sides exchanged ready acknowledgements). TAP data is only
@@ -2521,7 +2333,7 @@ func (n *Node) isResyncLeader(p peer.ID) bool {
 // given peer, unblocking TAP data transmission to it.
 func (n *Node) markPeerReady(p peer.ID) {
 	v, _ := n.peerReady.LoadOrStore(p, &atomic.Bool{})
-	v.(*atomic.Bool).Store(true)
+	wasReady := v.(*atomic.Bool).Swap(true)
 	// Record handshake convergence latency: time from first SyncSeqToPeer to
 	// readiness. Only meaningful for peers we actively tried to handshake with.
 	if t, ok := n.seqsyncHandshakeStart.Load(p); ok {
@@ -2529,6 +2341,11 @@ func (n *Node) markPeerReady(p peer.ID) {
 		cv, _ := n.seqsyncConvergeMs.LoadOrStore(p, &atomic.Uint64{})
 		cv.(*atomic.Uint64).Store(ms)
 		n.seqsyncHandshakeStart.Delete(p)
+	}
+	// On initial transition to Ready state, immediately trigger metadata sync
+	// so the peer's NodeMeta, subnets, and identity converge without race conditions.
+	if !wasReady {
+		go n.syncMetadataToPeer(p)
 	}
 }
 
@@ -2647,6 +2464,31 @@ func (n *Node) removePeerObf(p peer.ID) {
 	n.peerReady.Delete(p)        // force TX + handshake to re-confirm readiness on reconnect
 	n.clearCachedHandshakeEph(p) // drop the round's ephemeral so the next session mints fresh (PFS)
 	n.pushPeerEncryption()
+
+	// Drop per-peer observation maps so they don't grow without bound across
+	// peer churn (reconnects, roaming, flap). These are only ever written on
+	// inbound frames / probes and were previously never cleaned, leaking memory
+	// proportional to the number of distinct peers ever seen. Cleanup here
+	// covers every transport-loss path (removePeerObf is the shared chokepoint).
+	// PERF: CoW removal. Publish a fresh map without the peer instead of
+	// mutating the live one, so the per-frame readers stay lock-free.
+	n.peerRxMu.Lock()
+	if m := n.peerLastRx.Load(); m != nil {
+		if _, ok := (*m)[p]; ok {
+			next := make(map[peer.ID]*atomic.Int64, len(*m))
+			for k, v := range *m {
+				if k != p {
+					next[k] = v
+				}
+			}
+			n.peerLastRx.Store(&next)
+		}
+	}
+	n.peerRxMu.Unlock()
+	n.peerProbeMu.Lock()
+	delete(n.peerObservedTapMAC, p)
+	delete(n.peerTapProbe, p)
+	n.peerProbeMu.Unlock()
 }
 
 // ObfFingerprint returns a short fingerprint of the most recent ephemeral ECDH
@@ -3086,7 +2928,6 @@ func (n *Node) GetTopology() TopologyResponse {
 	resp.Clusters = summariseClusters(resp.Nodes, localCluster)
 	return resp
 }
-
 
 // linkClassName renders a routing link class for the topology API.
 func linkClassName(c routing.LinkClass) string {

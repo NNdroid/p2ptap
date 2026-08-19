@@ -109,6 +109,30 @@ type PacketCapture struct {
 	// calls AddWithPeers under p.mu) never blocks on a slow WebSocket peer.
 	subMu sync.Mutex
 	subs  map[*PcapSubscriber]struct{}
+
+	// --- CPU-bounding controls (see AddWithPeers) ---
+	// idleSkip: when true (default) and nothing is consuming captured frames
+	// (no live WebSocket subscriber AND no recent poll AND no disk persist),
+	// the per-frame parse + ring append is skipped entirely. This is the
+	// dominant CPU saving when capture is "running" but the packet panel is
+	// not open. A subscriber attaching (or a poll within the grace window)
+	// re-enables capture transparently.
+	idleSkip atomic.Bool
+	// subCount mirrors len(subs) as a lock-free read for the idle check.
+	subCount atomic.Int32
+	// lastConsumerNano records the last time a consumer touched the capture
+	// (subscribe / poll), so the idle check does not starve the HTTP polling
+	// fallback when the WebSocket is down.
+	lastConsumerNano atomic.Int64
+	// sampleEvery captures 1 of every N frames (1 = all). Downsampling bound.
+	sampleEvery atomic.Int64
+	// sampleCounter is the running frame counter used by the downsampler.
+	sampleCounter atomic.Uint64
+	// maxRatePerSec caps captures per second (0 = unlimited). Rate-limit net.
+	maxRatePerSec atomic.Int64
+	rateMu          sync.Mutex
+	rateWindowStart time.Time
+	rateCount       int
 }
 
 // NewPacketCapture builds a capture buffer. If filePath is non-empty, captured
@@ -117,13 +141,18 @@ func NewPacketCapture(capacity int, filePath string) *PacketCapture {
 	if capacity <= 0 {
 		capacity = 20000
 	}
-	return &PacketCapture{
+	p := &PacketCapture{
 		cap:       capacity,
 		buf:       make([]CapturedFrame, 0, capacity),
 		filePath:  filePath,
 		saveEvery: 2 * time.Second,
 		maxHex:    64,
 	}
+	// Defaults: idle-skip on (the main CPU saver), capture-all (no downsample),
+	// no rate cap. Operators can tighten these via config or /api/pcap/set-params.
+	p.idleSkip.Store(true)
+	p.sampleEvery.Store(1)
+	return p
 }
 
 // SetPersistFile updates the on-disk path used for load/save.
@@ -139,6 +168,56 @@ func (p *PacketCapture) SetPeerResolver(r PeerResolver) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.peerRes = r
+}
+
+// SetSampleEvery sets the downsample factor: capture 1 of every N frames.
+// n <= 1 means capture every frame (no downsampling).
+func (p *PacketCapture) SetSampleEvery(n int) {
+	if n <= 1 {
+		p.sampleEvery.Store(1)
+		return
+	}
+	p.sampleEvery.Store(int64(n))
+}
+
+// SetMaxRatePerSec caps captured frames per second. n <= 0 disables the cap.
+func (p *PacketCapture) SetMaxRatePerSec(n int) {
+	if n < 0 {
+		n = 0
+	}
+	p.maxRatePerSec.Store(int64(n))
+}
+
+// SetIdleSkip toggles the idle-skip optimization (default on).
+func (p *PacketCapture) SetIdleSkip(b bool) {
+	p.idleSkip.Store(b)
+}
+
+// SubscriberCount reports how many live consumers are currently attached.
+// Used by tests and diagnostics.
+func (p *PacketCapture) SubscriberCount() int { return int(p.subCount.Load()) }
+
+// touchConsumer records that a consumer just interacted with the capture,
+// keeping the idle-skip grace window alive for the HTTP polling fallback.
+func (p *PacketCapture) touchConsumer() {
+	p.lastConsumerNano.Store(time.Now().UnixNano())
+}
+
+// rateAllow implements a 1-second sliding-window cap on captures. The caller
+// must have already checked maxRatePerSec > 0.
+func (p *PacketCapture) rateAllow() bool {
+	p.rateMu.Lock()
+	defer p.rateMu.Unlock()
+	now := time.Now()
+	if now.Sub(p.rateWindowStart) >= time.Second {
+		p.rateWindowStart = now
+		p.rateCount = 0
+	}
+	if p.rateCount >= int(p.maxRatePerSec.Load()) {
+		return false
+	}
+	p.rateCount++
+	return true
 }
 
 // Running reports whether capture is currently active.
@@ -203,6 +282,27 @@ func (p *PacketCapture) AddWithPeers(dir CaptureDir, frame []byte, fromPeer, toP
 	if !p.running.Load() {
 		return
 	}
+	// Idle skip: if nothing is consuming captured frames (no live WebSocket
+	// subscriber, no recent poll, and no disk persist), the per-frame parse +
+	// ring append is pure CPU waste — skip it. This is the dominant saving
+	// when capture is "running" but the packet panel is not open. A subscriber
+	// attaching (or a poll within the grace window) re-enables capture.
+	if p.idleSkip.Load() && p.filePath == "" && p.subCount.Load() == 0 {
+		if time.Since(time.Unix(0, p.lastConsumerNano.Load())).Seconds() > 3 {
+			return
+		}
+	}
+	// Downsample: capture only 1 in sampleEvery frames (cheap counter check,
+	// before the lock + parseFrame memcopy).
+	if se := p.sampleEvery.Load(); se > 1 {
+		if p.sampleCounter.Add(1)%uint64(se) != 0 {
+			return
+		}
+	}
+	// Rate limit: cap captures per 1s sliding window.
+	if p.maxRatePerSec.Load() > 0 && !p.rateAllow() {
+		return
+	}
 	p.mu.Lock()
 	if !p.running.Load() || len(frame) < 14 {
 		p.mu.Unlock()
@@ -217,8 +317,15 @@ func (p *PacketCapture) AddWithPeers(dir CaptureDir, frame []byte, fromPeer, toP
 	}
 	p.seq++
 	if len(p.buf) >= p.cap {
-		// ring overwrite: drop oldest
-		copy(p.buf[0:], p.buf[1:])
+		// Ring overwrite. Shifting by ONE entry per frame is O(cap) memmove on
+		// EVERY captured frame (cap=20000 entries under p.mu, synchronously on
+		// the TAP TX/RX path) — at wire rate that stalls the datapath. Drop the
+		// oldest half in a single shift instead: amortized O(1) per frame, the
+		// buffer stays ordered newest-last, and all Since-scan consumers are
+		// unaffected (they only rely on ascending Seq).
+		drop := len(p.buf) / 2
+		copy(p.buf[0:], p.buf[drop:])
+		p.buf = p.buf[:len(p.buf)-drop]
 		p.buf[len(p.buf)-1] = cf
 	} else {
 		p.buf = append(p.buf, cf)
@@ -239,6 +346,7 @@ func (p *PacketCapture) AddWithPeers(dir CaptureDir, frame []byte, fromPeer, toP
 // Snapshot returns frames with Seq > since (for incremental polling). When
 // since == 0 it returns all buffered frames. A limit caps the response size.
 func (p *PacketCapture) Snapshot(since uint64, limit int) []CapturedFrame {
+	p.touchConsumer()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]CapturedFrame, 0)
@@ -268,6 +376,8 @@ func (p *PacketCapture) Subscribe(bufSize int) *PcapSubscriber {
 	}
 	p.subs[s] = struct{}{}
 	p.subMu.Unlock()
+	p.subCount.Add(1)
+	p.touchConsumer()
 	return s
 }
 
@@ -280,14 +390,8 @@ func (p *PacketCapture) Unsubscribe(s *PcapSubscriber) {
 	p.subMu.Lock()
 	delete(p.subs, s)
 	p.subMu.Unlock()
-}
-
-// SubscriberCount reports how many live consumers are currently attached.
-// Used by tests and diagnostics.
-func (p *PacketCapture) SubscriberCount() int {
-	p.subMu.Lock()
-	defer p.subMu.Unlock()
-	return len(p.subs)
+	p.subCount.Add(-1)
+	p.touchConsumer()
 }
 
 // broadcast fans a single event out to every registered subscriber. Holds
@@ -315,13 +419,17 @@ func (p *PacketCapture) broadcast(ev PcapEvent) {
 
 // State describes the current capture status for the WebUI.
 type CaptureState struct {
-	Running   bool   `json:"running"`
-	Count     int    `json:"count"`
-	Capacity  int    `json:"capacity"`
-	StartSeq  uint64 `json:"start_seq"`
-	LastSeq   uint64 `json:"last_seq"`
-	StartTime string `json:"start_time,omitempty"`
-	PersistOn bool   `json:"persist_on"`
+	Running        bool   `json:"running"`
+	Count          int    `json:"count"`
+	Capacity       int    `json:"capacity"`
+	StartSeq       uint64 `json:"start_seq"`
+	LastSeq        uint64 `json:"last_seq"`
+	StartTime      string `json:"start_time,omitempty"`
+	PersistOn      bool   `json:"persist_on"`
+	SampleEvery    int    `json:"sample_every"`
+	MaxRatePerSec  int    `json:"max_rate_per_sec"`
+	IdleSkip       bool   `json:"idle_skip"`
+	Subscribers    int    `json:"subscribers"`
 }
 
 // State returns a snapshot of the capture status.
@@ -329,10 +437,14 @@ func (p *PacketCapture) State() CaptureState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	st := CaptureState{
-		Running:   p.running.Load(),
-		Count:     len(p.buf),
-		Capacity:  p.cap,
-		PersistOn: p.filePath != "",
+		Running:       p.running.Load(),
+		Count:         len(p.buf),
+		Capacity:      p.cap,
+		PersistOn:     p.filePath != "",
+		SampleEvery:   int(p.sampleEvery.Load()),
+		MaxRatePerSec: int(p.maxRatePerSec.Load()),
+		IdleSkip:      p.idleSkip.Load(),
+		Subscribers:   int(p.subCount.Load()),
 	}
 	if len(p.buf) > 0 {
 		st.StartSeq = p.buf[0].Seq

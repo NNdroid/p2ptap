@@ -2,10 +2,13 @@ package node
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/net/swarm"
 	"github.com/multiformats/go-multiaddr"
 )
@@ -244,9 +247,11 @@ func (n *Node) startRoamWatcher() {
 	go func() {
 		defer n.wg.Done()
 		if err := mon.Watch(ctx, deb.trigger); err != nil {
-			// Non-fatal: the initial scheduled reconcile still runs, and reconcile
-			// can also be triggered externally.
-			log.Warn("roam: failed to start network monitor: %v", err)
+			if runtime.GOOS == "android" {
+				log.Debug("roam: netlink monitor skipped on Android (SELinux untrusted app): %v", err)
+			} else {
+				log.Warn("roam: failed to start network monitor: %v", err)
+			}
 		}
 	}()
 }
@@ -268,6 +273,87 @@ func (n *Node) reconcile() {
 			log.Warn("roam: WebUI rebind failed: %v", err)
 		}
 	}
+}
+
+// TriggerRoam forces immediate network change reconciliation and reconnects all peers/relays.
+func (n *Node) TriggerRoam() {
+	if n == nil || n.Host == nil {
+		return
+	}
+	log.Info("roam: network state change event triggered -> reconciling listeners & reconnecting peers")
+	if n.roamDeb != nil {
+		n.roamDeb.trigger()
+	} else {
+		n.reconcile()
+	}
+	go n.reconnectAllDisconnectedPeers()
+}
+
+// reconnectAllDisconnectedPeers clears swarm backoff and rapidly re-establishes connectivity
+// after a network change (e.g. Wi-Fi <-> Cellular handoff).
+func (n *Node) reconnectAllDisconnectedPeers() {
+	if n == nil || n.Host == nil || n.Config == nil {
+		return
+	}
+
+	// 1. Reconnect Bootstrap / Relay peers
+	for _, bStr := range n.Config.BootstrapPeers {
+		ma, err := multiaddr.NewMultiaddr(bStr)
+		if err != nil {
+			continue
+		}
+		info, err := peer.AddrInfoFromP2pAddr(ma)
+		if err != nil {
+			continue
+		}
+		n.clearSwarmBackoff(info.ID)
+		if n.Host.Network().Connectedness(info.ID) != network.Connected {
+			log.Debug("roam: rapidly reconnecting bootstrap peer %s...", info.ID.String())
+			go n.connectWithRetry(*info, "bootstrap", 1*time.Second, 5)
+		}
+	}
+
+	// 2. Reconnect Static peers
+	for _, sStr := range n.Config.StaticPeers {
+		ma, err := multiaddr.NewMultiaddr(sStr)
+		if err != nil {
+			continue
+		}
+		info, err := peer.AddrInfoFromP2pAddr(ma)
+		if err != nil {
+			continue
+		}
+		n.clearSwarmBackoff(info.ID)
+		if n.Host.Network().Connectedness(info.ID) != network.Connected {
+			log.Debug("roam: rapidly reconnecting static peer %s...", info.ID.String())
+			go n.connectWithRetry(*info, "static", 1*time.Second, 5)
+		}
+	}
+
+	// 3. Specifically prioritize the Active Exit Node if one is configured
+	if n.Gateway != nil {
+		if exitPID := n.Gateway.ActiveExitPeerPID(); exitPID != "" {
+			n.clearSwarmBackoff(exitPID)
+			if n.Host.Network().Connectedness(exitPID) != network.Connected {
+				log.Info("roam: prioritizing immediate fast reconnection to active Exit Node %s...", exitPID.String())
+				go n.reconnectPeer(exitPID)
+			}
+		}
+	}
+
+	// 4. Reconnect known active mesh peers
+	n.peerMeta.Range(func(key, val any) bool {
+		pid := key.(peer.ID)
+		if pid == n.Host.ID() || n.isBootstrapPeer(pid) {
+			return true
+		}
+		n.clearSwarmBackoff(pid)
+		if n.Host.Network().Connectedness(pid) != network.Connected {
+			log.Debug("roam: reconnecting mesh peer %s...", pid.String())
+			go n.reconnectPeer(pid)
+		}
+		return true
+	})
 }
 
 // stopRoamWatcher tears down the monitor + debouncer. Called from Close().

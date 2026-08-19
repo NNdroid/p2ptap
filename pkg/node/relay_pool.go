@@ -107,23 +107,165 @@ func isProtocolUnsupported(err error) bool {
 	return err != nil && containsSub(err.Error(), "protocols not supported")
 }
 
+// isP2ptapBootPeer reports whether hop is a p2ptap-boot server (which serves
+// VPN relay through its dedicated /p2ptap/boot-relay/1.0.0 uplink — see
+// openBootRelayUplink — and deliberately does NOT register our application-level
+// /p2ptap/relay/1.0.0 overlay relay protocol). Such peers must never be probed
+// by the overlay relay pool: the probe would always fail with "protocols not
+// supported", and worse, on first contact the warn log would mislead operators
+// into thinking the hop is misconfigured when it is actually the correct
+// p2ptap-boot design. A real p2ptap-boot always registers BootRelayProtocolID,
+// which no ordinary node does, so that is the most reliable discriminator;
+// IsBootstrapPeer handles the brief identify race window before the peerstore
+// knows about supported protocols.
+func isP2ptapBootPeer(h host.Host, n *Node, hop peer.ID) bool {
+	if h != nil {
+		if supported, err := h.Peerstore().SupportsProtocols(hop, BootRelayProtocolID); err == nil && len(supported) > 0 {
+			return true
+		}
+	}
+	if n != nil && n.isBootstrapPeer(hop) {
+		return true
+	}
+	return false
+}
+
+// bootSkippedLogOnce emits one debug log per boot peer the first time the
+// relay pool short-circuits on it, so the optimisation is observable without
+// spamming on every Submit. Subsequent Submits stay silent.
+var bootSkippedOnce sync.Map // peer.ID → *atomic.Bool
+
+// relayPoolReapInterval is how often the pool's idle reaper scans for conns that
+// have been permanently orphaned (a hop that is circuit-broken AND no longer
+// connected). Reaping is lazy: it only tears down a conn that has stayed in the
+// orphaned state for a full overlayRelayBlacklistTTL, so a hop that is
+// transiently broken and about to recover is never needlessly dropped. The
+// interval is deliberately large (not hot-path) — a scan at most once per TTL
+// keeps the steady-state overhead negligible.
+const relayPoolReapInterval = overlayRelayBlacklistTTL
+
 // relayStreamPool manages persistent relay streams per relay hop.
 // One background write goroutine per active relay peer.
 type relayStreamPool struct {
-	mu    sync.Mutex
-	conns map[peer.ID]*relayConn
-	host  host.Host
-	ctx   context.Context
-	node  *Node // back-reference for overlay-relay-hop circuit breaking
+	mu     sync.Mutex
+	conns  map[peer.ID]*relayConn
+	host   host.Host
+	ctx    context.Context
+	cancel context.CancelFunc
+	node   *Node // back-reference for overlay-relay-hop circuit breaking
+	wg     sync.WaitGroup
+
+	// candidateSince records, per hop, the first time the pool's reaper observed
+	// the hop's conn in the "orphaned" (blacklisted AND disconnected) state. A
+	// conn whose orphaned state persists for a full overlayRelayBlacklistTTL is
+	// reaped (goroutine stopped, map entry removed) so a permanently-dead hop
+	// cannot leak a goroutine + 128-slot queue forever. Guarded by mu.
+	candidateSince map[peer.ID]time.Time
 }
 
 func newRelayStreamPool(ctx context.Context, h host.Host, n *Node) *relayStreamPool {
-	return &relayStreamPool{
-		conns: make(map[peer.ID]*relayConn),
-		host:  h,
-		ctx:   ctx,
-		node:  n,
+	// Tolerate a nil ctx (some unit tests build a pool without a live node). The
+	// pool always owns a derived context so shutdown() can stop the reaper and
+	// all conns regardless of the caller's context lifecycle.
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	rctx, cancel := context.WithCancel(ctx)
+	p := &relayStreamPool{
+		conns:          make(map[peer.ID]*relayConn),
+		host:           h,
+		ctx:            rctx,
+		cancel:         cancel,
+		node:           n,
+		candidateSince: make(map[peer.ID]time.Time),
+	}
+	// Reaper runs until shutdown cancels rctx. It reaps permanently-orphaned
+	// conns so the pool does not grow without bound when hops go away for good.
+	p.wg.Add(1)
+	go p.reapLoop()
+	return p
+}
+
+// reapLoop periodically removes relay conns whose hop is permanently orphaned
+// (circuit-broken by the overlay-relay health monitor AND no longer connected).
+// Such a conn's write goroutine is only waiting out blacklist timers to re-probe
+// a hop that can never serve frames again; keeping it alive forever leaks one
+// goroutine + a 128-slot queue per dead hop. getOrCreate lazily rebuilds a conn
+// the moment the hop becomes reachable and is re-selected, so reaping is lossless.
+func (p *relayStreamPool) reapLoop() {
+	defer p.wg.Done()
+	ticker := time.NewTicker(relayPoolReapInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-ticker.C:
+			p.reapOrphaned()
+		}
+	}
+}
+
+// reapOrphaned removes conns whose hop has been both circuit-broken (blacklisted)
+// and disconnected for a full overlayRelayBlacklistTTL. It cancels the conn's
+// context (which exits its writeLoop), closes any live stream, and drops the map
+// entry. getOrCreate will recreate the conn lazily if the hop ever returns.
+func (p *relayStreamPool) reapOrphaned() {
+	now := time.Now()
+	var toReap []*relayConn
+
+	p.mu.Lock()
+	for hop, rc := range p.conns {
+		orphaned := p.node != nil && p.node.isOverlayRelayBlacklisted(hop) &&
+			!p.relayHopConnected(hop)
+		if !orphaned {
+			// Hop recovered (connected, or no longer blacklisted) — clear any
+			// pending candidate so a later re-blacklist starts fresh.
+			delete(p.candidateSince, hop)
+			continue
+		}
+		start, seen := p.candidateSince[hop]
+		if !seen {
+			p.candidateSince[hop] = now
+			continue
+		}
+		if now.Sub(start) >= overlayRelayBlacklistTTL {
+			toReap = append(toReap, rc)
+			delete(p.candidateSince, hop)
+		}
+	}
+	// Remove reaped conns from the map first so concurrent Submits to the same
+	// hop lazily recreate a fresh conn instead of racing to use a dying one.
+	for _, rc := range toReap {
+		delete(p.conns, rc.peer)
+	}
+	p.mu.Unlock()
+
+	for _, rc := range toReap {
+		p.teardownConn(rc)
+		relayLog.Warn("[relay-pool] reaped orphaned relay conn for %s: hop circuit-broken and disconnected for %s; will lazily rebuild if it returns",
+			rc.peer.ShortString(), overlayRelayBlacklistTTL)
+	}
+}
+
+// relayHopConnected reports whether hop currently has any live libp2p connection
+// (direct or via circuit relay). A disconnected hop cannot serve as a relay
+// next-hop: its relay stream would have to be re-dialed from scratch every time,
+// which is exactly the doomed reconnect loop an orphaned conn is stuck in.
+func (p *relayStreamPool) relayHopConnected(hop peer.ID) bool {
+	if p.host == nil {
+		return false
+	}
+	return p.host.Network().Connectedness(hop) == network.Connected
+}
+
+// teardownConn stops a relayConn's background writeLoop and releases its
+// resources. It is safe to call on a conn that is no longer in p.conns (the map
+// entry is removed by the caller first). Idempotent via the conn's cancel.
+func (p *relayStreamPool) teardownConn(rc *relayConn) {
+	rc.cancel()      // unblocks writeLoop (context-aware NewStream/wait paths)
+	rc.wg.Wait()     // wait for the goroutine to exit and drain/close
+	rc.closeStream() // best-effort final stream close (idempotent)
 }
 
 // Submit queues a relay frame for delivery via the persistent relay stream to hop.
@@ -135,6 +277,11 @@ func newRelayStreamPool(ctx context.Context, h host.Host, n *Node) *relayStreamP
 func (p *relayStreamPool) Submit(hop peer.ID, data []byte, onSent, onFail func()) bool {
 	rc := p.getOrCreate(hop)
 	if rc == nil {
+		// Either the peer is a known p2ptap-boot (we deliberately do not
+		// create an overlay-relay conn for it — the boot serves VPN relay
+		// through /p2ptap/boot-relay/1.0.0 instead) or the pool is shutting
+		// down. The caller should fall back to the dedicated boot-relay path
+		// (or circuit path) rather than re-queueing here.
 		onFail()
 		return false
 	}
@@ -187,7 +334,15 @@ func (rc *relayConn) throttledDropWarn(hop peer.ID) {
 }
 
 // getOrCreate returns or lazily creates a relayConn for the given hop.
+// Returns nil (caller must fast-fail) when hop is a known p2ptap-boot peer:
+// those nodes intentionally do not register our overlay-relay protocol and
+// instead serve VPN relay through /p2ptap/boot-relay/1.0.0. Probing them here
+// would only burn NewStream attempts and emit a misleading WARN.
 func (p *relayStreamPool) getOrCreate(hop peer.ID) *relayConn {
+	if isP2ptapBootPeer(p.host, p.node, hop) {
+		bootSkippedLogOnce(hop)
+		return nil
+	}
 	p.mu.Lock()
 	rc, ok := p.conns[hop]
 	if !ok {
@@ -196,6 +351,17 @@ func (p *relayStreamPool) getOrCreate(hop peer.ID) *relayConn {
 	}
 	p.mu.Unlock()
 	return rc
+}
+
+// bootSkippedLogOnce emits at most one debug line per peer when the relay
+// pool short-circuits on a p2ptap-boot (the event is otherwise invisible
+// because Submit returns silently). The latch uses a sync.Map of atomic
+// bools so concurrent first-touch Submits only log once.
+func bootSkippedLogOnce(hop peer.ID) {
+	v, _ := bootSkippedOnce.LoadOrStore(hop, &atomic.Bool{})
+	if v.(*atomic.Bool).CompareAndSwap(false, true) {
+		relayLog.Debug("Skipping overlay-relay probe for p2ptap-boot peer %s (it serves VPN relay via /p2ptap/boot-relay/1.0.0; the '/p2ptap/relay/1.0.0 not supported' warn is therefore suppressed)", hop.ShortString())
+	}
 }
 
 // startRelayConn initializes a relayConn and launches its background write loop.
@@ -219,8 +385,13 @@ func (p *relayStreamPool) startRelayConn(hop peer.ID) *relayConn {
 	return rc
 }
 
-// shutdown stops all relay connections. Must be called before the host closes.
+// shutdown stops the idle reaper and all relay connections. Must be called
+// before the host closes.
 func (p *relayStreamPool) shutdown() {
+	// Stop the reaper first so it cannot race a conn teardown while we drain.
+	p.cancel()
+	p.wg.Wait()
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for hop, rc := range p.conns {
@@ -281,8 +452,8 @@ func (rc *relayConn) ensureStream(backoff *time.Duration) bool {
 		// instead of hammering NewStream; the blacklist auto-expires and we retry.
 		if rc.node != nil && rc.node.isOverlayRelayBlacklisted(rc.peer) {
 			rc.drainAll() // hop is circuit-broken: drop queued frames now so they
-			              // fail fast instead of rotting for the whole TTL and being
-			              // retried on every (doomed) reconnect attempt.
+			// fail fast instead of rotting for the whole TTL and being
+			// retried on every (doomed) reconnect attempt.
 			select {
 			case <-rc.ctx.Done():
 				return false
@@ -421,18 +592,22 @@ func (rc *relayConn) pumpFrames(backoff *time.Duration) bool {
 					rc.mu.Unlock()
 					job.onFail()
 				}
-		} else {
-			// A successful local write only proves the frame entered the send
-			// buffer, NOT that the hop consumed it — in the "peer accepts the
-			// stream but never reads" class writes keep succeeding into a full
-			// flow-control window then stall, so clearing the streak here would
-			// let the circuit-breaker never trip. Only clear when we have
-			// independent return-path proof: we recently received a frame back
-			// FROM this hop.
-			if rc.node != nil && rc.node.peerRxWithin(rc.peer, relayPoolHealthyRxWindow) {
-				rc.failCount = 0
+			} else {
+				// A successful local write only proves the frame entered the send
+				// buffer, NOT that the hop consumed it — in the "peer accepts the
+				// stream but never reads" class writes keep succeeding into a full
+				// flow-control window then stall, so clearing the streak here would
+				// let the circuit-breaker never trip. Only clear when we have
+				// independent return-path proof: we recently received a frame back
+				// CARRIED BY this hop. Note this must check relayHopRx (hop-as-carrier),
+				// not peerRxWithin (hop-as-origin): a pure-forwarding hop that relays
+				// remote-cluster traffic back to us never appears as a frame origin,
+				// so its peerLastRx stays stale and a peerRxWithin check here would
+				// mis-clear (or worse, fail to clear for a genuinely healthy hop).
+				if rc.node != nil && rc.node.relayHopRxWithin(rc.peer, relayPoolHealthyRxWindow) {
+					rc.failCount = 0
+				}
 			}
-		}
 		}
 	}
 }

@@ -80,7 +80,7 @@ type TAPInterceptor struct {
 	v6IP          net.IP
 	port          uint16
 	collector     *StatsCollector
-	cfg           *config.Config
+	cfg           atomic.Pointer[config.Config]
 	configPath    string
 	sessions      sync.Map // key: string -> *tcpSession
 	htmlDashboard []byte
@@ -115,7 +115,6 @@ func NewTAPInterceptor(virtualIP4Str string, virtualIP6Str string, port int, col
 		v6IP:          v6,
 		port:          uint16(port),
 		collector:     collector,
-		cfg:           cfg,
 		configPath:    configPath,
 		htmlDashboard: htmlData,
 		workerPool:    newHTTPWorkerPool(8),
@@ -126,11 +125,18 @@ func NewTAPInterceptor(virtualIP4Str string, virtualIP6Str string, port int, col
 			},
 		},
 	}
+	if cfg != nil {
+		it.cfg.Store(cfg)
+	}
 
 	go it.cleanStaleSessionsLoop()
 	interceptLog.Info("Userspace Ultra-Fast Interceptor active for WebUI on %s:%d & [%s]:%d (Zero CPU overhead on regular traffic)", v4.String(), port, v6.String(), port)
 	return it
 }
+
+// loadCfg returns the current configuration snapshot this interceptor serves,
+// or nil when none was supplied at construction.
+func (it *TAPInterceptor) loadCfg() *config.Config { return it.cfg.Load() }
 
 // MatchAndHandle is the ultra-fast inline fast-path filter.
 // For non-target packets, it exits in < 1ns with 0 heap allocations.
@@ -338,8 +344,8 @@ func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, write
 			sess.requestBuf = nil
 
 			mtu := 1500
-			if it.cfg != nil && it.cfg.MTU > 0 {
-				mtu = it.cfg.MTU
+			if itCfg := it.loadCfg(); itCfg != nil && itCfg.MTU > 0 {
+				mtu = itCfg.MTU
 			}
 			mss := mtu - 40
 			if mss < 512 {
@@ -436,8 +442,8 @@ func (it *TAPInterceptor) handleIPv6TCP(frame []byte, writer PacketWriter) bool 
 			sess.requestBuf = nil
 
 			mtu := 1500
-			if it.cfg != nil && it.cfg.MTU > 0 {
-				mtu = it.cfg.MTU
+			if itCfg := it.loadCfg(); itCfg != nil && itCfg.MTU > 0 {
+				mtu = itCfg.MTU
 			}
 			mss := mtu - 60
 			if mss < 512 {
@@ -550,8 +556,8 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 		// SECURITY: blank secrets (PSK, WebUI auth token) before serializing.
 		// Copy by value so the live config is never mutated.
 		var safe config.Config
-		if it.cfg != nil {
-			safe = *it.cfg
+		if c := it.loadCfg(); c != nil {
+			safe = *c
 			safe.PSK = ""
 			safe.WebUI.AuthToken = ""
 		}
@@ -581,58 +587,58 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 			if it.collector.Gateway == nil {
 				return it.buildHTTPResponse(503, "application/json", []byte(`{"error":"gateway not initialized"}`))
 			}
-		if incoming.Action == "set" && incoming.PeerID != "" {
-			cleanIP := strings.Split(incoming.ExitTapIP, "/")[0]
-			cleanIP6 := strings.Split(incoming.ExitTapIPv6, "/")[0]
+			if incoming.Action == "set" && incoming.PeerID != "" {
+				cleanIP := strings.Split(incoming.ExitTapIP, "/")[0]
+				cleanIP6 := strings.Split(incoming.ExitTapIPv6, "/")[0]
 
-			// Auto-fill missing IPv4 or IPv6 TAP address from active peers or peer metadata
-			if cleanIP == "" || cleanIP6 == "" {
-				it.collector.mu.RLock()
-				for _, p := range it.collector.ActivePeers {
-					if p.PeerID == incoming.PeerID {
-						if cleanIP == "" && p.TapIP != "" {
-							cleanIP = strings.Split(p.TapIP, "/")[0]
-						}
-						if cleanIP6 == "" && p.TapIPv6 != "" {
-							cleanIP6 = strings.Split(p.TapIPv6, "/")[0]
-						}
-						break
-					}
-				}
+				// Auto-fill missing IPv4 or IPv6 TAP address from active peers or peer metadata
 				if cleanIP == "" || cleanIP6 == "" {
-					for _, pm := range it.collector.PeerMetas {
-						if pm.PeerID == incoming.PeerID {
-							if cleanIP == "" && pm.TapIP != "" {
-								cleanIP = strings.Split(pm.TapIP, "/")[0]
+					it.collector.mu.RLock()
+					for _, p := range it.collector.ActivePeers {
+						if p.PeerID == incoming.PeerID {
+							if cleanIP == "" && p.TapIP != "" {
+								cleanIP = strings.Split(p.TapIP, "/")[0]
 							}
-							if cleanIP6 == "" && pm.TapIPv6 != "" {
-								cleanIP6 = strings.Split(pm.TapIPv6, "/")[0]
+							if cleanIP6 == "" && p.TapIPv6 != "" {
+								cleanIP6 = strings.Split(p.TapIPv6, "/")[0]
 							}
 							break
 						}
 					}
+					if cleanIP == "" || cleanIP6 == "" {
+						for _, pm := range it.collector.PeerMetas {
+							if pm.PeerID == incoming.PeerID {
+								if cleanIP == "" && pm.TapIP != "" {
+									cleanIP = strings.Split(pm.TapIP, "/")[0]
+								}
+								if cleanIP6 == "" && pm.TapIPv6 != "" {
+									cleanIP6 = strings.Split(pm.TapIPv6, "/")[0]
+								}
+								break
+							}
+						}
+					}
+					it.collector.mu.RUnlock()
 				}
-				it.collector.mu.RUnlock()
-			}
 
-			// Validate the IPs before handing them to the gateway.
-			if cleanIP != "" && net.ParseIP(cleanIP) == nil {
-				return it.buildHTTPResponse(400, "application/json", []byte(`{"error":"invalid exit_tap_ip"}`))
-			}
-			if cleanIP6 != "" && net.ParseIP(cleanIP6) == nil {
-				return it.buildHTTPResponse(400, "application/json", []byte(`{"error":"invalid exit_tap_ipv6"}`))
-			}
-			if cleanIP == "" && cleanIP6 == "" {
-				return it.buildHTTPResponse(400, "application/json", []byte(fmt.Sprintf(`{"error":"no TAP IP address found for peer '%s'"}`, incoming.PeerID)))
-			}
-			var endpoints []string
-			if it.collector.ResolvePeerAddrs != nil {
-				endpoints = it.collector.ResolvePeerAddrs(incoming.PeerID)
-			}
-			if err := it.collector.Gateway.SetExitNode(incoming.PeerID, cleanIP, cleanIP6, endpoints); err != nil {
-				return it.buildHTTPResponse(500, "application/json", []byte(fmt.Sprintf(`{"error":"%v"}`, err)))
-			}
-		} else if incoming.Action == "clear" {
+				// Validate the IPs before handing them to the gateway.
+				if cleanIP != "" && net.ParseIP(cleanIP) == nil {
+					return it.buildHTTPResponse(400, "application/json", []byte(`{"error":"invalid exit_tap_ip"}`))
+				}
+				if cleanIP6 != "" && net.ParseIP(cleanIP6) == nil {
+					return it.buildHTTPResponse(400, "application/json", []byte(`{"error":"invalid exit_tap_ipv6"}`))
+				}
+				if cleanIP == "" && cleanIP6 == "" {
+					return it.buildHTTPResponse(400, "application/json", []byte(fmt.Sprintf(`{"error":"no TAP IP address found for peer '%s'"}`, incoming.PeerID)))
+				}
+				var endpoints []string
+				if it.collector.ResolvePeerAddrs != nil {
+					endpoints = it.collector.ResolvePeerAddrs(incoming.PeerID)
+				}
+				if err := it.collector.Gateway.SetExitNode(incoming.PeerID, cleanIP, cleanIP6, endpoints); err != nil {
+					return it.buildHTTPResponse(500, "application/json", []byte(fmt.Sprintf(`{"error":"%v"}`, err)))
+				}
+			} else if incoming.Action == "clear" {
 				if err := it.collector.Gateway.ClearExitNode(); err != nil {
 					return it.buildHTTPResponse(500, "application/json", []byte(fmt.Sprintf(`{"error":"%v"}`, err)))
 				}
@@ -657,7 +663,8 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 		if err := json.Unmarshal(body, &incoming); err != nil {
 			return it.buildHTTPResponse(400, "application/json", []byte(fmt.Sprintf(`{"error":"invalid JSON: %v"}`, err)))
 		}
-		if it.cfg == nil {
+		cur := it.loadCfg()
+		if cur == nil {
 			return it.buildHTTPResponse(500, "application/json", []byte(`{"error":"running config unavailable"}`))
 		}
 
@@ -665,61 +672,54 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 		// are zero in the incoming request (prevents accidental zeroing). When the
 		// user supplies a new value, it is persisted to disk and takes effect on restart.
 		if incoming.TapName == "" {
-			incoming.TapName = it.cfg.TapName
+			incoming.TapName = cur.TapName
 		}
 		if incoming.TapIP == "" {
-			incoming.TapIP = it.cfg.TapIP
+			incoming.TapIP = cur.TapIP
 		}
 		if incoming.TapIPv6 == "" {
-			incoming.TapIPv6 = it.cfg.TapIPv6
+			incoming.TapIPv6 = cur.TapIPv6
 		}
 		if incoming.TapMAC == "" {
-			incoming.TapMAC = it.cfg.TapMAC
+			incoming.TapMAC = cur.TapMAC
 		}
 		if incoming.MTU == 0 {
-			incoming.MTU = it.cfg.MTU
+			incoming.MTU = cur.MTU
 		}
 		if incoming.DriverType == "" {
-			incoming.DriverType = it.cfg.DriverType
+			incoming.DriverType = cur.DriverType
 		}
 		if incoming.NodeKeyFile == "" {
-			incoming.NodeKeyFile = it.cfg.NodeKeyFile
+			incoming.NodeKeyFile = cur.NodeKeyFile
 		}
 		if len(incoming.ListenAddrs) == 0 {
-			incoming.ListenAddrs = it.cfg.ListenAddrs
+			incoming.ListenAddrs = cur.ListenAddrs
 		}
 		if incoming.WebUI.Port == 0 {
-			incoming.WebUI = it.cfg.WebUI
+			incoming.WebUI = cur.WebUI
 		}
 		// TransportsConfig is a struct (requires restart), always preserve from running
-		incoming.Transports = it.cfg.Transports
+		incoming.Transports = cur.Transports
 
 		if err := incoming.Validate(); err != nil {
 			return it.buildHTTPResponse(400, "application/json", []byte(fmt.Sprintf(`{"error":"invalid config: %v"}`, err)))
 		}
 
 		effectivePath := it.configPath
-		if it.cfg != nil && it.cfg.ConfigPath != "" {
-			effectivePath = it.cfg.ConfigPath
+		if cur != nil && cur.ConfigPath != "" {
+			effectivePath = cur.ConfigPath
 		}
 		if effectivePath != "" {
 			config.UpdateConfigFileDelta(effectivePath, &incoming)
 		}
 
-		// Hot-reload mutable fields into running config
-		it.cfg.NodeName = incoming.NodeName
-		it.cfg.TransportStrategy = incoming.TransportStrategy
-		it.cfg.PSK = incoming.PSK
-		it.cfg.LogLevel = incoming.LogLevel
-		it.cfg.Obfuscation = incoming.Obfuscation
-		it.cfg.BootstrapPeers = incoming.BootstrapPeers
-		it.cfg.StaticPeers = incoming.StaticPeers
-		it.cfg.EnableMDNS = incoming.EnableMDNS
-		it.cfg.ExitNode = incoming.ExitNode
-		it.cfg.ACL = incoming.ACL
-		it.cfg.AdvertisedSubnets = incoming.AdvertisedSubnets
-		it.cfg.AcceptAdvertisedSubnets = incoming.AcceptAdvertisedSubnets
-		it.cfg.AllowedSubnetPeers = incoming.AllowedSubnetPeers
+		// Publish the freshly merged config as a NEW snapshot (never mutate the
+		// running *config.Config in place) so concurrent readers — the node data
+		// plane and this interceptor's own GET handlers — observe a consistent
+		// object. Deliver it to the node via OnConfigReload so SetConfig makes the
+		// atomic snapshot the data plane reads.
+		newCfg := incoming // heap-allocated copy escapes to the Store below
+		it.cfg.Store(&newCfg)
 
 		// Hot-reload global logger level
 		logger.SetGlobalLevel(logger.ParseLevel(incoming.LogLevel))
@@ -730,11 +730,8 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 			it.collector.ExitNode.Enable = incoming.ExitNode.Enable
 			it.collector.ExitNode.NATMasquerade = incoming.ExitNode.NATMasquerade
 			it.collector.ExitNode.WANInterface = incoming.ExitNode.WANInterface
-			if it.collector.OnExitNodeChanged != nil {
-				it.collector.OnExitNodeChanged()
-			}
-			if it.collector.OnSubnetsChanged != nil {
-				it.collector.OnSubnetsChanged()
+			if it.collector.OnConfigReload != nil {
+				it.collector.OnConfigReload(&newCfg)
 			}
 		}
 		return it.buildHTTPResponse(200, "application/json", []byte(`{"status":"ok","message":"Configuration saved and applied successfully"}`))

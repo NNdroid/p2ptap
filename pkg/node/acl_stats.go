@@ -13,10 +13,11 @@ import (
 //
 // Returns true if the frame is allowed (passes), false if dropped.
 func (n *Node) checkACL(frame []byte, peerID string, isTx bool) bool {
-	if n.Config == nil || !n.Config.ACL.Enable {
+	c := n.config()
+	if c == nil || !c.ACL.Enable {
 		return true // ACL disabled — fast path, no recording
 	}
-	allowed, matchedRuleID := MatchACL(&n.Config.ACL, frame, peerID, isTx)
+	allowed, matchedRuleID := MatchACL(&c.ACL, frame, peerID, isTx)
 	if n.aclStats == nil {
 		return allowed // counters disabled (e.g. unit test)
 	}
@@ -128,15 +129,15 @@ const recentDropsCap = 50
 // human-readable "recent drops" list. The full frame is intentionally not
 // stored (privacy + size) — only the matched rule, peer, and direction.
 type ACLDropRecord struct {
-	Time     time.Time `json:"time"`
-	PeerID   string    `json:"peer_id"`
-	RuleID   string    `json:"rule_id"` // "" = fell through to default action
-	Reason   string    `json:"reason"`  // "rule:r1" or "default"
-	Proto    string    `json:"protocol"`
-	SrcIP    string    `json:"src_ip"`
-	DstIP    string    `json:"dst_ip"`
-	DstPort  int       `json:"dst_port"`
-	Dir      string    `json:"direction"` // "inbound" | "outbound"
+	Time    time.Time `json:"time"`
+	PeerID  string    `json:"peer_id"`
+	RuleID  string    `json:"rule_id"` // "" = fell through to default action
+	Reason  string    `json:"reason"`  // "rule:r1" or "default"
+	Proto   string    `json:"protocol"`
+	SrcIP   string    `json:"src_ip"`
+	DstIP   string    `json:"dst_ip"`
+	DstPort int       `json:"dst_port"`
+	Dir     string    `json:"direction"` // "inbound" | "outbound"
 }
 
 func newACLStats() *ACLStats {
@@ -195,10 +196,10 @@ func (s *ACLStats) recordDrop(rec ACLDropRecord) {
 // serialization to the WebUI. Callers should treat the returned struct
 // as read-only.
 type ACLStatsSnapshot struct {
-	Accepted    uint64         `json:"accepted"`
-	Dropped     uint64         `json:"dropped"`
-	UptimeSec   int64          `json:"uptime_sec"`
-	RuleHits    []ACLRuleHit   `json:"rule_hits"`
+	Accepted    uint64          `json:"accepted"`
+	Dropped     uint64          `json:"dropped"`
+	UptimeSec   int64           `json:"uptime_sec"`
+	RuleHits    []ACLRuleHit    `json:"rule_hits"`
 	RecentDrops []ACLDropRecord `json:"recent_drops"`
 }
 

@@ -318,3 +318,35 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 	}
 	t.Logf("[rt] UnpackWith agrees with EncryptPayloadRegion (nonce shared via obfNonceFromHeader) OK")
 }
+
+// TestAutoModeEntropySwitches is a regression test for the auto-obfuscation
+// mode switcher. The entropy score was historically computed as -Σp² (always
+// negative), so evaluate() returned "dynamic" for every traffic profile and the
+// auto engine never switched to random/block padding. It must now return a
+// normalized Shannon entropy in [0,1]: varied sizes → ~1 → "random";
+// constant sizes → ~0 → "dynamic".
+func TestAutoModeEntropySwitches(t *testing.T) {
+	as := newAutoState()
+	// 1) Uniformly varied sizes ⇒ high entropy ⇒ "random".
+	as.packetCount = 0
+	for i := 0; i < autoRingSize*2; i++ {
+		as.recordSize(64 + (i % 40))
+	}
+	if s := as.entropyScore(); s < 0.7 {
+		t.Errorf("varied sizes: entropyScore=%f, want >0.7 (random traffic)", s)
+	}
+	if m := as.evaluate(); m != "random" {
+		t.Errorf("varied sizes: evaluate()=%q, want \"random\"", m)
+	}
+	// 2) Constant size ⇒ low entropy ⇒ "dynamic".
+	as = newAutoState()
+	for i := 0; i < autoRingSize*2; i++ {
+		as.recordSize(512)
+	}
+	if s := as.entropyScore(); s > 0.3 {
+		t.Errorf("constant size: entropyScore=%f, want <0.3 (dynamic traffic)", s)
+	}
+	if m := as.evaluate(); m != "dynamic" {
+		t.Errorf("constant size: evaluate()=%q, want \"dynamic\"", m)
+	}
+}

@@ -30,18 +30,16 @@ func WriteFrame(w io.Writer, data []byte) error {
 		return fmt.Errorf("frame too large: %d > %d", len(data), maxFrameLen)
 	}
 
-	// Write the 4-byte big-endian length prefix from the stack (no allocation),
-	// then stream the payload directly. This avoids the prior make+copy of a
-	// header||data concatenation on the per-packet TX path.
-	var lenBuf [frameLenSize]byte
-	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
-	if err := writeAll(w, lenBuf[:]); err != nil {
-		return fmt.Errorf("write frame header: %w", err)
-	}
-	if err := writeAll(w, data); err != nil {
+	total := frameLenSize + len(data)
+	buf := acquireFrameBuf(total)
+	binary.BigEndian.PutUint32(buf[0:frameLenSize], uint32(len(data)))
+	copy(buf[frameLenSize:], data)
+
+	err := writeAll(w, buf)
+	releaseFrameBuf(buf)
+	if err != nil {
 		return fmt.Errorf("write frame: %w", err)
 	}
-
 	return nil
 }
 

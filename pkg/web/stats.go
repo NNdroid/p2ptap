@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"p2ptap/pkg/config"
 	"p2ptap/pkg/observer"
 	"p2ptap/pkg/packet"
 	"p2ptap/pkg/version"
@@ -44,6 +45,10 @@ type StatsCollector struct {
 	// AllowedSubnetPeers config is hot-reloaded, so the node can re-broadcast its
 	// updated LAN subnet advertisements over the peek-map channel.
 	OnSubnetsChanged func()
+	// OnConfigReload delivers the FULL new config on WebUI save. The node
+	// publishes it atomically (SetConfig) then applies runtime side-effects, so
+	// the data plane observes the freshly published snapshot.
+	OnConfigReload func(*config.Config)
 	// TestPeerMultiaddrs probes each known multiaddr of a peer for reachability
 	// and measures per-address RTT.  Returns results sorted by RTT (fastest first).
 	TestPeerMultiaddrs func(peerIDStr string) []MultiaddrTestResultEntry
@@ -56,13 +61,15 @@ type StatsCollector struct {
 	ProbePeerConnectivity func(peerIDStr string) *PeerConnectivityResult
 	// ProbePeerEcho performs a real end-to-end P2P echo test over a dedicated stream,
 	// sending random payload and measuring precise RTT and payload byte integrity.
-	ProbePeerEcho     func(peerIDStr string) *PeerEchoResultDTO
-	ProbePeerEchoAddr func(peerIDStr string, targetAddrStr string) *PeerEchoResultDTO
+	ProbePeerEcho      func(peerIDStr string) *PeerEchoResultDTO
+	ProbePeerEchoAddr  func(peerIDStr string, targetAddrStr string) *PeerEchoResultDTO
+	ProbePeerSpeedTest func(peerIDStr string) *SpeedTestResultDTO
 	// ProbeTapForward performs an end-to-end TAP data-path forwarding test: a full
 	// Ethernet frame (ICMP echo request) is injected into the overlay toward the
 	// peer's TAP IP and the peer echoes back an ICMP echo reply frame. This
 	// exercises the TAP -> overlay -> peer -> reply path a real ping uses.
 	ProbeTapForward func(peerIDStr string) *TapProbeResultDTO
+	ForceSeqSync    func(peerIDStr string) (int, error)
 	AddStaticPeer   func(multiaddrStr string) error
 	OnSubnetToggle  func(cidr string, enable bool) error
 	// GetACLStatsFn is called on every /api/stats read. The node wires this
@@ -73,14 +80,14 @@ type StatsCollector struct {
 	// by the node at startup and refreshed on change.
 	TAPState *TAPStateDTO
 
-	ActivePeers  []PeerInfoDTO
-	MACTable     []MACInfoDTO
-	ARPTable     []ARPInfoDTO
-	IPTable      []IPInfoDTO
-	RoutesTable  []RouteInfoDTO
-	SubnetRoutes []SubnetRouteDTO
-	PeerMetas    []observer.PeerMetaDTO
-	MeshMatrix   []MeshMatrixCellDTO
+	ActivePeers      []PeerInfoDTO
+	MACTable         []MACInfoDTO
+	ARPTable         []ARPInfoDTO
+	IPTable          []IPInfoDTO
+	RoutesTable      []RouteInfoDTO
+	SubnetRoutes     []SubnetRouteDTO
+	PeerMetas        []observer.PeerMetaDTO
+	MeshMatrix       []MeshMatrixCellDTO
 	ProtocolChannels []ProtocolChannelDTO
 	ActiveStreams    []ProtocolStreamDTO
 	// DuplicateIPConflicts holds the latest duplicate-IP / overlapping-subnet
@@ -220,6 +227,7 @@ func (s *StatsCollector) SetCallbacks(cfg observer.CollectorConfig) {
 	s.OnExitNodeChanged = cfg.OnExitNodeChanged
 	s.OnObfuscationChanged = cfg.OnObfuscationChanged
 	s.OnSubnetsChanged = cfg.OnSubnetsChanged
+	s.OnConfigReload = cfg.OnConfigReload
 	s.GetACLStatsFn = cfg.GetACLStats
 	s.TestPeerMultiaddrs = func(peerIDStr string) []MultiaddrTestResultEntry {
 		if cfg.TestPeerMultiaddrs == nil {
@@ -245,12 +253,19 @@ func (s *StatsCollector) SetCallbacks(cfg observer.CollectorConfig) {
 		}
 		return cfg.ProbePeerEchoAddr(peerIDStr, targetAddrStr)
 	}
+	s.ProbePeerSpeedTest = func(peerIDStr string) *SpeedTestResultDTO {
+		if cfg.ProbePeerSpeedTest == nil {
+			return nil
+		}
+		return cfg.ProbePeerSpeedTest(peerIDStr)
+	}
 	s.ProbeTapForward = func(peerIDStr string) *TapProbeResultDTO {
 		if cfg.ProbeTapForward == nil {
 			return nil
 		}
 		return cfg.ProbeTapForward(peerIDStr)
 	}
+	s.ForceSeqSync = cfg.ForceSeqSync
 	s.AddStaticPeer = cfg.AddStaticPeer
 	s.DiagnoseLink = func(multiaddrStr string) *LinkDiagnosis {
 		if cfg.DiagnoseLink == nil {

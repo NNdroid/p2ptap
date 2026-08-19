@@ -4,6 +4,10 @@ import (
 	"net"
 	"runtime"
 	"testing"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+	"p2ptap/pkg/config"
+	vswitch "p2ptap/pkg/switch"
 )
 
 // fakeRouteBackend is an in-memory implementation of routeBackend used to
@@ -641,4 +645,63 @@ func TestDefaultHostRouteBypassPolicy(t *testing.T) {
 	if got := defaultHostRouteBypass(); got != want {
 		t.Fatalf("defaultHostRouteBypass() on %s = %v, want %v", runtime.GOOS, got, want)
 	}
+}
+
+// TestExitNodeTransitNeverPoisonsPeerMeta verifies that when a client receives
+// transit packets from an Exit Node (e.g. HTTP replies with srcIP 142.250.190.46
+// or 8.8.8.8), learnPeerAddressFromFrame NEVER overwrites the Exit Node's
+// real TapIP (10.0.0.1) in peerMeta or arpIndex.
+func TestExitNodeTransitNeverPoisonsPeerMeta(t *testing.T) {
+	exitPID := peer.ID("exit-node-peer-id")
+	exitMAC, _ := net.ParseMAC("02:00:0a:00:00:01")
+	_, localNet, _ := net.ParseCIDR("10.0.0.0/24")
+
+	n := &Node{
+		Config:     &config.Config{},
+		MACTable:   vswitch.NewMACTable(),
+		localV4Net: localNet,
+		localV4IP:  net.ParseIP("10.0.0.88"),
+		arpIndex:   &arpIndex{v4: make(map[uint32]arpIndexEntry), v6: make(map[[16]byte]arpIndexEntry)},
+	}
+
+	// 1. Initial state: Exit Node metadata initialized with 10.0.0.1/24
+	n.storePeerMeta(exitPID, PeerMeta{
+		TapIP:      "10.0.0.1/24",
+		TapMAC:     exitMAC.String(),
+		IsExitNode: true,
+	})
+
+	// Verify 10.0.0.1 resolves to exitPID in arpIndex
+	pid, mac := n.lookupPeerMACByIPv4(net.ParseIP("10.0.0.1"))
+	if pid == nil || mac != exitPID {
+		t.Fatalf("expected 10.0.0.1 to resolve to exitPID, got %s", mac)
+	}
+
+	// 2. An HTTP reply frame arrives from the Internet via the Exit Node
+	// srcIP = 142.250.190.46 (Google), dstIP = 10.0.0.88 (Client)
+	transitPayload := make([]byte, 64)
+	transitPayload[12] = 0x08
+	transitPayload[13] = 0x00 // IPv4
+	copy(transitPayload[26:30], []byte{142, 250, 190, 46}) // WAN src IP
+	copy(transitPayload[30:34], []byte{10, 0, 0, 88})      // Client dst IP
+
+	n.learnPeerAddressFromFrame(exitPID, exitMAC, transitPayload)
+
+	// 3. Verify Exit Node's TapIP was NOT overwritten by the WAN IP
+	val, ok := n.peerMeta.Load(exitPID)
+	if !ok {
+		t.Fatalf("expected peerMeta for exitPID to exist")
+	}
+	meta := val.(PeerMeta)
+	if meta.TapIP != "10.0.0.1/24" {
+		t.Fatalf("CRITICAL BUG: Exit Node TapIP was poisoned to %s (expected 10.0.0.1/24)", meta.TapIP)
+	}
+
+	// 4. Verify 10.0.0.1 STILL resolves correctly in arpIndex
+	pid2, mac2 := n.lookupPeerMACByIPv4(net.ParseIP("10.0.0.1"))
+	if pid2 == nil || mac2 != exitPID {
+		t.Fatalf("CRITICAL BUG: 10.0.0.1 resolution broken after transit packet")
+	}
+
+	t.Logf("✓ TestExitNodeTransitNeverPoisonsPeerMeta: Exit Node metadata integrity verified")
 }

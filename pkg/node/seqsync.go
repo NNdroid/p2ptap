@@ -94,11 +94,11 @@ type PeerObf struct {
 	// --- WebUI observability: details of the negotiated per-pair key ---
 	// txKey/rxKey are the raw 32-byte AEAD keys (derived by ECDH). They are kept
 	// only so the WebUI can show a short fingerprint; they are never transmitted.
-	txKey       []byte
-	rxKey       []byte
-	localEpoch  uint64 // our instance connEpoch (sent to this peer)
-	peerEpoch   uint64 // the peer's instance connEpoch (received at handshake)
-	pfsPubKey   []byte // peer's ephemeral ECDH(P256) public key (nil ⇒ no PFS / plaintext)
+	txKey      []byte
+	rxKey      []byte
+	localEpoch uint64 // our instance connEpoch (sent to this peer)
+	peerEpoch  uint64 // the peer's instance connEpoch (received at handshake)
+	pfsPubKey  []byte // peer's ephemeral ECDH(P256) public key (nil ⇒ no PFS / plaintext)
 
 	// negotiatedAtSeq is the raw FramePacker counter value at the moment this
 	// cipher was negotiated. It backs the GLOBAL safety-net re-key: the AEAD
@@ -219,7 +219,7 @@ func (n *Node) buildSeqSyncMsg(msgType string, p peer.ID, myPub []byte) SeqSyncM
 	// — keeping both sides symmetric instead of one side using a long-lived key
 	// while the other goes plaintext (which would silently mismatch).
 	m.ObfEnabled = n.obfKeyPair != nil && len(myPub) > 0
-	m.ObfMode = n.Config.Obfuscation.Mode
+	m.ObfMode = n.config().Obfuscation.Mode
 	// Embed the handshake's ephemeral public key exactly when a fresh key was
 	// minted for this message type (everything except "ready").
 	if m.ObfEnabled && len(myPub) > 0 {
@@ -256,7 +256,14 @@ func (n *Node) handleSeqSync(s network.Stream) {
 	msg, err := readSeqSyncMsg(s)
 	if err != nil {
 		log.Debug("SeqSync: read error from %s: %v", remotePeer.String(), err)
+		if n.protoTracker != nil {
+			n.protoTracker.SeqSync.RecordError()
+		}
 		return
+	}
+	if n.protoTracker != nil {
+		n.protoTracker.SeqSync.RecordRx(1, 128)
+		n.protoTracker.SeqSync.RecordSyncEvent()
 	}
 
 	switch msg.Type {
@@ -317,15 +324,12 @@ func (n *Node) handleSeqSync(s network.Stream) {
 		} else {
 			// The reciprocal "ready" was lost (older build / relay loss), but
 			// BOTH sides have ALREADY committed the same new cipher (we did above;
-			// the initiator commits right after its own ack). We deliberately do
-			// NOT mark the peer ready here: marking ready would start transmitting
-			// TAP data, and a lost "ready" in the OTHER direction (or a lost "ack"
-			// on a prior round) could still have the peer on its OLD key — which
-			// would re-introduce the permanent 100% decrypt-fail loop. Instead we
-			// re-run a clean handshake so readiness is reconfirmed symmetrically.
-			// The link simply stays idle (no TAP) until that converges, which is
-			// strictly safer than dropping every frame. Guarded by rekeyPeers.
-			log.Debug("SeqSync: peer %s reciprocal ready lost (older build?/relay loss) — cipher flipped on both sides but NOT marking ready; re-running clean handshake to reconfirm readiness", remotePeer.String())
+			// the initiator commits right after its own ack).
+			// The initiator already falls back to markPeerReady(p) on missing ready confirmation.
+			// Marking ready here prevents unidirectional egress deadlock where the initiator
+			// transmits data but the responder drops all egress return frames.
+			log.Debug("SeqSync: peer %s reciprocal ready lost (older build?/relay loss) — cipher flipped on both sides; marking ready and self-healing", remotePeer.String())
+			n.markPeerReady(remotePeer)
 			n.maybeSelfHeal(remotePeer)
 		}
 	case "ack":
@@ -535,11 +539,21 @@ func (n *Node) syncSeqToPeerAttempt(p peer.ID) error {
 	kp := n.useCachedHandshakeEph(p)
 	msg := n.buildSeqSyncMsg("sync", p, n.obfPubFromPair(kp))
 	if err := writeSeqSyncMsg(s, msg); err != nil {
+		if n.protoTracker != nil {
+			n.protoTracker.SeqSync.RecordError()
+		}
 		return err
+	}
+	if n.protoTracker != nil {
+		n.protoTracker.SeqSync.RecordTx(1, 128)
+		n.protoTracker.SeqSync.RecordSyncEvent()
 	}
 	// Read the peer's reply (ack with its own SeqID).
 	reply, err := readSeqSyncMsg(s)
 	if err != nil {
+		if n.protoTracker != nil {
+			n.protoTracker.SeqSync.RecordError()
+		}
 		// CRITICAL: do NOT treat a missing ack as success. For a
 		// version-matched peer, a failed ack-read means THIS side never
 		// received the peer's ephemeral public key, so we must NOT commit
@@ -578,7 +592,7 @@ func (n *Node) syncSeqToPeerAttempt(p peer.ID) error {
 	// neighbor before the neighbor derived the shared key). Fall back to ready
 	// on a failed/empty reciprocal to stay compatible with older peers.
 	if err := writeSeqSyncMsg(s, n.buildSeqSyncMsg("ready", p, nil)); err != nil {
-		n.markPeerReady(p) // fallback: still usable
+		n.markPeerReady(p)           // fallback: still usable
 		n.clearCachedHandshakeEph(p) // handshake considered done via fallback
 		return nil
 	}
@@ -634,7 +648,49 @@ func (n *Node) ForceSyncSeq(p peer.ID) {
 	// follower still recovers from sustained decrypt failures (it forces the
 	// leader to act) without ever crossing generations with the leader's round.
 	log.Debug("SeqSync: ForceSyncSeq to %s (iAmResyncLeader=%v) — driving re-handshake", p.String(), n.isResyncLeader(p))
+	if n.protoTracker != nil {
+		n.protoTracker.SeqSync.RecordSyncEvent()
+	}
 	n.triggerPeerRekey(p)
+}
+
+// ForceSeqSync triggers a forced SeqSync handshake, sequence window re-anchoring,
+// and forward-secret key rotation for the specified peer (or all connected peers if peerIDStr is "" or "all").
+func (n *Node) ForceSeqSync(peerIDStr string) (int, error) {
+	if n.Host == nil || n.Host.Network() == nil {
+		return 0, fmt.Errorf("node host network not initialized")
+	}
+
+	peerIDStr = strings.TrimSpace(peerIDStr)
+	if peerIDStr == "" || strings.EqualFold(peerIDStr, "all") {
+		count := 0
+		seen := make(map[peer.ID]bool)
+		for _, conn := range n.Host.Network().Conns() {
+			p := conn.RemotePeer()
+			if !seen[p] {
+				seen[p] = true
+				n.ForceSyncSeq(p)
+				count++
+			}
+		}
+		if count == 0 {
+			return 0, fmt.Errorf("no connected peers available to sync")
+		}
+		return count, nil
+	}
+
+	pID, err := peer.Decode(peerIDStr)
+	if err != nil {
+		if peeked, ok := n.Collector.PeekPeerID(peerIDStr); ok {
+			pID, err = peer.Decode(peeked)
+		}
+		if err != nil {
+			return 0, fmt.Errorf("invalid peer identifier %q: %w", peerIDStr, err)
+		}
+	}
+
+	n.ForceSyncSeq(pID)
+	return 1, nil
 }
 
 // mySupportedAlgos returns the list of obfuscation algorithms this node
@@ -642,7 +698,7 @@ func (n *Node) ForceSyncSeq(p peer.ID) {
 // preference order; a concrete algo is advertised alongside "none" so we can
 // interoperate with peers configured for plaintext obfuscation.
 func (n *Node) mySupportedAlgos() []byte {
-	switch n.Config.Obfuscation.Algorithm {
+	switch n.config().Obfuscation.Algorithm {
 	case "aes-gcm", "aes":
 		// Prefer AES-GCM, but support ChaCha20 and None for maximum cross-node compatibility
 		return []byte{obfuscate.ObfAlgoAESGCM, obfuscate.ObfAlgoChaCha20, obfuscate.ObfAlgoNone}
@@ -758,7 +814,7 @@ func (n *Node) negotiateObfWithPeer(p peer.ID, peerPub []byte, peerAlgos []byte,
 		// sacrifice PFS. Leave the peer pair at plaintext obfuscation instead. The
 		// next fresh SeqSync handshake (with a one-shot ephemeral key) will restore
 		// proper per-pair encryption.
-		if n.Config.Obfuscation.StrictKeyNegotiation {
+		if n.config().Obfuscation.StrictKeyNegotiation {
 			log.Warn("SeqSync: peer %s has no ephemeral handshake key and StrictKeyNegotiation is on; refusing long-lived-key fallback, leaving peer at plaintext", p.String())
 			return
 		}

@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 
 	"p2ptap/pkg/tuntap"
 )
@@ -28,6 +29,7 @@ type TunTAPDevice struct {
 	mtu    int
 	conv   *tuntap.Converter
 	closed bool
+	mu     sync.RWMutex
 }
 
 // CreateTunTAPDevice wraps an already-detached Android TUN file descriptor
@@ -78,6 +80,8 @@ func (d *TunTAPDevice) SetMAC(mac string) error {
 	if err != nil {
 		return err
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.mac = mac
 	d.conv = tuntap.NewConverter(m)
 	return nil
@@ -89,49 +93,94 @@ func (d *TunTAPDevice) SetMTU(mtu int) error { d.mtu = mtu; return nil }
 // address itself (builder.addAddress), so the node must not reconfigure it.
 func (d *TunTAPDevice) ConfigureIP(ipCIDR, ipv6CIDR string) error { return nil }
 
+// UpdateFd hot-swaps the underlying Android TUN file descriptor safely without tearing down the P2P engine.
+func (d *TunTAPDevice) UpdateFd(newTunFd int) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if newTunFd <= 0 {
+		return errors.New("tun: invalid new TUN fd")
+	}
+	f := os.NewFile(uintptr(newTunFd), d.name)
+	if f == nil {
+		return errors.New("tun: failed to wrap new TUN fd")
+	}
+	oldFile := d.file
+	d.file = f
+	if oldFile != nil {
+		_ = oldFile.Close()
+	}
+	return nil
+}
+
 func (d *TunTAPDevice) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.closed {
 		return nil
 	}
 	d.closed = true
-	return d.file.Close()
+	if d.file != nil {
+		return d.file.Close()
+	}
+	return nil
 }
 
-// Read pulls an L3 IP packet from the TUN fd and returns it wrapped as an
-// Ethernet frame for the node's L2 pipeline. Non-IP packets (e.g. ARP) cannot
-// traverse an L3 tunnel and are silently skipped (the loop retries).
+// Read pulls an L3 IP packet from the TUN fd and formats it directly into b
+// as an Ethernet frame for the node's L2 pipeline with ZERO intermediate copy and zero heap allocation.
+// Non-IP packets (e.g. ARP) cannot traverse an L3 tunnel and are skipped.
 func (d *TunTAPDevice) Read(b []byte) (int, error) {
+	if len(b) < 14 {
+		return 0, io.ErrShortBuffer
+	}
+	d.mu.RLock()
+	f := d.file
+	localMAC := d.conv.LocalMAC
+	d.mu.RUnlock()
+
+	if f == nil {
+		return 0, errors.New("tun: device closed")
+	}
+
 	for {
-		buf := make([]byte, d.mtu+64)
-		n, err := d.file.Read(buf)
+		// Zero-copy kernel read: read the IP packet directly into b[14:], leaving 14 bytes headroom for L2 Ethernet header
+		n, err := f.Read(b[14:])
 		if err != nil {
 			return 0, err
 		}
 		if n == 0 {
 			continue
 		}
-		frame, err := d.conv.PacketToFrame(buf[:n])
-		if err != nil {
-			// Not an IP packet — skip it; the OS handles L2 neighbour
-			// resolution itself, so dropping is correct and safe.
+		ethType := tuntap.EtherTypeOf(b[14 : 14+n])
+		if ethType == 0 {
+			// Not an IPv4/IPv6 packet — skip it.
 			continue
 		}
-		if len(frame) > len(b) {
-			return 0, io.ErrShortBuffer
-		}
-		return copy(b, frame), nil
+		// Populate the 14-byte Ethernet header in-place with zero memory allocation
+		copy(b[0:6], tuntap.BroadcastMAC)
+		copy(b[6:12], localMAC)
+		b[12] = byte(ethType >> 8)
+		b[13] = byte(ethType)
+		return 14 + n, nil
 	}
 }
 
-// Write strips the Ethernet header from b and writes the inner IP packet to the
-// TUN fd. Non-IP frames (e.g. ARP/GARP) are dropped, as the tunnel only carries
-// L3 traffic.
+// Write strips the Ethernet header from b and writes the inner IP packet directly
+// to the TUN fd with zero memory allocation. Non-IP frames (e.g. ARP/GARP) are
+// dropped, as the TUN tunnel only carries L3 traffic.
 func (d *TunTAPDevice) Write(b []byte) (int, error) {
-	pkt, err := d.conv.FrameToPacket(b)
+	d.mu.RLock()
+	f := d.file
+	d.mu.RUnlock()
+
+	if f == nil {
+		return len(b), nil
+	}
+
+	pkt, err := d.conv.FrameToPacketFast(b)
 	if err != nil {
 		return len(b), nil // drop non-IP frames; safe to skip on a TUN device
 	}
-	if _, err := d.file.Write(pkt); err != nil {
+	if _, err := f.Write(pkt); err != nil {
 		return 0, err
 	}
 	return len(b), nil

@@ -102,8 +102,8 @@ func TestExtractEthernetMACs(t *testing.T) {
 	}
 	t.Logf("[mac-table] extract MACs from %d-byte frame", len(dummyFrame))
 
-	dst, src, err := ExtractEthernetMACs(dummyFrame)
-	if err {
+	dst, src, ok := ExtractEthernetMACs(dummyFrame)
+	if !ok {
 		t.Fatal("Failed to extract Ethernet MACs")
 	}
 	if dst.String() != "02:00:00:00:00:02" {
@@ -113,4 +113,64 @@ func TestExtractEthernetMACs(t *testing.T) {
 		t.Errorf("Src MAC extracted incorrectly: %s", src.String())
 	}
 	t.Logf("[mac-table] ✓ dst=%s src=%s", dst, src)
+
+	dstArr, srcArr, okArr := ExtractEthernetMACArray(dummyFrame)
+	if !okArr {
+		t.Fatal("Failed to extract Ethernet MAC array")
+	}
+	if dstArr != [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x02} {
+		t.Errorf("Dst MAC array extracted incorrectly: %v", dstArr)
+	}
+	if srcArr != [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01} {
+		t.Errorf("Src MAC array extracted incorrectly: %v", srcArr)
+	}
+}
+
+// TestMACTableLearnUpdatesMappingOnChange is the correctness guard for the
+// LastSeen throttling in LearnWithIP: refreshing an unchanged mapping takes an
+// optimised path (read lock + throttled timestamp write), but a CHANGED mapping
+// must still take effect immediately. A regression here would strand traffic at
+// a stale peer after it roams — silently, because the MAC still resolves.
+func TestMACTableLearnUpdatesMappingOnChange(t *testing.T) {
+	table := NewMACTable()
+	peerA := peer.ID("12D3KooWPeerA")
+	peerB := peer.ID("12D3KooWPeerB")
+	mac := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x09}
+
+	table.Learn(mac, peerA)
+	// Repeated learns of the SAME mapping take the throttled fast path.
+	for i := 0; i < 5; i++ {
+		table.Learn(mac, peerA)
+	}
+	if got, ok := table.Lookup(mac); !ok || got != peerA {
+		t.Fatalf("after repeated identical learns: got (%q, %v), want (%q, true)", got, ok, peerA)
+	}
+
+	// A roam to another peer must win immediately, not after the throttle window.
+	table.Learn(mac, peerB)
+	if got, ok := table.Lookup(mac); !ok || got != peerB {
+		t.Fatalf("after peer change: got (%q, %v), want (%q, true)", got, ok, peerB)
+	}
+}
+
+// TestMACTableLearnWithIPUpdatesIPOnChange mirrors the roam case for the IP
+// field: an IP change must be picked up even though identical refreshes are
+// throttled.
+func TestMACTableLearnWithIPUpdatesIPOnChange(t *testing.T) {
+	table := NewMACTable()
+	pid := peer.ID("12D3KooWPeerC")
+	mac := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x0a}
+
+	table.LearnWithIP(mac, "10.0.0.1", pid)
+	for i := 0; i < 5; i++ {
+		table.LearnWithIP(mac, "10.0.0.1", pid)
+	}
+	if got := table.GetAllEntries()[mac.String()].IP; got != "10.0.0.1" {
+		t.Fatalf("IP after identical refreshes: got %q, want %q", got, "10.0.0.1")
+	}
+
+	table.LearnWithIP(mac, "10.0.0.2", pid)
+	if got := table.GetAllEntries()[mac.String()].IP; got != "10.0.0.2" {
+		t.Fatalf("IP after change: got %q, want %q", got, "10.0.0.2")
+	}
 }

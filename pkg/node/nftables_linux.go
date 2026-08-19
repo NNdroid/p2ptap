@@ -1,4 +1,5 @@
-//go:build linux
+//go:build linux && !android
+// +build linux,!android
 
 package node
 
@@ -147,6 +148,38 @@ func (m *NFTManager) SetupExitNodeNAT(wanIfName, tapIfName string, mss int) erro
 
 	m.active = true
 	nftLog.Info("Successfully configured Exit Node NAT masquerade via nftables (wan=%s, tap=%s, families=v4+v6, mss-clamp=%d)", wanIfName, tapIfName, mss)
+	return nil
+}
+
+// SetupSubnetRouterNAT configures IP forwarding and postrouting masquerade for nodes
+// that advertise LAN subnets to mesh peers, so incoming subnet packets are forwarded
+// and replied to correctly by local LAN devices.
+func (m *NFTManager) SetupSubnetRouterNAT(tapIfName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := m.EnableIPForwarding(); err != nil {
+		return fmt.Errorf("IP forwarding enable failed for subnet router: %w", err)
+	}
+
+	c, err := nftables.New()
+	if err != nil {
+		return fmt.Errorf("nftables connect error: %w", err)
+	}
+
+	if err := m.buildNATTable(c, nftables.TableFamilyIPv4, "p2ptap_subnet_nat", "", tapIfName); err != nil {
+		return err
+	}
+	if err := m.buildNATTable(c, nftables.TableFamilyIPv6, "p2ptap_subnet_nat6", "", tapIfName); err != nil {
+		return err
+	}
+
+	if err := c.Flush(); err != nil {
+		return fmt.Errorf("nftables flush rules error: %w", err)
+	}
+
+	m.active = true
+	nftLog.Info("Successfully configured Subnet Router NAT masquerade via nftables (tap=%s, families=v4+v6)", tapIfName)
 	return nil
 }
 

@@ -30,21 +30,42 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT_DIR"
 
-# ---- Locate Android SDK / NDK (best-effort auto-detect) ----
-: "${ANDROID_HOME:=$HOME/Android/Sdk}"
-if [ -z "${ANDROID_NDK_HOME:-}" ] && [ -n "${ANDROID_NDK_ROOT:-}" ]; then
-  ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
+# ---- Locate Android SDK (best-effort auto-detect & fix misconfigurations) ----
+# If ANDROID_HOME mistakenly points to an NDK subfolder, strip /ndk/...
+if [[ "${ANDROID_HOME:-}" == *"/ndk"* ]] || [[ "${ANDROID_HOME:-}" == *"\\ndk"* ]]; then
+  ANDROID_HOME="${ANDROID_HOME%%/ndk*}"
+  ANDROID_HOME="${ANDROID_HOME%%\\ndk*}"
 fi
-if [ -z "${ANDROID_NDK_HOME:-}" ] && [ -n "${ANDROID_NDK_LATEST_HOME:-}" ]; then
-  ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+
+if [ -z "${ANDROID_HOME:-}" ] || [ ! -d "${ANDROID_HOME:-}" ] || [ ! -d "${ANDROID_HOME:-}/platforms" ]; then
+  for candidate in \
+    "/c/Users/Administrator/AppData/Local/Android/Sdk" \
+    "$HOME/AppData/Local/Android/Sdk" \
+    "$LOCALAPPDATA/Android/Sdk" \
+    "$HOME/Android/Sdk" \
+    "${ANDROID_SDK_ROOT:-}" \
+    "/c/Android/Sdk"; do
+    if [ -n "$candidate" ] && [ -d "$candidate/platforms" ]; then
+      ANDROID_HOME="$candidate"
+      break
+    fi
+  done
 fi
-if [ -z "${ANDROID_NDK_HOME:-}" ] && [ -d "$ANDROID_HOME/ndk" ]; then
-  ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME/ndk"/*/ 2>/dev/null | sort -V | tail -1)"
-  ANDROID_NDK_HOME="${ANDROID_NDK_HOME%/}"
+
+# ---- Locate Android NDK ----
+if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "${ANDROID_NDK_HOME:-}" ]; then
+  if [ -n "${ANDROID_NDK_ROOT:-}" ] && [ -d "$ANDROID_NDK_ROOT" ]; then
+    ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
+  elif [ -n "${ANDROID_NDK_LATEST_HOME:-}" ] && [ -d "$ANDROID_NDK_LATEST_HOME" ]; then
+    ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+  elif [ -d "$ANDROID_HOME/ndk" ]; then
+    ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME/ndk"/*/ 2>/dev/null | sort -V | tail -1)"
+    ANDROID_NDK_HOME="${ANDROID_NDK_HOME%/}"
+  elif [ -d "$ANDROID_HOME/ndk-bundle" ]; then
+    ANDROID_NDK_HOME="$ANDROID_HOME/ndk-bundle"
+  fi
 fi
-if [ -z "${ANDROID_NDK_HOME:-}" ] && [ -d "$ANDROID_HOME/ndk-bundle" ]; then
-  ANDROID_NDK_HOME="$ANDROID_HOME/ndk-bundle"
-fi
+
 export ANDROID_HOME
 export ANDROID_NDK_HOME
 
@@ -79,12 +100,12 @@ OUT_DIR="$ROOT_DIR/bin"
 mkdir -p "$OUT_DIR"
 AAR="$OUT_DIR/p2ptap.aar"
 
-# Target ABIs. Default to arm64 only — it is the validated ABI for p2ptap and
-# covers essentially all modern (minSdk 21+) Android devices. To build a fat AAR
-# covering 32-bit devices as well, set AAR_TARGET=android (arm64 + arm + 386 +
-# amd64). Note: building every ABI compiles the large libp2p dependency tree
-# several times and requires substantial CPU/memory.
-AAR_TARGET="${AAR_TARGET:-android/arm64}"
+# Target ABIs. Default to all 4 Android architectures:
+#   arm64-v8a  (android/arm64)
+#   armeabi-v7a (android/arm)
+#   x86_64     (android/amd64)
+#   x86        (android/386)
+AAR_TARGET="${AAR_TARGET:-android}"
 
 echo "========================================================="
 echo "  Building p2ptap Android AAR"
@@ -107,15 +128,25 @@ echo "========================================================="
 # dependency tree itself is pure-Go on Android (verified with
 # `GOOS=android CGO_ENABLED=0 go build ./pkg/node/...`), so only gomobile's shim
 # uses CGO.
+# 16 KB page-size alignment for Android 15+ / Google Play compliance
+export CGO_LDFLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+
 gomobile bind \
   -target="$AAR_TARGET" \
   -androidapi 21 \
   -javapkg com.p2ptap \
-  -ldflags="-s -w $VER_FLAGS" \
+  -ldflags="-s -w $VER_FLAGS -extldflags '-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384'" \
   -o "$AAR" \
   ./pkg/android
 
 echo "========================================================="
 echo "  AAR build complete: $AAR"
 ls -lh "$AAR"
+
+# Sync to Android app libs directory if present
+ANDROID_APP_LIBS="/e/AndroidStudioProjects/p2ptap/app/libs"
+if [ -d "$ANDROID_APP_LIBS" ]; then
+  cp "$AAR" "$ANDROID_APP_LIBS/p2ptap.aar"
+  echo "  Synced to: $ANDROID_APP_LIBS/p2ptap.aar"
+fi
 echo "========================================================="

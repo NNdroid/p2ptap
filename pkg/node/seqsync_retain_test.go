@@ -230,3 +230,52 @@ func TestRxKeyGraceRetainsFullRing(t *testing.T) {
 		}
 	}
 }
+
+// TestSingleNodeRestartRecovery verifies that when a peer disconnects and reconnects
+// with a new ephemeral key, removePeerObf clears the cached ephemeral and peerReady,
+// allowing the re-handshake to converge onto a fresh, identical shared key without
+// cipher mismatch or decryption garbage drops.
+func TestSingleNodeRestartRecovery(t *testing.T) {
+	p := peer.ID("12D3KooWTestSingleNodeRestartRecovery12345")
+	longKey, err := obfuscate.GenerateObfKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateObfKeyPair: %v", err)
+	}
+	n := &Node{
+		obfKeyPair:              longKey,
+		peerReady:               sync.Map{},
+		peerRxDecryptRecentErrs: sync.Map{},
+		handshakeFingerprint:    atomic.Pointer[string]{},
+	}
+	n.perPeerObf.Store(&map[peer.ID]*PeerObf{})
+
+	// 1. Initial connection: negotiate ephemeral key
+	kp1 := n.useCachedHandshakeEph(p)
+	if kp1 == nil {
+		t.Fatalf("failed to mint initial ephemeral key")
+	}
+
+	// 2. Peer disconnects: removePeerObf is called
+	n.removePeerObf(p)
+
+	// Verify cached ephemeral is dropped and peerReady is cleared
+	n.cachedHandshakeEphMu.Lock()
+	_, cached := n.cachedHandshakeEph[p]
+	n.cachedHandshakeEphMu.Unlock()
+	if cached {
+		t.Fatalf("cachedHandshakeEph must be cleared after removePeerObf")
+	}
+	if n.isPeerReady(p) {
+		t.Fatalf("peerReady must be cleared after removePeerObf")
+	}
+
+	// 3. Peer reconnects: new ephemeral key is minted cleanly (PFS restored)
+	kp2 := n.useCachedHandshakeEph(p)
+	if kp2 == nil {
+		t.Fatalf("failed to mint post-reconnect ephemeral key")
+	}
+	if kp1.Fingerprint() == kp2.Fingerprint() {
+		t.Fatalf("post-reconnect handshake must mint a fresh ephemeral key, got identical fingerprint %s", kp1.Fingerprint())
+	}
+	t.Logf("✓ Single-node restart recovery verified: fresh ephemeral key minted (%s -> %s)", kp1.Fingerprint(), kp2.Fingerprint())
+}

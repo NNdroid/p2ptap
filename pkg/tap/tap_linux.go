@@ -1,14 +1,16 @@
-//go:build linux
-// +build linux
+//go:build linux && !android
+// +build linux,!android
 
 package tap
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"unsafe"
 
 	"github.com/vishvananda/netlink"
@@ -21,7 +23,6 @@ var tapLog = logger.New("TAP")
 
 type LinuxTAPDevice struct {
 	name    string
-	mac     string
 	file    *os.File
 	ipCIDR  string
 	ipv6    string
@@ -79,7 +80,8 @@ func createOSTAPDevice(tapName string, mtu int) (TAPDevice, error) {
 	dev.eventFd = efd
 
 	if err = dev.SetMTU(mtu); err != nil {
-		tapLog.Warn("Failed to set MTU %d on '%s': %v", mtu, realName, err)
+		_ = dev.Close()
+		return nil, fmt.Errorf("configure MTU %d on TAP device %q: %w", mtu, realName, err)
 	}
 
 	tapLog.Info("Linux TAP device '%s' created via /dev/net/tun (fd=%d)", realName, file.Fd())
@@ -125,12 +127,41 @@ func (l *LinuxTAPDevice) SetMAC(mac string) error {
 	if err := netlink.LinkSetHardwareAddr(link, addr); err != nil {
 		return fmt.Errorf("netlink set MAC %s on %q: %w", addr, l.name, err)
 	}
-	l.mac = addr.String()
+	actual, err := l.ActualMAC()
+	if err != nil {
+		return fmt.Errorf("verify MAC on %q after setting it: %w", l.name, err)
+	}
+	actualAddr, err := net.ParseMAC(actual)
+	if err != nil || len(actualAddr) != 6 {
+		return fmt.Errorf("verify MAC on %q after setting it: invalid address %q", l.name, actual)
+	}
+	if !bytes.Equal(actualAddr, addr) {
+		return fmt.Errorf("TAP MAC verification failed on %q: requested %s, kernel reports %s", l.name, addr, actualAddr)
+	}
 	return nil
 }
 
+// ActualMAC always queries netlink. A value retained from SetMAC can become
+// stale if a network manager or another privileged process changes the
+// interface afterwards.
+func (l *LinuxTAPDevice) ActualMAC() (string, error) {
+	link, err := netlink.LinkByName(l.name)
+	if err != nil {
+		return "", fmt.Errorf("netlink find link %q: %w", l.name, err)
+	}
+	if link.Attrs() == nil || len(link.Attrs().HardwareAddr) != 6 {
+		return "", fmt.Errorf("netlink returned no 6-octet hardware address for %q", l.name)
+	}
+	return link.Attrs().HardwareAddr.String(), nil
+}
+
 func (l *LinuxTAPDevice) MAC() string {
-	return l.mac
+	mac, err := l.ActualMAC()
+	if err != nil {
+		tapLog.Debug("Failed to query current MAC on '%s': %v", l.name, err)
+		return ""
+	}
+	return mac
 }
 
 func (l *LinuxTAPDevice) SetMTU(mtu int) error {
@@ -226,6 +257,9 @@ func (l *LinuxTAPDevice) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
 	if err := netlink.LinkSetUp(link); err != nil {
 		return fmt.Errorf("netlink link set %q up: %w", l.name, err)
 	}
+	if err := netlink.SetPromiscOn(link); err != nil {
+		tapLog.Debug("netlink link set %q promisc on: %v (non-fatal)", l.name, err)
+	}
 
 	// Configure IPv4
 	if ipCIDR != "" {
@@ -252,6 +286,56 @@ func (l *LinuxTAPDevice) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
 	}
 
 	tapLog.Info("TAP '%s' configured via netlink: IPv4=%s IPv6=%s", l.name, ipCIDR, ipv6CIDR)
+
+	// Ensure Linux kernel forwarding, rp_filter, and ARP flux prevention are properly configured
+	_ = os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0644)
+	_ = os.WriteFile("/proc/sys/net/ipv6/conf/all/forwarding", []byte("1"), 0644)
+	_ = os.WriteFile("/proc/sys/net/ipv4/conf/all/rp_filter", []byte("2"), 0644)
+	_ = os.WriteFile("/proc/sys/net/ipv4/conf/default/rp_filter", []byte("2"), 0644)
+	_ = os.WriteFile("/proc/sys/net/ipv4/conf/all/arp_ignore", []byte("1"), 0644)
+	_ = os.WriteFile("/proc/sys/net/ipv4/conf/default/arp_ignore", []byte("1"), 0644)
+	_ = os.WriteFile("/proc/sys/net/ipv4/conf/all/arp_announce", []byte("2"), 0644)
+	_ = os.WriteFile("/proc/sys/net/ipv4/conf/default/arp_announce", []byte("2"), 0644)
+	if _, err := os.Stat("/proc/sys/net/ipv4/conf/" + l.name); err == nil {
+		_ = os.WriteFile("/proc/sys/net/ipv4/conf/"+l.name+"/rp_filter", []byte("2"), 0644)
+		_ = os.WriteFile("/proc/sys/net/ipv4/conf/"+l.name+"/arp_ignore", []byte("1"), 0644)
+		_ = os.WriteFile("/proc/sys/net/ipv4/conf/"+l.name+"/arp_announce", []byte("2"), 0644)
+	}
+
+	// Ensure firewall (iptables/ip6tables) does not drop incoming/forwarded/outgoing packets on the TAP device
+	if exec.Command("iptables", "-C", "INPUT", "-i", l.name, "-j", "ACCEPT").Run() != nil {
+		_ = exec.Command("iptables", "-I", "INPUT", "-i", l.name, "-j", "ACCEPT").Run()
+	}
+	if exec.Command("iptables", "-C", "FORWARD", "-i", l.name, "-j", "ACCEPT").Run() != nil {
+		_ = exec.Command("iptables", "-I", "FORWARD", "-i", l.name, "-j", "ACCEPT").Run()
+	}
+	if exec.Command("iptables", "-C", "OUTPUT", "-o", l.name, "-j", "ACCEPT").Run() != nil {
+		_ = exec.Command("iptables", "-I", "OUTPUT", "-o", l.name, "-j", "ACCEPT").Run()
+	}
+	if exec.Command("ip6tables", "-C", "INPUT", "-i", l.name, "-j", "ACCEPT").Run() != nil {
+		_ = exec.Command("ip6tables", "-I", "INPUT", "-i", l.name, "-j", "ACCEPT").Run()
+	}
+	if exec.Command("ip6tables", "-C", "FORWARD", "-i", l.name, "-j", "ACCEPT").Run() != nil {
+		_ = exec.Command("ip6tables", "-I", "FORWARD", "-i", l.name, "-j", "ACCEPT").Run()
+	}
+	if exec.Command("ip6tables", "-C", "OUTPUT", "-o", l.name, "-j", "ACCEPT").Run() != nil {
+		_ = exec.Command("ip6tables", "-I", "OUTPUT", "-o", l.name, "-j", "ACCEPT").Run()
+	}
+
+	// TCP MSS Clamping to prevent Path MTU blackholing / hanging transfers over P2P tunnels
+	if exec.Command("iptables", "-t", "mangle", "-C", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu").Run() != nil {
+		_ = exec.Command("iptables", "-t", "mangle", "-I", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu").Run()
+	}
+	if exec.Command("iptables", "-t", "mangle", "-C", "OUTPUT", "-o", l.name, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu").Run() != nil {
+		_ = exec.Command("iptables", "-t", "mangle", "-I", "OUTPUT", "-o", l.name, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu").Run()
+	}
+	if exec.Command("ip6tables", "-t", "mangle", "-C", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu").Run() != nil {
+		_ = exec.Command("ip6tables", "-t", "mangle", "-I", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu").Run()
+	}
+	if exec.Command("ip6tables", "-t", "mangle", "-C", "OUTPUT", "-o", l.name, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu").Run() != nil {
+		_ = exec.Command("ip6tables", "-t", "mangle", "-I", "OUTPUT", "-o", l.name, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu").Run()
+	}
+
 	return nil
 }
 

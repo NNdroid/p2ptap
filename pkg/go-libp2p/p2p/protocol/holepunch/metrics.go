@@ -35,10 +35,31 @@ var (
 		[]string{"side", "num_attempts", "outcome"},
 	)
 
+	// New counters for timeout events
+	holePunchTimeouts = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricNamespace,
+			Name:      "holepunch_timeouts_total",
+			Help:      "Total hole‑punch timeout events (direct or relay)",
+		},
+		[]string{"type"},
+	)
+
+	relayTimeouts = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricNamespace,
+			Name:      "relay_timeouts_total",
+			Help:      "Total relay timeout events",
+		},
+		[]string{"reason"},
+	)
+
 	collectors = []prometheus.Collector{
 		directDialsTotal,
 		hpAddressOutcomesTotal,
 		hpOutcomesTotal,
+		holePunchTimeouts,
+		relayTimeouts,
 	}
 )
 

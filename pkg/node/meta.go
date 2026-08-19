@@ -93,12 +93,12 @@ func (n *Node) handleMetaStream(s network.Stream) {
 					}
 					if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 && n.TAP != nil {
 						garpFrame := tap.BuildARPReplyFrame(hw, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, ip, ip)
-						_, _ = n.TAP.Write(garpFrame)
+						_, _ = n.tapWrite(garpFrame)
 					}
 					if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil && n.TAP != nil {
 						naFrame := tap.BuildIPv6NeighborAdvertisementFrame(hw, ip6)
 						if len(naFrame) > 0 {
-							_, _ = n.TAP.Write(naFrame)
+							_, _ = n.tapWrite(naFrame)
 						}
 					}
 				}
@@ -176,6 +176,13 @@ func (n *Node) getAllPeersForMetaSync() []peer.ID {
 			list = append(list, targetPeer)
 		}
 	}
+	n.peerMeta.Range(func(key, _ any) bool {
+		if pid, ok := key.(peer.ID); ok && pid != "" && pid != n.Host.ID() && !seen[pid] {
+			seen[pid] = true
+			list = append(list, pid)
+		}
+		return true
+	})
 	return list
 }
 
@@ -192,6 +199,9 @@ func (n *Node) getAllPeersForMetaSync() []peer.ID {
 // retried a couple of times: a timeout is expected when the peer is only
 // reachable over an unreachable direct address, and it is not fatal.
 func (n *Node) syncMetadataToPeer(targetPeer peer.ID) {
+	if n == nil || n.metaPool == nil {
+		return
+	}
 	// Relay-only peers may need a few more attempts because the circuit is
 	// established lazily; identity must still propagate so the peer is not
 	// shown as "unknown" in the WebUI. The relay-priority dial path
@@ -257,31 +267,32 @@ func (n *Node) syncMetadataToPeer(targetPeer peer.ID) {
 // sending identity here does not cause duplication — it only fills gaps. Peers
 // that still send a full payload (older builds) are handled the same way.
 func (n *Node) buildLocalMetaPayload() meta.NodeMetaPayload {
+	c := n.config()
 	reachability := n.computeReachability()
 	localTxRx := observer.TxRxStats{}
 	if n.Collector != nil {
 		localTxRx = n.Collector.GetTxRxStats()
 	}
 	exitSubnets := make([]string, 0)
-	if n.Config.ExitNode.Enable && len(n.Config.AdvertisedSubnets) > 0 {
-		exitSubnets = n.Config.AdvertisedSubnets
+	if c.ExitNode.Enable && len(c.AdvertisedSubnets) > 0 {
+		exitSubnets = c.AdvertisedSubnets
 	}
 	return meta.NodeMetaPayload{
 		// Identity fields — required for boot nodes and relay-only peers that
 		// cannot rely on the LSA channel to learn who we are.
 		NodeName:          n.nodeName,
-		TapIP:             n.Config.TapIP,
-		TapIPv6:           n.Config.TapIPv6,
-		TapMAC:            n.Config.TapMAC,
+		TapIP:             c.TapIP,
+		TapIPv6:           c.TapIPv6,
+		TapMAC:            c.TapMAC,
 		OS:                runtime.GOOS,
 		Arch:              runtime.GOARCH,
 		Version:           version.Version,
-		IsExitNode:        n.Config.ExitNode.Enable,
+		IsExitNode:        c.ExitNode.Enable,
 		AdvertisedSubnets: exitSubnets,
 		// Dynamic liveness fields.
 		UptimeSec:    int64(time.Since(n.startTime).Seconds()),
 		Reachability: reachability,
-		ExitNAT:      n.Config.ExitNode.NATMasquerade,
+		ExitNAT:      c.ExitNode.NATMasquerade,
 		TxSpeed:      localTxRx.TxSpeed,
 		RxSpeed:      localTxRx.RxSpeed,
 		TotalTx:      localTxRx.TotalTx,
@@ -389,12 +400,12 @@ func (n *Node) handleMetaResponse(remotePeer peer.ID, respData []byte) {
 	}
 	if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 {
 		garpFrame := tap.BuildARPReplyFrame(hw, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, ip, ip)
-		_, _ = n.TAP.Write(garpFrame)
+		_, _ = n.tapWrite(garpFrame)
 	}
 	if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil {
 		naFrame := tap.BuildIPv6NeighborAdvertisementFrame(hw, ip6)
 		if len(naFrame) > 0 {
-			_, _ = n.TAP.Write(naFrame)
+			_, _ = n.tapWrite(naFrame)
 		}
 	}
 }
@@ -471,14 +482,24 @@ func (n *Node) applyPeerMetaFromLSA(remotePeer peer.ID, lsa routing.LinkStatePay
 	}
 	if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 {
 		garpFrame := tap.BuildARPReplyFrame(hw, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, ip, ip)
-		_, _ = n.TAP.Write(garpFrame)
+		_, _ = n.tapWrite(garpFrame)
 	}
 	if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil {
 		naFrame := tap.BuildIPv6NeighborAdvertisementFrame(hw, ip6)
 		if len(naFrame) > 0 {
-			_, _ = n.TAP.Write(naFrame)
+			_, _ = n.tapWrite(naFrame)
 		}
 	}
+}
+
+// GetPeerMeta retrieves the cached metadata for a specific peer.
+func (n *Node) GetPeerMeta(p peer.ID) (PeerMeta, bool) {
+	if val, ok := n.peerMeta.Load(p); ok {
+		if meta, ok := val.(PeerMeta); ok {
+			return meta, true
+		}
+	}
+	return PeerMeta{}, false
 }
 
 // registerPeerIPMACFallback records a peer's TAP IP when its MAC is not yet
@@ -714,6 +735,8 @@ func (n *Node) ingestPeekMapNodeInfo(info PeekMapNodeInfo, viaPeer peer.ID) {
 	// two clusters into a single circuit-relay domain.
 	if info.IsBoot {
 		go n.considerDiscoveredBoot(pID)
+	} else {
+		go n.considerDiscoveredPeer(pID)
 	}
 }
 
@@ -885,21 +908,43 @@ func (n *Node) considerDiscoveredBoot(pID peer.ID) {
 	n.ensurePeekMapListener(pID)
 }
 
+// considerDiscoveredPeer proactively attempts to dial a regular VPN peer learned
+// through Peek-Map, ensuring direct P2P or circuit connectivity is established
+// immediately rather than waiting for manual traffic or the 30s DHT discovery loop.
+func (n *Node) considerDiscoveredPeer(pID peer.ID) {
+	if pID == "" || pID == n.Host.ID() || n.isBootstrapPeer(pID) {
+		return
+	}
+	if n.Host.Network().Connectedness(pID) == network.Connected {
+		return
+	}
+	addrs := filterLoopbackAddrs(n.Host.Peerstore().Addrs(pID))
+	if relayAddrs := n.SynthesizeRelayCircuitAddrs(pID); len(relayAddrs) > 0 {
+		addrs = append(addrs, relayAddrs...)
+		n.Host.Peerstore().AddAddrs(pID, relayAddrs, peerstore.AddressTTL)
+	}
+	if len(addrs) > 0 {
+		log.Debug("Peek-map proactively dialing discovered peer %s (%d addrs)", pID.ShortString(), len(addrs))
+		_ = n.dialInParallel(n.ctx, peer.AddrInfo{ID: pID, Addrs: addrs}, "discovered")
+	}
+}
+
 // localPeekMapNodeInfo builds our own node-info payload.
 func (n *Node) localPeekMapNodeInfo() PeekMapNodeInfo {
+	c := n.config()
 	return PeekMapNodeInfo{
 		PeerID:     n.Host.ID().String(),
 		NodeName:   n.nodeName,
-		TapIP:      n.Config.TapIP,
-		TapIPv6:    n.Config.TapIPv6,
-		TapMAC:     n.Config.TapMAC,
+		TapIP:      c.TapIP,
+		TapIPv6:    c.TapIPv6,
+		TapMAC:     c.TapMAC,
 		OS:         runtime.GOOS,
 		Arch:       runtime.GOARCH,
 		Version:    version.Version,
-		IsExitNode: n.Config.ExitNode.Enable,
+		IsExitNode: c.ExitNode.Enable,
 		// LAN subnets we advertise into the mesh — sent over the peek-map
 		// broadcast channel so every peer learns/updates our routed subnets.
-		AdvertisedSubnets: n.Config.AdvertisedSubnets,
+		AdvertisedSubnets: c.AdvertisedSubnets,
 		// We publish through a boot node we are directly connected to. The
 		// immediate boot increments this to 1 as it forwards, so a direct
 		// receiver records a weighted boot<->us edge of one relay hop. Cascaded
@@ -911,8 +956,8 @@ func (n *Node) localPeekMapNodeInfo() PeekMapNodeInfo {
 		// the dial paths already drop loopback (filterLoopbackAddrs), so
 		// filtering twice would only make single-machine setups untestable.
 		Addrs:    multiaddrsToStrings(n.Host.Addrs()),
-		ObfsAlgo: n.Config.Obfuscation.Algorithm,
-		ObfsMode: n.Config.Obfuscation.Mode,
+		ObfsAlgo: c.Obfuscation.Algorithm,
+		ObfsMode: c.Obfuscation.Mode,
 	}
 }
 
@@ -1095,15 +1140,19 @@ func (n *Node) processSubnetRoutes(remotePeer peer.ID, tapIPv4, tapIPv6 string, 
 	}
 
 	isAllowed := false
-	for _, p := range n.Config.AllowedSubnetPeers {
-		if p == "*" || p == remotePeer.String() {
-			isAllowed = true
-			break
+	if len(n.Config.AllowedSubnetPeers) == 0 {
+		isAllowed = true
+	} else {
+		for _, p := range n.Config.AllowedSubnetPeers {
+			if p == "*" || p == remotePeer.String() {
+				isAllowed = true
+				break
+			}
 		}
 	}
 
 	if !isAllowed {
-		log.Debug("🔒 Subnet route from peer %s ignored (not in allowed_subnet_peers)", remotePeer.String())
+		log.Debug("🔒 Subnet route from peer %s ignored (not in allowed_subnet_peers whitelist)", remotePeer.String())
 		return
 	}
 
@@ -1159,52 +1208,52 @@ func (n *Node) reconcileSubnetRoutes() {
 		return
 	}
 	validSubnets := make(map[string]string)
-	if n.Config.AcceptAdvertisedSubnets {
-		n.peerMeta.Range(func(key, value interface{}) bool {
-			pID := key.(peer.ID)
-			if pID == n.Host.ID() {
-				return true
-			}
-			meta := value.(PeerMeta)
+	n.peerMeta.Range(func(key, value interface{}) bool {
+		pID := key.(peer.ID)
+		if pID == n.Host.ID() {
+			return true
+		}
+		meta := value.(PeerMeta)
 
-			isAllowed := false
+		isAllowed := false
+		if n.Config.AcceptAdvertisedSubnets {
 			for _, p := range n.Config.AllowedSubnetPeers {
 				if p == "*" || p == pID.String() {
 					isAllowed = true
 					break
 				}
 			}
-			if !isAllowed {
-				return true
+		}
+
+		cleanGWv4 := strings.Split(meta.TapIP, "/")[0]
+		cleanGWv6 := strings.Split(meta.TapIPv6, "/")[0]
+
+		for _, sub := range meta.AdvertisedSubnets {
+			if sub == "" {
+				continue
 			}
-
-			cleanGWv4 := strings.Split(meta.TapIP, "/")[0]
-			cleanGWv6 := strings.Split(meta.TapIPv6, "/")[0]
-
-			for _, sub := range meta.AdvertisedSubnets {
-				if sub == "" {
-					continue
-				}
-				// Exclude subnets that lost the duplicate/overlap arbitration to a
-				// higher-priority peer, so their OS route is reconciled away.
-				if n.isSubnetRouteSuppressed(pID, sub) {
-					continue
-				}
-				if _, subnetNet, err := net.ParseCIDR(sub); err == nil {
-					if subnetNet.IP.To4() != nil {
-						if cleanGWv4 != "" {
-							validSubnets[sub] = cleanGWv4
-						}
-					} else {
-						if cleanGWv6 != "" {
-							validSubnets[sub] = cleanGWv6
-						}
+			if !isAllowed && !n.isSubnetManuallyAuthorized(sub) {
+				continue
+			}
+			// Exclude subnets that lost the duplicate/overlap arbitration to a
+			// higher-priority peer, so their OS route is reconciled away.
+			if n.isSubnetRouteSuppressed(pID, sub) {
+				continue
+			}
+			if _, subnetNet, err := net.ParseCIDR(sub); err == nil {
+				if subnetNet.IP.To4() != nil {
+					if cleanGWv4 != "" {
+						validSubnets[sub] = cleanGWv4
+					}
+				} else {
+					if cleanGWv6 != "" {
+						validSubnets[sub] = cleanGWv6
 					}
 				}
 			}
-			return true
-		})
-	}
+		}
+		return true
+	})
 
 	n.Gateway.ReconcileSubnetRoutes(validSubnets)
 }

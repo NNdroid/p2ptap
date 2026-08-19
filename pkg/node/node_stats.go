@@ -18,6 +18,7 @@ import (
 	manet "github.com/multiformats/go-multiaddr/net"
 
 	"p2ptap/pkg/meta"
+	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/observer"
 )
 
@@ -35,13 +36,7 @@ const (
 )
 
 // returnPathAliveWindow is the liveness window for the WebUI "回程状态" column.
-// If we received an inbound frame from a peer within this window, its return
-// path is considered alive. It is intentionally separate from the circuit-breaker
-// reset window (relayPoolHealthyRxWindow, 10s) — that one only gates relay-hop
-// fail-count resets; this one is the human-facing "is the peer sending us
-// anything back?" indicator and is lenient enough to absorb normal idle gaps
-// between periodic ping-pong / data frames.
-const returnPathAliveWindow = 20 * time.Second
+const returnPathAliveWindow = 60 * time.Second
 
 // toDuplicateIPConflictDTOs converts the node-internal DuplicateIPConflict set
 // into the observer DTO shape the WebUI consumes. DetectedAt is formatted to
@@ -85,6 +80,14 @@ func (n *Node) deriveConnSignals(pID peer.ID) peerConnSignals {
 			s.hasRelay = true
 		} else {
 			s.hasDirect = true
+		}
+	}
+	// When there is no direct libp2p connection to the destination peer, check whether
+	// an active relay path exists (via Boot Relay uplink or Dijkstra Overlay Relay hop).
+	if !s.hasDirect {
+		if hop := n.relayHopForTarget(pID); hop != "" {
+			s.hasRelay = true
+			s.connCount++
 		}
 	}
 	// No direct connection (neither circuit relay nor overlay route counted as
@@ -161,20 +164,118 @@ func humanAgo(d time.Duration) string {
 
 // deriveReturnPath classifies a peer's asymmetric-routing return-path liveness
 // for the WebUI "回程状态" column, using the same lastRx signal the ping-pong
-// probe relies on. It deliberately does NOT fold the outbound connectivity
-// verdict into this field: the two are independent and the whole point is to
-// surface when they disagree (outbound OK but return dead).
-func (n *Node) deriveReturnPath(pID peer.ID) (status, detail, lastRxISO string) {
+// probe relies on. It supports fine-grained states:
+// - "relay_only": Bootstrap or pure relay node (no TAP data payload expected)
+// - "mac_mismatch": Source MAC mismatch detected on return path
+// - "asymmetric": Outbound traffic sent (Tx > 0) but zero inbound frames returned
+// - "idle": Standby channel, zero traffic in either direction
+// - "ok": Inbound frames active within returnPathAliveWindow
+// - "idle": Standby channel, zero pending traffic
+// - "asymmetric": Outbound traffic sent (Tx > 0) but zero inbound frames returned
+// - "dead": Active outbound traffic with zero inbound return response
+func (n *Node) deriveReturnPath(pID peer.ID, role string) (status, detail, lastRxISO string) {
+	hasTapIP := false
+	if val, ok := n.peerMeta.Load(pID); ok {
+		meta := val.(PeerMeta)
+		if meta.TapIP != "" || meta.TapIPv6 != "" {
+			hasTapIP = true
+		}
+	}
+	if role == "Bootstrap" || !hasTapIP {
+		return "relay_only", "信令/中继服务节点 · 不路由本端TAP数据", ""
+	}
+
+	// 1. Explicit TAP Probe outcome takes highest precedence
+	probe := n.tapProbeFrom(pID)
+	if !probe.Last.IsZero() && time.Since(probe.Last) <= returnPathAliveWindow {
+		if probe.Ok {
+			return "ok", "回程正常 · TAP 探测通过 (" + humanAgo(time.Since(probe.Last)) + "前)", probe.Last.Format(time.RFC3339)
+		}
+		if probe.Reached {
+			return "asymmetric", "单向仅发 · 探测帧已达对端但未收到回程帧 (" + humanAgo(time.Since(probe.Last)) + "前)", probe.Last.Format(time.RFC3339)
+		}
+	}
+
 	lastRx := n.lastRxFrom(pID)
 	if lastRx.IsZero() {
-		return "idle", "尚无回程帧记录", ""
+		// Distinguish active one-way traffic from idle peers that merely received background broadcasts (ARP/mDNS).
+		txSpd, _ := n.getPeerSpeed(pID)
+		if txSpd > 0 {
+			return "asymmetric", "单向仅发 · 正在发送流量但未收到回程帧(可能为路由或防火墙阻断)", ""
+		}
+		return "idle", "待机就绪 · 暂无双向业务流量", ""
 	}
 	ago := time.Since(lastRx)
 	iso := lastRx.Format(time.RFC3339)
 	if ago <= returnPathAliveWindow {
 		return "ok", "回程正常 · " + humanAgo(ago) + "前收到帧", iso
 	}
-	return "dead", "回程断 · " + humanAgo(ago) + "无回程帧(去程可能正常)", iso
+
+	// Beyond the active window, distinguish idle standby from genuine return-path break
+	txSpd, rxSpd := n.getPeerSpeed(pID)
+	if txSpd > 0 && rxSpd == 0 {
+		return "dead", "回程中断 · " + humanAgo(ago) + "无回程帧(去程有发包但无回程)", iso
+	}
+	return "idle", "待机就绪 · 上次通信 " + humanAgo(ago) + " 前", iso
+}
+
+// deriveTapPath classifies a peer's end-to-end TAP data-path health for the
+// WebUI "TAP Path" column.
+func (n *Node) deriveTapPath(pID peer.ID) (status, detail string) {
+	hasTapIP := false
+	var meta PeerMeta
+	if val, ok := n.peerMeta.Load(pID); ok {
+		meta = val.(PeerMeta)
+		if meta.TapIP != "" || meta.TapIPv6 != "" {
+			hasTapIP = true
+		}
+	}
+	if !hasTapIP {
+		return "unknown", "信令/中继节点 · 无虚拟 TAP 设备"
+	}
+
+	// 1. Explicit TAP Probe outcome takes highest precedence
+	out := n.tapProbeFrom(pID)
+	if !out.Last.IsZero() {
+		ago := time.Since(out.Last)
+		if out.Ok {
+			return "ok", "TAP 探测通过 · " + humanAgo(ago) + "前"
+		}
+		if out.Reached {
+			return "fail", "帧已抵达对端 TAP,但对端系统未应答(ICMP 被拦截 / 无回到本端 TAP IP 的路由) · " + humanAgo(ago) + "前"
+		}
+		return "fail", "帧未抵达对端 TAP(overlay / 中继去程或回程断开) · " + humanAgo(ago) + "前: " + out.Detail
+	}
+
+	// 2. Active bidirectional frame reception proves TAP link is working
+	lastRx := n.lastRxFrom(pID)
+	if !lastRx.IsZero() && time.Since(lastRx) <= returnPathAliveWindow {
+		return "ok", "TAP 数据链路通畅 · 正在双向收发业务帧"
+	}
+
+	// 3. For non-exit/non-subnet peers, verify if advertised MAC matches observed wire MAC
+	advHW := n.lookupPeerTapMAC(pID)
+	adv := ""
+	if advHW != nil {
+		adv = advHW.String()
+	}
+	if !meta.IsExitNode && len(meta.AdvertisedSubnets) == 0 {
+		obs := n.observedTapMACFrom(pID)
+		if obs != nil && adv != "" && obs.String() != adv {
+			return "mac_mismatch", "对端实际发帧 MAC " + obs.String() + " 与广播 MAC " + adv + " 不一致 · 探测帧按广播 MAC 寻址,对端 OS 不会应答"
+		}
+	}
+
+	if !lastRx.IsZero() {
+		return "ok", "已收到对端真实帧 · 链路通畅"
+	}
+	return "unknown", "尚未运行端到端 TAP 探测"
+}
+
+// UpdateWebCollectorState updates the observer stats collector with the latest
+// active peers, routes, ARP/MAC tables, speed, and health snapshots.
+func (n *Node) UpdateWebCollectorState() {
+	n.updateWebCollectorState()
 }
 
 func (n *Node) updateWebCollectorState() {
@@ -319,6 +420,7 @@ func (n *Node) updateWebCollectorState() {
 		nodeName := ""
 		tapIP := ""
 		tapIPv6 := ""
+		tapMAC := ""
 		osArch := ""
 		version := ""
 		uptimeStr := ""
@@ -352,6 +454,7 @@ func (n *Node) updateWebCollectorState() {
 			nodeName = meta.NodeName
 			tapIP = meta.TapIP
 			tapIPv6 = meta.TapIPv6
+			tapMAC = meta.TapMAC
 			osArch = meta.OSArch
 			version = meta.Version
 			isExitNode = meta.IsExitNode
@@ -532,19 +635,123 @@ func (n *Node) updateWebCollectorState() {
 		connState, connStage, connDetail := n.derivePeerConnState(pID, role)
 
 		// Return-path liveness (asymmetric routing): independent of ConnState.
-		rpStatus, rpDetail, rpLastRxISO := n.deriveReturnPath(pID)
+		rpStatus, rpDetail, rpLastRxISO := n.deriveReturnPath(pID, role)
+
+		// TAP data-path health (observed MAC vs advertised + last probe outcome).
+		tapStatus, tapDetail := n.deriveTapPath(pID)
+		observedMAC := n.observedTapMACFrom(pID)
+		observedMACStr := ""
+		if observedMAC != nil {
+			observedMACStr = observedMAC.String()
+		}
+		tapMACMismatch := observedMACStr != "" && tapMAC != "" && observedMACStr != tapMAC
 
 		// Per-peer encryption/obfuscation state negotiated via SeqSync ECDH
 		// (re-derived here for the inline Encryption column of the WebUI).
 		obfNegotiated, obfAlgo, obfEncrypted := n.obfStateForPeer(pID)
 
+		var (
+			obfLocalEphFP   string
+			obfRemoteEphFP  string
+			obfTxKeyFP      string
+			obfRxKeyFP      string
+			obfDecryptOK    uint64
+			obfDecryptErrs  uint64
+			obfLastRekeyAgo string
+			obfIAmLeader    bool
+			seqMinValid     uint64
+			seqMaxSeen      uint64
+			seqEpoch        uint64
+			seqPeerEpoch    uint64
+			seqReplayDrops  uint64
+			seqWindowResets uint64
+			winUtil         float64
+		)
+
+		obfIAmLeader = n.isResyncLeader(pID)
+		if val, ok := n.peerRxDecryptOK.Load(pID); ok {
+			obfDecryptOK = val.(*atomic.Uint64).Load()
+		}
+		if val, ok := n.peerRxDecryptErrs.Load(pID); ok {
+			obfDecryptErrs = val.(*atomic.Uint64).Load()
+		}
+		if val, ok := n.lastRekeySuccess.Load(pID); ok {
+			obfLastRekeyAgo = formatDurationAgo(val.(time.Time))
+		}
+
+		if tbl := n.perPeerObf.Load(); tbl != nil {
+			if po, ok := (*tbl)[pID]; ok && po != nil {
+				if len(po.txKey) > 0 {
+					obfTxKeyFP = obfuscate.KeyFingerprint(po.txKey)
+				}
+				if len(po.rxKey) > 0 {
+					obfRxKeyFP = obfuscate.KeyFingerprint(po.rxKey)
+				}
+				if len(po.pfsPubKey) > 0 {
+					obfRemoteEphFP = obfuscate.KeyFingerprint(po.pfsPubKey)
+				}
+				seqEpoch = po.localEpoch
+				seqPeerEpoch = po.peerEpoch
+			}
+		}
+
+		n.dedupPeersMu.RLock()
+		d := n.dedupPeers[pID]
+		n.dedupPeersMu.RUnlock()
+		if d != nil {
+			seqMaxSeen = d.MaxSeq()
+			if seqPeerEpoch == 0 {
+				seqPeerEpoch = d.ConnEpoch()
+			}
+			seqReplayDrops = d.ReplayDrops()
+			seqWindowResets = d.WindowResets()
+			winUtil = d.WindowUtilization()
+			if seqMaxSeen > 65536 {
+				seqMinValid = seqMaxSeen - 65536
+			}
+		}
+
+		transportScore := 999
+		transportPriority := "Overlay (Score: 999)"
+		if n.Dispatcher != nil {
+			if ps := n.Dispatcher.GetPeerStreams(pID); ps != nil {
+				streams := ps.GetAllStreams()
+				if len(streams) > 0 {
+					transportScore = scoreStreamTransport(streams[0])
+				}
+			}
+		}
+		if transportScore == 999 {
+			if strings.Contains(addr, "/p2p-circuit") || isRelayedPeer {
+				transportScore = 100
+			} else if strings.Contains(addr, "127.0.0.1") || strings.Contains(addr, "::1") {
+				transportScore = 0
+			} else if strings.Contains(addr, "192.168.") || strings.Contains(addr, "10.") || strings.Contains(addr, "172.16.") || strings.Contains(addr, "172.17.") || strings.Contains(addr, "172.18.") || strings.Contains(addr, "172.19.") || strings.Contains(addr, "172.20.") || strings.Contains(addr, "172.21.") || strings.Contains(addr, "172.22.") || strings.Contains(addr, "172.23.") || strings.Contains(addr, "172.24.") || strings.Contains(addr, "172.25.") || strings.Contains(addr, "172.26.") || strings.Contains(addr, "172.27.") || strings.Contains(addr, "172.28.") || strings.Contains(addr, "172.29.") || strings.Contains(addr, "172.30.") || strings.Contains(addr, "172.31.") || strings.Contains(addr, "fd") {
+				transportScore = 10
+			} else if addr != "" && addr != "unknown" {
+				transportScore = 20
+			}
+		}
+		switch transportScore {
+		case 0:
+			transportPriority = "Loopback (0)"
+		case 10:
+			transportPriority = "LAN Direct (10)"
+		case 20:
+			transportPriority = "WAN Direct (20)"
+		case 100:
+			transportPriority = "Relay (100)"
+		default:
+			transportPriority = "Overlay (999)"
+		}
+
 		peersDTO = append(peersDTO, observer.PeerInfoDTO{
 			PeerID:            pID.String(),
 			NodeName:          nodeName,
 			Role:              role,
-		IsRelayed:         isRelayedPeer,
-		RelayOnly:         n.isRelayOnlyPeer(pID),
-		IsExitNode:        isExitNode,
+			IsRelayed:         isRelayedPeer,
+			RelayOnly:         n.isRelayOnlyPeer(pID),
+			IsExitNode:        isExitNode,
 			ExitNAT:           exitNAT,
 			TxSpeed:           peerTxSpd,
 			RxSpeed:           peerRxSpd,
@@ -562,6 +769,8 @@ func (n *Node) updateWebCollectorState() {
 			Addr:              addr,
 			AllAddrs:          allAddrs,
 			Transport:         transport,
+			TransportScore:    transportScore,
+			TransportPriority: transportPriority,
 			RTTMs:             rttMs,
 			JitterMs:          float64(int(jitterMs*10)) / 10.0,
 			LossRatePercent:   0.0,
@@ -569,6 +778,21 @@ func (n *Node) updateWebCollectorState() {
 			ObfNegotiated:     obfNegotiated,
 			ObfAlgo:           obfAlgo,
 			ObfEncrypted:      obfEncrypted,
+			ObfLocalEphFP:     obfLocalEphFP,
+			ObfRemoteEphFP:    obfRemoteEphFP,
+			ObfTxKeyFP:        obfTxKeyFP,
+			ObfRxKeyFP:        obfRxKeyFP,
+			ObfDecryptOK:      obfDecryptOK,
+			ObfDecryptErrs:    obfDecryptErrs,
+			ObfLastRekeyAgo:   obfLastRekeyAgo,
+			ObfIAmLeader:      obfIAmLeader,
+			SeqMinValid:       seqMinValid,
+			SeqMaxSeen:        seqMaxSeen,
+			SeqEpoch:          seqEpoch,
+			SeqPeerEpoch:      seqPeerEpoch,
+			ReplayDrops:       seqReplayDrops,
+			WindowResets:      seqWindowResets,
+			WinUtilization:    winUtil,
 			SeqSyncConvergeMs: n.peerSeqSyncConvergeMs(pID),
 			ConnState:         connState,
 			ConnStage:         connStage,
@@ -576,6 +800,11 @@ func (n *Node) updateWebCollectorState() {
 			ReturnPath:        rpStatus,
 			ReturnPathDetail:  rpDetail,
 			LastRxISO:         rpLastRxISO,
+			TapMAC:            tapMAC,
+			ObservedTapMAC:    observedMACStr,
+			TapMACMismatch:    tapMACMismatch,
+			TapDataPath:       tapStatus,
+			TapDataPathDetail: tapDetail,
 		})
 	}
 
@@ -739,7 +968,9 @@ func (n *Node) updateWebCollectorState() {
 		meta := value.(PeerMeta)
 		for _, sub := range meta.AdvertisedSubnets {
 			status := "Pending Authorization"
-			if n.Config.AcceptAdvertisedSubnets {
+			if n.isSubnetManuallyAuthorized(sub) {
+				status = "Active (Authorized)"
+			} else if n.Config.AcceptAdvertisedSubnets {
 				for _, allowed := range n.Config.AllowedSubnetPeers {
 					if allowed == "*" || allowed == pID.String() {
 						status = "Active (Authorized)"
@@ -978,13 +1209,66 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 		}
 	}
 
+	trackerSnap := func(c *ChannelTrafficCounter) (txF, rxF, txB, rxB, syncs, errs uint64, ago string) {
+		if c == nil {
+			return 0, 0, 0, 0, 0, 0, ""
+		}
+		return c.Snapshot()
+	}
+
+	var (
+		seqTxF, seqRxF, seqTxB, seqRxB, seqSyncs, seqErrs uint64
+		seqAgo string
+		lsaTxF, lsaRxF, lsaTxB, lsaRxB, lsaSyncs, lsaErrs uint64
+		lsaAgo string
+		peekTxF, peekRxF, peekTxB, peekRxB, peekSyncs, peekErrs uint64
+		peekAgo string
+		dataTxF, dataRxF, dataTxB, dataRxB, dataSyncs, dataErrs uint64
+		dataAgo string
+		relayTxF, relayRxF, relayTxB, relayRxB, relaySyncs, relayErrs uint64
+		relayAgo string
+		authTxF, authRxF, authTxB, authRxB, authSyncs, authErrs uint64
+		authAgo string
+		dcutrTxF, dcutrRxF, dcutrTxB, dcutrRxB, dcutrSyncs, dcutrErrs uint64
+		dcutrAgo string
+		echoTxF, echoRxF, echoTxB, echoRxB, echoSyncs, echoErrs uint64
+		echoAgo string
+	)
+
+	if n.protoTracker != nil {
+		seqTxF, seqRxF, seqTxB, seqRxB, seqSyncs, seqErrs, seqAgo = trackerSnap(&n.protoTracker.SeqSync)
+		lsaTxF, lsaRxF, lsaTxB, lsaRxB, lsaSyncs, lsaErrs, lsaAgo = trackerSnap(&n.protoTracker.LSA)
+		peekTxF, peekRxF, peekTxB, peekRxB, peekSyncs, peekErrs, peekAgo = trackerSnap(&n.protoTracker.PeekMap)
+		dataTxF, dataRxF, dataTxB, dataRxB, dataSyncs, dataErrs, dataAgo = trackerSnap(&n.protoTracker.Data)
+		relayTxF, relayRxF, relayTxB, relayRxB, relaySyncs, relayErrs, relayAgo = trackerSnap(&n.protoTracker.RelayData)
+		authTxF, authRxF, authTxB, authRxB, authSyncs, authErrs, authAgo = trackerSnap(&n.protoTracker.Auth)
+		dcutrTxF, dcutrRxF, dcutrTxB, dcutrRxB, dcutrSyncs, dcutrErrs, dcutrAgo = trackerSnap(&n.protoTracker.DCUtR)
+		echoTxF, echoRxF, echoTxB, echoRxB, echoSyncs, echoErrs, echoAgo = trackerSnap(&n.protoTracker.Echo)
+	}
+
 	// 1. SeqSync Channel
+	syncedPeers := 0
+	if tbl := n.perPeerObf.Load(); tbl != nil {
+		for _, po := range *tbl {
+			if po != nil && po.negotiated {
+				syncedPeers++
+			}
+		}
+	}
+
 	seqIn := inboundCounts[string(SeqSyncProtocolID)]
 	seqOut := outboundCounts[string(SeqSyncProtocolID)]
 	seqTotal := seqIn + seqOut
-	seqStatus := "idle"
-	if seqTotal > 0 {
+	seqStatus := "ready"
+	if seqTotal > 0 || syncedPeers > 0 {
 		seqStatus = "active"
+	} else if len(n.Host.Network().Conns()) > 0 {
+		seqStatus = "running"
+	}
+
+	seqDetails := fmt.Sprintf("Synced Peers: %d · Window Dedup & Replay Protection", syncedPeers)
+	if seqTotal > 0 {
+		seqDetails = fmt.Sprintf("Handshaking: %d stream(s) · Synced Peers: %d", seqTotal, syncedPeers)
 	}
 
 	// 2. LSA Routing Channel
@@ -994,14 +1278,16 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	lsaStatus := "running"
 	if lsaTotal > 0 {
 		lsaStatus = "active"
+	} else if len(n.Host.Network().Conns()) == 0 {
+		lsaStatus = "ready"
 	}
 
 	// 3. Peek-Map Broadcast Channel
 	peekIn := inboundCounts[string(PeekMapProtocolID)] + inboundCounts[string(meta.MetaProtocolID)]
 	peekOut := outboundCounts[string(PeekMapProtocolID)] + outboundCounts[string(meta.MetaProtocolID)]
 	peekTotal := peekIn + peekOut
-	peekStatus := "idle"
-	if peekTotal > 0 || len(n.Config.BootstrapPeers) > 0 {
+	peekStatus := "ready"
+	if peekTotal > 0 || len(n.Config.BootstrapPeers) > 0 || len(n.Host.Network().Conns()) > 0 {
 		peekStatus = "running"
 	}
 
@@ -1017,8 +1303,8 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	dataIn := inboundCounts[string(ProtocolID)] + inboundCounts[string(OverlayRelayProtocolID)] + inboundCounts[string(BootRelayProtocolID)]
 	dataOut := outboundCounts[string(ProtocolID)] + outboundCounts[string(OverlayRelayProtocolID)] + outboundCounts[string(BootRelayProtocolID)]
 	dataTotal := dataIn + dataOut
-	dataStatus := "idle"
-	if n.TAP != nil && dataTotal > 0 {
+	dataStatus := "ready"
+	if n.TAP != nil && (dataTotal > 0 || len(n.Host.Network().Conns()) > 0) {
 		dataStatus = "active"
 	} else if n.TAP != nil {
 		dataStatus = "running"
@@ -1028,10 +1314,10 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	authIn := inboundCounts[relayAuthProtocol]
 	authOut := outboundCounts[relayAuthProtocol]
 	authTotal := authIn + authOut
-	authStatus := "running"
+	authStatus := "ready"
 	if n.Config.PSK == "" {
 		authStatus = "open-mode"
-	} else if authTotal > 0 {
+	} else if authTotal > 0 || len(n.Host.Network().Conns()) > 0 {
 		authStatus = "active"
 	}
 
@@ -1044,6 +1330,15 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 		dcutrStatus = "active"
 	}
 
+	// 7. Echo / Speedtest Diagnostics
+	echoIn := inboundCounts[string(EchoProtocolID)]
+	echoOut := outboundCounts[string(EchoProtocolID)]
+	echoTotal := echoIn + echoOut
+	echoStatus := "ready"
+	if echoTotal > 0 {
+		echoStatus = "active"
+	}
+
 	channels := []observer.ProtocolChannelDTO{
 		{
 			ID:              "seqsync",
@@ -1054,7 +1349,15 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 			ActiveStreams:   seqTotal,
 			InboundStreams:  seqIn,
 			OutboundStreams: seqOut,
-			Details:         fmt.Sprintf("Streams: %d (↓%d ↑%d) · Window Dedup & Replay Protection", seqTotal, seqIn, seqOut),
+			SyncedPeers:     syncedPeers,
+			TxFrames:        seqTxF,
+			RxFrames:        seqRxF,
+			TxBytes:         seqTxB,
+			RxBytes:         seqRxB,
+			SyncEvents:      seqSyncs,
+			ErrorCount:      seqErrs,
+			LastActiveAgo:   seqAgo,
+			Details:         seqDetails,
 		},
 		{
 			ID:              "lsa",
@@ -1065,18 +1368,14 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 			ActiveStreams:   lsaTotal,
 			InboundStreams:  lsaIn,
 			OutboundStreams: lsaOut,
+			TxFrames:        lsaTxF,
+			RxFrames:        lsaRxF,
+			TxBytes:         lsaTxB,
+			RxBytes:         lsaRxB,
+			SyncEvents:      lsaSyncs,
+			ErrorCount:      lsaErrs,
+			LastActiveAgo:   lsaAgo,
 			Details:         fmt.Sprintf("Streams: %d (↓%d ↑%d) · Dijkstra Shortest Path", lsaTotal, lsaIn, lsaOut),
-		},
-		{
-			ID:              "peekmap",
-			Name:            "Peek-Map Broadcast",
-			Protocol:        string(PeekMapProtocolID),
-			Category:        "pubsub",
-			Status:          peekStatus,
-			ActiveStreams:   peekTotal,
-			InboundStreams:  peekIn,
-			OutboundStreams: peekOut,
-			Details:         fmt.Sprintf("Streams: %d (↓%d ↑%d) · Bootstrap Topology Sync", peekTotal, peekIn, peekOut),
 		},
 		{
 			ID:              "data",
@@ -1087,7 +1386,50 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 			ActiveStreams:   dataTotal,
 			InboundStreams:  dataIn,
 			OutboundStreams: dataOut,
+			TxFrames:        dataTxF,
+			RxFrames:        dataRxF,
+			TxBytes:         dataTxB,
+			RxBytes:         dataRxB,
+			SyncEvents:      dataSyncs,
+			ErrorCount:      dataErrs,
+			LastActiveAgo:   dataAgo,
 			Details:         fmt.Sprintf("Cipher: %s · Mode: %s", obfsAlgo, obfsMode),
+		},
+		{
+			ID:              "relay-data",
+			Name:            "Overlay L2 Relay Data",
+			Protocol:        string(OverlayRelayProtocolID),
+			Category:        "data",
+			Status:          dataStatus,
+			ActiveStreams:   inboundCounts[string(OverlayRelayProtocolID)] + outboundCounts[string(OverlayRelayProtocolID)],
+			InboundStreams:  inboundCounts[string(OverlayRelayProtocolID)],
+			OutboundStreams: outboundCounts[string(OverlayRelayProtocolID)],
+			TxFrames:        relayTxF,
+			RxFrames:        relayRxF,
+			TxBytes:         relayTxB,
+			RxBytes:         relayRxB,
+			SyncEvents:      relaySyncs,
+			ErrorCount:      relayErrs,
+			LastActiveAgo:   relayAgo,
+			Details:         "Multi-hop P2P Ethernet Frame Forwarding",
+		},
+		{
+			ID:              "peekmap",
+			Name:            "Peek-Map Broadcast",
+			Protocol:        string(PeekMapProtocolID),
+			Category:        "pubsub",
+			Status:          peekStatus,
+			ActiveStreams:   peekTotal,
+			InboundStreams:  peekIn,
+			OutboundStreams: peekOut,
+			TxFrames:        peekTxF,
+			RxFrames:        peekRxF,
+			TxBytes:         peekTxB,
+			RxBytes:         peekRxB,
+			SyncEvents:      peekSyncs,
+			ErrorCount:      peekErrs,
+			LastActiveAgo:   peekAgo,
+			Details:         fmt.Sprintf("Streams: %d (↓%d ↑%d) · Bootstrap Topology Sync", peekTotal, peekIn, peekOut),
 		},
 		{
 			ID:              "auth",
@@ -1098,6 +1440,13 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 			ActiveStreams:   authTotal,
 			InboundStreams:  authIn,
 			OutboundStreams: authOut,
+			TxFrames:        authTxF,
+			RxFrames:        authRxF,
+			TxBytes:         authTxB,
+			RxBytes:         authRxB,
+			SyncEvents:      authSyncs,
+			ErrorCount:      authErrs,
+			LastActiveAgo:   authAgo,
 			Details:         fmt.Sprintf("PSK Mesh Network Isolation · Streams: %d", authTotal),
 		},
 		{
@@ -1109,7 +1458,32 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 			ActiveStreams:   dcutrTotal,
 			InboundStreams:  dcutrIn,
 			OutboundStreams: dcutrOut,
+			TxFrames:        dcutrTxF,
+			RxFrames:        dcutrRxF,
+			TxBytes:         dcutrTxB,
+			RxBytes:         dcutrRxB,
+			SyncEvents:      dcutrSyncs,
+			ErrorCount:      dcutrErrs,
+			LastActiveAgo:   dcutrAgo,
 			Details:         fmt.Sprintf("Direct Connection Upgrade · Streams: %d", dcutrTotal),
+		},
+		{
+			ID:              "echo",
+			Name:            "Diagnostic Echo & Speedtest",
+			Protocol:        string(EchoProtocolID),
+			Category:        "diagnostics",
+			Status:          echoStatus,
+			ActiveStreams:   echoTotal,
+			InboundStreams:  echoIn,
+			OutboundStreams: echoOut,
+			TxFrames:        echoTxF,
+			RxFrames:        echoRxF,
+			TxBytes:         echoTxB,
+			RxBytes:         echoRxB,
+			SyncEvents:      echoSyncs,
+			ErrorCount:      echoErrs,
+			LastActiveAgo:   echoAgo,
+			Details:         "Low-overhead Microsecond Stream Benchmark",
 		},
 	}
 

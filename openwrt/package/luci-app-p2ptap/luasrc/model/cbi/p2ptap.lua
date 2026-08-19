@@ -276,22 +276,9 @@ o.password = true
 o.placeholder = "留空将自动生成随机 Token"
 o.description = translate("访问 WebUI 面板所需的认证密钥。如留空，程序启动时将在日志中打印生成的临时 Token。")
 
-o = s:taboption("webui", DummyValue, "_webui_link", translate("控制台快捷入口"))
-o.rawhtml = true
-function o.cfgvalue(self, section)
-	local port = m.uci:get("p2ptap", "global", "webui_port") or "5857"
-	local lip = m.uci:get("p2ptap", "global", "webui_listen_ip") or "0.0.0.0"
-	local display_ip = lip
-	if lip == "0.0.0.0" then
-		local host = luci.http.getenv("HTTP_HOST") or ""
-		display_ip = host:match("^([^:]+)") or "127.0.0.1"
-	end
-	local url = "http://" .. display_ip .. ":" .. port
-	return '<div style="margin:12px 0;"><a href="' .. url .. '" target="_blank" class="cbi-button cbi-button-apply" style="background:linear-gradient(135deg, #06b6d4, #3b82f6); color:#fff; border:none; padding:10px 24px; border-radius:8px; font-weight:bold; font-size:15px; text-decoration:none; display:inline-block; box-shadow:0 4px 12px rgba(6,182,212,0.3);">🚀 打开 p2ptap 高级 WebUI 控制台 (' .. url .. ')</a></div>'
-end
-
 function m.on_after_commit(self)
 	luci.sys.call("/etc/init.d/p2ptap restart >/dev/null 2>&1 &")
 end
 
 return m
+

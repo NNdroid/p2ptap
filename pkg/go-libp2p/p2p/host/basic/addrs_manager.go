@@ -818,10 +818,24 @@ func (i *interfaceAddrsCache) update() []ma.Multiaddr {
 	return i.all
 }
 
+// CustomInterfaceAddrsProvider allows mobile platforms (Android) where netlink is restricted
+// to provide the active network interface addresses from the host OS API.
+var CustomInterfaceAddrsProvider func() ([]ma.Multiaddr, error)
+
 func (i *interfaceAddrsCache) updateUnlocked() {
 	i.all = nil
 
-	ifaceAddrs, err := manet.InterfaceMultiaddrs()
+	var ifaceAddrs []ma.Multiaddr
+	var err error
+
+	if CustomInterfaceAddrsProvider != nil {
+		ifaceAddrs, err = CustomInterfaceAddrsProvider()
+	}
+
+	if len(ifaceAddrs) == 0 || err != nil {
+		ifaceAddrs, err = manet.InterfaceMultiaddrs()
+	}
+
 	if err != nil {
 		// This usually shouldn't happen, but we could be in some kind
 		// of funky restricted environment.

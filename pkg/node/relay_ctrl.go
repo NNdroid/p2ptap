@@ -131,6 +131,11 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 
 	// ---- FINAL HOP: deliver the inner control protocol locally ----
 	if hdr.Target == n.Host.ID() {
+		origPID := peer.ID(hdr.Origin)
+		n.notePeerRx(origPID)
+		if remotePeer != "" && remotePeer != origPID {
+			n.recordPeekMapOrigin(origPID, remotePeer, int(hdr.Hops), false)
+		}
 		log.Debug("RelayCtrl: final hop for target %s (origin %s, proto %s)",
 			hdr.Target, hdr.Origin, protocol.ID(hdr.Proto))
 		n.dispatchRelayCtrlInner(s, hdr.Origin, protocol.ID(hdr.Proto))
@@ -235,6 +240,10 @@ func (n *Node) dispatchRelayCtrlInner(s network.Stream, origin peer.ID, proto pr
 		// close the stream, permanently breaking RTT measurement / keepalive
 		// for exactly the peers that depend on the tunnel.
 		n.handleEcho(wrapped)
+	case TapProbeAckProtocolID:
+		// Tunnelled peer-side probe acks (方案 B) so relay-only peers — whose
+		// ack must traverse the relay-ctrl tunnel — still reach the prober.
+		n.handleTapProbeAck(wrapped)
 	default:
 		log.Warn("RelayCtrl: no inner handler for proto %s (origin %s); closing", proto, origin)
 	}

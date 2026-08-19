@@ -2,6 +2,7 @@ package holepunch
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -164,6 +165,9 @@ func (t *tracer) DirectDialFailed(p peer.ID, dt time.Duration, err error) {
 	}
 
 	if t.mt != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			holePunchTimeouts.WithLabelValues("direct").Inc()
+		}
 		t.mt.DirectDialFinished(false)
 	}
 }

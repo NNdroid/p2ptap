@@ -568,17 +568,25 @@ func (w *WindowsTAPDevice) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
 		_ = w.configureMTU()
 	}
 
-	// Set interface metric = 1 via winipcfg
+	// Set interface metric = 1, and enable forwarding/weak-host for subnet routing & multi-interface reachability
 	if ipif, err := luid.IPInterface(windows.AF_INET); err == nil {
 		ipif.UseAutomaticMetric = false
 		ipif.Metric = 1
+		ipif.ForwardingEnabled = true
+		ipif.WeakHostReceive = true
+		ipif.WeakHostSend = true
 		_ = ipif.Set()
 	}
 	if ipif6, err := luid.IPInterface(windows.AF_INET6); err == nil {
 		ipif6.UseAutomaticMetric = false
 		ipif6.Metric = 1
+		ipif6.ForwardingEnabled = true
+		ipif6.WeakHostReceive = true
+		ipif6.WeakHostSend = true
 		_ = ipif6.Set()
 	}
+	_ = exec.Command("netsh", "interface", "ipv4", "set", "interface", "name="+w.name, "metric=1", "forwarding=enabled", "weakhostreceive=enabled", "weakhostsend=enabled").Run()
+	_ = exec.Command("netsh", "interface", "ipv6", "set", "interface", "name="+w.name, "metric=1", "forwarding=enabled", "weakhostreceive=enabled", "weakhostsend=enabled").Run()
 
 	// Ensure IPv4 subnet route is explicitly added so Windows knows to reach same-subnet peers via TAP
 	if ipCIDR != "" {
@@ -597,6 +605,14 @@ func (w *WindowsTAPDevice) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
 }
 
 func addWindowsFirewallRule(name string, isIPv6 bool) {
+	proto := "icmpv4"
+	if isIPv6 {
+		proto = "icmpv6"
+	}
+	// Always run netsh deletion and addition with profile=any to ensure Public/Private/Domain allow
+	_ = exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+name).Run()
+	_ = exec.Command("netsh", "advfirewall", "firewall", "add", "rule", "name="+name, "dir=in", "action=allow", "protocol="+proto, "profile=any").Run()
+
 	ole.CoInitialize(0)
 	defer ole.CoUninitialize()
 
@@ -618,6 +634,9 @@ func addWindowsFirewallRule(name string, isIPv6 bool) {
 	}
 	rules := rulesVar.ToIDispatch()
 	defer rules.Release()
+
+	// Remove old rule first so Add doesn't error on duplicate
+	_, _ = oleutil.CallMethod(rules, "Remove", name)
 
 	ruleUnk, err := oleutil.CreateObject("HNetCfg.FwRule")
 	if err != nil {
@@ -641,6 +660,7 @@ func addWindowsFirewallRule(name string, isIPv6 bool) {
 	oleutil.PutProperty(rule, "Direction", 1) // IN
 	oleutil.PutProperty(rule, "Action", 1)    // ALLOW
 	oleutil.PutProperty(rule, "Enabled", true)
+	oleutil.PutProperty(rule, "Profiles", 0x7FFFFFFF) // NET_FW_PROFILE2_ALL
 
 	_, _ = oleutil.CallMethod(rules, "Add", rule)
 }

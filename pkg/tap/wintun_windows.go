@@ -52,8 +52,9 @@ type WintunTAPDevice struct {
 	mtu           int
 	replyQueue    chan []byte
 
-	ipMapMu    sync.RWMutex
-	ipToMacMap map[string]net.HardwareAddr
+	ipMapMu       sync.RWMutex
+	ipToMacMap    map[string]net.HardwareAddr
+	macLookupFunc func(ip net.IP) net.HardwareAddr
 }
 
 func isWintunAvailable() bool {
@@ -150,11 +151,26 @@ func (w *WintunTAPDevice) recordMAC(ipStr string, mac net.HardwareAddr) {
 	w.ipMapMu.Unlock()
 }
 
+func (w *WintunTAPDevice) SetMACLookup(fn func(ip net.IP) net.HardwareAddr) {
+	w.ipMapMu.Lock()
+	w.macLookupFunc = fn
+	w.ipMapMu.Unlock()
+}
+
 func (w *WintunTAPDevice) lookupMAC(ipStr string) net.HardwareAddr {
 	w.ipMapMu.RLock()
-	defer w.ipMapMu.RUnlock()
+	fn := w.macLookupFunc
 	if mac, ok := w.ipToMacMap[ipStr]; ok {
+		w.ipMapMu.RUnlock()
 		return mac
+	}
+	w.ipMapMu.RUnlock()
+	if fn != nil {
+		if ip := net.ParseIP(ipStr); ip != nil {
+			if mac := fn(ip); len(mac) == 6 {
+				return mac
+			}
+		}
 	}
 	return nil
 }
@@ -212,9 +228,10 @@ func (w *WintunTAPDevice) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
 		_ = exec.Command("netsh", "interface", "ipv4", "set", "address", "name="+w.name, "source=static", "address="+ip, "mask="+mask).Run()
 		// Clean up any stale secondary WebUI virtual IP from interface so ipconfig only shows 10.0.0.3
 		_ = exec.Command("netsh", "interface", "ipv4", "delete", "address", "name="+w.name, "address=10.0.0.254").Run()
-		_ = exec.Command("netsh", "interface", "ipv4", "set", "interface", "name="+w.name, "metric=1").Run()
-		// Allow ICMP Echo Requests (Ping) in Windows Firewall
-		_ = exec.Command("netsh", "advfirewall", "firewall", "add", "rule", "name=p2ptap ICMPv4 Allow", "dir=in", "action=allow", "protocol=icmpv4").Run()
+		_ = exec.Command("netsh", "interface", "ipv4", "set", "interface", "name="+w.name, "metric=1", "forwarding=enabled", "weakhostreceive=enabled", "weakhostsend=enabled").Run()
+		// Allow ICMP Echo Requests (Ping) in Windows Firewall for any profile
+		_ = exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name=p2ptap ICMPv4 Allow").Run()
+		_ = exec.Command("netsh", "advfirewall", "firewall", "add", "rule", "name=p2ptap ICMPv4 Allow", "dir=in", "action=allow", "protocol=icmpv4", "profile=any").Run()
 		// Ensure IPv4 subnet route is explicitly added
 		if _, ipNet, err := net.ParseCIDR(ipCIDR); err == nil {
 			networkIP := parsedIP.Mask(ipNet.Mask)
@@ -247,8 +264,9 @@ func (w *WintunTAPDevice) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
 		}
 		_ = exec.Command("netsh", "interface", "ipv6", "add", "route", "prefix="+prefix, "interface="+w.name, "metric=1", "publish=yes").Run()
 		_ = exec.Command("netsh", "interface", "ipv6", "add", "route", prefix, w.name, "metric=1").Run()
-		_ = exec.Command("netsh", "interface", "ipv6", "set", "interface", "name="+w.name, "metric=1").Run()
-		_ = exec.Command("netsh", "advfirewall", "firewall", "add", "rule", "name=p2ptap ICMPv6 Allow", "dir=in", "action=allow", "protocol=icmpv6").Run()
+		_ = exec.Command("netsh", "interface", "ipv6", "set", "interface", "name="+w.name, "metric=1", "forwarding=enabled", "weakhostreceive=enabled", "weakhostsend=enabled").Run()
+		_ = exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name=p2ptap ICMPv6 Allow").Run()
+		_ = exec.Command("netsh", "advfirewall", "firewall", "add", "rule", "name=p2ptap ICMPv6 Allow", "dir=in", "action=allow", "protocol=icmpv6", "profile=any").Run()
 	}
 
 	if w.mtu > 0 {
@@ -291,7 +309,7 @@ func (w *WintunTAPDevice) Read(b []byte) (int, error) {
 		)
 
 		if retPtr != 0 {
-			packetData := (*[1 << 30]byte)(unsafe.Pointer(retPtr))[:packetSize:packetSize]
+			packetData := unsafe.Slice((*byte)(unsafe.Pointer(retPtr)), packetSize)
 
 			// Prepend 14-byte Ethernet Header (Destination MAC, Source MAC, EtherType)
 			const ethHdrLen = 14
@@ -462,7 +480,7 @@ func (w *WintunTAPDevice) Write(b []byte) (int, error) {
 			return 0, nil
 		}
 
-		destBuf := (*[1 << 30]byte)(unsafe.Pointer(retAlloc))[:packetLen:packetLen]
+		destBuf := unsafe.Slice((*byte)(unsafe.Pointer(retAlloc)), packetLen)
 		copy(destBuf, ipPayload)
 
 		// WintunSendPacket returns void: it always takes ownership of the buffer
@@ -610,7 +628,7 @@ func (w *WintunTAPDevice) injectARPPayloadToWintun(arpPayload []byte) {
 		return
 	}
 
-	destBuf := (*[1 << 30]byte)(unsafe.Pointer(retAlloc))[:packetLen:packetLen]
+	destBuf := unsafe.Slice((*byte)(unsafe.Pointer(retAlloc)), packetLen)
 	copy(destBuf, arpPayload)
 
 	// WintunSendPacket returns void and always takes ownership of the buffer.

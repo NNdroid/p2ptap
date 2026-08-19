@@ -71,16 +71,20 @@ func SelectAlgo(mine, peer []byte) byte {
 type ObfCipher interface {
 	Seal(seqID []byte, plaintext []byte) []byte
 	Open(seqID []byte, ciphertext []byte) ([]byte, error)
+	SealTo(dst, seqID, plaintext []byte) []byte
+	OpenTo(dst, seqID, ciphertext []byte) ([]byte, error)
 	Algo() byte
 	Overhead() int
 }
 
 type noneCipher struct{}
 
-func (noneCipher) Seal(seqID, p []byte) []byte          { return p }
-func (noneCipher) Open(seqID, c []byte) ([]byte, error) { return c, nil }
-func (noneCipher) Algo() byte                           { return ObfAlgoNone }
-func (noneCipher) Overhead() int                        { return 0 }
+func (noneCipher) Seal(seqID, p []byte) []byte                 { return p }
+func (noneCipher) Open(seqID, c []byte) ([]byte, error)        { return c, nil }
+func (noneCipher) SealTo(dst, seqID, p []byte) []byte          { return append(dst, p...) }
+func (noneCipher) OpenTo(dst, seqID, c []byte) ([]byte, error) { return append(dst, c...), nil }
+func (noneCipher) Algo() byte                                  { return ObfAlgoNone }
+func (noneCipher) Overhead() int                               { return 0 }
 
 type aeadCipher struct {
 	algo byte
@@ -92,6 +96,12 @@ func (c *aeadCipher) Seal(seqID, plaintext []byte) []byte {
 }
 func (c *aeadCipher) Open(seqID, ciphertext []byte) ([]byte, error) {
 	return c.aead.Open(nil, seqID, ciphertext, nil)
+}
+func (c *aeadCipher) SealTo(dst, seqID, plaintext []byte) []byte {
+	return c.aead.Seal(dst, seqID, plaintext, nil)
+}
+func (c *aeadCipher) OpenTo(dst, seqID, ciphertext []byte) ([]byte, error) {
+	return c.aead.Open(dst, seqID, ciphertext, nil)
 }
 func (c *aeadCipher) Algo() byte    { return c.algo }
 func (c *aeadCipher) Overhead() int { return c.aead.Overhead() }

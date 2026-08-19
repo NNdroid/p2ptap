@@ -82,6 +82,12 @@ func (n *Node) discoveryLoop() {
 }
 
 func (n *Node) isBootstrapPeer(pID peer.ID) bool {
+	// Nil-safe: a partially-initialised Node (e.g. test fakes, or code paths
+	// reached before Config is populated) must not panic here — just report
+	// "not a bootstrap peer" rather than dereferencing a nil *Config.
+	if n == nil || n.Config == nil {
+		return false
+	}
 	if _, ok := n.discoveredBoots.Load(pID); ok {
 		return true
 	}
@@ -177,6 +183,7 @@ func (n *Node) SynthesizeRelayCircuitAddrs(targetPeer peer.ID) []multiaddr.Multi
 	defer n.relayLatencyMu.RUnlock()
 
 	var entries []relayEntry
+	seenRelays := make(map[peer.ID]bool)
 	for _, bStr := range n.Config.BootstrapPeers {
 		bMa, err := multiaddr.NewMultiaddr(bStr)
 		if err != nil {
@@ -186,19 +193,10 @@ func (n *Node) SynthesizeRelayCircuitAddrs(targetPeer peer.ID) []multiaddr.Multi
 		if err != nil {
 			continue
 		}
-		// A relay that is also the destination makes no sense as a circuit
-		// relay — emitting "/p2p/<boot>/p2p-circuit/p2p/<boot>" would be a
-		// self-circuit that can never resolve. Skip it up front so callers never
-		// get a useless address (this kills the teardown-race
-		// "circuit dial to <boot itself>" case at the source).
-		if bInfo.ID == targetPeer {
+		if bInfo.ID == targetPeer || seenRelays[bInfo.ID] {
 			continue
 		}
-		// Only relays we are actually Connected to can forward a circuit — and
-		// only then is the peer-ID-only circuit addr below resolvable by libp2p
-		// (it looks the relay peer up in the peerstore and reuses the live
-		// connection). If a relay dropped, we simply omit it rather than emit an
-		// unusable address.
+		seenRelays[bInfo.ID] = true
 		if n.Host.Network().Connectedness(bInfo.ID) != network.Connected {
 			continue
 		}
@@ -209,6 +207,24 @@ func (n *Node) SynthesizeRelayCircuitAddrs(targetPeer peer.ID) []multiaddr.Multi
 		}
 		entries = append(entries, relayEntry{addr: circuitMA, latency: n.relayLatency[bInfo.ID]})
 	}
+
+	// Also include dynamically discovered bootstrap relays
+	n.discoveredBoots.Range(func(key, _ any) bool {
+		bootPID, ok := key.(peer.ID)
+		if !ok || bootPID == targetPeer || seenRelays[bootPID] {
+			return true
+		}
+		seenRelays[bootPID] = true
+		if n.Host.Network().Connectedness(bootPID) != network.Connected {
+			return true
+		}
+		circuitMA, cerr := multiaddr.NewMultiaddr(
+			fmt.Sprintf("/p2p/%s/p2p-circuit/p2p/%s", bootPID.String(), targetPeer.String()))
+		if cerr == nil {
+			entries = append(entries, relayEntry{addr: circuitMA, latency: n.relayLatency[bootPID]})
+		}
+		return true
+	})
 
 	// Sort: prefer lower-latency relay paths; unknown latency at end.
 	sort.Slice(entries, func(i, j int) bool {

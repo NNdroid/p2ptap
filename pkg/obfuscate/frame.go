@@ -1,11 +1,11 @@
 package obfuscate
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
-	"math/big"
+	"math"
+	randv2 "math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -174,7 +174,19 @@ func (a *autoState) recordSize(sz int) {
 	}
 }
 
-// entropyScore returns 0..1 measuring size distribution uniformity.
+// entropyScore returns the normalized Shannon entropy of the size distribution
+// in [0, 1]. Entropy measures how UNIFORMLY the observed packet sizes are spread:
+//
+//	≈0  -> nearly all packets are the same size (deterministic / "dynamic" traffic)
+//	≈1  -> sizes are uniformly varied (high-entropy / "random" traffic)
+//
+// This is the discrimination signal the auto mode uses to switch padding.
+//
+// NOTE: this was historically computed as `-Σ p·p` (sum of squared probabilities),
+// which is always in [-1, 0] — never > 0.7 and always < 0.3 — so evaluate()
+// returned "dynamic" for EVERY traffic profile and the auto engine never
+// switched modes. The correct measure is Shannon entropy -Σ p·log2(p); we
+// normalize by log2(numDistinctSizes) so a fully uniform spread reads ~1.0.
 func (a *autoState) entropyScore() float64 {
 	a.mu.Lock()
 	// copy for analysis
@@ -193,18 +205,27 @@ func (a *autoState) entropyScore() float64 {
 	for _, sz := range sizes {
 		seen[sz]++
 	}
-	var entropy float64
 	n := float64(count)
+	var sum float64
 	for _, cnt := range seen {
 		p := float64(cnt) / n
 		if p > 0 {
-			entropy -= p * (p)
+			sum -= p * math.Log2(p)
 		}
 	}
-	if entropy > 1.0 {
-		entropy = 1.0
+	// Normalize to [0,1]: max entropy for k distinct sizes is log2(k).
+	if k := len(seen); k > 1 {
+		if mx := math.Log2(float64(k)); mx > 0 {
+			sum /= mx
+		}
 	}
-	return entropy
+	if sum < 0 {
+		sum = 0
+	}
+	if sum > 1 {
+		sum = 1
+	}
+	return sum
 }
 
 func (a *autoState) evaluate() string {
@@ -345,11 +366,7 @@ func randomJitter(jitter int) int {
 	if jitter <= 0 {
 		return 0
 	}
-	n, err := rand.Int(rand.Reader, big.NewInt(int64(jitter*2+1)))
-	if err != nil {
-		return 0
-	}
-	return int(n.Int64()) - jitter
+	return randv2.IntN(jitter*2+1) - jitter
 }
 
 // randomBetween returns [min, max].
@@ -357,15 +374,21 @@ func randomBetween(minVal, maxVal int) int {
 	if minVal >= maxVal {
 		return maxVal
 	}
-	n, err := rand.Int(rand.Reader, big.NewInt(int64(maxVal-minVal+1)))
-	if err != nil {
-		return maxVal
-	}
-	return int(n.Int64()) + minVal
+	return randv2.IntN(maxVal-minVal+1) + minVal
 }
 
 func fillRandom(buf []byte) {
-	_, _ = rand.Read(buf)
+	for len(buf) >= 8 {
+		binary.LittleEndian.PutUint64(buf[:8], randv2.Uint64())
+		buf = buf[8:]
+	}
+	if len(buf) > 0 {
+		v := randv2.Uint64()
+		for i := range buf {
+			buf[i] = byte(v)
+			v >>= 8
+		}
+	}
 }
 
 // Pack pads the payload into outBuf.
@@ -375,13 +398,9 @@ func fillRandom(buf []byte) {
 //	[Magic(2) | SeqID(8) | PayloadLen(2) | PaddingLen(2) | payload | random padding]
 func (fp *FramePacker) Pack(seqID uint64, payload []byte, outBuf []byte) (int, error) {
 	if !fp.Enable {
-		// No obfuscation: just length prefix
-		if len(outBuf) < 2+len(payload) {
-			return 0, ErrBufferTooSmall
-		}
-		binary.BigEndian.PutUint16(outBuf[0:2], uint16(len(payload)))
-		copy(outBuf[2:], payload)
-		return 2 + len(payload), nil
+		// When obfuscation padding is disabled, we still write the standard 15-byte header with PaddingLen=0
+		// so that Magic (0x5054), SeqID (dedup/anti-replay), ObfType (encryption), and PayloadLen are preserved.
+		return fp.packStandard(seqID, payload, outBuf, "none")
 	}
 
 	mode := fp.Mode
@@ -414,9 +433,12 @@ func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte,
 	// Determine target total frame size
 	var targetSize int
 	switch mode {
+	case "none":
+		targetSize = HeaderLen + len(payload)
 	case "fixed":
 		targetSize = fp.FixedSize + randomJitter(fp.JitterRange)
 	case "block":
+
 		overhead := HeaderLen + len(payload)
 		blocks := overhead / fp.BlockSize
 		if overhead%fp.BlockSize != 0 {
@@ -479,6 +501,92 @@ func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte,
 	return targetSize, nil
 }
 
+// MaxPackedLen returns a strict UPPER BOUND on the byte count Pack will write
+// for a payload of the given length under the CURRENT configuration. Callers can
+// size their output buffer to exactly this value instead of over-allocating a
+// fixed slack (e.g. +4096 bytes), eliminating per-frame heap waste on the relay
+// hot path. It is guaranteed that Pack never needs more than MaxPackedLen
+// returns; if it ever does, that is a bug in this bound and Pack will return
+// ErrBufferTooSmall (it never truncates) — so the bound is safe by construction.
+func (fp *FramePacker) MaxPackedLen(payloadLen int) int {
+	fp.mu.Lock()
+	mode := fp.Mode
+	enable := fp.Enable
+	fixed, block, jitter := fp.FixedSize, fp.BlockSize, fp.JitterRange
+	minS, maxS := fp.MinSize, fp.MaxSize
+	fp.mu.Unlock()
+
+	if !enable {
+		mode = "none"
+	}
+	if block <= 0 {
+		block = 256
+	}
+
+	// Auto can switch modes at runtime; cover the worst case across candidates
+	// so we never under-allocate regardless of which mode it settles on.
+	if mode == "auto" {
+		b := overheadPlus(payloadLen)
+		b = max(b, fixed+jitter)
+		b = max(b, blockBound(payloadLen, block, jitter))
+		b = max(b, dynamicBound(payloadLen, minS, maxS))
+		return clampFrameSize(b, payloadLen)
+	}
+
+	switch mode {
+	case "none":
+		return clampFrameSize(overheadPlus(payloadLen), payloadLen)
+	case "fixed":
+		return clampFrameSize(fixed+jitter, payloadLen)
+	case "block":
+		return clampFrameSize(blockBound(payloadLen, block, jitter), payloadLen)
+	case "dynamic":
+		return clampFrameSize(dynamicBound(payloadLen, minS, maxS), payloadLen)
+	default: // "random" or unrecognised
+		return clampFrameSize(fixed+jitter, payloadLen)
+	}
+}
+
+func overheadPlus(payloadLen int) int { return HeaderLen + payloadLen }
+
+func blockBound(payloadLen, block, jitter int) int {
+	overhead := HeaderLen + payloadLen
+	blocks := overhead / block
+	if overhead%block != 0 {
+		blocks++
+	}
+	return blocks*block + jitter
+}
+
+// dynamicBound mirrors packStandard's "dynamic" branch: idealTarget is 4x
+// overhead clamped to [MinSize, MaxSize], and the final targetSize is
+// randomBetween(overhead, idealTarget) with a hard floor at overhead. So the
+// maximum is simply the larger of overhead and the clamped ideal.
+func dynamicBound(payloadLen, minS, maxS int) int {
+	overhead := HeaderLen + payloadLen
+	ideal := overhead * 4
+	if ideal < minS {
+		ideal = minS
+	}
+	if ideal > maxS {
+		ideal = maxS
+	}
+	return max(overhead, ideal)
+}
+
+// clampFrameSize mirrors Pack's own final guards: never below the bare overhead
+// for this payload, never above MaxFrameSize.
+func clampFrameSize(b, payloadLen int) int {
+	overhead := HeaderLen + payloadLen
+	if b < overhead {
+		b = overhead
+	}
+	if b > MaxFrameSize {
+		b = MaxFrameSize
+	}
+	return b
+}
+
 // Unpack reverses Pack with a nil cipher (no decryption). Convenience wrapper
 // around UnpackWith for callers that do not apply per-peer encryption.
 func Unpack(frame []byte) (seqID uint64, payload []byte, err error) {
@@ -515,17 +623,25 @@ func UnpackWith(frame []byte, cipher ObfCipher) (seqID uint64, payload []byte, e
 		// Historically this used frame[2:14] (SeqID+ObfType+PayloadLen), which
 		// disagreed with the encryptor and could never open a real frame.
 		nonce := obfNonceFromHeader(frame)
-		log.Debug("UnpackWith: DECRYPT branch seqID=%d obfType=%s algo=%s nonce=%s ctLen=%d",
-			seqID, AlgoName(obfType), AlgoName(cipher.Algo()), NonceHex(frame), len(raw))
-		opened, oerr := cipher.Open(nonce[:], raw)
+		// PERF: per-frame path. NonceHex() is a hex encode plus an allocation
+		// and Go evaluates it at the CALL SITE regardless of log level, so an
+		// unguarded log.Debug() costs that on every frame even at info level.
+		if log.IsDebug() {
+			log.Debug("UnpackWith: DECRYPT branch seqID=%d obfType=%s algo=%s nonce=%s ctLen=%d",
+				seqID, AlgoName(obfType), AlgoName(cipher.Algo()), NonceHex(frame), len(raw))
+		}
+		opened, oerr := cipher.OpenTo(make([]byte, 0, len(raw)), nonce[:], raw)
 		if oerr != nil {
 			// AEAD authentication failed under the supplied key. We deliberately
 			// do NOT log the raw stdlib "message authentication failed" string:
 			// it would flood the log for every in-flight old-key frame during a
 			// rotation (the caller retries staged fallback keys before giving
 			// up). Keep a neutral, classified note with the nonce for tracing.
-			log.Debug("UnpackWith: supplied rx key did NOT open frame seqID=%d algo=%s nonce=%s (AEAD auth failed)",
-				seqID, AlgoName(cipher.Algo()), NonceHex(frame))
+			// PERF: per-frame during a key-divergence storm — keep guarded.
+			if log.IsDebug() {
+				log.Debug("UnpackWith: supplied rx key did NOT open frame seqID=%d algo=%s nonce=%s (AEAD auth failed)",
+					seqID, AlgoName(cipher.Algo()), NonceHex(frame))
+			}
 			return 0, nil, ErrFrameCorrupted
 		}
 		payload = opened
@@ -598,10 +714,8 @@ func NonceHex(frame []byte) string {
 // padding is preserved. A nil cipher (or ObfAlgoNone) returns the input frame
 // unchanged. seqID is read from the frame header to derive the nonce.
 //
-// Allocation note: AEAD Seal must allocate the ciphertext (it appends a tag),
-// but we rebuild the frame with a single append chain instead of three separate
-// copies — header (fixed) + ciphertext + trailing padding are assembled in one
-// pass, which halves the copy work on the hot TX path.
+// Allocation note: AEAD SealTo appends directly into the pre-allocated output
+// buffer, eliminating intermediate slice allocations on the hot TX path.
 func EncryptPayloadRegion(frame []byte, cipher ObfCipher) ([]byte, error) {
 	if cipher == nil || cipher.Algo() == ObfAlgoNone {
 		return frame, nil
@@ -619,16 +733,22 @@ func EncryptPayloadRegion(frame []byte, cipher ObfCipher) ([]byte, error) {
 	// is shared verbatim by DecryptPayloadRegion and UnpackWith on the RX side.
 	nonce := obfNonceFromHeader(frame)
 	seqID := binary.BigEndian.Uint64(frame[2:10])
-	ct := cipher.Seal(nonce[:], frame[hLen:hLen+pLen])
-	log.Debug("ObfEncrypt: seqID=%d algo=%s nonce=%s ptLen=%d ctLen=%d",
-		seqID, AlgoName(cipher.Algo()), NonceHex(frame), pLen, len(ct))
 
-	// Reassemble: [header | ct | trailing padding].
-	out := make([]byte, 0, hLen+len(ct)+(len(frame)-(hLen+pLen)))
+	// Reassemble with a single allocation: [header | ct | trailing padding].
+	overhead := cipher.Overhead()
+	totalLen := len(frame) + overhead
+	out := make([]byte, 0, totalLen)
 	out = append(out, frame[:hLen]...)
-	binary.BigEndian.PutUint16(out[11:13], uint16(len(ct)))
-	out = append(out, ct...)
+	out = cipher.SealTo(out, nonce[:], frame[hLen:hLen+pLen])
+	ctLen := len(out) - hLen
+	binary.BigEndian.PutUint16(out[11:13], uint16(ctLen))
 	out = append(out, frame[hLen+pLen:]...) // preserve trailing padding
+
+	// PERF: per-frame TX path — keep guarded (see UnpackWith note).
+	if log.IsDebug() {
+		log.Debug("ObfEncrypt: seqID=%d algo=%s nonce=%s ptLen=%d ctLen=%d",
+			seqID, AlgoName(cipher.Algo()), NonceHex(frame), pLen, ctLen)
+	}
 	return out, nil
 }
 
@@ -636,8 +756,7 @@ func EncryptPayloadRegion(frame []byte, cipher ObfCipher) ([]byte, error) {
 // payload and returns a new frame slice with PayloadLen restored to the
 // plaintext length. Trailing padding is preserved (ignored by Unpack).
 //
-// Same single-append-chain assembly as EncryptPayloadRegion to minimise copies
-// on the hot RX path.
+// Same single-append-chain assembly with OpenTo to minimise copies on the hot RX path.
 func DecryptPayloadRegion(frame []byte, cipher ObfCipher) ([]byte, error) {
 	if cipher == nil || cipher.Algo() == ObfAlgoNone {
 		return frame, nil
@@ -653,7 +772,12 @@ func DecryptPayloadRegion(frame []byte, cipher ObfCipher) ([]byte, error) {
 	// Nonce derived from immutable header bytes (see EncryptPayloadRegion).
 	nonce := obfNonceFromHeader(frame)
 	seqID := binary.BigEndian.Uint64(frame[2:10])
-	pt, err := cipher.Open(nonce[:], frame[hLen:hLen+pLen])
+
+	// Reassemble with a single allocation: [header | pt | trailing padding].
+	out := make([]byte, 0, len(frame))
+	out = append(out, frame[:hLen]...)
+	var err error
+	out, err = cipher.OpenTo(out, nonce[:], frame[hLen:hLen+pLen])
 	if err != nil {
 		// AEAD authentication failed under the CURRENT rx key. This is EXPECTED
 		// during a key rotation or when a straggler from a prior connection
@@ -663,18 +787,23 @@ func DecryptPayloadRegion(frame []byte, cipher ObfCipher) ([]byte, error) {
 		// flood the log for every in-flight old-key frame that the fallback then
 		// successfully opens. The authoritative, classified failure line lives
 		// in the node RX path after all fallback keys have been tried.
-		log.Debug("ObfDecrypt: current rx key did NOT open frame seqID=%d algo=%s nonce=%s ctLen=%d (AEAD auth failed; caller retries fallback keys)",
-			seqID, AlgoName(cipher.Algo()), NonceHex(frame), pLen)
+		// PERF: hit on every frame whose AEAD open fails under the current key
+		// (a key-divergence storm) — keep guarded.
+		if log.IsDebug() {
+			log.Debug("ObfDecrypt: current rx key did NOT open frame seqID=%d algo=%s nonce=%s ctLen=%d (AEAD auth failed; caller retries fallback keys)",
+				seqID, AlgoName(cipher.Algo()), NonceHex(frame), pLen)
+		}
 		return nil, err
 	}
-	log.Debug("ObfDecrypt: OK seqID=%d algo=%s nonce=%s ctLen=%d ptLen=%d",
-		seqID, AlgoName(cipher.Algo()), NonceHex(frame), pLen, len(pt))
-	// Reassemble: [header | pt | trailing padding].
-	out := make([]byte, 0, hLen+len(pt)+(len(frame)-(hLen+pLen)))
-	out = append(out, frame[:hLen]...)
-	binary.BigEndian.PutUint16(out[11:13], uint16(len(pt)))
-	out = append(out, pt...)
+	ptLen := len(out) - hLen
+	binary.BigEndian.PutUint16(out[11:13], uint16(ptLen))
 	out = append(out, frame[hLen+pLen:]...)
+
+	// PERF: per-frame RX success path — keep guarded (see UnpackWith note).
+	if log.IsDebug() {
+		log.Debug("ObfDecrypt: OK seqID=%d algo=%s nonce=%s ctLen=%d ptLen=%d",
+			seqID, AlgoName(cipher.Algo()), NonceHex(frame), pLen, ptLen)
+	}
 	return out, nil
 }
 

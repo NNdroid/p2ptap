@@ -67,6 +67,9 @@ func (p *lsaStreamPool) peerMuLocked(target peer.ID) *sync.Mutex {
 // attempt. The peer's lock is held for the whole send so no other goroutine can
 // interleave on the same stream.
 func (p *lsaStreamPool) Submit(target peer.ID, data []byte) bool {
+	if p == nil {
+		return false
+	}
 	p.mu.Lock()
 	m := p.peerMuLocked(target)
 	p.mu.Unlock()
@@ -100,6 +103,9 @@ func (p *lsaStreamPool) Submit(target peer.ID, data []byte) bool {
 // return a non-nil error to signal the stream is broken; WithStream then drops
 // the cached stream so the next use re-opens.
 func (p *lsaStreamPool) WithStream(target peer.ID, fn func(s network.Stream) error) bool {
+	if p == nil {
+		return false
+	}
 	p.mu.Lock()
 	m := p.peerMuLocked(target)
 	p.mu.Unlock()
@@ -176,6 +182,9 @@ func (p *lsaStreamPool) closeLocked(target peer.ID) {
 // Invalidate drops any cached stream for a peer (e.g. on disconnect) so the next
 // use re-opens cleanly. Serialized with the peer's own lock.
 func (p *lsaStreamPool) Invalidate(target peer.ID) {
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	m, ok := p.writeMu[target]
 	p.mu.Unlock()
@@ -189,6 +198,9 @@ func (p *lsaStreamPool) Invalidate(target peer.ID) {
 
 // InvalidateAll closes every cached stream (used on node shutdown).
 func (p *lsaStreamPool) InvalidateAll() {
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	targets := make([]peer.ID, 0, len(p.streams))
 	for id := range p.streams {

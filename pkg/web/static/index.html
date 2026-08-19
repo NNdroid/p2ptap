@@ -118,11 +118,43 @@
                 <span class="tt-option tt-moon" aria-hidden="true"><svg class="ico" aria-hidden="true"><use href="#ic-moon"/></svg></span>
                 <span class="tt-thumb"></span>
             </button>
-                <button class="btn-glass" data-onclick="openAddStaticPeerModal()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-plus"/></svg><span data-i18n="btn_add_static_peer">Add Static Peer</span></button>
-                <button class="btn-glass" data-onclick="fetchStats()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-refresh"/></svg><span data-i18n="refresh">Refresh</span></button>
-                <button class="btn-glass" data-onclick="openConfigModal()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-gear"/></svg><span data-i18n="settings">Settings</span></button>
+                <button class="btn-glass" data-onclick="openAddStaticPeerModal()"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-plus"/></svg><span data-i18n="btn_add_static_peer">Add Static Peer</span></button>
+                <button class="btn-glass" data-onclick="exportDiagnosticReport()"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-download"/></svg><span data-i18n="btn_export_report">Export Report</span></button>
+                <button class="btn-glass" data-onclick="fetchStats()"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-refresh"/></svg><span data-i18n="refresh">Refresh</span></button>
+                <button class="btn-glass" data-onclick="openConfigModal()"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-gear"/></svg><span data-i18n="settings">Settings</span></button>
             </div>
         </header>
+
+        <!-- Mesh Link Quality & Health Scorecard -->
+        <section class="glass-section ext4" id="meshHealthSection" style="margin-bottom: 20px;">
+            <div class="mesh-health-card">
+                <div class="mesh-health-gauge-box">
+                    <div class="mesh-health-score-ring">
+                        <span class="mesh-health-score-val" id="meshHealthScore">100%</span>
+                        <span class="mesh-health-score-lbl" data-i18n="mesh_health_score_lbl">Mesh Health</span>
+                    </div>
+                </div>
+                <div class="mesh-health-content">
+                    <div class="mesh-health-title-row">
+                        <div>
+                            <strong style="font-size: 1.05rem; color: var(--text-primary);" data-i18n="mesh_health_title">Overlay Mesh Link Quality & Self-Healing Status</strong>
+                            <div style="font-size: 0.76rem; color: var(--text-secondary);" data-i18n="mesh_health_desc">Real-time health assessment covering direct-path ratio, cryptographic integrity, packet loss, and routing stability</div>
+                        </div>
+                        <div class="mesh-health-actions">
+                            <button class="proto-action-btn" data-onclick="openCryptoInspector()" title="Open Peer Cryptographic & Sequence Inspector">
+                                <span>🔐</span> <span data-i18n="btn_crypto_inspector">Crypto & Sequence Inspector</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="mesh-health-metrics-row" id="meshHealthMetricsRow">
+                        <!-- Injected via JS -->
+                    </div>
+                    <div class="mesh-health-tips" id="meshHealthTips">
+                        <!-- Injected via JS -->
+                    </div>
+                </div>
+            </div>
+        </section>
 
         <!-- Dynamic Stat Cards Grid -->
         <div class="stats-grid">
@@ -349,6 +381,16 @@
                     <span data-i18n="protocol_inspector_desc" class="ext30">(Layer-2/3/4 packet breakdown & live PPS statistics)</span>
                 </div>
             </div>
+
+            <!-- L2/L3 Traffic Composition Breakdown Bar -->
+            <div class="proto-traffic-bar-container" id="trafficCompContainer" style="margin-bottom: 14px;">
+                <div class="proto-traffic-bar-header">
+                    <span><strong data-i18n="traffic_comp_title">以太网与网络层流量构成 (Traffic Composition)</strong>: <span id="trafficCompTotalSummary">0 pkts</span></span>
+                </div>
+                <div class="proto-traffic-bar" id="trafficCompBar"></div>
+                <div class="proto-traffic-legend" id="trafficCompLegend"></div>
+            </div>
+
             <div class="ext60">
                 <div class="glass-card ext61">
                     <div data-i18n="lbl_broadcast_pkts" class="ext62">Broadcast Packets</div>
@@ -468,16 +510,37 @@
 
         <!-- 📡 Active Protocol Streams & Channels Monitor Card -->
         <section class="glass-section ext4" id="protoChannelsSection">
-            <div class="section-header ext5">
+            <div class="section-header ext5" style="gap: 12px; flex-wrap: wrap;">
                 <div class="section-title">
                     <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-layers"/></svg><span data-i18n="proto_channels_title">Protocol Streams & Subsystem Channels</span>
                     <span class="pill-badge role-static ext50" id="activeStreamsBadge">0 Streams</span>
                 </div>
-                <div class="ext99">
-                    <input type="text" id="streamSearchInput" class="module-search" data-search-target="streamsTableBody" data-paginate="true" data-paginate-page-size="25" data-i18n-ph="search_streams_ph" placeholder="Search streams, protocols, peers…">
-
-
+                <div class="header-actions proto-header-actions" style="display:flex; gap:10px; align-items:center; flex-wrap:nowrap; margin-left:auto;">
+                    <input type="text" id="streamSearchInput" class="module-search proto-search-input" data-search-target="streamsTableBody" data-paginate="true" data-paginate-page-size="25" data-i18n-ph="search_streams_ph" placeholder="Search streams, protocols, peers…">
+                    <button class="proto-action-btn" onclick="triggerSeqSyncResync('all')" title="Force SeqSync & Key Rotation on all connected peers">
+                        <span>🔄</span> <span data-i18n="btn_global_resync">全网重同步</span>
+                    </button>
                 </div>
+            </div>
+
+            <!-- Protocol Category Filter Tabs -->
+            <div class="proto-tabs" id="protoCategoryTabs">
+                <button class="proto-tab active" data-cat="all" onclick="filterProtoChannels('all')">🌐 <span data-i18n="cat_tab_all">全部 (All)</span></button>
+                <button class="proto-tab" data-cat="data" onclick="filterProtoChannels('data')">🚀 <span data-i18n="cat_tab_data">数据传输 (Data)</span></button>
+                <button class="proto-tab" data-cat="sync" onclick="filterProtoChannels('sync')">🔄 <span data-i18n="cat_tab_sync">序列与安全 (Sync)</span></button>
+                <button class="proto-tab" data-cat="routing" onclick="filterProtoChannels('routing')">🛣️ <span data-i18n="cat_tab_routing">拓扑路由 (Routing)</span></button>
+                <button class="proto-tab" data-cat="transport" onclick="filterProtoChannels('transport')">🕳️ <span data-i18n="cat_tab_transport">传输与打洞 (Transport)</span></button>
+                <button class="proto-tab" data-cat="pubsub" onclick="filterProtoChannels('pubsub')">📡 <span data-i18n="cat_tab_pubsub">发布订阅 (PubSub)</span></button>
+                <button class="proto-tab" data-cat="diagnostics" onclick="filterProtoChannels('diagnostics')">🩺 <span data-i18n="cat_tab_diagnostics">诊断回显 (Diagnostics)</span></button>
+            </div>
+
+            <!-- Protocol Traffic Distribution Bar -->
+            <div class="proto-traffic-bar-container" id="protoTrafficBarContainer">
+                <div class="proto-traffic-bar-header">
+                    <span><strong data-i18n="proto_traffic_distribution">协议吞吐流量分布 (Traffic Distribution)</strong>: <span id="protoTotalTrafficSummary">0 帧 (0 B)</span></span>
+                </div>
+                <div class="proto-traffic-bar" id="protoTrafficBar"></div>
+                <div class="proto-traffic-legend" id="protoTrafficLegend"></div>
             </div>
 
             <!-- Subsystem Channels Status Grid -->
@@ -538,18 +601,50 @@
         </section>
 
         <!-- P2P Network Diagnostics Tool (Ping & Traceroute) -->
-        <section class="glass-section">
+        <section class="glass-section diag-section">
             <div class="section-header">
                 <div class="section-title">
                     <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-radar"/></svg><span data-i18n="ping_tool">P2P Network Diagnostics (Ping & Traceroute)</span>
                 </div>
+                <div class="diag-header-actions">
+                    <div class="diag-view-switcher">
+                        <button id="diagViewVisualBtn" class="btn-toggle active" data-onclick="setDiagViewMode('visual')">
+                            <svg class="ico btn-ico" aria-hidden="true"><use href="#ic-layers"/></svg><span data-i18n="view_visual">Visual Flow</span>
+                        </button>
+                        <button id="diagViewRawBtn" class="btn-toggle" data-onclick="setDiagViewMode('raw')">
+                            <svg class="ico btn-ico" aria-hidden="true"><use href="#ic-terminal"/></svg><span data-i18n="view_raw">Terminal</span>
+                        </button>
+                    </div>
+                </div>
             </div>
-            <div class="ping-box">
-                <input type="text" id="pingTargetInput" class="ping-input" placeholder="e.g. 10.0.0.2 or 12D3KooW..." data-i18n-ph="ping_placeholder">
-                <button class="btn-glass" data-onclick="runPingDiagnostics()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-radar"/></svg><span data-i18n="run_ping">Run Ping Test</span></button>
-                <button class="btn-glass ext103" data-onclick="runTracerouteDiagnostics()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-search"/></svg><span data-i18n="run_trace">Run P2P Traceroute</span></button>
+            <div class="diag-toolbar">
+                <div class="diag-input-wrapper">
+                    <svg class="ico diag-input-ico" aria-hidden="true"><use href="#ic-search"/></svg>
+                    <input type="text" id="pingTargetInput" class="diag-input" placeholder="e.g. 10.0.0.2 or 12D3KooW..." data-i18n-ph="ping_placeholder">
+                </div>
+                <div class="diag-actions">
+                    <button class="btn-glass btn-ping-action" id="btnRunPing" data-onclick="runPingDiagnostics()">
+                        <svg class="ico btn-ico" aria-hidden="true"><use href="#ic-radar"/></svg><span data-i18n="run_ping">Run Ping Test</span>
+                    </button>
+                    <button class="btn-glass btn-trace-action" id="btnRunTrace" data-onclick="runTracerouteDiagnostics()">
+                        <svg class="ico btn-ico" aria-hidden="true"><use href="#ic-network"/></svg><span data-i18n="run_trace">Run P2P Traceroute</span>
+                    </button>
+                </div>
             </div>
-            <div id="pingOutput" class="ping-output">Click "Run Ping Test" or "Run P2P Traceroute" to diagnose network paths and latency.</div>
+            <!-- Quick Peer Selector Chips -->
+            <div class="diag-quick-chips" id="diagQuickChips"></div>
+            <!-- Modern Diagnostic Result Container (Visual View) -->
+            <div id="diagVisualContainer" class="diag-visual-container">
+                <div class="diag-idle-state">
+                    <div class="diag-idle-icon-wrap">
+                        <svg class="ico idle-pulse-ico" aria-hidden="true"><use href="#ic-radar"/></svg>
+                    </div>
+                    <div class="idle-title" data-i18n="diag_idle_title">Select a peer or enter an address to start diagnostic</div>
+                    <div class="idle-desc" data-i18n="diag_idle_desc">Inspect real-time RTT latency, jitter stability, packet loss, and full overlay hop-by-hop forwarding topology.</div>
+                </div>
+            </div>
+            <!-- Raw Terminal Console -->
+            <div id="pingOutput" class="ping-output" style="display:none;">Click "Run Ping Test" or "Run P2P Traceroute" to diagnose network paths and latency.</div>
         </section>
 
         <!-- P2P Connectivity Troubleshooter -->
@@ -559,12 +654,12 @@
                     <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-wrench"/></svg><span data-i18n="troubleshoot_title">P2P Connectivity Troubleshooter</span>
                 </div>
             </div>
-            <div class="ext104">
-                <select id="troubleshootPeerSelect" class="ping-input ext105">
+            <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;">
+                <select id="troubleshootPeerSelect" class="form-select" style="max-width: 260px; min-width: 200px;">
                     <option value="" disabled selected data-i18n="troubleshoot_select_peer">Select a Peer to Diagnose</option>
                 </select>
-                <input type="text" id="troubleshootTargetInput" class="ping-input ext106" placeholder="Or enter Peer ID manually..." data-i18n-ph="troubleshoot_manual_input">
-                <button class="btn-glass ext107" data-onclick="runConnectivityDiagnosis()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-wrench"/></svg><span data-i18n="troubleshoot_run">Run Full Diagnosis</span></button>
+                <input type="text" id="troubleshootTargetInput" class="form-input ping-input" placeholder="Or enter Peer ID manually..." data-i18n-ph="troubleshoot_manual_input" style="flex: 1; min-width: 220px;">
+                <button class="btn-glass" data-onclick="runConnectivityDiagnosis()"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-wrench"/></svg><span data-i18n="troubleshoot_run">Run Full Diagnosis</span></button>
             </div>
             <div id="troubleshootResults" class="ext108">
                 <span data-i18n="troubleshoot_idle">Select a peer and click 'Run Full Diagnosis' to start troubleshooting connectivity issues.</span>
@@ -577,8 +672,8 @@
                     <span data-i18n="linkcheck_title">Multiaddr Link Check</span>
                 </div>
                 <div class="linkcheck-desc" data-i18n="linkcheck_desc">Deep transport probe: multiaddr valid → DNS resolve → TCP/QUIC → libp2p transport → Noise/TLS handshake → Peer ID match → connection.</div>
-                <div class="linkcheck-controls">
-                    <input type="text" id="linkCheckInput" class="ping-input" placeholder="Enter a full P2P multiaddr, e.g. /ip4/1.2.3.4/tcp/4001/p2p/12D3KooW..." data-i18n-ph="linkcheck_input_ph">
+                <div class="linkcheck-controls" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                    <input type="text" id="linkCheckInput" class="form-input ping-input" placeholder="Enter a full P2P multiaddr, e.g. /ip4/1.2.3.4/tcp/4001/p2p/12D3KooW..." data-i18n-ph="linkcheck_input_ph" style="flex: 1; min-width: 240px;">
                     <button class="btn-glass" data-onclick="runLinkCheck()">
                         <svg class="ico btn-ico" aria-hidden="true"><use href="#ic-network"/></svg>
                         <span data-i18n="linkcheck_btn">Run Link Check</span>
@@ -610,6 +705,7 @@
                             <th data-i18n="col_encryption">Encryption</th>
                             <th data-i18n="col_status">Conn Status</th>
                             <th data-i18n="col_return_path">Return Path</th>
+                            <th data-i18n="col_tap_path">TAP Path</th>
                             <th data-i18n="col_peerid">Peer ID</th>
                             <th data-i18n="col_multiaddr">Network Multiaddr</th>
                             <th data-i18n="col_transport">Transport</th>
@@ -621,7 +717,7 @@
                         </tr>
                     </thead>
                     <tbody id="peersList">
-                        <tr><td colspan="17" class="empty-row" data-i18n="retrieving_metrics">Retrieving peer link metrics...</td></tr>
+                        <tr><td colspan="18" class="empty-row" data-i18n="retrieving_metrics">Retrieving peer link metrics...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1418,6 +1514,38 @@
                 <div class="ext227">
                     <button class="btn-glass ext106" data-onclick="copyConfigJSON()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-copy"/></svg><span data-i18n="copy_json">Copy JSON</span></button>
                     <button class="btn-glass ext228" data-onclick="downloadConfigJSON()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-download"/></svg><span data-i18n="download_json">Download File</span></button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Peer Cryptography & Sequence Window Deep Inspector Modal -->
+    <div id="cryptoInspectorModal" class="modal-backdrop" data-onclick="if(event.target===this) closeCryptoInspectorModal()">
+        <div class="modal-card ext33" style="max-width: 840px; width: 95%; max-height: 90vh; overflow-y: auto;">
+            <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 12px; border-bottom: 1px solid var(--border-subtle);">
+                <div class="modal-title-box" style="display: flex; align-items: center; gap: 8px;">
+                    <svg class="ico modal-title-ico" aria-hidden="true" style="color: #38bdf8;"><use href="#ic-lock"/></svg>
+                    <strong style="font-size: 1.05rem; color: var(--text-primary);" data-i18n="crypto_inspector_title">Peer Cryptography & Anti-Replay Sequence Inspector</strong>
+                </div>
+                <button class="modal-close" data-onclick="closeCryptoInspectorModal()" style="background: none; border: none; font-size: 1.4rem; color: var(--text-muted); cursor: pointer;">&times;</button>
+            </div>
+            <div class="modal-body" style="padding: 16px 4px; display: flex; flex-direction: column; gap: 14px;">
+                <div style="display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; background: rgba(0,0,0,0.2); padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border-subtle);">
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <label style="font-size: 0.82rem; font-weight: 600; color: var(--text-secondary);" data-i18n="select_peer_lbl">Select Peer:</label>
+                        <select id="cryptoInspectorPeerSelect" class="module-select" data-onchange="renderCryptoInspectorContent(this.value)" style="padding: 5px 12px; font-size: 0.82rem; border-radius: 6px; background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-subtle);">
+                            <!-- Injected via JS -->
+                        </select>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="proto-action-btn" id="btnCryptoResyncThisPeer" data-onclick="resyncSelectedPeerFromModal()">
+                            <span>🔄</span> <span data-i18n="btn_resync_this_peer">Resync This Peer</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div id="cryptoInspectorBody">
+                    <!-- Injected via JS: Sliding window visualizer, Key FP comparison, convergence & state -->
                 </div>
             </div>
         </div>

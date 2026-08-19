@@ -1,6 +1,7 @@
 package node
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
 	"strings"
@@ -90,6 +91,65 @@ func (t *IPTrafficTracker) getOrCreate(ipStr string) *ipStatItem {
 	return actual.(*ipStatItem)
 }
 
+type ipCacheEntry struct {
+	ip  uint32
+	str string
+}
+
+var ip4Cache [256]atomic.Pointer[ipCacheEntry]
+
+func ipv4ToString(b []byte) string {
+	ip := binary.BigEndian.Uint32(b)
+	idx := (ip ^ (ip >> 8) ^ (ip >> 16) ^ (ip >> 24)) & 0xFF
+	entry := ip4Cache[idx].Load()
+	if entry != nil && entry.ip == ip {
+		return entry.str
+	}
+	s := net.IPv4(b[0], b[1], b[2], b[3]).String()
+	ip4Cache[idx].Store(&ipCacheEntry{ip: ip, str: s})
+	return s
+}
+
+type ip6CacheEntry struct {
+	ip  [16]byte
+	str string
+}
+
+var ip6Cache [64]atomic.Pointer[ip6CacheEntry]
+
+func ipv6ToString(b []byte) string {
+	var ip [16]byte
+	copy(ip[:], b[:16])
+	idx := (uint32(ip[12]) ^ uint32(ip[13]) ^ uint32(ip[14]) ^ uint32(ip[15])) & 0x3F
+	entry := ip6Cache[idx].Load()
+	if entry != nil && entry.ip == ip {
+		return entry.str
+	}
+	s := net.IP(b[:16]).String()
+	ip6Cache[idx].Store(&ip6CacheEntry{ip: ip, str: s})
+	return s
+}
+
+type macCacheEntry struct {
+	mac [6]byte
+	str string
+}
+
+var macCache [64]atomic.Pointer[macCacheEntry]
+
+func macToString(b []byte) string {
+	var m [6]byte
+	copy(m[:], b[:6])
+	idx := (uint32(m[0]) ^ uint32(m[1]) ^ uint32(m[2]) ^ uint32(m[3]) ^ uint32(m[4]) ^ uint32(m[5])) & 0x3F
+	entry := macCache[idx].Load()
+	if entry != nil && entry.mac == m {
+		return entry.str
+	}
+	s := net.HardwareAddr(b[:6]).String()
+	macCache[idx].Store(&macCacheEntry{mac: m, str: s})
+	return s
+}
+
 func (t *IPTrafficTracker) RecordTx(ipStr string, bytes uint64, mac ...string) {
 	if ipStr == "" || ipStr == "0.0.0.0" || ipStr == "<nil>" || ipStr == "::" {
 		return
@@ -98,11 +158,14 @@ func (t *IPTrafficTracker) RecordTx(ipStr string, bytes uint64, mac ...string) {
 	atomic.AddUint64(&item.txBytes, bytes)
 	atomic.AddUint64(&item.txPackets, 1)
 	if len(mac) > 0 && mac[0] != "" && mac[0] != "ff:ff:ff:ff:ff:ff" && mac[0] != "00:00:00:00:00:00" {
-		item.mu.Lock()
-		if item.mac == "" || item.mac != mac[0] {
+		item.mu.RLock()
+		cur := item.mac
+		item.mu.RUnlock()
+		if cur != mac[0] {
+			item.mu.Lock()
 			item.mac = mac[0]
+			item.mu.Unlock()
 		}
-		item.mu.Unlock()
 	}
 	item.lastActive.Store(time.Now().Unix())
 }
@@ -115,11 +178,14 @@ func (t *IPTrafficTracker) RecordRx(ipStr string, bytes uint64, mac ...string) {
 	atomic.AddUint64(&item.rxBytes, bytes)
 	atomic.AddUint64(&item.rxPackets, 1)
 	if len(mac) > 0 && mac[0] != "" && mac[0] != "ff:ff:ff:ff:ff:ff" && mac[0] != "00:00:00:00:00:00" {
-		item.mu.Lock()
-		if item.mac == "" || item.mac != mac[0] {
+		item.mu.RLock()
+		cur := item.mac
+		item.mu.RUnlock()
+		if cur != mac[0] {
+			item.mu.Lock()
 			item.mac = mac[0]
+			item.mu.Unlock()
 		}
-		item.mu.Unlock()
 	}
 	item.lastActive.Store(time.Now().Unix())
 }
@@ -133,17 +199,17 @@ func (t *IPTrafficTracker) ExtractAndRecord(frame []byte, isTx bool) {
 
 	var srcIP, dstIP string
 	if etherType == packet.EtherTypeIPv4 && len(frame) >= 34 { // IPv4
-		srcIP = net.IP(frame[26:30]).String()
-		dstIP = net.IP(frame[30:34]).String()
+		srcIP = ipv4ToString(frame[26:30])
+		dstIP = ipv4ToString(frame[30:34])
 	} else if etherType == packet.EtherTypeIPv6 && len(frame) >= 54 { // IPv6
-		srcIP = net.IP(frame[22:38]).String()
-		dstIP = net.IP(frame[38:54]).String()
+		srcIP = ipv6ToString(frame[22:38])
+		dstIP = ipv6ToString(frame[38:54])
 	} else {
 		return
 	}
 
-	srcMAC := net.HardwareAddr(frame[6:12]).String()
-	dstMAC := net.HardwareAddr(frame[0:6]).String()
+	srcMAC := macToString(frame[6:12])
+	dstMAC := macToString(frame[0:6])
 
 	if isTx {
 		// Outbound frame emitted by local host:

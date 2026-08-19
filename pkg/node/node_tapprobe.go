@@ -56,13 +56,16 @@ const (
 
 // TapProbeResult reports the outcome of a single end-to-end TAP forwarding test.
 type TapProbeResult struct {
-	PeerID    string `json:"peer_id"`
-	PeerName  string `json:"peer_name"`
-	TapIP     string `json:"tap_ip"`
-	Success   bool   `json:"success"`
-	RTTMills  int64  `json:"rtt_ms"`
-	SentBytes int    `json:"sent_bytes"`
-	Error     string `json:"error,omitempty"`
+	PeerID              string `json:"peer_id"`
+	PeerName            string `json:"peer_name"`
+	TapIP               string `json:"tap_ip"`
+	Success             bool   `json:"success"`
+	RTTMills            int64  `json:"rtt_ms"`
+	SentBytes           int    `json:"sent_bytes"`
+	ReachedPeerTAP      bool   `json:"reached_peer_tap"`
+	MacMismatchDetected bool   `json:"mac_mismatch_detected"`
+	ProbeMacUsed        string `json:"probe_mac_used,omitempty"`
+	Error               string `json:"error,omitempty"`
 }
 
 // ProbeTapForward runs the prober side of the TAP forwarding test against peer.
@@ -89,11 +92,31 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 		res.Error = "peer TAP IP is not a valid IPv4 address"
 		return res, fmt.Errorf("%s", res.Error)
 	}
+	// CRITICAL: address the probe at the MAC the peer ACTUALLY emits on the
+	// wire, not the MAC advertised in metadata. If the two differ (Windows
+	// EUI-64 synthetic MACs, misconfigured `tap_mac`, intentional alias), the
+	// peer's TAP still receives our frame (so the 方案 B ack fires and we
+	// get "reached peer TAP"), but the peer's OS rejects the frame because
+	// the dst MAC is not its own — no ICMP reply is generated and we would
+	// incorrectly report "frame arrived but peer OS didn't answer", when the
+	// reality is just "we addressed it to the wrong MAC". The peer's own
+	// `ping` succeeds because the OS uses ARP to learn the actual MAC. We
+	// fall back to the advertised MAC only if we have never received any
+	// frame from this peer yet (e.g. relayed-only peers whose return path is
+	// entirely overlay) — in that case the probe may legitimately fail until
+	// at least one inbound frame populates the observation table.
+	if obs := n.observedTapMACFrom(peerID); obs != nil {
+		if obs.String() != peerTapMAC.String() {
+			res.MacMismatchDetected = true
+			peerTapMAC = obs
+		}
+	}
 	if n.localV4IP == nil || len(n.localMAC) != 6 {
 		res.Error = "local TAP IP/MAC not initialized"
 		return res, fmt.Errorf("%s", res.Error)
 	}
 	res.TapIP = peerTapIPStr
+	res.ProbeMacUsed = peerTapMAC.String()
 
 	// Transport context: a RELAYED peer reaches us (and our probe frame reaches
 	// it) through an overlay-relay / circuit hop. If THAT path is down, the real
@@ -112,13 +135,9 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 		}
 	}
 
-	// Build an ICMP echo request frame addressed to the peer's TAP IP.
-	reqFrame, err := buildICMPEchoRequest(n.localMAC, peerTapMAC, n.localV4IP, peerTapIP, tapProbeICMPIdentify)
-	if err != nil {
-		res.Error = "failed to build probe frame: " + err.Error()
-		return res, err
-	}
-	res.SentBytes = len(reqFrame)
+	// The ICMP echo request frame is built inside the attempt loop below
+	// because each attempt stamps a fresh per-probe token (方案 B ack routing)
+	// into the ICMP payload.
 
 	// Serialise probes so concurrent troubleshooter calls can't steal each
 	// other's echo replies off the single TAP read loop.
@@ -136,10 +155,23 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 	const probeAttempts = 2
 	start := time.Now()
 	var lastErr error
+	anyAck := false
 	for attempt := 1; attempt <= probeAttempts; attempt++ {
 		// Arm the capture so maybeDeliverProbeReply starts copying matching echo
 		// replies to probeReplyCh for the duration of this attempt's wait.
 		atomic.StoreInt32(&n.probeActive, 1)
+
+		// Fresh per-probe token + build the REAL request frame. The ICMP payload
+		// carries our peer ID + token so the peer can route the ack back to us
+		// (方案 B) even when the probe itself was relayed.
+		tok := atomic.AddUint64(&n.probeAckSeq, 1)
+		atomic.StoreUint64(&n.probeAckToken, tok)
+		reqFrame, err := buildICMPEchoRequest(n.localMAC, peerTapMAC, n.localV4IP, peerTapIP, tapProbeICMPIdentify, n.tapProbePayload(tok))
+		if err != nil {
+			lastErr = fmt.Errorf("probe frame build error: %w", err)
+			continue
+		}
+		res.SentBytes = len(reqFrame)
 
 		// Dispatch the REAL request frame to the peer (overlay -> peer TAP).
 		seqID := n.Packer.NextSeqID(n.txEpochForPeer(peerID))
@@ -155,18 +187,27 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 		n.DispatchUrgentFrame(peerID, reqCopy, peerTapMAC, len(reqFrame))
 
 
-		// Wait for the echo reply to arrive on OUR real TAP path (captured off
-		// the inbound overlay receive path).
-		reply, got := n.waitProbeReply(peerTapMAC, peerTapIP, tapProbeDefaultRTT)
+		// Wait for either the echo reply on OUR real TAP path (captured off
+		// the inbound overlay receive path) OR a peer-side ack proving the frame
+		// reached the peer's TAP (方案 B) — distinguishing "arrived but OS
+		// didn't answer" from "never arrived".
+		reply, gotReply, gotAck := n.waitProbeReplyOrAck(peerTapMAC, peerTapIP, tapProbeDefaultRTT)
 		atomic.StoreInt32(&n.probeActive, 0)
 
-		if got {
+		if gotReply {
 			if err := verifyICMPEchoReply(reply, peerTapMAC, n.localMAC, peerTapIP, n.localV4IP, tapProbeICMPIdentify, 0); err != nil {
 				lastErr = fmt.Errorf("reply validation failed: %w", err)
 			} else {
 				res.Success = true
 				res.RTTMills = time.Since(start).Milliseconds()
+				res.ReachedPeerTAP = true
+				n.recordTapProbe(peerID, true, true, "")
 				return res, nil
+			}
+		} else if gotAck {
+			anyAck = true
+			if lastErr == nil {
+				lastErr = fmt.Errorf("probe frame reached peer TAP but peer OS sent no echo reply within %s (%s)", tapProbeDefaultRTT, transportNote)
 			}
 		} else if lastErr == nil {
 			lastErr = fmt.Errorf("no echo reply on local TAP within %s (%s)", tapProbeDefaultRTT, transportNote)
@@ -175,37 +216,64 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 			time.Sleep(300 * time.Millisecond)
 		}
 	}
+	res.ReachedPeerTAP = anyAck
 	res.Error = fmt.Sprintf("TAP probe failed (%s): %s", transportNote, lastErr.Error())
+	n.recordTapProbe(peerID, false, anyAck, res.Error)
 	return res, fmt.Errorf("%s", res.Error)
 }
 
-// waitProbeReply blocks until a TAP-probe echo reply (matching the peer's MAC
-// and IP) is captured off the local inbound TAP path via probeReplyCh, or the
-// timeout elapses. Frames that arrive but don't match this peer are ignored, so a
-// stray or out-of-order reply doesn't abort the wait.
-func (n *Node) waitProbeReply(peerTapMAC net.HardwareAddr, peerTapIP net.IP, timeout time.Duration) ([]byte, bool) {
+// waitProbeReplyOrAck blocks until either a TAP-probe echo reply is captured
+// off the local inbound TAP path (gotReply), a peer-side ack arrives on
+// probeAckCh (方案 B), or the timeout elapses. An ack only records that the
+// frame reached the peer's TAP — it does NOT preempt the wait, because the
+// genuine ICMP reply may still be buffered in probeReplyCh; we must keep waiting
+// so a real reply is never misreported as "reached but no answer". On timeout
+// gotAck reports whether an ack was seen at all.
+func (n *Node) waitProbeReplyOrAck(peerTapMAC net.HardwareAddr, peerTapIP net.IP, timeout time.Duration) (reply []byte, gotReply bool, gotAck bool) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	ackSeen := false
 	for {
 		select {
 		case frame := <-n.probeReplyCh:
 			if verifyICMPEchoReply(frame, peerTapMAC, n.localMAC, peerTapIP, n.localV4IP, tapProbeICMPIdentify, 0) == nil {
-				return frame, true
+				return frame, true, false
 			}
 			// Not ours; keep draining so a later frame can still match.
 			continue
+		case <-n.probeAckCh:
+			// Peer confirms the frame reached its TAP. Remember it but keep
+			// waiting for the genuine ICMP reply (the OS may still answer).
+			ackSeen = true
+			continue
 		case <-timer.C:
-			return nil, false
+			return nil, false, ackSeen
 		}
 	}
 }
 
+// tapProbePayload builds the ICMP payload stamped into each probe request so the
+// receiving peer can route the ack back to us. Layout (big-endian):
+//
+//	[0:2]   magic (tapProbeAckMagic)
+//	[2]     prober peer-ID length
+//	[3:n]   prober peer-ID string
+//	[n:n+8] per-probe token (matched by handleTapProbeAck)
+func (n *Node) tapProbePayload(tok uint64) []byte {
+	pid := []byte(n.Host.ID())
+	buf := make([]byte, 3+len(pid)+8)
+	binary.BigEndian.PutUint16(buf[0:2], tapProbeAckMagic)
+	buf[2] = byte(len(pid))
+	copy(buf[3:3+len(pid)], pid)
+	binary.BigEndian.PutUint64(buf[3+len(pid):3+len(pid)+8], tok)
+	return buf
+}
+
 // ---- ICMP frame helpers ----
 
-func buildICMPEchoRequest(localMAC, dstMAC net.HardwareAddr, srcIP, dstIP net.IP, identify uint16) ([]byte, error) {
-	// Ethernet(14) + IPv4(20) + ICMP(8 + payload 8) = 50 bytes
-	const icmpPayloadLen = 8
-	frame := make([]byte, 14+20+8+icmpPayloadLen)
+func buildICMPEchoRequest(localMAC, dstMAC net.HardwareAddr, srcIP, dstIP net.IP, identify uint16, icmpPayload []byte) ([]byte, error) {
+	// Ethernet(14) + IPv4(20) + ICMP(8 + icmpPayload).
+	frame := make([]byte, 14+20+8+len(icmpPayload))
 	// Ethernet
 	copy(frame[0:6], dstMAC)
 	copy(frame[6:12], localMAC)
@@ -235,9 +303,8 @@ func buildICMPEchoRequest(localMAC, dstMAC net.HardwareAddr, srcIP, dstIP net.IP
 	binary.BigEndian.PutUint16(frame[icmpStart+2:icmpStart+4], 0) // checksum
 	binary.BigEndian.PutUint16(frame[icmpStart+4:icmpStart+6], identify)
 	binary.BigEndian.PutUint16(frame[icmpStart+6:icmpStart+8], 0x0001) // sequence
-	// payload (8 bytes of zeros)
-	frame[icmpStart+2] = 0
-	frame[icmpStart+3] = 0
+	// payload (prober peer ID + per-probe token for 方案 B ack routing)
+	copy(frame[icmpStart+8:], icmpPayload)
 	icmpCS := icmpChecksum(frame[icmpStart:])
 	binary.BigEndian.PutUint16(frame[icmpStart+2:icmpStart+4], icmpCS)
 

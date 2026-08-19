@@ -13,6 +13,20 @@ var (
 	BroadcastMAC = net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 )
 
+type macKey [6]byte
+
+func toMacKey(mac net.HardwareAddr) macKey {
+	var k macKey
+	if len(mac) >= 6 {
+		copy(k[:], mac[:6])
+	}
+	return k
+}
+
+func (k macKey) String() string {
+	return net.HardwareAddr(k[:]).String()
+}
+
 type MACEntry struct {
 	IP       string
 	PeerID   peer.ID
@@ -23,7 +37,7 @@ type MACEntry struct {
 type ShardedMACTable struct {
 	shards [16]struct {
 		mu      sync.RWMutex
-		entries map[string]MACEntry
+		entries map[macKey]MACEntry
 	}
 	// peerCounts caps how many distinct source MACs a single peer may register,
 	// preventing a misbehaving/synthetic-MAC peer from exploding the table.
@@ -40,18 +54,14 @@ const MaxMACsPerPeer = 8
 func NewMACTable() *ShardedMACTable {
 	table := &ShardedMACTable{}
 	for i := 0; i < 16; i++ {
-		table.shards[i].entries = make(map[string]MACEntry)
+		table.shards[i].entries = make(map[macKey]MACEntry)
 	}
 	table.peerCounts = make(map[peer.ID]int)
 	return table
 }
 
-func (t *ShardedMACTable) getShardIndex(macStr string) int {
-	var hash uint32
-	for i := 0; i < len(macStr); i++ {
-		hash = 31*hash + uint32(macStr[i])
-	}
-	return int(hash % 16)
+func (t *ShardedMACTable) getShardIndex(k macKey) int {
+	return int((uint32(k[0]) ^ uint32(k[1]) ^ uint32(k[2]) ^ uint32(k[3]) ^ uint32(k[4]) ^ uint32(k[5])) % 16)
 }
 
 // IsBroadcastOrMulticast checks if MAC is Ethernet Broadcast or IPv4/IPv6 Multicast
@@ -70,29 +80,67 @@ func IsBroadcastOrMulticast(mac net.HardwareAddr) bool {
 	return false
 }
 
+// IsBroadcastOrMulticastArray checks if a [6]byte MAC is Ethernet Broadcast or Multicast
+func IsBroadcastOrMulticastArray(mac [6]byte) bool {
+	if mac == [6]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff} {
+		return true
+	}
+	return (mac[0] & 0x01) != 0
+}
+
 // Learn updates or inserts a MAC -> PeerID mapping
 func (t *ShardedMACTable) Learn(mac net.HardwareAddr, peerID peer.ID) {
 	t.LearnWithIP(mac, "", peerID)
 }
+
+// macLastSeenInterval throttles how often an already-known, UNCHANGED MAC entry
+// has its LastSeen timestamp refreshed. LastSeen feeds only CleanStale(300s)
+// and the WebUI (which renders it at second granularity), so a 1s refresh is
+// orders of magnitude more precise than either consumer needs — while sparing
+// every frame in between a time.Now() call and a write lock.
+const macLastSeenInterval = time.Second
 
 // LearnWithIP updates or inserts a MAC + IP -> PeerID mapping
 func (t *ShardedMACTable) LearnWithIP(mac net.HardwareAddr, ip string, peerID peer.ID) {
 	if len(mac) < 6 || IsBroadcastOrMulticast(mac) {
 		return
 	}
-	macKey := mac.String()
-	idx := t.getShardIndex(macKey)
+	k := toMacKey(mac)
+	idx := t.getShardIndex(k)
 
 	shard := &t.shards[idx]
-	// The entire existence-check + insert + per-peer circuit-breaker must run
-	// under a SINGLE shard lock. The original code released the lock between
-	// the RLock read of `exists` and the write, which let two concurrent
-	// learners of the same new MAC both see exists==false and both bump
-	// peerCounts (over-counting it and tripping the breaker early), and let the
-	// second writer clobber the first's IP field. Lock order here (shard.mu ->
-	// peerCountsMu) matches deleteEntryLocked to avoid deadlock.
+	// Fast path (the steady state): the mapping exists and is UNCHANGED. Take
+	// only a read lock so concurrent receive goroutines refresh in parallel
+	// instead of serialising on a write lock every frame, and skip the
+	// timestamp write unless the interval elapsed.
+	//
+	// The lock is released before any upgrade — sync.RWMutex cannot be
+	// upgraded in place, and taking a write lock while holding a read lock
+	// deadlocks.
+	shard.mu.RLock()
+	entry, exists := shard.entries[k]
+	if exists && entry.PeerID == peerID && (ip == "" || ip == entry.IP) {
+		refresh := time.Since(entry.LastSeen) >= macLastSeenInterval
+		shard.mu.RUnlock()
+		if !refresh {
+			return
+		}
+		shard.mu.Lock()
+		// Re-read under the write lock: another goroutine may have changed the
+		// mapping (or purged it) in the window we were unlocked.
+		entry, exists = shard.entries[k]
+		if exists && entry.PeerID == peerID && (ip == "" || ip == entry.IP) {
+			entry.LastSeen = time.Now()
+			shard.entries[k] = entry
+		}
+		shard.mu.Unlock()
+		return
+	}
+	shard.mu.RUnlock()
+
+	// Slow path: new or changed mapping — full write lock, as before.
 	shard.mu.Lock()
-	entry, exists := shard.entries[macKey]
+	entry, exists = shard.entries[k]
 	if !exists {
 		t.peerCountsMu.Lock()
 		if t.peerCounts[peerID] >= MaxMACsPerPeer {
@@ -109,7 +157,7 @@ func (t *ShardedMACTable) LearnWithIP(mac net.HardwareAddr, ip string, peerID pe
 	}
 	entry.PeerID = peerID
 	entry.LastSeen = time.Now()
-	shard.entries[macKey] = entry
+	shard.entries[k] = entry
 	shard.mu.Unlock()
 }
 
@@ -118,12 +166,31 @@ func (t *ShardedMACTable) Lookup(mac net.HardwareAddr) (peer.ID, bool) {
 	if len(mac) < 6 || IsBroadcastOrMulticast(mac) {
 		return "", false
 	}
-	macKey := mac.String()
-	idx := t.getShardIndex(macKey)
+	k := toMacKey(mac)
+	idx := t.getShardIndex(k)
 
 	shard := &t.shards[idx]
 	shard.mu.RLock()
-	entry, found := shard.entries[macKey]
+	entry, found := shard.entries[k]
+	shard.mu.RUnlock()
+
+	if found {
+		return entry.PeerID, true
+	}
+	return "", false
+}
+
+// LookupArray finds the peer.ID for a given [6]byte MAC address with zero allocations
+func (t *ShardedMACTable) LookupArray(mac [6]byte) (peer.ID, bool) {
+	if IsBroadcastOrMulticastArray(mac) {
+		return "", false
+	}
+	k := macKey(mac)
+	idx := t.getShardIndex(k)
+
+	shard := &t.shards[idx]
+	shard.mu.RLock()
+	entry, found := shard.entries[k]
 	shard.mu.RUnlock()
 
 	if found {
@@ -139,7 +206,7 @@ func (t *ShardedMACTable) GetAllEntries() map[string]MACEntry {
 		shard := &t.shards[i]
 		shard.mu.RLock()
 		for k, v := range shard.entries {
-			res[k] = v
+			res[k.String()] = v
 		}
 		shard.mu.RUnlock()
 	}
@@ -148,10 +215,10 @@ func (t *ShardedMACTable) GetAllEntries() map[string]MACEntry {
 
 // deleteEntryLocked removes a single MAC entry from its shard and decrements the
 // owning peer's count. The shard mutex must already be held by the caller.
-func (t *ShardedMACTable) deleteEntryLocked(idx int, macKey string) {
+func (t *ShardedMACTable) deleteEntryLocked(idx int, k macKey) {
 	shard := &t.shards[idx]
-	if entry, ok := shard.entries[macKey]; ok {
-		delete(shard.entries, macKey)
+	if entry, ok := shard.entries[k]; ok {
+		delete(shard.entries, k)
 		t.peerCountsMu.Lock()
 		if t.peerCounts[entry.PeerID] > 0 {
 			t.peerCounts[entry.PeerID]--
@@ -169,9 +236,9 @@ func (t *ShardedMACTable) CleanStale(maxAge time.Duration) {
 	for i := 0; i < 16; i++ {
 		shard := &t.shards[i]
 		shard.mu.Lock()
-		for mac := range shard.entries {
-			if now.Sub(shard.entries[mac].LastSeen) > maxAge {
-				t.deleteEntryLocked(i, mac)
+		for k := range shard.entries {
+			if now.Sub(shard.entries[k].LastSeen) > maxAge {
+				t.deleteEntryLocked(i, k)
 			}
 		}
 		shard.mu.Unlock()
@@ -186,11 +253,11 @@ func (t *ShardedMACTable) Forget(mac net.HardwareAddr) {
 	if len(mac) < 6 || IsBroadcastOrMulticast(mac) {
 		return
 	}
-	macKey := mac.String()
-	idx := t.getShardIndex(macKey)
+	k := toMacKey(mac)
+	idx := t.getShardIndex(k)
 	shard := &t.shards[idx]
 	shard.mu.Lock()
-	t.deleteEntryLocked(idx, macKey)
+	t.deleteEntryLocked(idx, k)
 	shard.mu.Unlock()
 }
 
@@ -199,21 +266,33 @@ func (t *ShardedMACTable) CleanPeer(target peer.ID) {
 	for i := 0; i < 16; i++ {
 		shard := &t.shards[i]
 		shard.mu.Lock()
-		for mac, entry := range shard.entries {
+		for k, entry := range shard.entries {
 			if entry.PeerID == target {
-				t.deleteEntryLocked(i, mac)
+				t.deleteEntryLocked(i, k)
 			}
 		}
 		shard.mu.Unlock()
 	}
 }
 
-// ExtractEthernetMACs parses source and destination MACs from a raw Ethernet frame
-func ExtractEthernetMACs(frame []byte) (dstMAC net.HardwareAddr, srcMAC net.HardwareAddr, err bool) {
+// ExtractEthernetMACs parses source and destination MACs from a raw Ethernet frame.
+// Returns ok == true if frame length >= 14, false otherwise.
+func ExtractEthernetMACs(frame []byte) (dstMAC net.HardwareAddr, srcMAC net.HardwareAddr, ok bool) {
 	if len(frame) < 14 {
-		return nil, nil, true
+		return nil, nil, false
 	}
 	dstMAC = net.HardwareAddr(frame[0:6])
 	srcMAC = net.HardwareAddr(frame[6:12])
-	return dstMAC, srcMAC, false
+	return dstMAC, srcMAC, true
+}
+
+// ExtractEthernetMACArray parses source and destination MACs from a raw Ethernet frame into fixed arrays with 0 allocations.
+// Returns ok == true if frame length >= 14, false otherwise.
+func ExtractEthernetMACArray(frame []byte) (dstMAC [6]byte, srcMAC [6]byte, ok bool) {
+	if len(frame) < 14 {
+		return dstMAC, srcMAC, false
+	}
+	copy(dstMAC[:], frame[0:6])
+	copy(srcMAC[:], frame[6:12])
+	return dstMAC, srcMAC, true
 }

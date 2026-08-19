@@ -63,11 +63,12 @@ func UnpackRelayFrame(buf []byte) (finalDst, source peer.ID, ttl uint8, payload 
 	}
 
 	ver := buf[0]
+	ttl = buf[1]
+
 	if ver != RelayHeaderVersion {
-		return "", "", 0, nil, fmt.Errorf("unsupported relay header version: 0x%02x", ver)
+		return "", "", 0, nil, fmt.Errorf("unsupported relay header version: 0x%02x (expected 0x%02x)", ver, RelayHeaderVersion)
 	}
 
-	ttl = buf[1]
 	dstLen := int(binary.BigEndian.Uint16(buf[2:4]))
 	if len(buf) < 4+dstLen+2 {
 		return "", "", 0, nil, fmt.Errorf("truncated relay header: len=%d need>=%d", len(buf), 4+dstLen+2)
@@ -92,3 +93,5 @@ func UnpackRelayFrame(buf []byte) (finalDst, source peer.ID, ttl uint8, payload 
 
 	return pID, srcID, ttl, buf[headerLen:], nil
 }
+
+

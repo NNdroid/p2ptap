@@ -14,10 +14,9 @@ import (
 	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/observer"
 	"p2ptap/pkg/routing"
-	"p2ptap/pkg/version"
 	vswitch "p2ptap/pkg/switch"
+	"p2ptap/pkg/version"
 )
-
 
 // bootRelayMaxQueue is the per-boot write buffer depth for the boot-relay
 // uplink. When full, Submit fails fast and the caller falls back to the circuit
@@ -25,14 +24,13 @@ import (
 const bootRelayMaxQueue = 128
 
 // bootRelayBlacklistTTL is how long a boot stays blacklisted after its uplink
-// repeatedly failed to establish. Expiry lets a boot that later comes up be
-// retried instead of being permanently avoided.
-const bootRelayBlacklistTTL = 5 * time.Minute
+// repeatedly failed to establish. 30s allows rapid self-healing recovery from transient blips.
+const bootRelayBlacklistTTL = 30 * time.Second
 
 // bootRelayBlacklistMaxFailures is how many consecutive NewStream attempts to a
 // boot must fail before we conclude it is not a real boot-relay server (e.g. a
 // plain node mistakenly listed as a bootstrap peer) and blacklist it.
-const bootRelayBlacklistMaxFailures = 5
+const bootRelayBlacklistMaxFailures = 8
 
 // bootRelayJob is a single frame queued for the boot-relay uplink write loop.
 type bootRelayJob struct {
@@ -268,11 +266,28 @@ func (n *Node) bootRelaySubmit(boot peer.ID, env []byte, onSent, onFail func()) 
 // context cancellation or a stream write error, draining the queue (calling
 // onFail) so no frame is left silently queued on a dead uplink.
 func (n *Node) bootRelayWriteLoop(rc *bootRelayConn) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-rc.ctx.Done():
 			n.bootRelayDrain(rc)
 			return
+		case <-ticker.C:
+			// Send a periodic loopback heartbeat frame (finalDst == self)
+			// to keep intermediate NAT / firewall UDP/TCP translations alive
+			// and detect broken uplinks promptly.
+			hbFrame, err := routing.PackBootRelayFrame(n.bootRelayNetID, routing.BootRelayKindControl, "", n.Host.ID(), n.Host.ID(), 1, []byte("ping"))
+			if err == nil {
+				_ = rc.stream.SetWriteDeadline(time.Now().Add(3 * time.Second))
+				if err := WriteFrame(rc.stream, hbFrame); err != nil {
+					log.Debug("[boot-relay] heartbeat to %s failed: %v, tearing down uplink", rc.boot.ShortString(), err)
+					n.bootRelayDrain(rc)
+					rc.cancel()
+					return
+				}
+			}
 		case job, ok := <-rc.writeCh:
 			if !ok {
 				return
@@ -284,6 +299,7 @@ func (n *Node) bootRelayWriteLoop(rc *bootRelayConn) {
 					job.onFail()
 				}
 				n.bootRelayDrain(rc)
+				rc.cancel()
 				return
 			}
 			if job.onSent != nil {
@@ -322,19 +338,37 @@ func (n *Node) handleBootRelayDownlink(s network.Stream, boot peer.ID) {
 		data := buf[:readN]
 		netID, kind, proto, finalDst, srcPeer, _, innerPayload, uerr := routing.UnpackBootRelayFrame(data)
 		if uerr != nil {
-			// A truncation / layout error here almost always means the boot is
-			// running a DIFFERENT envelope version than this node (the historical
-			// 0x8000 "proto field len 32768 > 163" class of bug). Surface it as a
-			// WARN with both commits so the operator can immediately see the
-			// version skew instead of silently dropped frames — the auth-handshake
-			// version gate (P0) should normally have rejected this peer already.
-			log.Warn("[boot-relay] downlink unpack error from %s (local commit=%s): %v", boot.String(), version.ShortCommit(), uerr)
+			hexLen := len(data)
+			if hexLen > 32 {
+				hexLen = 32
+			}
+			log.Warn("[boot-relay] downlink unpack error from %s (local commit=%s): %v, raw_hex=%x", boot.String(), version.ShortCommit(), uerr, data[:hexLen])
 			continue
+
 		}
 		if finalDst != n.Host.ID() {
 			// The boot only sends us frames destined for us; a misrouted frame
 			// is harmless to ignore.
 			continue
+		}
+		// Defense in depth: the boot already enforces that a local delivery's
+		// netID equals the receiver's network, but re-verify here so a frame that
+		// slipped through (e.g. a misconfigured/permissive boot) cannot inject
+		// traffic tagged for a different PSK network into this node. Data AND
+		// control frames are both gated; a control handshake is exactly what an
+		// attacker would forge to establish a bogus cipher.
+		if netID != n.bootRelayNetID {
+			log.Debug("[boot-relay] downlink drop netID mismatch from %s (frame net=%s, local net=%s)",
+				boot.ShortString(), netID, n.bootRelayNetID)
+			continue
+		}
+
+		// Return-path liveness and provenance tracking: an inbound frame
+		// from srcPeer via boot proves the return path is alive and records
+		// that srcPeer is reachable through this boot hop.
+		n.notePeerRx(srcPeer)
+		if boot != "" && boot != srcPeer {
+			n.recordPeekMapOrigin(srcPeer, boot, 1, false)
 		}
 		// Control-plane frames (SeqSync / LSA / Meta / Echo for a relay-only
 		// peer) carry the raw inner protocol bytes and must NOT be decrypted with
@@ -346,7 +380,6 @@ func (n *Node) handleBootRelayDownlink(s network.Stream, boot peer.ID) {
 			n.deliverBootRelayControl(finalDst, srcPeer, proto, boot, innerPayload)
 			continue
 		}
-		_ = netID
 		// Decrypt the inner payload with the cipher negotiated for srcPeer.
 		if cipher := n.obfDecryptCipherForPeer(srcPeer); cipher != nil {
 			dec, derr := obfuscate.DecryptPayloadRegion(innerPayload, cipher)
@@ -419,8 +452,11 @@ func (sd *StrategyDispatcher) sendToPeerViaBootRelay(target, bootHop peer.ID, pa
 // relay-over-backbone). Centralising this stops the two relay paths from
 // drifting apart.
 func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer.ID, seqID uint64) {
-	// Valid end-to-end frame: record success so the recent-error window resets
-	// and readiness self-heals, matching the direct-frame RX path.
+	// Valid end-to-end frame: record return-path liveness and success
+	n.notePeerRx(srcPeer)
+	if viaPeer != "" && viaPeer != srcPeer {
+		n.recordPeekMapOrigin(srcPeer, viaPeer, 1, false)
+	}
 	n.recordPeerRxDecrypt(srcPeer, true)
 	n.maybeMarkReadyOnDecrypt(srcPeer, true)
 
@@ -436,29 +472,48 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 		}
 		n.dedupPeersMu.Unlock()
 	}
+	if obfuscate.IsStructuredSeq(seqID) {
+		if ep := obfuscate.ConnEpochFromSeq(seqID); ep != peerDedup.ConnEpoch() {
+			peerDedup.SetConnEpoch(ep)
+		}
+	}
 	if peerDedup.IsDuplicate(seqID) {
 		n.Collector.RecordDedup()
-		n.Collector.RecordPeerDedup(srcPeer.String())
+		// PERF: cached base58 — this is on every relayed frame (see peer_idstr.go).
+		n.Collector.RecordPeerDedup(n.peerIDString(srcPeer))
 		log.Debug("Duplicate relayed frame seq=%d from peer %s", seqID, srcPeer.String())
 		return
 	}
-	n.Collector.RecordRxSeq(srcPeer.String(), seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
+	n.Collector.RecordRxSeq(n.peerIDString(srcPeer), seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
 
 	// ACL check — evaluate against the TRUE origin (srcPeer), not the relay
 	// transport peer. The relay only forwards the frame; the security policy is
 	// about which mesh member may inject traffic into our TAP.
-	if !n.checkACL(tapPayload, srcPeer.String(), false) {
+	if !n.checkACL(tapPayload, n.peerIDString(srcPeer), false) {
 		log.Debug("ACL blocked relayed frame from origin %s (via %s)", srcPeer.String(), viaPeer.String())
 		return
 	}
 
 	// Learn source MAC — key on srcPeer so replies route back through the relay
 	// path (not directly to the relay forwarder, which would drop them).
-	if dstMAC, srcMAC, ok := vswitch.ExtractEthernetMACs(tapPayload); ok {
+	// GUARD: same minEthernetFrameLen check as the direct-Rx path in
+	// handleStream — ExtractEthernetMACs only needs 12 bytes, so a short
+	// control payload would otherwise be learned as a bogus src MAC here too.
+	if dstMAC, srcMAC, ok := vswitch.ExtractEthernetMACs(tapPayload); ok && len(tapPayload) >= minEthernetFrameLen {
+		if rawSrc := net.HardwareAddr(srcMAC); len(rawSrc) == 6 {
+			if n.isFrameFromPeerSelf(srcPeer, tapPayload) {
+				n.recordPeerObservedTapMAC(srcPeer, rawSrc)
+			}
+		}
 		if realMAC := n.lookupPeerTapMAC(srcPeer); realMAC != nil {
 			srcMAC = realMAC
 		}
 		n.MACTable.Learn(srcMAC, srcPeer)
+
+		// Auto-learn peer IPv4 / IPv6 into ARP/NDP index and inject GARP/NA into local TAP
+		// ensuring the local OS can immediately return unicast replies without unproxied broadcast delay.
+		n.learnPeerAddressFromFrame(srcPeer, srcMAC, tapPayload)
+
 		log.Debug("Rx relayed frame: len=%d src=%s dst=%s from_peer=%s",
 			len(tapPayload), net.HardwareAddr(srcMAC[:]).String(), net.HardwareAddr(dstMAC[:]).String(), viaPeer.String())
 	}
@@ -473,7 +528,6 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 			return
 		}
 	}
-
 
 	// Routing arbitration for relayed transit (mirrors the direct-Rx decision
 	// table): an Exit Node client only sinks frames genuinely for us.
@@ -495,10 +549,11 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 	// Write packet to local TAP device.
 	if n.TAP != nil {
 		if n.Collector != nil {
-			n.Collector.CaptureFrameWithPeers(observer.DirRx, tapPayload, srcPeer.String(), "self")
+			n.Collector.CaptureFrameWithPeers(observer.DirRx, tapPayload, n.peerIDString(srcPeer), "self")
 		}
 		_, _ = n.tapWrite(tapPayload)
 		n.recordPeerRxBytes(srcPeer, len(tapPayload))
+		n.resetPingPongFailCountForPeer(srcPeer)
 		n.Collector.RecordRecv(len(tapPayload))
 		n.Collector.RecordPacketDir(tapPayload, false)
 		n.IPTracker.ExtractAndRecord(tapPayload, false)

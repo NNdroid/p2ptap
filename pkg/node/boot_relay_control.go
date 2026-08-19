@@ -101,15 +101,15 @@ type bootRelayCtrlStream struct {
 	remote  peer.ID // true origin/target peer the protocol runs between
 	bootHop peer.ID // which boot uplink carries this control stream
 	proto   protocol.ID
-	convID  []byte  // unique per-conversation ID; matches the peer's reply routing
+	convID  []byte // unique per-conversation ID; matches the peer's reply routing
 
-	mu             sync.Mutex
-	readBuf        []byte
-	readCh         chan []byte
-	closeCh        chan struct{}
-	closed         bool
-	readDeadline   time.Time
-	writeDeadline  time.Time
+	mu            sync.Mutex
+	readBuf       []byte
+	readCh        chan []byte
+	closeCh       chan struct{}
+	closed        bool
+	readDeadline  time.Time
+	writeDeadline time.Time
 }
 
 // --- network.MuxedStream (io.Reader / io.Writer / io.Closer) ---
@@ -319,16 +319,16 @@ type bootRelayCtrlConn struct {
 }
 
 func (c *bootRelayCtrlConn) Close() error                               { return nil }
-func (c *bootRelayCtrlConn) LocalPeer() peer.ID                        { return c.n.Host.ID() }
-func (c *bootRelayCtrlConn) RemotePeer() peer.ID                      { return c.remote }
-func (c *bootRelayCtrlConn) RemotePublicKey() ic.PubKey                { return nil }
-func (c *bootRelayCtrlConn) ConnState() network.ConnectionState        { return network.ConnectionState{} }
-func (c *bootRelayCtrlConn) LocalMultiaddr() ma.Multiaddr             { return nil }
-func (c *bootRelayCtrlConn) RemoteMultiaddr() ma.Multiaddr            { return nil }
-func (c *bootRelayCtrlConn) Stat() network.ConnStats                  { return network.ConnStats{} }
-func (c *bootRelayCtrlConn) Scope() network.ConnScope                 { return nil }
+func (c *bootRelayCtrlConn) LocalPeer() peer.ID                         { return c.n.Host.ID() }
+func (c *bootRelayCtrlConn) RemotePeer() peer.ID                        { return c.remote }
+func (c *bootRelayCtrlConn) RemotePublicKey() ic.PubKey                 { return nil }
+func (c *bootRelayCtrlConn) ConnState() network.ConnectionState         { return network.ConnectionState{} }
+func (c *bootRelayCtrlConn) LocalMultiaddr() ma.Multiaddr               { return nil }
+func (c *bootRelayCtrlConn) RemoteMultiaddr() ma.Multiaddr              { return nil }
+func (c *bootRelayCtrlConn) Stat() network.ConnStats                    { return network.ConnStats{} }
+func (c *bootRelayCtrlConn) Scope() network.ConnScope                   { return nil }
 func (c *bootRelayCtrlConn) CloseWithError(network.ConnErrorCode) error { return nil }
-func (c *bootRelayCtrlConn) ID() string                               { return "bootrelay-ctrl-conn-" + c.remote.String() }
+func (c *bootRelayCtrlConn) ID() string                                 { return "bootrelay-ctrl-conn-" + c.remote.String() }
 func (c *bootRelayCtrlConn) NewStream(context.Context) (network.Stream, error) {
 	return nil, errors.New("boot-relay control conn: NewStream not supported")
 }
@@ -380,6 +380,10 @@ func (n *Node) deliverBootRelayControl(finalDst, srcPeer peer.ID, proto protocol
 	if finalDst != n.Host.ID() {
 		log.Debug("[boot-relay] control frame finalDst %s != self; dropping", finalDst.ShortString())
 		return
+	}
+	n.notePeerRx(srcPeer)
+	if viaBoot != "" && viaBoot != srcPeer {
+		n.recordPeekMapOrigin(srcPeer, viaBoot, 1, false)
 	}
 	convID, inner, err := decodeBootRelayCtrlFrame(payload)
 	if err != nil {
@@ -435,6 +439,12 @@ func (n *Node) dispatchBootRelayControlStream(st *bootRelayCtrlStream) {
 		n.handleMetaStream(st)
 	case EchoProtocolID:
 		n.handleEcho(st)
+	case TapProbeAckProtocolID:
+		// Tunnelled peer-side TAP probe acks, mirroring dispatchRelayCtrlInner.
+		// A relay-only peer's ack traverses the boot-relay control tunnel, so
+		// without this case it would fall into default: and be closed before
+		// reaching the prober, making ProbeTapForward falsely time out.
+		n.handleTapProbeAck(st)
 	default:
 		log.Warn("[boot-relay] no control handler for proto %s (origin %s); closing", st.proto, st.remote.ShortString())
 	}

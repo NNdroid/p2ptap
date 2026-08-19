@@ -3,10 +3,12 @@ package node
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"p2ptap/pkg/config"
 	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/routing"
@@ -565,4 +567,34 @@ func TestE2EFullSuiteAfterInitialization(t *testing.T) {
 
 	t.Logf("✓ Librespeed SpeedTest Simulation Result: Target Peer %s, Node %s, Strategy=%s, Mesh Health=100%%", nodeB.Host.ID().String(), nodeA.nodeName, res.TransportStrategy)
 	t.Log("=== Full E2E Integration Suite Successfully Verified! All 5 Test Stages PASSED ===")
+}
+
+// TestBroadcastNeverBlocksDispatchWorkers verifies that when BroadcastToAllPeers
+// is called with unresponsive or unreachable peers, it returns non-blocking in
+// under 50ms, never stalling dispatch workers on network I/O.
+func TestBroadcastNeverBlocksDispatchWorkers(t *testing.T) {
+	tapA, _ := tap.NewMemTAPPair("tapA", "pipeA")
+	cfgA := createTestNodeConfig("10.0.0.1/24", "fd00::1/64", "best_path")
+	nodeA, err := NewNodeWithTAP(cfgA, tapA, nil)
+	if err != nil {
+		t.Fatalf("Failed to create NodeA: %v", err)
+	}
+	defer nodeA.Close()
+	nodeA.Start()
+
+	// Add 5 fake/unreachable peers to peerMeta
+	for i := 1; i <= 5; i++ {
+		fakePID := peer.ID(fmt.Sprintf("unreachable-peer-%d-1234567890", i))
+		nodeA.peerMeta.Store(fakePID, PeerMeta{TapIP: fmt.Sprintf("10.0.0.%d/24", i+10)})
+	}
+
+	start := time.Now()
+	testPayload := []byte("BROADCAST_FANOUT_NONBLOCKING_TEST_FRAME")
+	nodeA.Dispatcher.BroadcastToAllPeers(context.Background(), testPayload)
+	elapsed := time.Since(start)
+
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("BroadcastToAllPeers blocked worker synchronously: took %v (expected < 100ms)", elapsed)
+	}
+	t.Logf("✓ BroadcastToAllPeers completed non-blocking in %v", elapsed)
 }

@@ -73,7 +73,14 @@ func (d *Deduplicator) WindowUtilization() float64 {
 func (d *Deduplicator) SetConnEpoch(epoch uint64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.expectedConnEpoch = epoch & 0xFFF
+	ep := epoch & 0xFFF
+	if d.epochSet && d.expectedConnEpoch != ep {
+		d.clearAll()
+		d.maxSeq = 0
+		d.minCounter = 0
+		atomic.AddUint64(&d.windowRets, 1)
+	}
+	d.expectedConnEpoch = ep
 	d.epochSet = true
 }
 
@@ -96,6 +103,7 @@ func (d *Deduplicator) SyncFrom(remoteSeq uint64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	atomic.AddUint64(&d.windowRets, 1)
+	d.clearAll()
 	d.maxSeq = remoteSeq
 	c := CounterFromSeq(remoteSeq)
 	d.minCounter = (c - dedupWindow) & 0xFFFF
@@ -117,22 +125,15 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 		return false
 	}
 
-	// --- Anti-replay via per-connection epoch ---
-	// A frame captured in a previous session carries a stale epoch and must be
-	// rejected. We compare against the epoch negotiated at handshake, which is
-	// refreshed on every (re)connect, so no wall-clock is involved.
-	d.mu.Lock()
-	epochSet := d.epochSet
-	expect := d.expectedConnEpoch
-	d.mu.Unlock()
-	if epochSet && ConnEpochFromSeq(seqID) != expect {
-		atomic.AddUint64(&d.replayDrops, 1)
-		log.Debug("Dedup: stale epoch drop seq=%d got=%d expect=%d", seqID, ConnEpochFromSeq(seqID), expect)
-		return true
-	}
-
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	// --- Anti-replay via per-connection epoch ---
+	if d.epochSet && ConnEpochFromSeq(seqID) != d.expectedConnEpoch {
+		atomic.AddUint64(&d.replayDrops, 1)
+		log.Debug("Dedup: stale epoch drop seq=%d got=%d expect=%d", seqID, ConnEpochFromSeq(seqID), d.expectedConnEpoch)
+		return true
+	}
 
 	c := CounterFromSeq(seqID)
 	maxC := CounterFromSeq(d.maxSeq)
@@ -156,16 +157,6 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 		// Genuine forward move: slide the live window forward to
 		// [c - dedupWindow, c]. Evict every counter that has just fallen off
 		// the lower edge so the bitmask never accumulates set bits forever.
-		//
-		// Without this slide the full 16-bit bitmask keeps every seen counter
-		// set (the old evictBehind only fired on jumps >= dedupWindow, so it
-		// never ran for normal sequential traffic). Once the 32-bit source
-		// counter's low 16 bits wrap (~every 65536 frames), those stale bits
-		// make every out-of-order frame (routine under direct+relay multi-path
-		// delivery) look like a duplicate and get dropped — exactly the
-		// intermittent packet loss / "unstable TAP transmission" symptom.
-		// The slide is amortised O(1) per frame: only ~diff counters leave
-		// the window per move.
 		newMin := (c - dedupWindow) & 0xFFFF
 		if d.maxSeq != 0 {
 			d.evictRange(d.minCounter, newMin)

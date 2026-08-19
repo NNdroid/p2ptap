@@ -61,9 +61,9 @@ func NewConverter(localMAC net.HardwareAddr) *Converter {
 	return &Converter{LocalMAC: localMAC}
 }
 
-// etherTypeOf inspects the IP version nibble and returns the corresponding
+// EtherTypeOf inspects the IP version nibble and returns the corresponding
 // EtherType, or 0 if the packet is not IPv4/IPv6.
-func etherTypeOf(pkt []byte) uint16 {
+func EtherTypeOf(pkt []byte) uint16 {
 	if len(pkt) == 0 {
 		return 0
 	}
@@ -77,11 +77,16 @@ func etherTypeOf(pkt []byte) uint16 {
 	}
 }
 
+// etherTypeOf is the unexported alias for backward compatibility.
+func etherTypeOf(pkt []byte) uint16 {
+	return EtherTypeOf(pkt)
+}
+
 // PacketToFrame wraps an L3 IP packet (read from the TUN fd) into an Ethernet
 // frame addressed to BroadcastMAC with the converter's LocalMAC as the source.
 // It returns ErrNotIPPacket if pkt is not IPv4 or IPv6.
 func (c *Converter) PacketToFrame(pkt []byte) ([]byte, error) {
-	ethType := etherTypeOf(pkt)
+	ethType := EtherTypeOf(pkt)
 	if ethType == 0 {
 		return nil, ErrNotIPPacket
 	}
@@ -93,11 +98,9 @@ func (c *Converter) PacketToFrame(pkt []byte) ([]byte, error) {
 	return frame, nil
 }
 
-// FrameToPacket strips the 14-byte Ethernet header from frame and returns the
-// inner L3 IP packet. It returns ErrFrameTooShort for frames under 14 bytes and
-// ErrNotIPPacket when the EtherType is not IPv4/IPv6 (e.g. ARP), which the
-// caller should skip rather than deliver to the TUN fd.
-func (c *Converter) FrameToPacket(frame []byte) ([]byte, error) {
+// FrameToPacketFast strips the 14-byte Ethernet header from frame and returns a
+// zero-copy subslice to the inner L3 IP packet.
+func (c *Converter) FrameToPacketFast(frame []byte) ([]byte, error) {
 	if len(frame) < 14 {
 		return nil, ErrFrameTooShort
 	}
@@ -105,7 +108,18 @@ func (c *Converter) FrameToPacket(frame []byte) ([]byte, error) {
 	if ethType != EtherTypeIPv4 && ethType != EtherTypeIPv6 {
 		return nil, ErrNotIPPacket
 	}
-	pkt := make([]byte, len(frame)-14)
-	copy(pkt, frame[14:])
-	return pkt, nil
+	return frame[14:], nil
 }
+
+// FrameToPacket strips the 14-byte Ethernet header from frame and returns the
+// inner L3 IP packet as a newly allocated buffer.
+func (c *Converter) FrameToPacket(frame []byte) ([]byte, error) {
+	pkt, err := c.FrameToPacketFast(frame)
+	if err != nil {
+		return nil, err
+	}
+	res := make([]byte, len(pkt))
+	copy(res, pkt)
+	return res, nil
+}
+

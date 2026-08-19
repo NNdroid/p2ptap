@@ -6,11 +6,14 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -25,6 +28,14 @@ import (
 	vswitch "p2ptap/pkg/switch"
 	"p2ptap/pkg/version"
 )
+
+// minEthernetFrameLen is the smallest payload accepted as a genuine Ethernet
+// frame for MAC learning / observed-MAC recording: a 14-byte Ethernet header
+// plus the smallest useful L3 header (20-byte IPv4). ExtractEthernetMACs only
+// needs 12 bytes, so short control payloads (e.g. a 19-byte stream warm-up
+// probe) still "parse" as L2 frames — their payload bytes [0:12] would be
+// recorded as a bogus src MAC, poisoning the MAC table and the ARP index.
+const minEthernetFrameLen = 34
 
 // rewriteRxDstMAC applies the L2 destination-MAC fix-ups that must happen to
 // every frame just before it is injected into the local TAP device. It is
@@ -49,6 +60,9 @@ func (n *Node) rewriteRxDstMAC(payload []byte) {
 	if len(payload) < 34 || len(n.localMAC) != 6 {
 		return
 	}
+	// Snapshot the mutable config once so the two IPv4/IPv6 exit-transit checks
+	// below observe one consistent reload (a mid-frame swap must not tear them).
+	c := n.config()
 	if binary.BigEndian.Uint16(payload[12:14]) == packet.EtherTypeIPv4 && n.localV4IP != nil {
 		dstIP := net.IP(payload[30:34])
 		if dstIP.Equal(n.localV4IP) || n.isLocalAdvertisedSubnet(dstIP) {
@@ -58,11 +72,11 @@ func (n *Node) rewriteRxDstMAC(payload []byte) {
 			}
 			return
 		}
-		if (n.isExitNodeActive() || (n.Config != nil && n.Config.ExitNode.Enable)) &&
+		if (n.isExitNodeActive() || (c != nil && c.ExitNode.Enable)) &&
 			func() bool { mac, _ := n.lookupPeerMACByIPv4(dstIP); return mac == nil }() &&
 			n.lookupPeerMACByAdvertisedSubnet(dstIP) == nil {
 			exitMAC := n.localMAC
-			if !(n.Config != nil && n.Config.ExitNode.Enable) {
+			if !(c != nil && c.ExitNode.Enable) {
 				exitMAC = n.getExitPeerMAC()
 				if len(exitMAC) != 6 {
 					exitMAC = n.localMAC
@@ -75,6 +89,17 @@ func (n *Node) rewriteRxDstMAC(payload []byte) {
 		}
 		return
 	}
+	if binary.BigEndian.Uint16(payload[12:14]) == packet.EtherTypeARP && n.localV4IP != nil && len(payload) >= 42 {
+		targetIP := net.IP(payload[38:42])
+		if targetIP.Equal(n.localV4IP) || n.isLocalAdvertisedSubnet(targetIP) {
+			if !isBroadcastOrMulticastMAC(payload[0:6]) && !bytes.Equal(payload[0:6], n.localMAC) {
+				log.Debug("MAC rewrite ARP (local dst / subnet): dstIP=%s oldDstMAC=%s newDstMAC=%s", targetIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+				copy(payload[0:6], n.localMAC)
+			}
+			return
+		}
+	}
+
 	if binary.BigEndian.Uint16(payload[12:14]) == packet.EtherTypeIPv6 && n.localV6IP != nil && len(payload) >= 54 {
 		dstIP := net.IP(payload[38:54])
 		if dstIP.Equal(n.localV6IP) || n.isLocalAdvertisedSubnet(dstIP) {
@@ -85,11 +110,11 @@ func (n *Node) rewriteRxDstMAC(payload []byte) {
 			return
 		}
 
-		if (n.isExitNodeActive() || (n.Config != nil && n.Config.ExitNode.Enable)) &&
+		if (n.isExitNodeActive() || (c != nil && c.ExitNode.Enable)) &&
 			func() bool { mac, _ := n.lookupPeerMACByIPv6(dstIP); return mac == nil }() &&
 			n.lookupPeerMACByAdvertisedSubnet(dstIP) == nil {
 			exitMAC := n.localMAC
-			if !(n.Config != nil && n.Config.ExitNode.Enable) {
+			if !(c != nil && c.ExitNode.Enable) {
 				exitMAC = n.getExitPeerMAC()
 				if len(exitMAC) != 6 {
 					exitMAC = n.localMAC
@@ -113,28 +138,40 @@ func (n *Node) handleStream(s network.Stream) {
 
 	buf := make([]byte, obfuscate.MaxSealedFrameSize)
 	frameCount := 0
+
+	// A read deadline may fire after io.ReadFull has consumed part of the length
+	// prefix or frame body. ReadFrame cannot put those bytes back, so retrying on
+	// the same stream desynchronizes every following frame. Clear any inherited
+	// deadline and instead reset the stream when node shutdown is requested.
+	// Reset unblocks a ReadFrame even when its peer stays silent, without turning
+	// a harmless idle period into a corrupt partial-frame retry.
+	if err := s.SetReadDeadline(time.Time{}); err != nil {
+		log.Debug("Failed to clear stream read deadline for %s: %v", remotePeer.String(), err)
+	}
+	if n.ctx != nil {
+		streamDone := make(chan struct{})
+		defer close(streamDone)
+		go func() {
+			select {
+			case <-n.ctx.Done():
+				_ = s.Reset()
+			case <-streamDone:
+			}
+		}()
+	}
+
 	for {
-		// Respond to node shutdown: libp2p streams block indefinitely in
-		// ReadFrame, so arm a short read deadline and re-check the node context
-		// between frames. This lets handleStream exit promptly once Close()
-		// cancels the context, instead of waiting for the underlying transport
-		// to deliver EOF (which can hang on Windows / after a forced host close).
-		if err := s.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-			log.Debug("Failed to set stream read deadline for %s: %v", remotePeer.String(), err)
-		}
 		// Read length-prefixed frame from P2P stream
 		readN, err := ReadFrame(s, buf)
 		if err != nil {
-			// A deadline-induced error means no frame arrived in the window;
-			// check shutdown before giving up.
-			if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-				select {
-				case <-n.ctx.Done():
-					log.Debug("Stream closed for %s: node shutting down", remotePeer.String())
-					return
-				default:
-					continue
-				}
+			var nerr net.Error
+			if errors.As(err, &nerr) && nerr.Timeout() {
+				// A timeout has an unknown read offset. Never reuse this framing
+				// stream: if it occurred mid-frame, its next bytes cannot safely be
+				// interpreted as a new length prefix.
+				log.Warn("Stream read timed out from peer %s after %d frames; resetting stream to preserve frame alignment", remotePeer.String(), frameCount)
+				_ = s.Reset()
+				break
 			}
 			if err != io.EOF {
 				log.Debug("Stream read error from peer %s: %v (after %d frames)", remotePeer.String(), err, frameCount)
@@ -146,22 +183,35 @@ func (n *Node) handleStream(s network.Stream) {
 
 		// Track per-peer received bytes for accurate speed display.
 		n.recordPeerRxBytes(remotePeer, readN)
+		if n.protoTracker != nil {
+			n.protoTracker.Data.RecordRx(1, uint64(readN))
+		}
+		// Return-path liveness: an inbound frame directly from remotePeer proves its return path is alive
+		n.notePeerRx(remotePeer)
 
-		log.Debug("Rx raw frame: len=%d from peer=%s", readN, remotePeer.String())
+		// PERF: per-frame path. peer.String() is base58 (~930ns, 2 allocs) and
+		// is evaluated at the call site regardless of log level, so guard it.
+		if log.IsDebug() {
+			log.Debug("Rx raw frame: len=%d from peer=%s", readN, remotePeer.String())
+		}
 
 		frameData := buf[:readN] // may be reassigned below if reassembled
 
-		// CONCURRENCY CONTRACT: `buf` is allocated per-iteration inside this
-		// stream's read loop, so it is local to THIS goroutine. The MAC-rewrite
-		// paths below mutate frameData (== buf[:readN]) in place. This is safe
-		// ONLY because the eventual TAP write (n.tapWrite -> n.TAP.Write) is
-		// synchronous and returns before the next loop iteration reuses `buf`.
+		// CONCURRENCY CONTRACT: `buf` belongs exclusively to this stream-reader
+		// goroutine and is reused on each iteration. The MAC-rewrite paths below
+		// mutate frameData (== buf[:readN]) in place. This is safe ONLY because
+		// the eventual TAP write (n.tapWrite -> n.TAP.Write) is synchronous and
+		// returns before the next loop iteration reuses `buf`.
 		// Do NOT let `buf`/`frameData` escape this goroutine (e.g. hand it to a
 		// background send or the urgent-write channel) without copying first, or
 		// a concurrent read would observe torn/overwritten frame bytes.
 
 		if len(frameData) < obfuscate.HeaderLen {
-			log.Debug("Short frame (%d bytes) from peer %s, skipping", len(frameData), remotePeer.String())
+			// PERF: malformed-traffic path — every junk frame lands here, so
+			// keep the base58 peer.String() behind the level check.
+			if log.IsDebug() {
+				log.Debug("Short frame (%d bytes) from peer %s, skipping", len(frameData), remotePeer.String())
+			}
 			continue
 		}
 
@@ -173,7 +223,10 @@ func (n *Node) handleStream(s network.Stream) {
 		// case leaves frameData unchanged (legitimate plaintext).
 		dec, decOK, garbage := n.decryptPeerFrame(frameData, remotePeer)
 		if garbage {
-			log.Debug("Rx: dropping undecryptable ciphertext frame from %s", remotePeer.String())
+			// PERF: hit on EVERY frame during a key-divergence storm — keep guarded.
+			if log.IsDebug() {
+				log.Debug("Rx: dropping undecryptable ciphertext frame from %s", remotePeer.String())
+			}
 			n.recordPeerRxDecrypt(remotePeer, false)
 			// Self-heal: if this keeps failing, re-run SeqSync to re-anchor keys.
 			n.maybeResyncOnDecryptFail(remotePeer)
@@ -186,7 +239,10 @@ func (n *Node) handleStream(s network.Stream) {
 		// ── Deobfuscation (parse header, extract payload) ──
 		seqID, payload, err := obfuscate.Unpack(frameData)
 		if err != nil {
-			log.Debug("Frame unpack error from peer %s: %v", remotePeer.String(), err)
+			// PERF: also a per-frame path while keys are diverged — keep guarded.
+			if log.IsDebug() {
+				log.Debug("Frame unpack error from peer %s: %v", remotePeer.String(), err)
+			}
 			// Both decrypt AND unpack failed => genuinely invalid frame. Record
 			// the failure so the recent-window Decrypt-Fail signal can fire only
 			// for real garbage (not benign plaintext during the handshake window).
@@ -210,8 +266,11 @@ func (n *Node) handleStream(s network.Stream) {
 		// belt-and-suspenders guard against stray/garbage traffic leaking into
 		// the TAP device.
 		if len(frameData) < 2 || binary.BigEndian.Uint16(frameData[0:2]) != obfuscate.FrameMagic {
-			log.Debug("Rejected non-p2ptap frame from peer %s (bad magic, len=%d)",
-				remotePeer.String(), len(frameData))
+			// PERF: stray-traffic path — keep the base58 cost behind the check.
+			if log.IsDebug() {
+				log.Debug("Rejected non-p2ptap frame from peer %s (bad magic, len=%d)",
+					remotePeer.String(), len(frameData))
+			}
 			continue
 		}
 
@@ -222,14 +281,16 @@ func (n *Node) handleStream(s network.Stream) {
 		// frame to obtain the real TAP payload + seqID. Non-fragment frames use
 		// the payload/seqID from the first Unpack directly.
 		if n.fragRX != nil && isFragPayload(payload) {
-			finalPacked, complete := n.fragRX.reassemble(payload)
+			finalPacked, complete := n.fragRX.reassemble(remotePeer, payload)
 			if !complete {
 				continue // more fragments pending
 			}
 			// ── DECRYPT the reassembled inner frame BEFORE unpacking ──
 			fdec, fdecOK, fgarbage := n.decryptPeerFrame(finalPacked, remotePeer)
 			if fgarbage {
-				log.Debug("Rx: dropping undecryptable reassembled ciphertext from %s", remotePeer.String())
+				if log.IsDebug() {
+					log.Debug("Rx: dropping undecryptable reassembled ciphertext from %s", remotePeer.String())
+				}
 				n.recordPeerRxDecrypt(remotePeer, false)
 				n.maybeResyncOnDecryptFail(remotePeer)
 				continue
@@ -244,7 +305,11 @@ func (n *Node) handleStream(s network.Stream) {
 			}
 		}
 
-		log.Debug("Rx unpacked: seq=%d payloadLen=%d frameLen=%d from peer=%s", seqID, len(payload), len(frameData), remotePeer.String())
+		// PERF: per-frame path — peer.String() is base58 (~930ns, 2 allocs),
+		// evaluated at the call site regardless of log level. Keep guarded.
+		if log.IsDebug() {
+			log.Debug("Rx unpacked: seq=%d payloadLen=%d frameLen=%d from peer=%s", seqID, len(payload), len(frameData), remotePeer.String())
+		}
 
 		// Per-peer deduplication: each peer has its own seqID space,
 		// so seqIDs from different peers never collide (unlike the
@@ -262,7 +327,7 @@ func (n *Node) handleStream(s network.Stream) {
 			}
 			n.dedupPeersMu.Unlock()
 		}
-		if decOK && obfuscate.IsStructuredSeq(seqID) {
+		if obfuscate.IsStructuredSeq(seqID) {
 			if ep := obfuscate.ConnEpochFromSeq(seqID); ep != peerDedup.ConnEpoch() {
 				peerDedup.SetConnEpoch(ep)
 			}
@@ -270,23 +335,51 @@ func (n *Node) handleStream(s network.Stream) {
 		if peerDedup.IsDuplicate(seqID) {
 
 			n.Collector.RecordDedup()
-			n.Collector.RecordPeerDedup(remotePeer.String())
+			// PERF: cached base58 (see peer_idstr.go) — pid.String() would cost
+			// ~933ns/2allocs on EVERY frame just to feed a bookkeeping call.
+			n.Collector.RecordPeerDedup(n.peerIDString(remotePeer))
 			log.Debug("Duplicate frame seq=%d from peer %s", seqID, remotePeer.String())
 			continue
 		}
-		n.Collector.RecordRxSeq(remotePeer.String(), seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
+		n.Collector.RecordRxSeq(n.peerIDString(remotePeer), seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
 
 		// ACL Firewall Filtering check
-		if !n.checkACL(payload, remotePeer.String(), false) {
+		if !n.checkACL(payload, n.peerIDString(remotePeer), false) {
 			log.Debug("🛡️ ACL Firewall blocked Rx frame seq=%d from peer %s", seqID, remotePeer.String())
 			continue
 		}
-		if n.Config.ACL.Enable {
+		if log.IsDebug() && n.config().ACL.Enable {
 			log.Debug("ACL passed: seq=%d from peer=%s", seqID, remotePeer.String())
 		}
 
-		dstMAC, srcMAC, errExtract := vswitch.ExtractEthernetMACs(payload)
-		if !errExtract {
+		dstMAC, srcMAC, okExtract := vswitch.ExtractEthernetMACs(payload)
+		// CORRECTNESS: a runt frame cannot carry trustworthy L2 addressing, so
+		// it must not feed MAC learning or the observed-MAC table.
+		//
+		// ExtractEthernetMACs only needs 12 bytes, so a short control payload
+		// (e.g. a 19-byte stream warm-up probe) still "parses": its payload
+		// bytes [0:6]/[6:12] get read as dst/src MAC. Recording that bogus src
+		// MAC as the peer's observed wire MAC then poisons rebuildARPIndex
+		// (which prefers the observed MAC over the advertised metadata MAC), so
+		// EVERY peer ends up indexed under the same garbage MAC and the ARP
+		// index collapses onto it — ARP replies return the wrong MAC and frames
+		// get delivered to the wrong peer. That was the root cause of the
+		// three-node mesh failure (A->C and B->C "no delivery").
+		//
+		// Require a legal minimum: a 14-byte Ethernet header plus a minimal
+		// ARP (28) or IPv4 (20) header.
+		if okExtract && len(payload) >= minEthernetFrameLen {
+			// Capture the RAW (pre-normalization) source MAC the peer truly
+			// emits on the wire when sending from its own TAP interface.
+			// Only record when the packet originated from the peer's own TapIP,
+			// avoiding false-positive MAC mismatches when an exit node / router forwards
+			// LAN or routed traffic.
+			if rawSrc := net.HardwareAddr(srcMAC); len(rawSrc) == 6 {
+				if n.isFrameFromPeerSelf(remotePeer, payload) {
+					n.recordPeerObservedTapMAC(remotePeer, rawSrc)
+				}
+			}
+
 			// Normalize the learned source MAC to the peer's configured TapMAC
 			// when known. Some peers (e.g. Windows) emit EUI-64 / synthetic
 			// MACs in the SrcMAC field; learning those verbatim would explode
@@ -296,6 +389,10 @@ func (n *Node) handleStream(s network.Stream) {
 				srcMAC = realMAC
 			}
 			n.MACTable.Learn(srcMAC, remotePeer)
+
+			// Auto-learn peer IPv4 / IPv6 into ARP/NDP index and inject GARP/NA into local TAP
+			// ensuring the local OS can immediately return unicast replies without unproxied broadcast delay.
+			n.learnPeerAddressFromFrame(remotePeer, srcMAC, payload)
 			if log.IsDebug() {
 				log.Debug("Rx frame: seq=%d len=%d src=%s dst=%s from_peer=%s %s",
 					seqID, len(payload), net.HardwareAddr(srcMAC[:]).String(), net.HardwareAddr(dstMAC[:]).String(), remotePeer.String(), describeEthernetFrame(payload))
@@ -321,7 +418,7 @@ func (n *Node) handleStream(s network.Stream) {
 		n.Collector.RecordRecv(len(payload))
 		n.Collector.RecordPacketDir(payload, false)
 		if n.Collector != nil {
-			n.Collector.CaptureFrameWithPeers(observer.DirRx, payload, remotePeer.String(), "self")
+			n.Collector.CaptureFrameWithPeers(observer.DirRx, payload, n.peerIDString(remotePeer), "self")
 		}
 		if len(payload) >= 14 {
 			// Fix up rx frame SrcMAC: some peers (especially Windows) may send
@@ -330,7 +427,7 @@ func (n *Node) handleStream(s network.Stream) {
 			// TapMAC from peer metadata so the pcap table shows a consistent,
 			// address-book MAC.
 			capturePayload := payload // avoid copying for the common case
-			if !errExtract {
+			if okExtract {
 				if realMAC := n.lookupPeerTapMAC(remotePeer); realMAC != nil {
 					frameSrc := net.HardwareAddr(payload[6:12])
 					if frameSrc.String() != realMAC.String() {
@@ -351,7 +448,7 @@ func (n *Node) handleStream(s network.Stream) {
 
 		frameCount++
 
-		if n.Interceptor != nil && n.Interceptor.MatchAndHandle(payload, n.TAP) {
+		if n.Interceptor != nil && n.Interceptor.MatchAndHandle(payload, tapInjectionWriter{node: n}) {
 			log.Debug("Frame intercepted by userspace WebUI interceptor from peer %s", remotePeer.String())
 			continue
 		}
@@ -372,12 +469,25 @@ func (n *Node) handleStream(s network.Stream) {
 		// socket originated the request).
 		n.maybeDeliverProbeReply(payload)
 
+		// 方案 B: peer-side probe ack. If this inbound frame is the genuine
+		// TAP-forward probe request (real ICMP echo request with our marker id),
+		// fire an out-of-band control-plane ack to the prober so it can tell
+		// "frame reached peer TAP but OS didn't answer" from "frame never
+		// arrived" — no need to log onto the peer machine. We still write the
+		// frame to TAP below so the real end-to-end echo reply also flows back.
+		if pid, tok, ok := n.isTapProbeRequest(payload); ok {
+			go n.sendTapProbeAck(pid, tok)
+		}
+
 		// Write unpadded payload Ethernet frame to TAP
 		if n.TAP == nil {
 			log.Warn("TAP device is nil, cannot write frame")
 			continue
 		}
-		log.Debug("TAP write: seq=%d len=%d dstMAC=%s to %s", seqID, len(payload), net.HardwareAddr(payload[0:6]).String(), n.TAP.Name())
+		// PERF: per-frame path — MAC .String() allocs on every call. Keep guarded.
+		if log.IsDebug() {
+			log.Debug("TAP write: seq=%d len=%d dstMAC=%s to %s", seqID, len(payload), net.HardwareAddr(payload[0:6]).String(), n.TAP.Name())
+		}
 		wn, werr := n.tapWrite(payload)
 		if werr != nil {
 			log.Warn("TAP write error: %v", werr)
@@ -394,7 +504,7 @@ func (n *Node) handleStream(s network.Stream) {
 			// double-counted them (they are already binned by RecordPacketDir)
 			// and made the gateway counter balloon even when no exit-client was
 			// active. A frame is unicast iff bit 0 of the first dst-MAC byte is 0.
-			if n.Config != nil && n.Config.ExitNode.Enable && !n.isExitNodeActive() && len(payload) >= 6 && payload[0]&1 == 0 {
+			if cfg := n.config(); cfg != nil && cfg.ExitNode.Enable && !n.isExitNodeActive() && len(payload) >= 6 && payload[0]&1 == 0 {
 				n.Collector.RecordGatewayPacket()
 			}
 		}
@@ -456,19 +566,20 @@ func (n *Node) nextLSASeq() uint64 {
 }
 
 func (n *Node) broadcastLSA(seq uint64) {
+	c := n.config()
 	lsa := n.Router.BuildLSA(seq, routing.NodeIdentity{
 		NodeName:   n.nodeName,
-		TapIP:      n.Config.TapIP,
-		TapIPv6:    n.Config.TapIPv6,
-		TapMAC:     n.Config.TapMAC,
+		TapIP:      c.TapIP,
+		TapIPv6:    c.TapIPv6,
+		TapMAC:     c.TapMAC,
 		OS:         runtime.GOOS,
 		Arch:       runtime.GOARCH,
 		Version:    version.Version,
-		IsExitNode: n.Config.ExitNode.Enable,
+		IsExitNode: c.ExitNode.Enable,
 		// Carry advertised subnets in the LSA broadcast so peers that learn
 		// our identity via the LSA / Peek-Map channel (not just the direct
 		// P2P meta stream) also receive our routed LAN subnets.
-		AdvertisedSubnets: n.Config.AdvertisedSubnets,
+		AdvertisedSubnets: c.AdvertisedSubnets,
 	})
 	data, err := json.Marshal(lsa)
 	if err != nil {
@@ -476,17 +587,24 @@ func (n *Node) broadcastLSA(seq uint64) {
 	}
 
 	// Gossip throttle: if the LSA content is byte-for-byte identical to the last
-	// broadcast (topology + identity + links unchanged), skip re-sending. Neighbours
-	// already hold this LSA and keep it alive via TTL, so a steady-state mesh no
-	// longer re-floods the same payload every 15s.
+	// broadcast (topology + identity + links unchanged), we can throttle re-sending.
+	// However, remote peers run Router.CleanStaleNodes(60s), which purges any node
+	// that hasn't refreshed its LSA within 60 seconds. Therefore, we MUST re-flood
+	// at least once every 20 seconds (heartbeat) even if the payload is unchanged!
 	n.lastLSAMu.Lock()
 	unchanged := bytes.Equal(n.lastLSAJSON, data)
+	timeSinceLast := time.Since(n.lastLSABroadcastAt)
+	shouldBroadcast := !unchanged || timeSinceLast >= 20*time.Second
 	if !unchanged {
 		n.lastLSAJSON = append(n.lastLSAJSON[:0], data...)
 	}
+	if shouldBroadcast {
+		n.lastLSABroadcastAt = time.Now()
+	}
 	n.lastLSAMu.Unlock()
-	if unchanged {
-		log.Debug("LSA unchanged since last broadcast, skipping re-flood (seq=%d)", seq)
+
+	if !shouldBroadcast {
+		log.Debug("LSA unchanged since last broadcast (%v ago), skipping re-flood (seq=%d)", timeSinceLast, seq)
 		return
 	}
 
@@ -507,6 +625,9 @@ func (n *Node) broadcastLSA(seq uint64) {
 		}
 		if n.lsaPool.Submit(pID, data) {
 			n.recordPeerTxBytes(pID, len(data))
+			if n.protoTracker != nil {
+				n.protoTracker.LSA.RecordTx(1, uint64(len(data)))
+			}
 		} else {
 			log.Debug("Failed to send LSA to peer %s (unreachable)", pID.String())
 		}
@@ -529,6 +650,9 @@ func (n *Node) handleLSAStream(s network.Stream) {
 		}
 		if rn == 0 {
 			continue
+		}
+		if n.protoTracker != nil {
+			n.protoTracker.LSA.RecordRx(1, uint64(rn))
 		}
 		data := buf[:rn]
 
@@ -699,6 +823,9 @@ func (n *Node) handleRelayStream(s network.Stream) {
 		if err != nil || readN == 0 {
 			break
 		}
+		if n.protoTracker != nil {
+			n.protoTracker.RelayData.RecordRx(1, uint64(readN))
+		}
 		data := buf[:readN]
 
 		// HOP-BY-HOP envelope decryption. The origin sealed the outer relay
@@ -732,7 +859,7 @@ func (n *Node) handleRelayStream(s network.Stream) {
 		envelope := data
 		if _, outer, uerr := obfuscate.Unpack(data); uerr == nil {
 			if n.fragRX != nil && isFragPayload(outer) {
-				finalPacked, complete := n.fragRX.reassemble(outer)
+				finalPacked, complete := n.fragRX.reassemble(remotePeer, outer)
 				if !complete {
 					continue // more fragments pending
 				}
@@ -770,6 +897,18 @@ func (n *Node) handleRelayStream(s network.Stream) {
 		// us is currently alive. Recorded for the ping-pong probe's outbound-vs-
 		// return distinction in an asymmetric-routing mesh.
 		n.notePeerRx(srcPeer)
+		// relayHopRx: the hop (remotePeer) itself just carried a frame to us. A
+		// pure-forwarding hop is never srcPeer, so this is the only signal that
+		// advances for it — relayStreamPool anchors its failure-streak clear on
+		// this so a healthy-but-silent forwarder is not mis-blacklisted.
+		if remotePeer != "" && remotePeer != srcPeer {
+			n.noteRelayHopRx(remotePeer)
+			n.recordPeekMapOrigin(srcPeer, remotePeer, 1, false)
+		} else if remotePeer != "" {
+			// Final hop where the carrier IS the origin: still counts as the hop
+			// delivering to us.
+			n.noteRelayHopRx(remotePeer)
+		}
 		if finalDst == n.Host.ID() {
 			// Destination reached: the INNER payload is END-TO-END encrypted for
 			// us (finalDst) by the origin (srcPeer), so decrypt it with the cipher
@@ -787,27 +926,27 @@ func (n *Node) handleRelayStream(s network.Stream) {
 				innerPayload = dec
 			}
 
-		// Unpack the (now decrypted) obfuscated frame back to raw Ethernet for TAP delivery.
-		seqID, unpacked, uerr := obfuscate.Unpack(innerPayload)
-		if uerr != nil {
-			// The end-to-end decrypted inner payload did not yield a valid
-			// obfuscate frame. This happens when the origin sent a malformed
-			// frame or the shared (srcPeer ↔ us) cipher drifted. The payload is
-			// either still-encrypted ciphertext or garbage — writing it into the
-			// kernel TAP would inject corrupt packets onto the local LAN, so DROP
-			// it. (Previously this fell through and wrote `innerPayload` raw.)
-			log.Debug("Relay Unpack: err=%v, dropping undecodable inner payload len=%d from origin=%s (via %s)",
-				uerr, len(innerPayload), srcPeer.String(), remotePeer.String())
-			n.recordPeerRxDecrypt(srcPeer, false)
+			// Unpack the (now decrypted) obfuscated frame back to raw Ethernet for TAP delivery.
+			seqID, unpacked, uerr := obfuscate.Unpack(innerPayload)
+			if uerr != nil {
+				// The end-to-end decrypted inner payload did not yield a valid
+				// obfuscate frame. This happens when the origin sent a malformed
+				// frame or the shared (srcPeer ↔ us) cipher drifted. The payload is
+				// either still-encrypted ciphertext or garbage — writing it into the
+				// kernel TAP would inject corrupt packets onto the local LAN, so DROP
+				// it. (Previously this fell through and wrote `innerPayload` raw.)
+				log.Debug("Relay Unpack: err=%v, dropping undecodable inner payload len=%d from origin=%s (via %s)",
+					uerr, len(innerPayload), srcPeer.String(), remotePeer.String())
+				n.recordPeerRxDecrypt(srcPeer, false)
+				continue
+			}
+			log.Debug("Relay Unpack: seq=%d payloadLen=%d innerLen=%d ttl=%d from=%s",
+				seqID, len(unpacked), len(innerPayload), ttl, remotePeer.String())
+			// Deliver through the shared relayed-frame TAP path (also used by the
+			// boot-relay / relay-over-backbone downlink). Keyed on the TRUE origin
+			// (srcPeer); remotePeer is the transport (via) peer.
+			n.deliverRelayedFrameToTAP(unpacked, srcPeer, remotePeer, seqID)
 			continue
-		}
-		log.Debug("Relay Unpack: seq=%d payloadLen=%d innerLen=%d ttl=%d from=%s",
-			seqID, len(unpacked), len(innerPayload), ttl, remotePeer.String())
-		// Deliver through the shared relayed-frame TAP path (also used by the
-		// boot-relay / relay-over-backbone downlink). Keyed on the TRUE origin
-		// (srcPeer); remotePeer is the transport (via) peer.
-		n.deliverRelayedFrameToTAP(unpacked, srcPeer, remotePeer, seqID)
-		continue
 		}
 
 		// Destination is another peer: forward frame if TTL > 1
@@ -895,17 +1034,21 @@ func (n *Node) handleRelayStream(s network.Stream) {
 // EchoProtocolID is a dedicated stream protocol for real end-to-end P2P echo testing.
 const EchoProtocolID protocol.ID = "/p2ptap/echo/1.0.0"
 
+// TapProbeAckProtocolID carries the peer-side TAP-probe acknowledgement (方案 B).
+// When a node receives a TAP-forward probe request frame at its TAP write
+// boundary, it opens this control stream back to the prober (through relay-ctrl /
+// boot-circuit when needed) to confirm the frame physically reached the peer's
+// TAP — distinguishing "arrived but OS didn't answer" from "never arrived"
+// without logging onto the peer machine.
+const TapProbeAckProtocolID protocol.ID = "/p2ptap/tapprobe-ack/1.0.0"
+
 // handleEcho responds to P2P echo probe streams by echoing back the exact payload
 // of each length-prefixed frame. It loops over ReadFrame so a single long-lived
 // echo stream can serve many periodic probes (the client reuses the same stream
 // via echoPool instead of opening a fresh NewStream every tick).
 func (n *Node) handleEcho(s network.Stream) {
 	defer s.Close()
-	// Echo payloads in practice are tiny (32-byte probes, 4-byte "PING"
-	// keepalives), but size the buffer well above that so a peer sending a
-	// larger valid frame is echoed correctly instead of triggering
-	// ReadFrame's "frame too large" rejection and tearing down the stream.
-	buf := make([]byte, 4096)
+	buf := make([]byte, obfuscate.MaxFrameSize)
 	for {
 		rn, err := ReadFrame(s, buf)
 		if err != nil {
@@ -917,10 +1060,114 @@ func (n *Node) handleEcho(s network.Stream) {
 		if rn == 0 {
 			continue
 		}
+		if n.protoTracker != nil {
+			n.protoTracker.Echo.RecordRx(1, uint64(rn))
+		}
 		// Echo the exact payload bytes back as a length-prefixed frame.
 		if err := WriteFrame(s, buf[:rn]); err != nil {
 			return
 		}
+		if n.protoTracker != nil {
+			n.protoTracker.Echo.RecordTx(1, uint64(rn))
+		}
+	}
+}
+
+// tapProbeAckMagic marks the embedded payload of a TAP-probe request frame and
+// the control-plane ack so we can tell a genuine probe from stray ICMP traffic.
+const tapProbeAckMagic uint16 = 0x5A51
+
+// isTapProbeRequest inspects an inbound TAP payload and, if it is a TAP-forward
+// probe request (real ICMP echo request carrying our marker id), returns the
+// prober's peer ID and the per-probe token embedded in the ICMP payload. The
+// prober stamps both so the peer can route the ack back to the right origin
+// even when the probe was relayed (the immediate remotePeer would then be the
+// relay hop, not the prober).
+func (n *Node) isTapProbeRequest(payload []byte) (peer.ID, uint64, bool) {
+	if len(payload) < 42 {
+		return "", 0, false
+	}
+	if binary.BigEndian.Uint16(payload[12:14]) != 0x0800 { // IPv4
+		return "", 0, false
+	}
+	ihl := int(payload[14]&0x0f) * 4
+	if ihl < 20 || len(payload) < 14+ihl+8 {
+		return "", 0, false
+	}
+	if payload[14+9] != 1 { // ICMP
+		return "", 0, false
+	}
+	icmpStart := 14 + ihl
+	if payload[icmpStart] != 8 { // echo request
+		return "", 0, false
+	}
+	if binary.BigEndian.Uint16(payload[icmpStart+4:icmpStart+6]) != tapProbeICMPIdentify {
+		return "", 0, false
+	}
+	icmpPayload := payload[icmpStart+8:]
+	if len(icmpPayload) < 3+8 {
+		return "", 0, false
+	}
+	if binary.BigEndian.Uint16(icmpPayload[0:2]) != tapProbeAckMagic {
+		return "", 0, false
+	}
+	pidLen := int(icmpPayload[2])
+	if pidLen <= 0 || len(icmpPayload) < 3+pidLen+8 {
+		return "", 0, false
+	}
+	pid := peer.ID(icmpPayload[3 : 3+pidLen])
+	if pid == "" {
+		return "", 0, false
+	}
+	tok := binary.BigEndian.Uint64(icmpPayload[3+pidLen : 3+pidLen+8])
+	return pid, tok, true
+}
+
+// sendTapProbeAck fires the peer-side acknowledgement for a received TAP-forward
+// probe request. It runs in its own goroutine (off the receive loop) and opens a
+// control stream back to the prober via openControlStream, which transparently
+// tunnels through relay-ctrl / boot-circuit when the prober is relay-only — so
+// the ack reaches the prober even on a fully relayed mesh. The ack carries the
+// prober-supplied token it matches against its in-flight probe.
+func (n *Node) sendTapProbeAck(prober peer.ID, tok uint64) {
+	ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
+	defer cancel()
+	s, err := n.openControlStream(ctx, prober, TapProbeAckProtocolID)
+	if err != nil {
+		log.Debug("tapProbeAck: open control stream to %s: %v", prober, err)
+		return
+	}
+	defer s.Close()
+	buf := make([]byte, 2+8)
+	binary.BigEndian.PutUint16(buf[0:2], tapProbeAckMagic)
+	binary.BigEndian.PutUint64(buf[2:10], tok)
+	if err := WriteFrame(s, buf); err != nil {
+		log.Debug("tapProbeAck: write to %s: %v", prober, err)
+	}
+}
+
+// handleTapProbeAck is the TapProbeAckProtocolID stream handler on the PROBER
+// side. It reads the peer-supplied token and, if it matches the in-flight probe
+// token, signals probeAckCh so ProbeTapForward can report "frame reached peer
+// TAP but OS didn't answer". Token matching discards stale acks from a previous
+// probe that may still be in flight.
+func (n *Node) handleTapProbeAck(s network.Stream) {
+	defer s.Close()
+	buf := make([]byte, 64)
+	rn, err := ReadFrame(s, buf)
+	if err != nil || rn < 10 {
+		return
+	}
+	if binary.BigEndian.Uint16(buf[0:2]) != tapProbeAckMagic {
+		return
+	}
+	tok := binary.BigEndian.Uint64(buf[2:10])
+	if tok != atomic.LoadUint64(&n.probeAckToken) {
+		return
+	}
+	select {
+	case n.probeAckCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -1175,4 +1422,216 @@ func (n *Node) ProbePeerEchoAddr(targetStr string, targetAddrStr string) *observ
 	}
 
 	return res
+}
+
+// ProbePeerSpeedTest executes a real multi-burst throughput and latency benchmark
+// over an end-to-end stream to the specified peer.
+// Transmits real bursts of payload data, measures actual transfer time and bytes,
+// and computes genuine Mbps throughput, RTT metrics, jitter, and loss.
+func (n *Node) ProbePeerSpeedTest(targetStr string) *observer.SpeedTestResultDTO {
+	res := &observer.SpeedTestResultDTO{
+		PeerID: targetStr,
+	}
+
+	var pid peer.ID
+	var targetPeerInfo *observer.PeerInfoDTO
+
+	// Resolve target (PeerID, TAP IP, or Node Name)
+	decodedPID, err := peer.Decode(targetStr)
+	if err == nil {
+		pid = decodedPID
+	} else if n.Collector != nil {
+		for _, p := range n.getActivePeers() {
+			pTapIP := strings.Split(p.TapIP, "/")[0]
+			pTapIPv6 := strings.Split(p.TapIPv6, "/")[0]
+			if p.PeerID == targetStr || pTapIP == targetStr || pTapIPv6 == targetStr || strings.EqualFold(p.NodeName, targetStr) {
+				if parsed, err := peer.Decode(p.PeerID); err == nil {
+					pid = parsed
+					targetPeerInfo = &p
+					break
+				}
+			}
+		}
+	}
+
+	if pid == "" {
+		res.QualityGrade = "UNREACHABLE"
+		res.MeasurementNote = fmt.Sprintf("cannot resolve target '%s' to a connected peer ID", targetStr)
+		res.PacketLoss = 1.0
+		return res
+	}
+
+	if targetPeerInfo != nil {
+		res.NodeName = targetPeerInfo.NodeName
+		res.PeerID = targetPeerInfo.PeerID
+		res.IsRelayed = targetPeerInfo.IsRelayed
+	}
+
+	ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
+	defer cancel()
+
+	streamCtx := network.WithAllowLimitedConn(ctx, "speedtest-probe")
+	s, err := n.Host.NewStream(streamCtx, pid, EchoProtocolID)
+	if err != nil {
+		res.QualityGrade = "UNREACHABLE"
+		res.MeasurementNote = fmt.Sprintf("failed to open benchmark stream to %s: %v", pid.String(), err)
+		res.PacketLoss = 1.0
+		return res
+	}
+	defer s.Close()
+
+	if s.Conn() != nil {
+		remoteAddr := s.Conn().RemoteMultiaddr().String()
+		res.IsRelayed = strings.Contains(remoteAddr, "/p2p-circuit")
+	}
+
+	_ = s.SetDeadline(time.Now().Add(8 * time.Second))
+
+	// Benchmark configuration: 5 bursts of 32KB payload = 160 KB payload data (320 KB roundtrip)
+	const (
+		numBursts = 5
+		burstSize = 32 * 1024 // 32 KB per burst
+	)
+
+	testPayload := make([]byte, burstSize)
+	for i := range testPayload {
+		testPayload[i] = byte(i % 251)
+	}
+
+	recvBuf := make([]byte, burstSize+1024)
+	rtts := make([]float64, 0, numBursts)
+	var totalBytesTransferred int64
+	var totalElapsed time.Duration
+	successCount := 0
+
+	for i := 0; i < numBursts; i++ {
+		start := time.Now()
+		if err := WriteFrame(s, testPayload); err != nil {
+			break
+		}
+		readN, err := ReadFrame(s, recvBuf)
+		elapsed := time.Since(start)
+		if err != nil || readN != burstSize {
+			break
+		}
+		rttMs := float64(elapsed.Microseconds()) / 1000.0
+		rtts = append(rtts, rttMs)
+		totalElapsed += elapsed
+		totalBytesTransferred += int64(burstSize * 2) // Tx + Rx
+		successCount++
+	}
+
+	if successCount == 0 {
+		res.QualityGrade = "FAILED"
+		res.MeasurementNote = "Stream established but data transfer timed out or failed"
+		res.PacketLoss = 1.0
+		return res
+	}
+
+	// Calculate RTT metrics
+	minRTT := rtts[0]
+	maxRTT := rtts[0]
+	sumRTT := 0.0
+	for _, r := range rtts {
+		if r < minRTT {
+			minRTT = r
+		}
+		if r > maxRTT {
+			maxRTT = r
+		}
+		sumRTT += r
+	}
+	avgRTT := sumRTT / float64(len(rtts))
+
+	// Jitter calculation (mean deviation)
+	jitterSum := 0.0
+	for i := 1; i < len(rtts); i++ {
+		diff := rtts[i] - rtts[i-1]
+		if diff < 0 {
+			diff = -diff
+		}
+		jitterSum += diff
+	}
+	jitter := 0.0
+	if len(rtts) > 1 {
+		jitter = jitterSum / float64(len(rtts)-1)
+	}
+
+	loss := float64(numBursts-successCount) / float64(numBursts)
+
+	// Calculate real measured Mbps: (total bits) / (total seconds) / 1,000,000
+	var mbps float64
+	if totalElapsed.Seconds() > 0 {
+		mbps = float64(totalBytesTransferred*8) / (totalElapsed.Seconds() * 1_000_000.0)
+	}
+
+	// Round values for clean display
+	res.Mbps = math.Round(mbps*100) / 100.0
+	res.RTTMin = math.Round(minRTT*10) / 10.0
+	res.RTTAvg = math.Round(avgRTT*10) / 10.0
+	res.RTTMax = math.Round(maxRTT*10) / 10.0
+	res.Jitter = math.Round(jitter*10) / 10.0
+	res.PacketLoss = math.Round(loss*100) / 100.0
+
+	// Quality rating based on real metrics
+	switch {
+	case loss > 0.3:
+		res.QualityGrade = "POOR (High Packet Loss)"
+	case res.IsRelayed && avgRTT > 100:
+		res.QualityGrade = "FAIR (High Latency Relay Link)"
+	case res.IsRelayed:
+		res.QualityGrade = "GOOD (Circuit Relay Link)"
+	case avgRTT > 100:
+		res.QualityGrade = "FAIR (High Latency Direct Link)"
+	case avgRTT > 40:
+		res.QualityGrade = "GOOD (Direct P2P Link)"
+	default:
+		res.QualityGrade = "EXCELLENT (Ultra-Low Latency P2P)"
+	}
+
+	res.MeasurementNote = fmt.Sprintf("Real stream benchmark: %d KB transferred in %d ms (%d/%d bursts ok)",
+		totalBytesTransferred/1024, totalElapsed.Milliseconds(), successCount, numBursts)
+
+	return res
+}
+
+// isFrameFromPeerSelf returns true if an inbound Ethernet frame's source IP
+// corresponds directly to the peer's own virtual TAP IP or ARP sender IP,
+// rather than forwarded LAN / NAT traffic from behind an exit node / gateway router.
+func (n *Node) isFrameFromPeerSelf(p peer.ID, frame []byte) bool {
+	if len(frame) < 14 {
+		return false
+	}
+	val, ok := n.peerMeta.Load(p)
+	if !ok {
+		return true
+	}
+	meta := val.(PeerMeta)
+	peerTapIP := strings.Split(meta.TapIP, "/")[0]
+	peerTapIPv6 := strings.Split(meta.TapIPv6, "/")[0]
+
+	etherType := uint16(frame[12])<<8 | uint16(frame[13])
+	if etherType == 0x0800 && len(frame) >= 34 { // IPv4
+		srcIP := net.IP(frame[26:30]).String()
+		if peerTapIP != "" && srcIP == peerTapIP {
+			return true
+		}
+		if meta.IsExitNode || (peerTapIP != "" && srcIP != peerTapIP) {
+			return false
+		}
+	} else if etherType == 0x86dd && len(frame) >= 54 { // IPv6
+		srcIP := net.IP(frame[22:38]).String()
+		if peerTapIPv6 != "" && srcIP == peerTapIPv6 {
+			return true
+		}
+		if meta.IsExitNode || (peerTapIPv6 != "" && srcIP != peerTapIPv6) {
+			return false
+		}
+	} else if etherType == 0x0806 && len(frame) >= 42 { // ARP
+		arpSenderIP := net.IP(frame[28:32]).String()
+		if peerTapIP != "" && arpSenderIP == peerTapIP {
+			return true
+		}
+	}
+	return true
 }
