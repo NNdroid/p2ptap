@@ -3,6 +3,7 @@ package bootweb
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"p2ptap/pkg/logger"
+
 )
 
 //go:embed static
@@ -113,6 +115,7 @@ func (s *Server) Stop(ctx context.Context) error {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
 	if r.URL.Path != "/" && r.URL.Path != "/index.html" {
 		http.NotFound(w, r)
 		return
@@ -131,28 +134,39 @@ func (s *Server) checkAuth(r *http.Request) bool {
 	if s.authToken == "" {
 		return true
 	}
+	tokenBytes := []byte(s.authToken)
 	// 1. Query param
 	if token := r.URL.Query().Get("token"); token != "" {
-		if token == s.authToken {
+		if subtle.ConstantTimeCompare([]byte(token), tokenBytes) == 1 {
 			return true
 		}
 	}
 	// 2. Authorization header: Bearer <token>
 	authHeader := r.Header.Get("Authorization")
 	if strings.HasPrefix(authHeader, "Bearer ") {
-		if strings.TrimPrefix(authHeader, "Bearer ") == s.authToken {
+		if subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(authHeader, "Bearer ")), tokenBytes) == 1 {
 			return true
 		}
 	}
 	// 3. X-Auth-Token header
-	if r.Header.Get("X-Auth-Token") == s.authToken {
-		return true
+	if token := r.Header.Get("X-Auth-Token"); token != "" {
+		if subtle.ConstantTimeCompare([]byte(token), tokenBytes) == 1 {
+			return true
+		}
 	}
 	return false
 }
 
+func setSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-XSS-Protection", "1; mode=block")
+	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+}
+
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setSecurityHeaders(w)
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Auth-Token")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -179,6 +193,7 @@ type authVerifyResp struct {
 }
 
 func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Auth-Token")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -199,13 +214,14 @@ func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(body, &req)
 
 	ok := false
-	if s.authToken == "" || req.Token == s.authToken {
+	if s.authToken == "" || subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.authToken)) == 1 {
 		ok = true
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(authVerifyResp{OK: ok})
 }
+
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	dashboard := CollectDashboard(s.provider)

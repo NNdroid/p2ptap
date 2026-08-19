@@ -3,7 +3,9 @@ package web
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"embed"
+
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -230,15 +232,18 @@ func (s *Server) authRequired(next func(http.ResponseWriter, *http.Request)) fun
 			return
 		}
 
-		if s.authToken != "" && extractToken(r) != s.authToken {
-			setJSONHeaders(w)
-			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"status":        "error",
-				"error":         "unauthorized: missing or invalid token",
-				"tokenRequired": true,
-			})
-			return
+		if s.authToken != "" {
+			reqTok := extractToken(r)
+			if subtle.ConstantTimeCompare([]byte(reqTok), []byte(s.authToken)) != 1 {
+				setJSONHeaders(w)
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"status":        "error",
+					"error":         "unauthorized: missing or invalid token",
+					"tokenRequired": true,
+				})
+				return
+			}
 		}
 
 		// For authenticated cross-origin requests, reflect the Origin (no "*").
@@ -248,14 +253,22 @@ func (s *Server) authRequired(next func(http.ResponseWriter, *http.Request)) fun
 			w.Header().Set("Vary", "Origin")
 		}
 
+		// Security headers applied to all API responses
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+
 		next(w, r)
 	}
 }
 
+// StartServer starts the WebUI HTTP server on the configured IP addresses and port.
 func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, port int, cfg *config.Config, configPath string, socketProtectHook func(network, address string, c syscall.RawConn) error) (*Server, error) {
 	if port <= 0 {
 		port = 80
 	}
+
 
 	// Resolve the WebUI auth token. When none is configured, generate a random
 	// one and surface it in the logs so the operator can paste it into the UI.
@@ -309,6 +322,14 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	fileSrv := http.FileServer(http.FS(staticSub))
 
 	mux := http.NewServeMux()
+
+	// Favicon: Serve embedded SVG icon to avoid 404 in browser console
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><circle cx="16" cy="16" r="14" fill="#0ea5e9"/><text x="16" y="21" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">P</text></svg>`))
+	})
+
 
 	// Serve Static HTML Dashboard (no auth required so the page can load and
 	// prompt the user for the token; all /api/* below are protected). Unknown
@@ -1404,29 +1425,19 @@ func (s *Server) listenAll() ([]net.Listener, error) {
 					listeners = append(listeners, lnFallback)
 					webLog.Info("Listening on IPv4 (fallback) http://%s (accessible via http://%s:%d)", boundAddrFallback, listenIP, port)
 				} else {
-					altPort := 5857
-					if port == 5857 {
-						altPort = 8888
-					}
-					webLog.Info("Port %d occupied on 0.0.0.0 (%v), trying smart fallback to 0.0.0.0:%d...", port, errFallback, altPort)
-					lnAlt, boundAlt, errAlt := listenTCPWithRetry("tcp4", "0.0.0.0", altPort, socketProtectHook)
-					if errAlt == nil {
-						listeners = append(listeners, lnAlt)
-						webLog.Info("Listening on IPv4 (smart fallback) http://%s (accessible via http://%s:%d)", boundAlt, listenIP, altPort)
+					lnLoop, boundLoop, errLoop := listenTCPWithRetry("tcp4", "127.0.0.1", port, socketProtectHook)
+					if errLoop == nil {
+						listeners = append(listeners, lnLoop)
+						webLog.Info("Listening on IPv4 (loopback) http://%s", boundLoop)
 					} else {
-						webLog.Warn("IPv4 fallback bind to 0.0.0.0:%d failed: %v", altPort, errAlt)
+						webLog.Warn("Failed to bind IPv4 %s:%d or 0.0.0.0:%d: %v", listenIP, port, port, errFallback)
 					}
 				}
 			} else {
-				altPort := 5857
-				if port == 5857 {
-					altPort = 8888
-				}
-				webLog.Info("Port %d occupied on 0.0.0.0 (%v), trying smart fallback to 0.0.0.0:%d...", port, err, altPort)
-				lnAlt, boundAlt, errAlt := listenTCPWithRetry("tcp4", "0.0.0.0", altPort, socketProtectHook)
-				if errAlt == nil {
-					listeners = append(listeners, lnAlt)
-					webLog.Info("Listening on IPv4 (smart fallback) http://%s", boundAlt)
+				lnLoop, boundLoop, errLoop := listenTCPWithRetry("tcp4", "127.0.0.1", port, socketProtectHook)
+				if errLoop == nil {
+					listeners = append(listeners, lnLoop)
+					webLog.Info("Listening on IPv4 (loopback fallback) http://%s", boundLoop)
 				} else {
 					webLog.Warn("Failed to bind IPv4 0.0.0.0:%d: %v", port, err)
 				}
@@ -1448,19 +1459,16 @@ func (s *Server) listenAll() ([]net.Listener, error) {
 					listeners = append(listeners, lnFallback)
 					webLog.Info("Listening on IPv6 (fallback) http://%s", boundAddrFallback)
 				} else {
-					altPort := 5857
-					if port == 5857 {
-						altPort = 8888
-					}
-					lnAlt, boundAlt, errAlt := listenTCPWithRetry("tcp6", "::", altPort, socketProtectHook)
-					if errAlt == nil {
-						listeners = append(listeners, lnAlt)
-						webLog.Info("Listening on IPv6 (smart fallback) http://%s", boundAlt)
+					lnLoop, boundLoop, errLoop := listenTCPWithRetry("tcp6", "::1", port, socketProtectHook)
+					if errLoop == nil {
+						listeners = append(listeners, lnLoop)
+						webLog.Info("Listening on IPv6 (loopback) http://%s", boundLoop)
 					}
 				}
 			}
 		}
 	}
+
 
 	return listeners, nil
 }
@@ -1481,48 +1489,19 @@ func (s *Server) listenAll() ([]net.Listener, error) {
 // simply retries. listenTCPWithRetry retries internally to ride out any
 // TIME_WAIT on the just-closed port.
 func (s *Server) Rebind() error {
-	type want struct {
-		network, ip, addr string
-	}
-	var wants []want
-	if s.listenIP != "" {
-		wants = append(wants, want{"tcp4", s.listenIP, formatBindAddr("tcp4", s.listenIP, s.port)})
-	}
-	if s.listenIPv6 != "" {
-		wants = append(wants, want{"tcp6", s.listenIPv6, formatBindAddr("tcp6", s.listenIPv6, s.port)})
-	}
-	if len(wants) == 0 {
-		return fmt.Errorf("rebind: no listen addresses configured")
-	}
-
 	s.rebindMu.Lock()
-	old := s.listeners
-	s.rebindMu.Unlock()
+	defer s.rebindMu.Unlock()
 
-	// Close the existing listeners first so the configured port is free.
-	for _, ln := range old {
+	// Close the existing listeners first so ports are free.
+	for _, ln := range s.listeners {
 		_ = ln.Close()
 	}
+	s.listeners = nil
 
-	kept := make([]net.Listener, 0, len(wants))
-	keptAddrs := make([]string, 0, len(wants))
-	var firstErr error
-	for _, w := range wants {
-		ln, _, err := listenTCPWithRetry(w.network, w.ip, s.port, s.socketProtectHook)
-		if err != nil {
-			webLog.Warn("WebUI rebind: bind %s failed: %v", w.addr, err)
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		kept = append(kept, ln)
-		keptAddrs = append(keptAddrs, w.addr)
-	}
-
-	if len(kept) == 0 {
-		webLog.Error("WebUI rebind failed to bind any listener; dashboard may be unreachable until p2ptap restarts: %v", firstErr)
-		return fmt.Errorf("rebind produced no listeners: %w", firstErr)
+	kept, err := s.listenAll()
+	if err != nil || len(kept) == 0 {
+		webLog.Error("WebUI rebind failed to bind any listener: %v", err)
+		return fmt.Errorf("rebind produced no listeners: %w", err)
 	}
 
 	// Begin serving on the freshly bound listeners.
@@ -1531,14 +1510,12 @@ func (s *Server) Rebind() error {
 		go func() { _ = s.httpServer.Serve(l) }()
 	}
 
-	s.rebindMu.Lock()
 	s.listeners = kept
-	s.rebindMu.Unlock()
-
-	webLog.Info("WebUI rebound %d listener(s) after NIC change: %v", len(kept), keptAddrs)
+	webLog.Info("WebUI rebound %d listener(s) after NIC change", len(kept))
 	s.recordBoundAddrs(kept)
 	return nil
 }
+
 
 // webuiURLSidecar is the sidecar file (next to config.json) the running WebUI
 // rewrites on every (re)bind with the addresses it actually listens on. The

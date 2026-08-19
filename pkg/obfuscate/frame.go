@@ -375,13 +375,9 @@ func fillRandom(buf []byte) {
 //	[Magic(2) | SeqID(8) | PayloadLen(2) | PaddingLen(2) | payload | random padding]
 func (fp *FramePacker) Pack(seqID uint64, payload []byte, outBuf []byte) (int, error) {
 	if !fp.Enable {
-		// No obfuscation: just length prefix
-		if len(outBuf) < 2+len(payload) {
-			return 0, ErrBufferTooSmall
-		}
-		binary.BigEndian.PutUint16(outBuf[0:2], uint16(len(payload)))
-		copy(outBuf[2:], payload)
-		return 2 + len(payload), nil
+		// When obfuscation padding is disabled, we still write the standard 15-byte header with PaddingLen=0
+		// so that Magic (0x5054), SeqID (dedup/anti-replay), ObfType (encryption), and PayloadLen are preserved.
+		return fp.packStandard(seqID, payload, outBuf, "none")
 	}
 
 	mode := fp.Mode
@@ -414,9 +410,12 @@ func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte,
 	// Determine target total frame size
 	var targetSize int
 	switch mode {
+	case "none":
+		targetSize = HeaderLen + len(payload)
 	case "fixed":
 		targetSize = fp.FixedSize + randomJitter(fp.JitterRange)
 	case "block":
+
 		overhead := HeaderLen + len(payload)
 		blocks := overhead / fp.BlockSize
 		if overhead%fp.BlockSize != 0 {

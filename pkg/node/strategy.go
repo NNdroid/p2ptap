@@ -832,11 +832,11 @@ func (sd *StrategyDispatcher) BroadcastToAllPeers(ctx context.Context, data []by
 			if sd.node != nil && !sd.node.canEgressToPeer(p) {
 				return
 			}
-			po := sd.node.peerObf(p)
-			if po == nil {
-				return
+			localEpoch := uint64(0)
+			if po := sd.node.peerObf(p); po != nil {
+				localEpoch = po.localEpoch
 			}
-			seqID := sd.node.Packer.MakeSeqID(cnt, po.localEpoch)
+			seqID := sd.node.Packer.MakeSeqID(cnt, localEpoch)
 			sd.node.Collector.RecordTxSeq(p.String(), seqID)
 			outBuf := make([]byte, len(data)+4096)
 			n, perr := sd.node.Packer.Pack(seqID, data, outBuf)
@@ -887,9 +887,9 @@ func (sd *StrategyDispatcher) BroadcastBatchToAllPeers(ctx context.Context, fram
 			if sd.node != nil && !sd.node.canEgressToPeer(p) {
 				return
 			}
-			po := sd.node.peerObf(p)
-			if po == nil {
-				return
+			localEpoch := uint64(0)
+			if po := sd.node.peerObf(p); po != nil {
+				localEpoch = po.localEpoch
 			}
 			// Relay-only peers have no direct stream; use SendToPeer so the
 			// frame is routed through the circuit relay. A directly-connected
@@ -899,7 +899,7 @@ func (sd *StrategyDispatcher) BroadcastBatchToAllPeers(ctx context.Context, fram
 			// relay envelope.
 			if !sd.hasDirectStream(p) && !(sd.node != nil && sd.node.isDirectlyConnected(p)) {
 				for _, frame := range frames {
-					seqID := sd.node.Packer.MakeSeqID(sd.node.Packer.BumpCounter(), po.localEpoch)
+					seqID := sd.node.Packer.MakeSeqID(sd.node.Packer.BumpCounter(), localEpoch)
 					sd.node.Collector.RecordTxSeq(p.String(), seqID)
 					outBuf := make([]byte, len(frame)+4096)
 					n, perr := sd.node.Packer.Pack(seqID, frame, outBuf)
@@ -915,7 +915,8 @@ func (sd *StrategyDispatcher) BroadcastBatchToAllPeers(ctx context.Context, fram
 				return
 			}
 			for _, frame := range frames {
-				seqID := sd.node.Packer.MakeSeqID(sd.node.Packer.BumpCounter(), po.localEpoch)
+				seqID := sd.node.Packer.MakeSeqID(sd.node.Packer.BumpCounter(), localEpoch)
+
 				sd.node.Collector.RecordTxSeq(p.String(), seqID)
 				outBuf := make([]byte, len(frame)+4096)
 				n, perr := sd.node.Packer.Pack(seqID, frame, outBuf)

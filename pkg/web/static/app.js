@@ -6837,7 +6837,30 @@
         // --- WebUI auth token handling (mirrors server-side bearer requirement) ---
         const AUTH_TOKEN_KEY = 'p2ptap_webui_token';
         function getAuthToken() {
-            try { return localStorage.getItem(AUTH_TOKEN_KEY) || ''; } catch (e) { return ''; }
+            try {
+                // 1. Check URL query parameters (?token=admin)
+                if (typeof window !== 'undefined' && window.location && window.location.search) {
+                    const params = new URLSearchParams(window.location.search);
+                    const urlToken = params.get('token');
+                    if (urlToken) {
+                        try { localStorage.setItem(AUTH_TOKEN_KEY, urlToken); } catch (e) {}
+                        return urlToken;
+                    }
+                }
+                // 2. Check URL hash fragment (#token=admin)
+                if (typeof window !== 'undefined' && window.location && window.location.hash) {
+                    const hashParams = new URLSearchParams(window.location.hash.substring(1));
+                    const hashToken = hashParams.get('token');
+                    if (hashToken) {
+                        try { localStorage.setItem(AUTH_TOKEN_KEY, hashToken); } catch (e) {}
+                        return hashToken;
+                    }
+                }
+                // 3. Fall back to localStorage
+                return localStorage.getItem(AUTH_TOKEN_KEY) || '';
+            } catch (e) {
+                return '';
+            }
         }
         function setAuthToken(tok) {
             try { localStorage.setItem(AUTH_TOKEN_KEY, tok); } catch (e) {}
@@ -6887,12 +6910,18 @@
             const err = document.getElementById('loginError');
             const tok = (input.value || '').trim();
             if (!tok) {
-                err.textContent = t('login_error') || 'Invalid token or request failed. Please try again.';
+                err.textContent = (typeof t === 'function' && t('login_error')) || 'Invalid token or request failed. Please try again.';
                 err.style.display = 'block';
                 return;
             }
             setAuthToken(tok);
             closeLoginModal(true);
+            // Reconnect WebSockets and refetch immediately with the new token
+            try { if (typeof pcapStream !== 'undefined') pcapStream.connect(); } catch (e) {}
+            try { if (typeof logStream !== 'undefined') logStream.connect(); } catch (e) {}
+            try { if (typeof fetchStats === 'function') fetchStats(); } catch (e) {}
+            try { if (typeof fetchLogs === 'function') fetchLogs(); } catch (e) {}
+            try { if (typeof pcapRefreshState === 'function') pcapRefreshState(); } catch (e) {}
         }
 
         // Allow Enter key to submit the login form.
@@ -6902,6 +6931,7 @@
                 submitLogin();
             }
         });
+
 
         async function promptForToken() {
             return await openLoginModal();
@@ -8274,7 +8304,27 @@
                 badge.style.border = "1px solid rgba(16,185,129,0.4)";
 
                 const name = exit.active_exit_peer_name || exit.active_peer_id.substring(0, 12) + '…';
-                const tapIP = exit.active_exit_tap_ip || exit.active_exit_ip || '—';
+                let tapIP = exit.active_exit_tap_ip || exit.active_exit_ip || '';
+                let tapIPv6 = exit.active_exit_tap_ipv6 || '';
+
+                if ((!tapIP || !tapIPv6) && Array.isArray(data.active_peers)) {
+                    const p = data.active_peers.find(x => x.peer_id === exit.active_peer_id);
+                    if (p) {
+                        if (!tapIP && p.tap_ip) tapIP = p.tap_ip;
+                        if (!tapIPv6 && p.tap_ipv6) tapIPv6 = p.tap_ipv6;
+                    }
+                }
+
+                let ipBadges = '';
+                if (tapIP) {
+                    ipBadges += `(<code>${escapeHTML(tapIP)}</code>)`;
+                }
+                if (tapIPv6) {
+                    ipBadges += ` (<code class="ipv6" style="color:var(--accent-purple, #c084fc); background:rgba(168,85,247,0.12);">${escapeHTML(tapIPv6)}</code>)`;
+                }
+                if (!ipBadges) {
+                    ipBadges = '(<code>—</code>)';
+                }
 
                 body.innerHTML = `
                     <div class="exit-active-banner">
@@ -8285,7 +8335,7 @@
                             </div>
                             <div class="exit-active-meta">
                                 ${t('exit_status_peer') || 'Gateway'}: <strong>${escapeHTML(name)}</strong>
-                                (<code>${escapeHTML(tapIP)}</code>)
+                                ${ipBadges}
                             </div>
                         </div>
                         <button class="exit-disconnect-btn" data-onclick="disconnectExitGateway()">
@@ -8293,6 +8343,7 @@
                         </button>
                     </div>
                 `;
+
             } else {
                 badge.innerText = "Inactive";
                 badge.className = "pill-badge role-peer";
@@ -10434,6 +10485,15 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             const mix = (c) => Math.round(c + (255 - c) * amt);
             return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
         }
+        function darkenHex(hex, amt) {
+            const h = hex.replace('#', '');
+            const r = parseInt(h.substring(0, 2), 16);
+            const g = parseInt(h.substring(2, 4), 16);
+            const b = parseInt(h.substring(4, 6), 16);
+            const mix = (c) => Math.round(Math.max(0, c * (1 - amt)));
+            return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
+        }
+
 
         // Build the hover / pinned-detail HTML for a topology node. Shared by
         // the floating tooltip and the click-to-inspect detail panel so the two
@@ -11307,6 +11367,26 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             ctx.clearRect(0, 0, topoCanvasW, topoCanvasH);
             ctx.save();
             ctx.imageSmoothingEnabled = true;
+
+            // --- Cyber Grid & Ambient Canvas Background ---
+            if (!lightT) {
+                ctx.save();
+                ctx.strokeStyle = "rgba(255, 255, 255, 0.02)";
+                ctx.lineWidth = 1;
+                const gridSize = 36;
+                const offX = ((topoPanX * topoZoom) % gridSize + gridSize) % gridSize;
+                const offY = ((topoPanY * topoZoom) % gridSize + gridSize) % gridSize;
+                ctx.beginPath();
+                for (let x = offX; x < topoCanvasW; x += gridSize) {
+                    ctx.moveTo(x, 0); ctx.lineTo(x, topoCanvasH);
+                }
+                for (let y = offY; y < topoCanvasH; y += gridSize) {
+                    ctx.moveTo(0, y); ctx.lineTo(topoCanvasW, y);
+                }
+                ctx.stroke();
+                ctx.restore();
+            }
+
             ctx.translate(topoPanX, topoPanY);
             ctx.scale(topoZoom, topoZoom);
 
@@ -11323,71 +11403,86 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             topoClusterBoxes.forEach(b => {
                 ctx.save();
                 ctx.fillStyle = b.color;
-                ctx.globalAlpha = b.local ? 0.08 : 0.04;
+                ctx.globalAlpha = b.local ? 0.06 : 0.03;
                 ctx.beginPath();
                 if (ctx.roundRect) {
-                    ctx.roundRect(b.x, b.y, b.w, b.h, 12);
+                    ctx.roundRect(b.x, b.y, b.w, b.h, 16);
                 } else {
                     ctx.rect(b.x, b.y, b.w, b.h);
                 }
                 ctx.fill();
-                ctx.globalAlpha = b.local ? 0.75 : 0.45;
+
+                // Subtle neon boundary
+                ctx.globalAlpha = b.local ? 0.65 : 0.35;
                 ctx.strokeStyle = b.color;
                 ctx.lineWidth = b.local ? 1.5 : 1.0;
-                ctx.setLineDash([6, 4]);
+                ctx.setLineDash([8, 6]);
                 ctx.stroke();
                 ctx.setLineDash([]);
 
-                // Cluster label chip with rounded corners anchored at top-left inside box
+                // Glassmorphic cluster label chip anchored at top-left
                 const label = '🟣 ' + b.name + (b.count > 0 ? ` (${b.count})` : '');
-                ctx.font = "bold 10px system-ui, -apple-system, sans-serif";
-                const lw = topoMeasure(ctx, "bold 10px system-ui, -apple-system, sans-serif", label) + 18;
-                ctx.globalAlpha = b.local ? 0.95 : 0.8;
-                ctx.fillStyle = b.color;
+                ctx.font = "bold 11px system-ui, -apple-system, sans-serif";
+                const lw = topoMeasure(ctx, "bold 11px system-ui, -apple-system, sans-serif", label) + 20;
+                ctx.globalAlpha = b.local ? 0.92 : 0.75;
+                ctx.fillStyle = lightT ? "rgba(255,255,255,0.92)" : "rgba(18, 14, 38, 0.88)";
+                ctx.strokeStyle = b.color;
+                ctx.lineWidth = 1;
                 ctx.beginPath();
                 if (ctx.roundRect) {
-                    ctx.roundRect(b.x + 8, b.y + 6, lw, 18, 5);
+                    ctx.roundRect(b.x + 10, b.y + 8, lw, 22, 6);
                 } else {
-                    ctx.rect(b.x + 8, b.y + 6, lw, 18);
+                    ctx.rect(b.x + 10, b.y + 8, lw, 22);
                 }
                 ctx.fill();
-                ctx.fillStyle = "#ffffff";
+                ctx.stroke();
+
+                ctx.fillStyle = lightT ? "#7c3aed" : "#e9d5ff";
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'middle';
-                ctx.fillText(label, b.x + 16, b.y + 15);
+                ctx.fillText(label, b.x + 20, b.y + 19);
                 ctx.textBaseline = 'alphabetic';
                 ctx.restore();
             });
 
-
+            // Draw Links and Staggered Glassmorphic Badges
             for (let i = 0; i < nodes.length; i++) {
                 const target = nodes[i];
-                if (!target.parentId || !nodeByID[target.parentId]) continue; // self or orphan
+                if (!target.parentId || !nodeByID[target.parentId]) continue;
                 const parent = nodeByID[target.parentId];
                 const edgeKey = parent.id + '|' + target.id;
                 const edgeHi = topoSelectedId !== null && topoSelectedEdgeSet.has(edgeKey);
                 const edgeDim = topoFilterMode !== 'all' && !topoNodeMatchesFilter(target);
+
+                // Sleek link line
                 ctx.beginPath();
                 ctx.moveTo(parent.x, parent.y);
                 ctx.lineTo(target.x, target.y);
                 ctx.strokeStyle = edgeHi ? (target.isRelayed ? '#f59e0b' : '#38bdf8') : target.linkColor;
-                ctx.lineWidth = edgeHi ? (target.isRelayed ? 2.4 : 3.4) : (target.isRelayed ? 1.8 : 2.8);
-                if (target.lineStyle === 'overlay') ctx.setLineDash([10, 5]);
+                ctx.lineWidth = edgeHi ? (target.isRelayed ? 2.6 : 3.4) : (target.isRelayed ? 1.6 : 2.2);
+                if (target.lineStyle === 'overlay') ctx.setLineDash([8, 5]);
                 else if (target.lineStyle === 'circuit') ctx.setLineDash([4, 4]);
                 else ctx.setLineDash([]);
-                if (edgeHi) { ctx.shadowColor = target.isRelayed ? '#f59e0b' : '#38bdf8'; ctx.shadowBlur = 12; }
-                else ctx.shadowBlur = 0;
-                ctx.globalAlpha = edgeHi ? 0.95 : (edgeDim ? 0.12 : (topoSelectedId !== null ? 0.18 : 0.55));
+
+                if (edgeHi) {
+                    ctx.shadowColor = target.isRelayed ? '#f59e0b' : '#38bdf8';
+                    ctx.shadowBlur = 12;
+                } else {
+                    ctx.shadowColor = target.linkColor;
+                    ctx.shadowBlur = 4;
+                }
+                ctx.globalAlpha = edgeHi ? 0.95 : (edgeDim ? 0.12 : (topoSelectedId !== null ? 0.18 : 0.65));
                 ctx.stroke();
                 ctx.shadowBlur = 0;
                 ctx.globalAlpha = 1.0;
 
-                const midX = (parent.x + target.x) / 2;
-                const midY = (parent.y + target.y) / 2;
-                // Pre-existing bug fix: the field actually set on each node by
-                // mkNode is seqWinMax (from backend `seq_win_max`), not rxSeqMax.
-                // The previous check was silently dead because rxSeqMax was
-                // always undefined → 0 → false.
+                // ── Staggered position along the link ray to prevent horizontal bar collision! ──
+                // Sibling badges gently stagger at 42%, 56%, 38%, 62%, 50% along each ray
+                const staggerOffsets = [0.42, 0.58, 0.36, 0.64, 0.48, 0.52];
+                const tDist = leafNodes <= 2 ? 0.50 : staggerOffsets[i % staggerOffsets.length];
+                const midX = parent.x + (target.x - parent.x) * tDist;
+                const midY = parent.y + (target.y - parent.y) * tDist;
+
                 const seqWinMaxForBlackhole = typeof target.seqWinMax === 'number' ? target.seqWinMax : 0;
                 const blackhole = seqWinMaxForBlackhole > 0 &&
                     ((seqWinMaxForBlackhole - target.rxSeq) >= 1024 || (target.dedupDrops > 0 && target.rxSeq < seqWinMaxForBlackhole));
@@ -11403,7 +11498,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                     : '';
                 const typeLine = target.isRelayed
                     ? ((t('topo_via') || 'via') + (relayFirst ? ' ' + relayFirst : ''))
-                    : (t('topo_summary_direct') || 'direct');
+                    : (t('topo_summary_direct') || '直连');
                 const dropTxt = target.dedupDrops > 0 ? ` · dup:${target.dedupDrops}` : '';
                 const seqWinMax = typeof target.seqWinMax === 'number' ? target.seqWinMax : 0;
                 const skew = seqWinMax > 0 ? (seqWinMax - target.rxSeq) : 0;
@@ -11414,179 +11509,212 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 // Skip when dimmed by active filter/selection
                 if (edgeDim || (topoSelectedId !== null && !edgeHi)) continue;
 
-                // Pre-measure widths
-                const wRate = rateLine ? topoMeasure(ctx, "bold 9px system-ui, -apple-system, sans-serif", rateLine) : 0;
-                const wMeta = topoMeasure(ctx, "8px system-ui, -apple-system, sans-serif", metaLine);
+                // Measure widths
+                const wRate = rateLine ? topoMeasure(ctx, "bold 9px ui-monospace, monospace", rateLine) : 0;
+                const wMeta = topoMeasure(ctx, "9px system-ui, -apple-system, sans-serif", metaLine);
                 const contentW = Math.max(wRate, wMeta);
 
-                const padX = 8, padY = 3, lineH = 11;
+                const padX = 8, padY = 4, lineH = 12;
                 const numLines = rateLine ? 2 : 1;
-                const boxW = Math.max(54, contentW + padX * 2);
+                const boxW = Math.max(58, contentW + padX * 2);
                 const boxH = padY * 2 + numLines * lineH;
                 const boxX = midX - boxW / 2;
                 const boxY = midY - boxH / 2;
 
                 ctx.save();
-                ctx.fillStyle = lightT ? "rgba(255,255,255,0.94)" : "rgba(10, 15, 30, 0.88)";
-                ctx.strokeStyle = blackhole ? "#f87171" : (edgeHi ? "#38bdf8" : target.linkColor);
-                ctx.lineWidth = 1;
+                // Frosted Dark Glass Pill
+                ctx.shadowColor = edgeHi ? "#38bdf8" : "rgba(0,0,0,0.5)";
+                ctx.shadowBlur = edgeHi ? 10 : 6;
+                ctx.fillStyle = lightT ? "rgba(255,255,255,0.95)" : "rgba(10, 16, 32, 0.88)";
+                ctx.strokeStyle = blackhole ? "#f87171" : (edgeHi ? "#38bdf8" : (target.isRelayed ? "rgba(245, 158, 11, 0.6)" : "rgba(56, 189, 248, 0.4)"));
+                ctx.lineWidth = edgeHi ? 1.6 : 1;
                 ctx.beginPath();
                 if (ctx.roundRect) {
-                    ctx.roundRect(boxX, boxY, boxW, boxH, 6);
+                    ctx.roundRect(boxX, boxY, boxW, boxH, 7);
                 } else {
                     ctx.rect(boxX, boxY, boxW, boxH);
                 }
                 ctx.fill();
                 ctx.stroke();
+                ctx.shadowBlur = 0;
 
-                let yCursor = boxY + padY + 8;
+                let yCursor = boxY + padY + 9;
                 ctx.textAlign = "center";
                 if (rateLine) {
                     ctx.fillStyle = blackhole ? (lightT ? "#dc2626" : "#f87171") : (target.isRelayed ? (lightT ? "#b45309" : "#fcd34d") : (lightT ? "#0284c7" : "#38bdf8"));
-                    ctx.font = "bold 9px system-ui, -apple-system, sans-serif";
+                    ctx.font = "bold 9px ui-monospace, monospace";
                     ctx.fillText(rateLine, midX, yCursor);
                     yCursor += lineH;
                 }
-                ctx.font = "8px system-ui, -apple-system, sans-serif";
+                ctx.font = "9px system-ui, -apple-system, sans-serif";
                 ctx.fillStyle = blackhole ? (lightT ? "#dc2626" : "#fca5a5") : (lightT ? "#475569" : "#94a3b8");
                 ctx.fillText(metaLine, midX, yCursor);
                 ctx.restore();
             }
 
-            // --- Real-Rate Data-Flow Particles (smooth @60fps) ---
-            // Particle speed and density are driven by the REAL per-link byte
-            // rate reported by the backend (target.rxSpeed inbound peer->self,
-            // target.txSpeed outbound self->peer). Idle links (rate < ~1KB/s)
-            // show no flow, so the chart reflects actual traffic truthfully.
+            // --- Real-Rate Data-Flow Glowing Particles (smooth @60fps) ---
             const nowMs = (ts || performance.now());
             const dt = Math.max(0, Math.min(0.1, (nowMs - topoLastFrameTs) / 1000)) || 0.016;
             topoLastFrameTs = nowMs;
             const tsec = nowMs / 1000;
             const selfNode = nodes[0];
+
             for (let i = 0; i < nodes.length; i++) {
                 const target = nodes[i];
-                // Particles flow along the actual tree edge (node <-> parent),
-                // not always to self. For the root (self) this loop is a no-op
-                // here; its traffic to children is drawn when iterating children.
                 if (!target.parentId || !nodeByID[target.parentId]) continue;
                 const parent = nodeByID[target.parentId];
                 if (!topoFlowState[target.id]) topoFlowState[target.id] = { in: Math.random(), out: Math.random() };
 
-                // Map real byte rate -> visual velocity factor (0.08 .. 2.2).
-                // Inbound = from the peer toward its parent (up the tree); outbound
-                // = toward the peer from its parent (down the tree).
-                const inboundRate = target.rxSpeed || 0;   // peer -> parent (RX)
-                const outboundRate = target.txSpeed || 0;  // parent -> peer (TX)
-                const inVel = inboundRate <= TOPO_IDLE_BPS ? 0 : Math.min(2.2, 0.12 + inboundRate / (256 * 1024));
-                const outVel = outboundRate <= TOPO_IDLE_BPS ? 0 : Math.min(2.2, 0.12 + outboundRate / (256 * 1024));
+                const inboundRate = target.rxSpeed || 0;
+                const outboundRate = target.txSpeed || 0;
+                const inVel = inboundRate <= TOPO_IDLE_BPS ? 0 : Math.min(2.4, 0.15 + inboundRate / (256 * 1024));
+                const outVel = outboundRate <= TOPO_IDLE_BPS ? 0 : Math.min(2.4, 0.15 + outboundRate / (256 * 1024));
 
-                // Advance each direction's phase by real-rate * dt.
                 topoFlowState[target.id].in = (topoFlowState[target.id].in + inVel * dt) % 1.0;
                 topoFlowState[target.id].out = (topoFlowState[target.id].out + outVel * dt) % 1.0;
 
-                // Particle density scales with rate: more traffic => more dots.
                 const inCount = inVel === 0 ? 0 : Math.min(6, 2 + Math.floor(inboundRate / (64 * 1024)));
                 const outCount = outVel === 0 ? 0 : Math.min(6, 2 + Math.floor(outboundRate / (64 * 1024)));
 
-                // Inbound particles travel from peer (target) -> parent (up the tree).
+                // Inbound particles (peer -> parent)
                 for (let k = 0; k < inCount; k++) {
                     let p = (topoFlowState[target.id].in + k / inCount) % 1.0;
                     const alpha = 0.35 + 0.65 * Math.sin(Math.PI * p);
                     const px = target.x + (parent.x - target.x) * p;
                     const py = target.y + (parent.y - target.y) * p;
                     ctx.beginPath();
-                    ctx.arc(px, py, 4.0, 0, 2 * Math.PI);
+                    ctx.arc(px, py, 4.2, 0, 2 * Math.PI);
                     ctx.fillStyle = target.particleColor;
                     ctx.globalAlpha = alpha;
                     ctx.shadowColor = target.glowColor;
-                    ctx.shadowBlur = 10;
+                    ctx.shadowBlur = 12;
                     ctx.fill();
                 }
-                // Outbound particles travel from parent -> peer (target, down the tree).
+                // Outbound particles (parent -> peer)
                 for (let k = 0; k < outCount; k++) {
                     let p = (topoFlowState[target.id].out + k / outCount) % 1.0;
                     const alpha = 0.35 + 0.65 * Math.sin(Math.PI * p);
                     const px = parent.x + (target.x - parent.x) * p;
                     const py = parent.y + (target.y - parent.y) * p;
                     ctx.beginPath();
-                    ctx.arc(px, py, 4.0, 0, 2 * Math.PI);
+                    ctx.arc(px, py, 4.2, 0, 2 * Math.PI);
                     ctx.fillStyle = target.particleColor;
                     ctx.globalAlpha = alpha;
                     ctx.shadowColor = target.glowColor;
-                    ctx.shadowBlur = 10;
+                    ctx.shadowBlur = 12;
                     ctx.fill();
                 }
             }
             ctx.shadowBlur = 0;
             ctx.globalAlpha = 1.0;
 
-            // --- Nodes ---
-            // (crowded / leafNodes hoisted above the link-rendering block so
-            // edge labels can also drop the peer-name header when dense.)
+            // --- High-Tech 3D Spherical Nodes & Spaced Typography ---
             for (let i = 0; i < nodes.length; i++) {
                 const n = nodes[i];
                 const nodeRadius = topoNodeRadius(n, leafNodes);
-                const nameSize = nodeRadius >= 14 ? 12 : nodeRadius >= 10 ? 10 : nodeRadius >= 8 ? 9 : 8;
-                const nameGap = nodeRadius + (nodeRadius >= 12 ? 14 : nodeRadius + 6);
+                const nameSize = nodeRadius >= 14 ? 12 : nodeRadius >= 10 ? 11 : nodeRadius >= 8 ? 9 : 8;
+                const nameGap = nodeRadius + 14;
                 const nodeHi = topoSelectedId !== null && topoSelectedPathSet.has(n.id);
                 const nodeDim = topoFilterMode !== 'all' && !topoNodeMatchesFilter(n);
                 ctx.globalAlpha = nodeDim ? 0.18 : (nodeHi ? 1.0 : (topoSelectedId !== null ? 0.3 : 1.0));
 
                 if (n.isSelf) {
-                    const glowRadius = nodeRadius + 3 + Math.sin(tsec * 3) * 2.5;
+                    // Double concentric pulse for Root/Self Node
+                    const pulseR = nodeRadius + 5 + Math.sin(tsec * 2.6) * 3.5;
                     ctx.beginPath();
-                    ctx.arc(n.x, n.y, glowRadius, 0, 2 * Math.PI);
-                    ctx.fillStyle = "rgba(99, 102, 241, 0.25)";
+                    ctx.arc(n.x, n.y, pulseR, 0, 2 * Math.PI);
+                    ctx.fillStyle = "rgba(99, 102, 241, 0.22)";
                     ctx.fill();
+
+                    // Outer orbit tech ring
+                    ctx.beginPath();
+                    ctx.arc(n.x, n.y, nodeRadius + 9, 0, 2 * Math.PI);
+                    ctx.strokeStyle = "rgba(129, 140, 248, 0.35)";
+                    ctx.lineWidth = 1.2;
+                    ctx.setLineDash([6, 8]);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
                 }
-                // Radial gradient fill gives each node a subtle lit / 3D look.
+
+                // 3D Glass Sphere with Radial Highlight
                 const baseFill = n.isSelf ? "#6366f1" : (n.isBoot ? "#a855f7" : (n.isRelayed ? "#f59e0b" : "#10b981"));
-                const strokeCol = n.isSelf ? (lightT ? "#4338ca" : "#a5b4fc") : (n.isBoot ? (lightT ? "#7c3aed" : "#c4b5fd") : (n.isRelayed ? (lightT ? "#b45309" : "#fde68a") : (lightT ? "#047857" : "#6ee7b7")));
-                const grad = ctx.createRadialGradient(n.x - nodeRadius * 0.35, n.y - nodeRadius * 0.35, nodeRadius * 0.2, n.x, n.y, nodeRadius);
-                grad.addColorStop(0, lightenHex(baseFill, lightT ? 0.35 : 0.45));
-                grad.addColorStop(1, baseFill);
+                const strokeCol = n.isSelf ? (lightT ? "#4338ca" : "#c7d2fe") : (n.isBoot ? (lightT ? "#7c3aed" : "#ddd6fe") : (n.isRelayed ? (lightT ? "#b45309" : "#fef3c7") : (lightT ? "#047857" : "#a7f3d0")));
+                const grad = ctx.createRadialGradient(n.x - nodeRadius * 0.35, n.y - nodeRadius * 0.35, nodeRadius * 0.15, n.x, n.y, nodeRadius);
+                grad.addColorStop(0, lightenHex(baseFill, lightT ? 0.40 : 0.55));
+                grad.addColorStop(0.6, baseFill);
+                grad.addColorStop(1, darkenHex(baseFill, 0.25));
+
                 ctx.beginPath();
                 ctx.arc(n.x, n.y, nodeRadius, 0, 2 * Math.PI);
                 ctx.fillStyle = grad;
                 ctx.strokeStyle = nodeHi ? (lightT ? "#0ea5e9" : "#38bdf8") : strokeCol;
-                ctx.lineWidth = nodeHi ? (nodeRadius >= 12 ? 4 : 3) : (nodeRadius >= 12 ? 3 : 2);
-                if (nodeHi) { ctx.shadowColor = lightT ? "#0ea5e9" : "#38bdf8"; ctx.shadowBlur = 14; }
-                else ctx.shadowBlur = 0;
+                ctx.lineWidth = nodeHi ? 3.5 : 2.2;
+                if (nodeHi) {
+                    ctx.shadowColor = lightT ? "#0ea5e9" : "#38bdf8";
+                    ctx.shadowBlur = 16;
+                } else {
+                    ctx.shadowColor = baseFill;
+                    ctx.shadowBlur = 8;
+                }
                 ctx.fill();
                 ctx.stroke();
                 ctx.shadowBlur = 0;
 
-                // Boot node: dashed outer ring (pure shape, no glyph).
+                // Boot node: elegant dashed outer halo
                 if (n.isBoot) {
                     ctx.beginPath();
-                    ctx.arc(n.x, n.y, nodeRadius + 4, 0, 2 * Math.PI);
+                    ctx.arc(n.x, n.y, nodeRadius + 5, 0, 2 * Math.PI);
                     ctx.strokeStyle = lightT ? "#7c3aed" : "#c4b5fd";
                     ctx.lineWidth = 1.5;
-                    ctx.setLineDash([3, 3]);
+                    ctx.setLineDash([4, 4]);
                     ctx.stroke();
                     ctx.setLineDash([]);
                 }
-                // Static peer: small square badge in the top-right quadrant.
+                // Static peer: elegant glowing pin badge at top-right
                 if (n.isStatic) {
-                    const bs = Math.max(6, nodeRadius * 0.55);
-                    ctx.fillStyle = lightT ? "#1d4ed8" : "#60a5fa";
-                    ctx.fillRect(n.x + nodeRadius * 0.7 - bs / 2, n.y - nodeRadius * 0.7 - bs / 2, bs, bs);
+                    const pinX = n.x + nodeRadius * 0.72;
+                    const pinY = n.y - nodeRadius * 0.72;
+                    ctx.fillStyle = "#3b82f6";
+                    ctx.beginPath();
+                    ctx.arc(pinX, pinY, 5, 0, 2 * Math.PI);
+                    ctx.fill();
+                    ctx.strokeStyle = "#ffffff";
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
                 }
 
+                // ── Node Labels with Clear Vertical Hierarchy ──
+                let labelY = n.y + nameGap;
+                // Node Name
                 ctx.fillStyle = lightT ? "#0f172a" : "#f8fafc";
                 ctx.font = "bold " + nameSize + "px system-ui, -apple-system, sans-serif";
                 ctx.textAlign = "center";
-                ctx.fillText(topoShortLabel(n.name), n.x, n.y + nameGap);
+                ctx.fillText(topoShortLabel(n.name), n.x, labelY);
+                labelY += nameSize + 4;
+
                 if (n.isSelf) {
-                    let labelY = n.y + nameGap + nameSize + 4;
                     if (!crowded) {
+                        // IP Address Tag (Sleek Frosted Cyan Tag)
                         if (n.tapIP) {
-                            ctx.fillStyle = "#38bdf8";
-                            ctx.font = "10px monospace";
-                            ctx.fillText(n.tapIP, n.x, labelY);
-                            labelY += 14;
+                            const ipText = n.tapIP;
+                            ctx.font = "bold 10px ui-monospace, monospace";
+                            const ipW = topoMeasure(ctx, "bold 10px ui-monospace, monospace", ipText) + 12;
+                            ctx.save();
+                            ctx.fillStyle = "rgba(56, 189, 248, 0.12)";
+                            ctx.strokeStyle = "rgba(56, 189, 248, 0.4)";
+                            ctx.lineWidth = 1;
+                            ctx.beginPath();
+                            if (ctx.roundRect) ctx.roundRect(n.x - ipW / 2, labelY - 10, ipW, 16, 4);
+                            else ctx.rect(n.x - ipW / 2, labelY - 10, ipW, 16);
+                            ctx.fill();
+                            ctx.stroke();
+                            ctx.fillStyle = lightT ? "#0284c7" : "#38bdf8";
+                            ctx.textAlign = "center";
+                            ctx.fillText(ipText, n.x, labelY + 2);
+                            ctx.restore();
+                            labelY += 16;
                         }
-                        // Role badges: exit-server and/or L2 transit switch.
+                        // Role badges
                         const badges = [];
                         if (n.isExitServer) badges.push('🚪 ' + t('topo_badge_exit_server'));
                         if (n.transitCount > 0) badges.push('🌉 ' + t('topo_badge_transit') + ' ×' + n.transitCount);
@@ -11597,25 +11725,25 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                             labelY += 14;
                         }
                     }
-                    // Aggregate throughput through self (transit visibility).
+                    // Aggregate throughput through self
                     if (n.totalTx > 0 || n.totalRx > 0) {
                         ctx.fillStyle = lightT ? "#0369a1" : "#7dd3fc";
-                        ctx.font = (crowded ? 8 : 9) + "px system-ui, -apple-system, sans-serif";
+                        ctx.font = (crowded ? 8 : 9) + "px ui-monospace, monospace";
                         ctx.fillText('⬆ ' + formatSpeed(n.totalTx) + '  ⬇ ' + formatSpeed(n.totalRx), n.x, labelY);
                     }
-                }
- else {
-                    // Per-peer live Rx/Tx rate beneath the node name.
-                    const peerTx = typeof n.txSpeed === 'number' ? n.txSpeed : 0; // self -> peer
-                    const peerRx = typeof n.rxSpeed === 'number' ? n.rxSpeed : 0; // peer -> self
+                } else {
+                    // Per-peer live Rx/Tx rate beneath the node name
+                    const peerTx = typeof n.txSpeed === 'number' ? n.txSpeed : 0;
+                    const peerRx = typeof n.rxSpeed === 'number' ? n.rxSpeed : 0;
                     ctx.fillStyle = lightT ? "#475569" : "#94a3b8";
-                    ctx.font = (nodeRadius >= 10 ? 9 : 8) + "px system-ui, -apple-system, sans-serif";
-                    ctx.fillText("⬆ " + formatSpeed(peerTx) + "  ⬇ " + formatSpeed(peerRx), n.x, n.y + nameGap + nameSize + 3);
-                    // Exit-server peer marker (small, above the node name).
+                    ctx.font = (nodeRadius >= 10 ? 9 : 8) + "px ui-monospace, monospace";
+                    ctx.fillText("⬆ " + formatSpeed(peerTx) + "  ⬇ " + formatSpeed(peerRx), n.x, labelY);
+
+                    // Exit-server peer marker
                     if (n.peer && n.peer.is_exit_node) {
                         ctx.fillStyle = lightT ? "#6d28d9" : "#c4b5fd";
                         ctx.font = (nodeRadius >= 10 ? 10 : 8) + "px system-ui, -apple-system, sans-serif";
-                        ctx.fillText('🚪', n.x, n.y - nodeRadius - 5);
+                        ctx.fillText('🚪', n.x, n.y - nodeRadius - 6);
                     }
                 }
             }
@@ -11627,6 +11755,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 ctx.textAlign = "center";
                 ctx.fillText(t('topo_standalone'), centerX, centerY + 55);
             }
+
 
             ctx.restore();
             topoNeedsRedraw = false; // drew this frame; idle throttle can now gate us
@@ -11779,10 +11908,11 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             // the badge stays in sync even when the WebSocket briefly
             // disconnects, but the response is tiny (~80 bytes).
             try {
-                const res = await fetch('/api/pcap/state', withAuth());
-                if (!res.ok) return;
+                const res = await fetchWithTimeout('/api/pcap/state', {}, 3000);
+                if (!res || !res.ok) return;
                 applyPcapStateToBadge(await res.json());
             } catch (e) { /* ignore */ }
+
         }
 
         // ---- pcapStream: WebSocket client for /api/pcap/stream ----

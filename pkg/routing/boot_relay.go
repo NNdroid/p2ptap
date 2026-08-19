@@ -68,6 +68,13 @@ func PackBootRelayFrame(netID string, kind byte, proto protocol.ID, finalDst, so
 // network ID, the frame kind, the control protocol ID (empty for data frames),
 // and the relay envelope fields.
 func UnpackBootRelayFrame(data []byte) (netID string, kind byte, proto protocol.ID, finalDst, source peer.ID, ttl uint8, payload []byte, err error) {
+	// Auto-detect and strip accidental 4-byte framing prefix (e.g. from intermediate bridge / double framing)
+	if len(data) >= 4 {
+		possibleLen := binary.BigEndian.Uint32(data[:4])
+		if possibleLen == uint32(len(data)-4) && possibleLen > 0 {
+			data = data[4:]
+		}
+	}
 	netID, rest, perr := stripNetIDPrefix(data)
 	if perr != nil {
 		err = perr
@@ -81,6 +88,7 @@ func UnpackBootRelayFrame(data []byte) (netID string, kind byte, proto protocol.
 	finalDst, source, ttl, payload, err = UnpackRelayFrame(rest)
 	return
 }
+
 
 func appendBootRelayPrefix(netID string, kind byte, proto protocol.ID, env []byte) []byte {
 	nb := []byte(netID)
@@ -105,6 +113,7 @@ func stripKindProtoPrefix(data []byte) (kind byte, proto protocol.ID, rest []byt
 	if len(data) < 1 {
 		return 0, "", nil, fmt.Errorf("boot-relay frame truncated: missing kind byte")
 	}
+
 	kind = data[0]
 	data = data[1:]
 	if len(data) < 2 {
@@ -119,6 +128,9 @@ func stripKindProtoPrefix(data []byte) (kind byte, proto protocol.ID, rest []byt
 	rest = data[n:]
 	return kind, proto, rest, nil
 }
+
+
+
 
 func appendNetIDPrefix(netID string, env []byte) []byte {
 	nb := []byte(netID)

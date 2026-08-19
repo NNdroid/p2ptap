@@ -512,9 +512,11 @@ func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
 		// any route whose NextHop is the target itself.
 		if r, ok := routes[targetPeer]; ok && r.NextHop != "" &&
 			r.NextHop != targetPeer && r.NextHop != n.Host.ID() &&
-			n.supportsOverlayRelay(r.NextHop) {
+			n.supportsOverlayRelay(r.NextHop) &&
+			!n.isOverlayRelayBlacklisted(r.NextHop) {
 			return r.NextHop
 		}
+
 	}
 	// Fallback when the route table has no entry for the target yet (LSA not
 	// propagated, or the per-tick route cache was invalidated mid-convergence):

@@ -1806,30 +1806,28 @@ func (n *Node) SetupWebUI() error {
 		}
 	}
 
-	// 2. Start Native OS WebServer for any non-virtual, local IPs
-	if (localIP != "" || localIPv6 != "") && n.StartWebServer != nil {
+	// 2. Start Native OS WebServer for any non-virtual, local IPs (or loopback fallback)
+	if n.StartWebServer != nil {
 		bindIP := localIP
+		if bindIP == "" && (isVirtualV4 || isVirtualV6) {
+			// In virtual IP mode, ALSO spin up native webserver on 127.0.0.1 loopback
+			// so the local host / tray client / CLI can always reach /api/stats
+			bindIP = "127.0.0.1"
+		}
 		bindIPv6 := localIPv6
 		if bindIPv6 == "" || bindIPv6 == "auto" {
 			bindIPv6 = "::" // Bind to all IPv6 addresses if not specified
 		}
-		log.Info("WebUI listening on (v4: %s, v6: %s) on port %d (native OS stack mode)", bindIP, bindIPv6, cfg.WebUI.Port)
-		// NOTE: the WebUI is an *inbound* management listener. It must NOT be
-		// pinned to the egress NIC via SO_BINDTODEVICE/IP_UNICAST_IF — doing so
-		// (GetSocketControlHookTolerant) restricts the socket to a single
-		// physical interface and breaks access from other interfaces (e.g. the
-		// LAN on a multi-homed router, where the dashboard IP lives on a
-		// different NIC than the egress one), presenting as "listening on *:port
-		// but connection refused from a local IP". The protect hook exists for
-		// *outbound* P2P transport sockets to avoid TAP-default-route loops; an
-		// inbound listener has no such loop, so we pass nil and let it bind
-		// wildcard on every interface.
-		webSrv, err := n.StartWebServer(n.Collector, bindIP, bindIPv6, cfg.WebUI.Port, cfg, cfg.ConfigPath, nil)
-		if err != nil {
-			return err
+		if bindIP != "" || bindIPv6 != "" {
+			log.Info("WebUI listening on (v4: %s, v6: %s) on port %d (native OS stack mode)", bindIP, bindIPv6, cfg.WebUI.Port)
+			webSrv, err := n.StartWebServer(n.Collector, bindIP, bindIPv6, cfg.WebUI.Port, cfg, cfg.ConfigPath, nil)
+			if err != nil {
+				return err
+			}
+			n.WebSrv = webSrv
 		}
-		n.WebSrv = webSrv
 	}
+
 
 	return nil
 }

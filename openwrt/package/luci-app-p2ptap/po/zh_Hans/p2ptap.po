@@ -494,3 +494,32 @@ msgstr "WebUI 访问 Token / 密码"
 #: luasrc/model/cbi/p2ptap.lua:240
 msgid "访问 WebUI 面板所需的认证密钥。如留空，程序启动时将在日志中打印生成的临时 Token。"
 msgstr "访问 WebUI 面板所需的认证密钥。如留空，程序启动时将在日志中打印生成的临时 Token。"
+
+#: luasrc/view/p2ptap/status.htm
+msgid "自身 Peer ID (Local Peer ID)"
+msgstr "自身 Peer ID (Local Peer ID)"
+
+msgid "虚拟 IPv4 (TAP IPv4)"
+msgstr "虚拟 IPv4 (TAP IPv4)"
+
+msgid "虚拟 IPv6 (TAP IPv6)"
+msgstr "虚拟 IPv6 (TAP IPv6)"
+
+msgid "虚拟 MAC (TAP MAC)"
+msgstr "虚拟 MAC (TAP MAC)"
+
+msgid "实时网速 (Speed)"
+msgstr "实时网速 (Speed)"
+
+msgid "个 Peer 在线"
+msgstr "个 Peer 在线"
+
+msgid "当前出口网关"
+msgstr "当前出口网关"
+
+msgid "打开完整 WebUI 控制台 (拓扑图/实时监控)"
+msgstr "打开完整 WebUI 控制台 (拓扑图/实时监控)"
+
+msgid "Peer ID 已复制到剪贴板！"
+msgstr "Peer ID 已复制到剪贴板！"
+

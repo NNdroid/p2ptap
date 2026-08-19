@@ -7,7 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 
@@ -19,6 +22,10 @@ import (
 )
 
 func main() {
+	if checkAndRunService() {
+		return
+	}
+
 	if len(os.Args) < 2 {
 		printUsage()
 		runDefaultNode("config.json")
@@ -28,6 +35,9 @@ func main() {
 	subcommand := os.Args[1]
 
 	switch subcommand {
+	case "service":
+		handleServiceCommand(os.Args[2:])
+
 	case "genconf":
 		genconfFlags := flag.NewFlagSet("genconf", flag.ExitOnError)
 		outputFile := genconfFlags.String("o", "config.json", "Output config file path")
@@ -63,13 +73,16 @@ func printUsage() {
 	fmt.Println("Usage: p2ptap <command> [options]")
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  genconf    Generate default config.json file with random MAC, PSK & persistent node.key")
-	fmt.Println("             Example: p2ptap genconf -o config.json")
 	fmt.Println("  run        Run P2P TAP VPN node using config file")
 	fmt.Println("             Example: p2ptap run -c config.json")
+	fmt.Println("  service    Manage Windows Service (install, uninstall, start, stop, status)")
+	fmt.Println("             Example: p2ptap service install -c config.json")
+	fmt.Println("  genconf    Generate default config.json file with random MAC, PSK & persistent node.key")
+	fmt.Println("             Example: p2ptap genconf -o config.json")
 	fmt.Println("  version    Display version information")
 	fmt.Println()
 }
+
 
 func generateConfigFile(outPath string) {
 	absOutPath, err := filepath.Abs(outPath)
@@ -136,8 +149,17 @@ func runDefaultNode(configPath string) {
 }
 
 func startNode(cfg *config.Config) {
+	// Ensure only one p2ptap daemon or service instance is running
+	hMutex, isSingle := acquireDaemonMutex("p2ptap_Daemon_SingleInstance_Mutex")
+	if !isSingle {
+		fmt.Println("[-] Another p2ptap instance (or Windows Service) is already running. Exiting.")
+		os.Exit(1)
+	}
+	defer releaseDaemonMutex(hMutex)
+
 	// Initialize global log level from config
 	logger.SetGlobalLevel(logger.ParseLevel(cfg.LogLevel))
+
 
 	log := logger.New("Main")
 	log.Info("Log level set to: %s", cfg.LogLevel)
@@ -154,6 +176,13 @@ func startNode(cfg *config.Config) {
 	n.Start()
 	node.PrintBanner(n)
 
-	// Wait for shutdown signal
-	select {}
+	// Wait for shutdown signal (SIGINT / SIGTERM)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	<-sigCh
+
+	log.Info("Shutdown signal received, closing node...")
+	_ = n.Close()
+	log.Info("Node stopped cleanly.")
 }
+

@@ -2928,7 +2928,18 @@
             });
         }
 
-        let authToken = localStorage.getItem('p2ptap_boot_token') || '';
+        let authToken = (() => {
+            try {
+                const params = new URLSearchParams(window.location.search);
+                const t = params.get('token');
+                if (t) {
+                    localStorage.setItem('p2ptap_boot_token', t);
+                    return t;
+                }
+            } catch (e) {}
+            return localStorage.getItem('p2ptap_boot_token') || '';
+        })();
+
         let state = { server: {}, relay: {}, peek_map: {}, peers: [], subnet_routes: [], mesh: [], alerts: [], networks: [], relay_sessions: [], geo_nodes: [], geo_arcs: [], traffic_history: [], health: {healthy: true, issues: []}, config: {} };
         let logEntries = [];
         let expandedPeers = new Set();

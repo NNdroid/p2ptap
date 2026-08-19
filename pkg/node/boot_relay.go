@@ -322,14 +322,13 @@ func (n *Node) handleBootRelayDownlink(s network.Stream, boot peer.ID) {
 		data := buf[:readN]
 		netID, kind, proto, finalDst, srcPeer, _, innerPayload, uerr := routing.UnpackBootRelayFrame(data)
 		if uerr != nil {
-			// A truncation / layout error here almost always means the boot is
-			// running a DIFFERENT envelope version than this node (the historical
-			// 0x8000 "proto field len 32768 > 163" class of bug). Surface it as a
-			// WARN with both commits so the operator can immediately see the
-			// version skew instead of silently dropped frames — the auth-handshake
-			// version gate (P0) should normally have rejected this peer already.
-			log.Warn("[boot-relay] downlink unpack error from %s (local commit=%s): %v", boot.String(), version.ShortCommit(), uerr)
+			hexLen := len(data)
+			if hexLen > 32 {
+				hexLen = 32
+			}
+			log.Warn("[boot-relay] downlink unpack error from %s (local commit=%s): %v, raw_hex=%x", boot.String(), version.ShortCommit(), uerr, data[:hexLen])
 			continue
+
 		}
 		if finalDst != n.Host.ID() {
 			// The boot only sends us frames destined for us; a misrouted frame

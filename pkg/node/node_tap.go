@@ -255,7 +255,8 @@ func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, pack
 	routes := n.getCachedRoutes()
 	route, hasRoute := routes[exitPID]
 
-	if hasRoute && !route.IsDirect && route.NextHop != "" && route.NextHop != exitPID && route.NextHop != n.Host.ID() {
+	if hasRoute && !route.IsDirect && route.NextHop != "" && route.NextHop != exitPID && route.NextHop != n.Host.ID() && !n.isBootstrapPeer(route.NextHop) {
+
 		log.Debug("Tx exit-transit (%s via relay %s): origLen=%d exitPeer=%s", tag, route.NextHop.String(), readN, exitPeerID)
 		// END-TO-END seal for exitPID into a SEPARATE buffer; keep `packedCopy`
 		// as the plaintext framed copy, because it is the direct-fallback payload
@@ -620,8 +621,10 @@ func (n *Node) processTapFrame(payload, outBuf []byte) bool {
 		}
 		log.Debug("Tx Pack: seq=%d origLen=%d packedLen=%d mode=%s dst=%s", seqID, readN, totalLen, n.Packer.Mode, targetPeer.String())
 
-		if hasRoute && !route.IsDirect && route.NextHop != "" && route.NextHop != targetPeer && route.NextHop != n.Host.ID() {
+		if hasRoute && !route.IsDirect && route.NextHop != "" && route.NextHop != targetPeer && route.NextHop != n.Host.ID() && !n.isBootstrapPeer(route.NextHop) {
 			log.Debug("Tx overlay relay: seq=%d len=%d dst=%s via nextHop=%s (totalRTT=%dms vs directRTT=%dms)",
+
+
 				seqID, readN, targetPeer.String(), route.NextHop.String(), route.TotalRTTMs, route.DirectRTTMs)
 			// Direct-path fallback copy MUST remain the PLAINTEXT packed frame.
 			// dispatchWorker's relay onFail handler hands task.data to SendToPeer,

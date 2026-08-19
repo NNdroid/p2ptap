@@ -6,6 +6,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,10 +17,12 @@ import (
 	"time"
 	"unsafe"
 
+
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
+
 
 	"p2ptap/cmd/internal/bootstrap"
 	"p2ptap/pkg/config"
@@ -87,9 +90,8 @@ const (
 
 	GMEM_MOVEABLE  = 0x0002
 	CF_UNICODETEXT = 13
-
-	runKeyPath = `Software\Microsoft\Windows\CurrentVersion\Run`
 )
+
 
 type WNDCLASSEXW struct {
 	CbSize        uint32
@@ -187,6 +189,13 @@ var (
 	// tooltip and context menu can render without blocking on the network.
 	trayCache = &trayStateCache{}
 )
+
+// nodeStateMu guards the node-ownership globals above (daemonClient,
+// standaloneNode, standaloneCollector, standaloneMode). They are written by the
+// service toggle goroutine (install/uninstall) while the status ticker and
+// menu handlers read them concurrently — without this lock those accesses are
+// data races.
+var nodeStateMu sync.RWMutex
 
 // trayStateCache is a concurrency-safe mirror of the daemon's /api/stats
 // snapshot, refreshed on a background ticker.
@@ -334,11 +343,14 @@ func runTray() {
 		_ = os.Chdir(filepath.Dir(exePath))
 	}
 
-	// Auto-elevate to Windows Administrator Privileges if needed for Wintun/TAP netsh configuration
-	if !isAdministrator() {
+	// Auto-elevate to Windows Administrator Privileges if in standalone mode
+	// (needed for Wintun/TAP netsh configuration). In client mode the service
+	// already runs as SYSTEM so the tray does not need elevation.
+	if !isServiceInstalled() && !isAdministrator() {
 		runAsAdmin()
 		return
 	}
+
 
 	configPath := flag.String("c", "config.json", "Path to p2ptap configuration file")
 	flag.Parse()
@@ -356,7 +368,11 @@ func runTray() {
 		}
 	}
 	globalConfig = cfg
+	if abs, err := filepath.Abs(configLoadedPath); err == nil {
+		configLoadedPath = abs
+	}
 	globalConfigPath = configLoadedPath
+
 
 	// Initialize i18n early so messages shown before the node starts
 	// (e.g. the "already running" dialog) are localized.
@@ -396,18 +412,28 @@ func runTray() {
 	// Either way the tray only ever talks to ONE node, so we never get two
 	// nodes fighting over the TAP adapter.
 	if isServiceInstalled() {
+		nodeStateMu.Lock()
 		standaloneMode = false
 		daemonClient = NewDaemonClient(cfg, configLoadedPath)
+		nodeStateMu.Unlock()
 		ensureDaemonRunning()
 		log.Info("Windows System Tray (client mode) active for p2ptap (%s)", configLoadedPath)
 	} else {
+		nodeStateMu.Lock()
 		standaloneMode = true
+		nodeStateMu.Unlock()
 		// Start the node in-process; its WebUI persists the auth token sidecar,
 		// after which we build the client that talks to the local loopback API.
-		startStandaloneNode(cfg, configLoadedPath)
+		if err := startStandaloneNode(cfg, configLoadedPath); err != nil {
+			showErrorBox(tT("err_startup_title"), fmt.Sprintf(tT("err_startup_msg"), err))
+			os.Exit(1)
+		}
+		nodeStateMu.Lock()
 		daemonClient = NewDaemonClient(cfg, configLoadedPath)
+		nodeStateMu.Unlock()
 		log.Info("Windows System Tray (standalone mode) active for p2ptap (%s)", configLoadedPath)
 	}
+
 
 	// Pre-generate dynamic status icons in memory
 	iconGreen = generateStatusIcon("green")
@@ -423,7 +449,7 @@ func runTray() {
 // the VPN directly without any service plumbing. The node's WebUI still serves
 // /api/* on loopback, which is why the tray can keep using the same daemonClient
 // it would use against the service.
-func startStandaloneNode(cfg *config.Config, configPath string) {
+func startStandaloneNode(cfg *config.Config, configPath string) error {
 	if exePath, err := os.Executable(); err == nil {
 		_ = os.Chdir(filepath.Dir(exePath))
 	}
@@ -442,16 +468,20 @@ func startStandaloneNode(cfg *config.Config, configPath string) {
 
 	n, coll, initErr := bootstrap.Node(cfg)
 	if n == nil {
-		showErrorBox(tT("err_startup_title"), fmt.Sprintf(tT("err_startup_msg"), initErr))
-		os.Exit(1)
+		return fmt.Errorf("failed to start in-process node: %w", initErr)
 	}
 	n.Start()
-	standaloneNode = n
 	// Keep the concrete collector so the tray can read status / drive Exit Node
 	// control directly, bypassing the loopback HTTP entirely in standalone mode.
 	if sc, ok := coll.(*web.StatsCollector); ok {
+		nodeStateMu.Lock()
 		standaloneCollector = sc
+		nodeStateMu.Unlock()
 	}
+	nodeStateMu.Lock()
+	standaloneNode = n
+	nodeStateMu.Unlock()
+	return nil
 }
 
 // switchFromStandaloneToService tears down the in-process node and hands control
@@ -459,38 +489,62 @@ func startStandaloneNode(cfg *config.Config, configPath string) {
 // TAP adapter. The tray then becomes a plain client of that service. If the
 // install fails we restart the node in-process so the VPN keeps working.
 func switchFromStandaloneToService() error {
+	nodeStateMu.Lock()
 	if standaloneNode != nil {
 		_ = standaloneNode.Close()
-		standaloneNode = nil
-		standaloneCollector = nil
 	}
+	standaloneNode = nil
+	standaloneCollector = nil
+	nodeStateMu.Unlock()
+	// Brief delay to ensure TAP adapter handle and ports are released
+	time.Sleep(500 * time.Millisecond)
+
 	if err := installService(); err != nil {
-		// Roll back: bring the node back up in-process.
-		startStandaloneNode(globalConfig, globalConfigPath)
+		// Roll back: bring the node back up in-process safely.
+		nodeStateMu.Lock()
+		standaloneMode = true
+		nodeStateMu.Unlock()
+		_ = startStandaloneNode(globalConfig, globalConfigPath)
 		return err
 	}
+	nodeStateMu.Lock()
 	standaloneMode = false
 	// The service persisted a fresh token sidecar; rebuild the client so it
 	// authenticates to the service's loopback API, and wait for it to come up.
 	daemonClient = NewDaemonClient(globalConfig, globalConfigPath)
+	nodeStateMu.Unlock()
+	dc := daemonClientSnapshot()
 	for i := 0; i < 20; i++ {
-		if daemonClient != nil && daemonClient.Reachable() {
+		if dc != nil && dc.Reachable() {
 			break
 		}
-		time.Sleep(1 * time.Second)
+		time.Sleep(500 * time.Millisecond)
 	}
 	return nil
+}
+
+
+// daemonClientSnapshot returns the current daemon client under the node-state lock.
+func daemonClientSnapshot() *DaemonClient {
+	nodeStateMu.RLock()
+	defer nodeStateMu.RUnlock()
+	return daemonClient
 }
 
 // fetchStats returns the latest node status snapshot using the most reliable
 // source for the current mode: in standalone mode the tray reads the in-process
 // collector directly (no HTTP); otherwise it calls the daemon's /api/stats.
 func fetchStats() (*statsResponse, error) {
-	if standaloneMode && standaloneCollector != nil {
+	nodeStateMu.RLock()
+	standalone := standaloneMode
+	sc := standaloneCollector
+	dc := daemonClient
+	nodeStateMu.RUnlock()
+	if standalone && sc != nil {
 		return standaloneStats()
 	}
-	if daemonClient != nil {
-		return daemonClient.Stats()
+	if dc != nil {
+		return dc.Stats()
 	}
 	return nil, fmt.Errorf("no status source available")
 }
@@ -499,10 +553,13 @@ func fetchStats() (*statsResponse, error) {
 // statsResponse DTO. Reading directly avoids the loopback HTTP token/auth/bind
 // fragility that previously left the tray stuck on "daemon offline".
 func standaloneStats() (*statsResponse, error) {
-	if standaloneCollector == nil {
+	nodeStateMu.RLock()
+	sc := standaloneCollector
+	nodeStateMu.RUnlock()
+	if sc == nil {
 		return nil, fmt.Errorf("collector not ready")
 	}
-	r := standaloneCollector.GetResponse()
+	r := sc.GetResponse()
 	s := &statsResponse{
 		PeerID:  r.PeerID,
 		TapIP:   r.TapIP,
@@ -532,22 +589,32 @@ func standaloneStats() (*statsResponse, error) {
 // standalone mode it drives the in-process gateway directly; otherwise it uses
 // the daemon's /api/exitnode.
 func setExitNode(peerID, tapIP, tapIPv6 string) error {
-	if standaloneMode && standaloneCollector != nil && standaloneCollector.Gateway != nil {
-		return standaloneCollector.Gateway.SetExitNode(peerID, tapIP, tapIPv6, nil)
+	nodeStateMu.RLock()
+	standalone := standaloneMode
+	sc := standaloneCollector
+	dc := daemonClient
+	nodeStateMu.RUnlock()
+	if standalone && sc != nil && sc.Gateway != nil {
+		return sc.Gateway.SetExitNode(peerID, tapIP, tapIPv6, nil)
 	}
-	if daemonClient != nil {
-		return daemonClient.SetExitNode(peerID, tapIP, tapIPv6)
+	if dc != nil {
+		return dc.SetExitNode(peerID, tapIP, tapIPv6)
 	}
 	return fmt.Errorf("no control path available")
 }
 
 // clearExitNode restores the default route. Mirrors setExitNode's mode split.
 func clearExitNode() error {
-	if standaloneMode && standaloneCollector != nil && standaloneCollector.Gateway != nil {
-		return standaloneCollector.Gateway.ClearExitNode()
+	nodeStateMu.RLock()
+	standalone := standaloneMode
+	sc := standaloneCollector
+	dc := daemonClient
+	nodeStateMu.RUnlock()
+	if standalone && sc != nil && sc.Gateway != nil {
+		return sc.Gateway.ClearExitNode()
 	}
-	if daemonClient != nil {
-		return daemonClient.ClearExitNode()
+	if dc != nil {
+		return dc.ClearExitNode()
 	}
 	return fmt.Errorf("no control path available")
 }
@@ -644,12 +711,14 @@ func runWin32TrayLoop() {
 	// In standalone mode the node runs in this process, so quitting the tray
 	// also stops the VPN. In client mode the node belongs to the service and is
 	// intentionally left running.
+	nodeStateMu.Lock()
 	if standaloneNode != nil {
 		log.Info("Standalone mode: shutting down in-process node...")
 		_ = standaloneNode.Close()
-		standaloneNode = nil
-		standaloneCollector = nil
 	}
+	standaloneNode = nil
+	standaloneCollector = nil
+	nodeStateMu.Unlock()
 
 	// Clean up Tray Icon.
 	procShell_NotifyIconW.Call(NIM_DELETE, uintptr(unsafe.Pointer(&nid)))
@@ -854,9 +923,9 @@ func showContextMenu(hwnd syscall.Handle) {
 
 	procSetForegroundWindow.Call(uintptr(hwnd))
 
-	retCmd, _, _ := procTrackPopupMenuEx.Call(
+	procTrackPopupMenuEx.Call(
 		hMenu,
-		0x0100|0x0002, // TPM_RETURNCMD | TPM_RIGHTBUTTON
+		0x0002, // TPM_RIGHTBUTTON -> posts WM_COMMAND to hwnd
 		uintptr(pt.X),
 		uintptr(pt.Y),
 		uintptr(hwnd),
@@ -865,11 +934,9 @@ func showContextMenu(hwnd syscall.Handle) {
 
 	procPostMessageW.Call(uintptr(hwnd), 0, 0, 0)
 	procDestroyMenu.Call(hMenu)
-
-	if retCmd != 0 {
-		handleMenuCommand(uint16(retCmd))
-	}
 }
+
+var serviceOpMu sync.Mutex
 
 func handleMenuCommand(cmdID uint16) {
 	switch cmdID {
@@ -900,24 +967,38 @@ func handleMenuCommand(cmdID uint16) {
 			}
 		}
 	case IDM_TOGGLE_SERVICE:
-		installed := isServiceInstalled()
-		if !installed {
-			if err := switchFromStandaloneToService(); err != nil {
-				showErrorBox(tT("err_svc_install_title"), fmt.Sprintf(tT("err_svc_install_msg"), err))
-			} else {
-				// The service already provides an always-on node, so disable
-				// tray auto-start to avoid two nodes fighting over the TAP
-				// adapter at boot. (Best-effort; ignore errors.)
-				_ = toggleAutoStart(false)
-				showToastNotification("p2ptap", tT("toast_svc_installed"))
+		go func() {
+			if !serviceOpMu.TryLock() {
+				return // prevent parallel execution
 			}
-		} else {
-			if err := uninstallService(); err != nil {
-				showErrorBox(tT("err_svc_install_title"), fmt.Sprintf(tT("err_svc_uninstall_msg"), err))
+			defer serviceOpMu.Unlock()
+
+			installed := isServiceInstalled()
+			if !installed {
+				if err := switchFromStandaloneToService(); err != nil {
+					showErrorBox(tT("err_svc_install_title"), fmt.Sprintf(tT("err_svc_install_msg"), err))
+				} else {
+					showToastNotification("p2ptap", tT("toast_svc_installed"))
+				}
 			} else {
-				showToastNotification("p2ptap", tT("toast_svc_uninstalled"))
+				if err := uninstallService(); err != nil {
+					showErrorBox(tT("err_svc_install_title"), fmt.Sprintf(tT("err_svc_uninstall_msg"), err))
+				} else {
+					// Fall back to standalone mode and bring in-process node back up
+					nodeStateMu.Lock()
+					standaloneMode = true
+					nodeStateMu.Unlock()
+					_ = startStandaloneNode(globalConfig, globalConfigPath)
+					nodeStateMu.Lock()
+					daemonClient = NewDaemonClient(globalConfig, globalConfigPath)
+					nodeStateMu.Unlock()
+					showToastNotification("p2ptap", tT("toast_svc_uninstalled"))
+				}
 			}
-		}
+
+		}()
+
+
 	case IDM_CLEAR_EXITNODE:
 		if err := clearExitNode(); err != nil {
 			showErrorBox(tT("err_exitnode_title"), fmt.Sprintf(tT("err_clear_exit_msg"), err))
@@ -969,60 +1050,25 @@ func runQuickSpeedTest() {
 	}()
 }
 
-func isAutoStartEnabled() bool {
-	k, err := registry.OpenKey(registry.CURRENT_USER, runKeyPath, registry.QUERY_VALUE)
-	if err != nil {
-		return false
-	}
-	defer k.Close()
-
-	val, _, err := k.GetStringValue("p2ptap")
-	if err != nil {
-		return false
-	}
-	// Present and non-empty means auto-start is enabled.
-	return strings.TrimSpace(val) != ""
-}
-
-func toggleAutoStart(enable bool) error {
-	k, err := registry.OpenKey(registry.CURRENT_USER, runKeyPath, registry.SET_VALUE)
-	if err != nil {
-		return fmt.Errorf("failed to open registry key: %w", err)
-	}
-	defer k.Close()
-
-	if !enable {
-		// Best-effort: ignore "value does not exist".
-		_ = k.DeleteValue("p2ptap")
-		return nil
-	}
-
-	exePath, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	absConfigPath, _ := filepath.Abs(globalConfigPath)
-	cmdValue := fmt.Sprintf(`"%s" -c "%s"`, exePath, absConfigPath)
-	if err := k.SetStringValue("p2ptap", cmdValue); err != nil {
-		return fmt.Errorf("failed to write registry value: %w", err)
-	}
-	return nil
-}
-
 func isServiceInstalled() bool {
-	m, err := mgr.Connect()
-	if err != nil {
-		return false
+	// 1. Direct registry probe in HKLM\SYSTEM\CurrentControlSet\Services\p2ptap
+	// (Always readable by all standard users without requiring admin privileges).
+	if k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Services\p2ptap`, registry.QUERY_VALUE); err == nil {
+		k.Close()
+		return true
 	}
-	defer m.Disconnect()
 
-	s, err := m.OpenService("p2ptap")
-	if err != nil {
-		return false
+	// 2. Fallback via windows SCManager query with standard user access
+	if hSCM, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT); err == nil {
+		defer windows.CloseServiceHandle(hSCM)
+		if hSvc, err := windows.OpenService(hSCM, windows.StringToUTF16Ptr("p2ptap"), windows.SERVICE_QUERY_STATUS); err == nil {
+			windows.CloseServiceHandle(hSvc)
+			return true
+		}
 	}
-	s.Close()
-	return true
+	return false
 }
+
 
 func installService() error {
 	exePath, err := os.Executable()
@@ -1031,9 +1077,17 @@ func installService() error {
 	}
 	absConfigPath, _ := filepath.Abs(globalConfigPath)
 
+	// If the headless p2ptap.exe daemon exists in the same directory, prefer it
+	// as the service binary; otherwise use the current executable.
+	svcExe := exePath
+	cliExe := filepath.Join(filepath.Dir(exePath), "p2ptap.exe")
+	if fi, statErr := os.Stat(cliExe); statErr == nil && !fi.IsDir() {
+		svcExe = cliExe
+	}
+
 	m, err := mgr.Connect()
 	if err != nil {
-		return fmt.Errorf("failed to connect to Service Control Manager: %w", err)
+		return fmt.Errorf("failed to connect to Service Control Manager: %w (please run as Administrator)", err)
 	}
 	defer m.Disconnect()
 
@@ -1043,24 +1097,27 @@ func installService() error {
 		return fmt.Errorf("service 'p2ptap' is already installed")
 	}
 
-	// svc/mgr quotes the executable path internally only if needed; pass it
-	// quoted ourselves so paths with spaces (e.g. "Program Files") work. The
-	// config path is also quoted so spaces there are handled.
-	quotedExe := `"` + exePath + `"`
+	// svc/mgr quotes the executable path and args internally when needed.
 	s, err := m.CreateService(
 		"p2ptap",
-		quotedExe,
+		svcExe,
 		mgr.Config{
 			DisplayName: "p2ptap Service",
 			Description: "P2P TAP VPN node — runs headless in the background.",
 			StartType:   mgr.StartAutomatic,
+			// The node needs the TCP/IP stack up before it opens sockets / the
+			// TAP device; declaring the dependency makes SCM order boot starts
+			// correctly instead of racing tcpip.sys initialization.
+			Dependencies: []string{"Tcpip"},
 		},
-		"-c", `"`+absConfigPath+`"`,
+		"-c", absConfigPath,
 	)
 	if err != nil {
 		return fmt.Errorf("CreateService failed: %w", err)
 	}
 	defer s.Close()
+
+
 
 	// Configure recovery: restart on failure so an unexpected crash doesn't
 	// leave the VPN silently down.
@@ -1124,29 +1181,45 @@ func startService() error {
 	}
 	defer s.Close()
 
+	// If already running, return success
+	status, err := s.Query()
+	if err == nil && status.State == svc.Running {
+		return nil
+	}
+
+	// If the service is currently stopping/starting, wait for it to reach STOPPED
+	for i := 0; i < 40; i++ {
+		status, qerr := s.Query()
+		if qerr == nil && status.State == svc.Running {
+			return nil
+		}
+		if qerr == nil && status.State == svc.Stopped {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+
 	if err := s.Start(); err != nil {
 		return fmt.Errorf("failed to start service: %w", err)
 	}
 	// Wait for RUNNING so the caller can rely on the daemon being up.
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 40; i++ {
 		status, qerr := s.Query()
-		if qerr != nil {
-			break
+		if qerr == nil && status.State == svc.Running {
+			return nil
 		}
-		if status.State == svc.Running {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 	}
 	return nil
 }
+
 
 // ensureDaemonRunning brings the p2ptap daemon up if it isn't already. The tray
 // is a pure client, so the VPN only works when the daemon (service, or a
 // foreground process) is alive. We start the service if it's installed, or
 // install + start it on first run, then wait briefly for it to accept API calls.
 func ensureDaemonRunning() {
-	if daemonClient != nil && daemonClient.Reachable() {
+	if dc := daemonClientSnapshot(); dc != nil && dc.Reachable() {
 		return
 	}
 
@@ -1164,7 +1237,7 @@ func ensureDaemonRunning() {
 
 	// Give the freshly started daemon a moment to come up and serve /api/stats.
 	for i := 0; i < 20; i++ {
-		if daemonClient != nil && daemonClient.Reachable() {
+		if dc := daemonClientSnapshot(); dc != nil && dc.Reachable() {
 			return
 		}
 		time.Sleep(1 * time.Second)
@@ -1180,43 +1253,124 @@ func openWebUI() {
 
 // resolveWebuiURL returns the URL the WebUI is actually listening on. It reads
 // the sidecar the server rewrites on every (re)bind (.p2ptap_webui_url, next to
-// config.json), preferring a loopback address. This makes the tray open the
-// REAL dashboard address instead of a hardcoded 127.0.0.1:configPort, which is
-// wrong when the WebUI binds to a specific interface IP or fell back to an
-// alt-port after a bind collision. Falls back to the legacy loopback URL if the
-// sidecar is missing/unreadable.
+// config.json), prioritizing the user's configured IPv4/IPv6 listen address (or loopback for wildcard),
+// and automatically attaches the auth token if one is configured.
 func resolveWebuiURL() string {
-	fallback := "http://127.0.0.1:5857"
-	if globalConfig != nil {
-		if p := globalConfig.WebUI.Port; p != 0 {
-			fallback = fmt.Sprintf("http://127.0.0.1:%d", p)
+	// 1. Reload the latest config from disk if available
+	cfg := globalConfig
+	if globalConfigPath != "" {
+		if reloaded, err := config.LoadConfigFromFile(globalConfigPath); err == nil {
+			cfg = reloaded
+			globalConfig = reloaded
 		}
 	}
-	if globalConfigPath == "" {
-		return fallback
+
+	targetHostV4 := ""
+	if cfg != nil && cfg.WebUI.ListenIP != "" && cfg.WebUI.ListenIP != "0.0.0.0" {
+		targetHostV4 = cfg.WebUI.ListenIP
 	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(globalConfigPath), webuiURLSidecar))
-	if err != nil {
-		return fallback
+
+	targetHostV6 := ""
+	cleanV6 := ""
+	if cfg != nil && cfg.WebUI.ListenIPv6 != "" && cfg.WebUI.ListenIPv6 != "::" {
+		cleanV6 = strings.Trim(cfg.WebUI.ListenIPv6, "[]")
+		targetHostV6 = "[" + cleanV6 + "]"
 	}
-	preferred := ""
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+
+	targetPort := 5857
+	if cfg != nil && cfg.WebUI.Port > 0 {
+		targetPort = cfg.WebUI.Port
+	}
+
+	targetBaseURL := ""
+
+	// 2. Check the live sidecar file written by the running daemon (.p2ptap_webui_url)
+	if globalConfigPath != "" {
+		sidecarPath := filepath.Join(filepath.Dir(globalConfigPath), webuiURLSidecar)
+		if data, err := os.ReadFile(sidecarPath); err == nil {
+			var configuredV4URL, configuredV6URL, loopbackV4URL, loopbackV6URL, firstURL string
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				if targetHostV4 != "" && strings.Contains(line, targetHostV4) {
+					configuredV4URL = line
+				}
+				if cleanV6 != "" && strings.Contains(line, cleanV6) {
+					configuredV6URL = line
+				}
+				if strings.Contains(line, "127.0.0.1") || strings.Contains(line, "localhost") {
+					loopbackV4URL = line
+				}
+				if strings.Contains(line, "[::1]") {
+					loopbackV6URL = line
+				}
+				if firstURL == "" {
+					firstURL = line
+				}
+			}
+			// Priority:
+			// 1. Configured specific IPv4 (e.g. 10.0.0.3)
+			// 2. Configured specific IPv6 (e.g. [fd00::3])
+			// 3. Fallback to direct string if sidecar had a wildcard bind
+			// 4. IPv4 Loopback (127.0.0.1)
+			// 5. IPv6 Loopback ([::1])
+			// 6. First bound URL in sidecar
+			if configuredV4URL != "" {
+				targetBaseURL = configuredV4URL
+			} else if configuredV6URL != "" {
+				targetBaseURL = configuredV6URL
+			} else if targetHostV4 != "" {
+				targetBaseURL = fmt.Sprintf("http://%s:%d", targetHostV4, targetPort)
+			} else if targetHostV6 != "" {
+				targetBaseURL = fmt.Sprintf("http://%s:%d", targetHostV6, targetPort)
+			} else if loopbackV4URL != "" {
+				targetBaseURL = loopbackV4URL
+			} else if loopbackV6URL != "" {
+				targetBaseURL = loopbackV6URL
+			} else if firstURL != "" {
+				targetBaseURL = firstURL
+			}
+
 		}
-		if strings.Contains(line, "127.0.0.1") {
-			return line // loopback is always locally reachable — use it directly
+	}
+
+	// 3. Fall back to direct calculation from config if sidecar was not found
+	if targetBaseURL == "" {
+		host := "127.0.0.1"
+		if targetHostV4 != "" {
+			host = targetHostV4
+		} else if targetHostV6 != "" {
+			host = targetHostV6
+		} else if cfg != nil && cfg.WebUI.ListenIPv6 == "::" && (cfg.WebUI.ListenIP == "" || cfg.WebUI.ListenIP == "0.0.0.0") {
+			host = "[::1]"
 		}
-		if preferred == "" {
-			preferred = line
+		targetBaseURL = fmt.Sprintf("http://%s:%d", host, targetPort)
+	}
+
+	// 4. Attach auth token if configured so the dashboard logs in seamlessly on double-click
+	token := ""
+	if globalConfigPath != "" {
+		token = config.LoadWebUIToken(globalConfigPath)
+	}
+	if token == "" && cfg != nil {
+		token = cfg.WebUI.AuthToken
+	}
+
+	if token != "" {
+		if strings.Contains(targetBaseURL, "?") {
+			targetBaseURL = fmt.Sprintf("%s&token=%s", targetBaseURL, url.QueryEscape(token))
+		} else {
+			targetBaseURL = fmt.Sprintf("%s/?token=%s", targetBaseURL, url.QueryEscape(token))
 		}
 	}
-	if preferred != "" {
-		return preferred
-	}
-	return fallback
+
+	return targetBaseURL
 }
+
+
+
 
 // webuiURLSidecar mirrors the server-side sidecar filename; the server writes
 // the actual bound WebUI URLs here (one per line) on every (re)bind.
@@ -1289,7 +1443,7 @@ func showMessageBox(title, msg string) {
 		0,
 		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(msg))),
 		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(title))),
-		0x00000040, // MB_ICONINFORMATION
+		0x00000040|0x00040000|0x00010000, // MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND
 	)
 }
 
@@ -1299,9 +1453,10 @@ func showErrorBox(title, msg string) {
 		0,
 		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(msg))),
 		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(title))),
-		0x00000010, // MB_ICONERROR
+		0x00000010|0x00040000|0x00010000, // MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND
 	)
 }
+
 
 func openConfigInEditor(configPath string) {
 	absPath, err := filepath.Abs(configPath)
@@ -1397,6 +1552,7 @@ func runAsAdmin() {
 	}
 	argsPtr, _ := windows.UTF16PtrFromString(strings.Join(args, " "))
 
-	_ = windows.ShellExecute(0, verbPtr, exePtr, argsPtr, cwdPtr, windows.SW_HIDE)
+	_ = windows.ShellExecute(0, verbPtr, exePtr, argsPtr, cwdPtr, windows.SW_SHOWNORMAL)
 	os.Exit(0)
 }
+

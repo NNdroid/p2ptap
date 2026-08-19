@@ -75,6 +75,17 @@ func (n *Node) rewriteRxDstMAC(payload []byte) {
 		}
 		return
 	}
+	if binary.BigEndian.Uint16(payload[12:14]) == packet.EtherTypeARP && n.localV4IP != nil && len(payload) >= 42 {
+		targetIP := net.IP(payload[38:42])
+		if targetIP.Equal(n.localV4IP) || n.isLocalAdvertisedSubnet(targetIP) {
+			if !isBroadcastOrMulticastMAC(payload[0:6]) && !bytes.Equal(payload[0:6], n.localMAC) {
+				log.Debug("MAC rewrite ARP (local dst / subnet): dstIP=%s oldDstMAC=%s newDstMAC=%s", targetIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+				copy(payload[0:6], n.localMAC)
+			}
+			return
+		}
+	}
+
 	if binary.BigEndian.Uint16(payload[12:14]) == packet.EtherTypeIPv6 && n.localV6IP != nil && len(payload) >= 54 {
 		dstIP := net.IP(payload[38:54])
 		if dstIP.Equal(n.localV6IP) || n.isLocalAdvertisedSubnet(dstIP) {
