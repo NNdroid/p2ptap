@@ -56,7 +56,7 @@
                 th_stream_direction: "Direction",
                 th_stream_transport: "Transport & Multiaddr",
                 th_stream_status: "Status",
-                search_streams_ph: "🔍 Search streams, protocols, peers…",
+                search_streams_ph: "Search streams, protocols, peers…",
                 no_matching_streams: "No active protocol streams found",
                 no_channels: "No active protocol channels",
                 lbl_active_streams: "Streams",
@@ -64,6 +64,34 @@
                 dir_out: "Outbound ↑",
                 dir_in: "Inbound ↓",
                 stream_active: "Active",
+                channel_status_active: "Active",
+                channel_status_running: "Running",
+                channel_status_idle: "Idle",
+                channel_status_standby: "Standby",
+                channel_status_ready: "Ready",
+                channel_status_open: "Open Mode",
+                category_sync: "Sync",
+                category_routing: "Routing",
+                category_pubsub: "PubSub",
+                category_data: "Data",
+                category_security: "Security",
+                category_transport: "Transport",
+                category_diagnostics: "Diagnostics",
+                category_discovery: "Discovery",
+                channel_seqsync_name: "Sequence Sync (SeqSync)",
+                channel_seqsync_desc: "Window Dedup & Replay Protection",
+                channel_lsa_name: "LSA Mesh Routing",
+                channel_lsa_desc: "Dijkstra Shortest Path",
+                channel_peekmap_name: "Peek-Map Broadcast",
+                channel_peekmap_desc: "Bootstrap Topology Sync",
+                channel_data_name: "Virtual TAP Datapath",
+                channel_data_proto: "Layer-2 Ethernet Overlay",
+                channel_auth_name: "Mesh Authentication",
+                channel_auth_desc: "PSK Mesh Network Isolation",
+                channel_dcutr_name: "DCUtR Hole-Punch & Relay",
+                channel_dcutr_desc: "Direct Connection Upgrade",
+                cipher_lbl: "Cipher",
+
                 lbl_arp_broadcast: "ARP Broadcast Frames",
                 lbl_broadcast_pkts: "Broadcast Packets",
                 lbl_multicast_pkts: "Multicast Packets",
@@ -256,12 +284,16 @@
                 col_jitter_loss: "Jitter / Loss",
                 col_encryption: "Encryption",
                 col_status: "Conn Status",
+                col_return_path: "Return Path",
                 conn_ok: "Connected",
                 conn_relay_ok: "Relay OK",
                 conn_connecting: "Connecting",
                 conn_proto_mismatch: "Proto Mismatch",
                 conn_obf_failed: "Decrypt Fail",
                 conn_unreachable: "Unreachable",
+                return_ok: "Return OK",
+                return_dead: "Return Dead",
+                return_idle: "Unknown",
                 col_actions: "Actions",
                 topo_tx: "Outbound (Tx ➔)",
                 topo_rx: "Return (Rx ⬅️)",
@@ -725,7 +757,7 @@
                 th_stream_direction: "流方向",
                 th_stream_transport: "传输层与 Multiaddr 链路",
                 th_stream_status: "状态",
-                search_streams_ph: "🔍 搜索流、协议、对端节点…",
+                search_streams_ph: "搜索流、协议、对端节点…",
                 no_matching_streams: "未找到活跃协议流",
                 no_channels: "未找到活跃协议通道",
                 lbl_active_streams: "条活跃流",
@@ -733,6 +765,34 @@
                 dir_out: "出站 ↑",
                 dir_in: "入站 ↓",
                 stream_active: "活跃中",
+                channel_status_active: "活跃",
+                channel_status_running: "运行中",
+                channel_status_idle: "空闲",
+                channel_status_standby: "待命",
+                channel_status_ready: "就绪",
+                channel_status_open: "开放模式",
+                category_sync: "同步",
+                category_routing: "路由",
+                category_pubsub: "发布订阅",
+                category_data: "数据传输",
+                category_security: "安全隔离",
+                category_transport: "传输层",
+                category_diagnostics: "诊断",
+                category_discovery: "发现",
+                channel_seqsync_name: "序号同步 (SeqSync)",
+                channel_seqsync_desc: "窗口去重与重放防护",
+                channel_lsa_name: "LSA 链路状态路由",
+                channel_lsa_desc: "Dijkstra 最短路径选路",
+                channel_peekmap_name: "Peek-Map 全网拓扑广播",
+                channel_peekmap_desc: "引导拓扑发现与同步",
+                channel_data_name: "虚拟 TAP 数据通路",
+                channel_data_proto: "二层以太网数据链路",
+                channel_auth_name: "PSK Mesh 身份认证",
+                channel_auth_desc: "PSK Mesh 网络安全隔离",
+                channel_dcutr_name: "DCUtR 自动打洞与中继",
+                channel_dcutr_desc: "NAT 直连打洞自动升级",
+                cipher_lbl: "加密算法",
+
                 lbl_arp_broadcast: "ARP 广播以太帧",
                 lbl_broadcast_pkts: "广播包",
                 lbl_multicast_pkts: "组播包",
@@ -924,12 +984,16 @@
                 col_last_active: "上次通信时间",
                 col_jitter_loss: "抖动 / 丢包率",
                 col_status: "连接状态",
+                col_return_path: "回程状态",
                 conn_ok: "已连接",
                 conn_relay_ok: "中继正常",
                 conn_connecting: "连接中",
                 conn_proto_mismatch: "协议不匹配",
                 conn_obf_failed: "解密失败",
                 conn_unreachable: "不可达",
+                return_ok: "回程正常",
+                return_dead: "回程断",
+                return_idle: "回程未知",
                 col_actions: "操作",
                 topo_tx: "去程链路 (Tx ➔)",
                 topo_rx: "回程链路 (Rx ⬅️)",
@@ -1541,12 +1605,16 @@
                 col_last_active: "上次通訊時間",
                 col_jitter_loss: "抖動 / 丟包率",
                 col_status: "連線狀態",
+                col_return_path: "回程狀態",
                 conn_ok: "已連線",
                 conn_relay_ok: "中繼正常",
                 conn_connecting: "連線中",
                 conn_proto_mismatch: "協定不符",
                 conn_obf_failed: "解密失敗",
                 conn_unreachable: "無法連線",
+                return_ok: "回程正常",
+                return_dead: "回程斷",
+                return_idle: "回程未知",
                 col_actions: "操作",
                 topo_tx: "去程鏈路 (Tx ➔)",
                 topo_rx: "回程鏈路 (Rx ⬅️)",
@@ -2002,20 +2070,48 @@
                 pcap_layer_tree: "協定解析",
                 protocol_inspector_desc: "（第 2/3/4 層封包拆解與即時 PPS 統計）",
                 protocol_inspector_title: "📊 即時流量與乙太網路協定檢視器",
-                proto_channels_title: "📡 協議通道與流狀態監測",
-                th_stream_proto: "協議 / 通道標識",
+                proto_channels_title: "📡 通訊協定通道與串流狀態監測",
+                th_stream_proto: "協定 / 通道標識",
                 th_stream_peer: "對端節點",
-                th_stream_direction: "流方向",
+                th_stream_direction: "串流方向",
                 th_stream_transport: "傳輸層與 Multiaddr 鏈路",
                 th_stream_status: "狀態",
-                search_streams_ph: "🔍 搜索流、協議、對端節點…",
-                no_matching_streams: "未找到活躍協議流",
-                no_channels: "未找到活躍協議通道",
-                lbl_active_streams: "條活躍流",
-                lbl_streams: "條流",
+                search_streams_ph: "搜尋通訊流、協定、對端節點…",
+                no_matching_streams: "未找到活躍通訊協定串流",
+                no_channels: "未找到活躍協定通道",
+                lbl_active_streams: "條活躍串流",
+                lbl_streams: "條串流",
                 dir_out: "出站 ↑",
                 dir_in: "入站 ↓",
                 stream_active: "活躍中",
+                channel_status_active: "活躍",
+                channel_status_running: "運行中",
+                channel_status_idle: "閒置",
+                channel_status_standby: "待命",
+                channel_status_ready: "就緒",
+                channel_status_open: "開放模式",
+                category_sync: "同步",
+                category_routing: "路由",
+                category_pubsub: "發布訂閱",
+                category_data: "數據傳輸",
+                category_security: "安全隔離",
+                category_transport: "傳輸層",
+                category_diagnostics: "診斷",
+                category_discovery: "發現",
+                channel_seqsync_name: "序號同步 (SeqSync)",
+                channel_seqsync_desc: "視窗去重與重放防護",
+                channel_lsa_name: "LSA 鏈路狀態路由",
+                channel_lsa_desc: "Dijkstra 最短路徑選路",
+                channel_peekmap_name: "Peek-Map 全網拓撲廣播",
+                channel_peekmap_desc: "引導拓撲發現與同步",
+                channel_data_name: "虛擬 TAP 數據通路",
+                channel_data_proto: "二層乙太網數據鏈路",
+                channel_auth_name: "PSK Mesh 身分認證",
+                channel_auth_desc: "PSK Mesh 網絡安全隔離",
+                channel_dcutr_name: "DCUtR 自動打洞與中繼",
+                channel_dcutr_desc: "NAT 直連打洞自動升級",
+                cipher_lbl: "加密演算法",
+
                 rejected: "❌ 已拒絕",
                 relay_accel_active: "中繼加速作用中",
                 relay_accel_desc: "Dijkstra 演算法計算的多跳路徑經由",
@@ -2207,12 +2303,16 @@
                 col_last_active: "最終アクティブ",
                 col_jitter_loss: "ジッター / 損失率",
                 col_status: "接続状態",
+                col_return_path: "リターンパス",
                 conn_ok: "接続済み",
                 conn_relay_ok: "リレー正常",
                 conn_connecting: "接続中",
                 conn_proto_mismatch: "プロトコル不一致",
                 conn_obf_failed: "復号失敗",
                 conn_unreachable: "到達不可",
+                return_ok: "リターン正常",
+                return_dead: "リターン断",
+                return_idle: "リターン不明",
                 col_actions: "操作",
                 topo_tx: "送信ルート (Tx ➔)",
                 topo_rx: "返信ルート (Rx ⬅️)",
@@ -2609,7 +2709,7 @@
                 th_stream_direction: "方向",
                 th_stream_transport: "トランスポート & Multiaddr",
                 th_stream_status: "状態",
-                search_streams_ph: "🔍 ストリーム、プロトコル、ピアを検索…",
+                search_streams_ph: "ストリーム、プロトコル、ピアを検索…",
                 no_matching_streams: "アクティブなプロトコルストリームが見つかりません",
                 no_channels: "アクティブなチャネルがありません",
                 lbl_active_streams: "ストリーム",
@@ -2617,6 +2717,34 @@
                 dir_out: "送信 ↑",
                 dir_in: "受信 ↓",
                 stream_active: "アクティブ",
+                channel_status_active: "アクティブ",
+                channel_status_running: "実行中",
+                channel_status_idle: "アイドル",
+                channel_status_standby: "スタンバイ",
+                channel_status_ready: "レディ",
+                channel_status_open: "オープンモード",
+                category_sync: "同期",
+                category_routing: "ルーティング",
+                category_pubsub: "PubSub",
+                category_data: "データ転送",
+                category_security: "セキュリティ",
+                category_transport: "トランスポート",
+                category_diagnostics: "診断",
+                category_discovery: "検出",
+                channel_seqsync_name: "シーケンス同期 (SeqSync)",
+                channel_seqsync_desc: "ウィンドウ重複排除とリプレイ保護",
+                channel_lsa_name: "LSA メッシュルーティング",
+                channel_lsa_desc: "Dijkstra 最短パス選路",
+                channel_peekmap_name: "Peek-Map トポロジブロードキャスト",
+                channel_peekmap_desc: "ブートストラップトポロジ同期",
+                channel_data_name: "仮想 TAP データパス",
+                channel_data_proto: "レイヤ 2 イーサネットオーバーレイ",
+                channel_auth_name: "PSK メッシュ認証",
+                channel_auth_desc: "PSK メッシュネットワーク分離",
+                channel_dcutr_name: "DCUtR ホールパンチ & リレー",
+                channel_dcutr_desc: "直接接続への自動アップグレード",
+                cipher_lbl: "暗号化アルゴリズム",
+
                 rejected: "❌ 拒否",
                 relay_accel_active: "リレー高速化アクティブ",
                 relay_accel_desc: "Dijkstra アルゴリズムが計算したマルチホップパス経由",
@@ -2874,12 +3002,16 @@
                 col_last_active: "Zuletzt aktiv",
                 col_jitter_loss: "Jitter / Verlust",
                 col_status: "Verbindungsstatus",
+                col_return_path: "Rückweg",
                 conn_ok: "Verbunden",
                 conn_relay_ok: "Relay OK",
                 conn_connecting: "Verbinde",
                 conn_proto_mismatch: "Protokoll-Fehler",
                 conn_obf_failed: "Entschlüsseln fehlgeschlagen",
                 conn_unreachable: "Nicht erreichbar",
+                return_ok: "Rückweg OK",
+                return_dead: "Rückweg unterbrochen",
+                return_idle: "Rückweg unbekannt",
                 col_actions: "Aktionen",
                 topo_tx: "Hingang (Tx ➔)",
                 topo_rx: "Rückgang (Rx ⬅️)",
@@ -3276,7 +3408,7 @@
                 th_stream_direction: "Richtung",
                 th_stream_transport: "Transport & Multiaddr",
                 th_stream_status: "Status",
-                search_streams_ph: "🔍 Streams, Protokolle, Peers durchsuchen…",
+                search_streams_ph: "Streams, Protokolle, Peers durchsuchen…",
                 no_matching_streams: "Keine aktiven Protokoll-Streams gefunden",
                 no_channels: "Keine aktiven Protokollkanäle",
                 lbl_active_streams: "Streams",
@@ -3284,6 +3416,34 @@
                 dir_out: "Ausgehend ↑",
                 dir_in: "Eingehend ↓",
                 stream_active: "Aktiv",
+                channel_status_active: "Aktiv",
+                channel_status_running: "Wird ausgeführt",
+                channel_status_idle: "Inaktiv",
+                channel_status_standby: "Bereitstehend",
+                channel_status_ready: "Bereit",
+                channel_status_open: "Offener Modus",
+                category_sync: "Synchronisation",
+                category_routing: "Routing",
+                category_pubsub: "PubSub",
+                category_data: "Datenübertragung",
+                category_security: "Sicherheit",
+                category_transport: "Transport",
+                category_diagnostics: "Diagnose",
+                category_discovery: "Erkennung",
+                channel_seqsync_name: "Sequenz-Sync (SeqSync)",
+                channel_seqsync_desc: "Fenster-Deduplizierung & Replay-Schutz",
+                channel_lsa_name: "LSA-Mesh-Routing",
+                channel_lsa_desc: "Dijkstra-Kürzester-Pfad-Routing",
+                channel_peekmap_name: "Peek-Map Topologie-Broadcast",
+                channel_peekmap_desc: "Bootstrap-Topologie-Synchronisation",
+                channel_data_name: "Virtueller TAP-Datenpfad",
+                channel_data_proto: "Layer-2-Ethernet-Overlay",
+                channel_auth_name: "PSK-Mesh-Authentifizierung",
+                channel_auth_desc: "PSK-Mesh-Netzwerkisolation",
+                channel_dcutr_name: "DCUtR Lochstanzen & Relay",
+                channel_dcutr_desc: "Direktverbindungs-Upgrade",
+                cipher_lbl: "Chiffre",
+
                 rejected: "❌ Abgelehnt",
                 relay_accel_active: "Relay-Beschleunigung aktiv",
                 relay_accel_desc: "Dijkstra-Algorithmus berechneter Multihop-Pfad über",
@@ -3541,12 +3701,16 @@
                 col_last_active: "Última Actividad",
                 col_jitter_loss: "Jitter / Pérdida",
                 col_status: "Estado de conexión",
+                col_return_path: "Ruta de retorno",
                 conn_ok: "Conectado",
                 conn_relay_ok: "Relé OK",
                 conn_connecting: "Conectando",
                 conn_proto_mismatch: "Protocolo incompatible",
                 conn_obf_failed: "Fallo de descifrado",
                 conn_unreachable: "Inalcanzable",
+                return_ok: "Retorno OK",
+                return_dead: "Retorno cortado",
+                return_idle: "Retorno desconocido",
                 col_actions: "Acciones",
                 topo_tx: "Ruta Ida (Tx ➔)",
                 topo_rx: "Ruta Vuelta (Rx ⬅️)",
@@ -3943,7 +4107,7 @@
                 th_stream_direction: "Dirección",
                 th_stream_transport: "Transporte & Multiaddr",
                 th_stream_status: "Estado",
-                search_streams_ph: "🔍 Buscar streams, protocolos, peers…",
+                search_streams_ph: "Buscar streams, protocolos, peers…",
                 no_matching_streams: "No se encontraron streams de protocolo activos",
                 no_channels: "No hay canales de protocolo activos",
                 lbl_active_streams: "Streams",
@@ -3951,6 +4115,34 @@
                 dir_out: "Saliente ↑",
                 dir_in: "Entrante ↓",
                 stream_active: "Activo",
+                channel_status_active: "Activo",
+                channel_status_running: "En ejecución",
+                channel_status_idle: "Inactivo",
+                channel_status_standby: "En espera",
+                channel_status_ready: "Listo",
+                channel_status_open: "Modo abierto",
+                category_sync: "Sincronización",
+                category_routing: "Enrutamiento",
+                category_pubsub: "PubSub",
+                category_data: "Transferencia de datos",
+                category_security: "Seguridad",
+                category_transport: "Transporte",
+                category_diagnostics: "Diagnóstico",
+                category_discovery: "Descubrimiento",
+                channel_seqsync_name: "Sincronización de secuencia (SeqSync)",
+                channel_seqsync_desc: "Deduplicación de ventana y protección contra retransmisión",
+                channel_lsa_name: "Enrutamiento de malla LSA",
+                channel_lsa_desc: "Ruta más corta de Dijkstra",
+                channel_peekmap_name: "Difusión de topología Peek-Map",
+                channel_peekmap_desc: "Sincronización de topología Bootstrap",
+                channel_data_name: "Ruta de datos TAP virtual",
+                channel_data_proto: "Superposición Ethernet de capa 2",
+                channel_auth_name: "Autenticación de malla PSK",
+                channel_auth_desc: "Aislamiento de red de malla PSK",
+                channel_dcutr_name: "Perforación de NAT DCUtR y Relay",
+                channel_dcutr_desc: "Actualización a conexión directa",
+                cipher_lbl: "Cifrado",
+
                 rejected: "❌ Rechazado",
                 relay_accel_active: "Aceleración de retransmisión activa",
                 relay_accel_desc: "Algoritmo Dijkstra calculó ruta multi-salto vía",
@@ -4208,12 +4400,16 @@
                 col_last_active: "Dernière Activité",
                 col_jitter_loss: "Jitter / Perte",
                 col_status: "État de connexion",
+                col_return_path: "Chemin de retour",
                 conn_ok: "Connecté",
                 conn_relay_ok: "Relais OK",
                 conn_connecting: "Connexion",
                 conn_proto_mismatch: "Protocole incompatible",
                 conn_obf_failed: "Échec déchiffrement",
                 conn_unreachable: "Injoignable",
+                return_ok: "Retour OK",
+                return_dead: "Retour coupé",
+                return_idle: "Retour inconnu",
                 col_actions: "Actions",
                 topo_tx: "Route Aller (Tx ➔)",
                 topo_rx: "Route Retour (Rx ⬅️)",
@@ -4674,7 +4870,7 @@
                 th_stream_direction: "Direction",
                 th_stream_transport: "Transport & Multiaddr",
                 th_stream_status: "État",
-                search_streams_ph: "🔍 Rechercher flux, protocoles, pairs…",
+                search_streams_ph: "Rechercher flux, protocoles, pairs…",
                 no_matching_streams: "Aucun flux de protocole actif trouvé",
                 no_channels: "Aucun canal de protocole actif",
                 lbl_active_streams: "Flux",
@@ -4682,6 +4878,34 @@
                 dir_out: "Sortant ↑",
                 dir_in: "Entrant ↓",
                 stream_active: "Actif",
+                channel_status_active: "Actif",
+                channel_status_running: "En cours",
+                channel_status_idle: "Inactif",
+                channel_status_standby: "En attente",
+                channel_status_ready: "Prêt",
+                channel_status_open: "Mode ouvert",
+                category_sync: "Synchronisation",
+                category_routing: "Routage",
+                category_pubsub: "PubSub",
+                category_data: "Données",
+                category_security: "Sécurité",
+                category_transport: "Transport",
+                category_diagnostics: "Diagnostics",
+                category_discovery: "Découverte",
+                channel_seqsync_name: "Synchronisation de séquence (SeqSync)",
+                channel_seqsync_desc: "Déduplication de fenêtre & protection anti-rejeu",
+                channel_lsa_name: "Routage maillé LSA",
+                channel_lsa_desc: "Chemin le plus court Dijkstra",
+                channel_peekmap_name: "Diffusion de topologie Peek-Map",
+                channel_peekmap_desc: "Synchronisation topologique Bootstrap",
+                channel_data_name: "Chemin de données TAP virtuel",
+                channel_data_proto: "Superposition Ethernet couche 2",
+                channel_auth_name: "Authentification de maillage PSK",
+                channel_auth_desc: "Isolation réseau maillé PSK",
+                channel_dcutr_name: "Poinçonnage NAT DCUtR & Relais",
+                channel_dcutr_desc: "Mise à niveau vers connexion directe",
+                cipher_lbl: "Chiffrement",
+
                 rejected: "❌ Rejeté",
                 relay_accel_active: "Accélération de relais active",
                 relay_accel_desc: "Algorithme Dijkstra a calculé un chemin multi-sauts via",
@@ -7213,7 +7437,8 @@
         // --- IP Traffic Analytics: pagination + search state (module scope) ---
         let allIpRows = [];   // latest ip_table snapshot from the stats feed
         let ipCurPage = 1;
-        let ipPageSize = 50;
+        let ipPageSize = 25;
+
 
         function renderIpTable() {
             const ipBody = document.getElementById('ipList');
@@ -7804,6 +8029,18 @@
             </div>`;
         }
 
+        // returnPathBadge renders the asymmetric-routing return-path liveness for
+        // a peer — deliberately independent of the outbound ConnState verdict. It
+        // uses CSS classes (.rp-ok / .rp-dead / .rp-idle) wired in styles.css so
+        // the colours follow the active theme's CSS variables (no hardcoded rgba
+        // in the markup). The hover title carries the precise detail string.
+        function returnPathBadge(p) {
+            const st = (p && p.return_path) || 'idle';
+            const detail = (p && p.return_path_detail) || '';
+            const label = t('return_' + st);
+            return `<span class="pill-badge rp-badge rp-${st}" title="${escapeHTML(detail)}">${escapeHTML(label)}</span>`;
+        }
+
         function getNodeColor(peer) {
             let hash = 0;
             const str = peer.peer_id || peer.node_name || "peer";
@@ -7835,12 +8072,12 @@
         };
 
         function channelStatusBadge(status) {
-            if (status === 'active')     return `<span style="color:#34d399;font-weight:700;font-size:0.75rem;">● ${t('stream_active') || 'Active'}</span>`;
-            if (status === 'running')    return `<span style="color:#38bdf8;font-weight:700;font-size:0.75rem;">● Running</span>`;
-            if (status === 'idle')       return `<span style="color:#94a3b8;font-weight:700;font-size:0.75rem;">◌ Idle</span>`;
-            if (status === 'standby')    return `<span style="color:#fbbf24;font-weight:700;font-size:0.75rem;">⏸ Standby</span>`;
-            if (status === 'ready')      return `<span style="color:#a78bfa;font-weight:700;font-size:0.75rem;">● Ready</span>`;
-            if (status === 'open-mode') return `<span style="color:#fbbf24;font-weight:700;font-size:0.75rem;">◌ Open</span>`;
+            if (status === 'active')    return `<span style="color:#34d399;font-weight:700;font-size:0.75rem;">● ${t('channel_status_active') || 'Active'}</span>`;
+            if (status === 'running')   return `<span style="color:#38bdf8;font-weight:700;font-size:0.75rem;">● ${t('channel_status_running') || 'Running'}</span>`;
+            if (status === 'idle')      return `<span style="color:#94a3b8;font-weight:700;font-size:0.75rem;">◌ ${t('channel_status_idle') || 'Idle'}</span>`;
+            if (status === 'standby')   return `<span style="color:#fbbf24;font-weight:700;font-size:0.75rem;">⏸ ${t('channel_status_standby') || 'Standby'}</span>`;
+            if (status === 'ready')     return `<span style="color:#a78bfa;font-weight:700;font-size:0.75rem;">● ${t('channel_status_ready') || 'Ready'}</span>`;
+            if (status === 'open-mode') return `<span style="color:#fbbf24;font-weight:700;font-size:0.75rem;">◌ ${t('channel_status_open') || 'Open'}</span>`;
             return `<span style="color:var(--text-muted);font-size:0.75rem;">◌ ${escapeHTML(status)}</span>`;
         }
 
@@ -7863,26 +8100,53 @@
                         const totalStreams = ch.active_streams || 0;
                         const inStr  = ch.inbound_streams  || 0;
                         const outStr = ch.outbound_streams || 0;
+                        const normId = (ch.id || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+                        const rawKey = 'channel_' + ch.id + '_name';
+                        const normKey = 'channel_' + normId + '_name';
+                        const dict = i18nDict[currentLang] || i18nDict.en || {};
+                        const enDict = i18nDict.en || {};
+                        const chName = dict[rawKey] || dict[normKey] || enDict[rawKey] || enDict[normKey] || ch.name || ch.id;
+                        const catName = t('category_' + ch.category) || ch.category;
+
+                        let detailsStr = ch.details || '';
+                        if (normId === 'seqsync') {
+                            detailsStr = `Streams: ${totalStreams} (↓${inStr} ↑${outStr}) · ${t('channel_seqsync_desc') || 'Window Dedup & Replay Protection'}`;
+                        } else if (normId === 'lsa') {
+                            detailsStr = `Streams: ${totalStreams} (↓${inStr} ↑${outStr}) · ${t('channel_lsa_desc') || 'Dijkstra Shortest Path'}`;
+                        } else if (normId === 'peekmap' || normId === 'peek-map') {
+                            detailsStr = `Streams: ${totalStreams} (↓${inStr} ↑${outStr}) · ${t('channel_peekmap_desc') || t('channel_peek-map_desc') || 'Bootstrap Topology Sync'}`;
+                        } else if (normId === 'data') {
+                            const cipher = (data.obfs_algo || 'auto');
+                            const mode = (data.obfs_mode || 'fixed');
+                            detailsStr = `${t('channel_data_proto') || 'Layer-2 Ethernet Overlay'} · ${t('cipher_lbl') || 'Cipher'}: ${cipher} · Mode: ${mode}`;
+                        } else if (normId === 'auth') {
+                            detailsStr = `${t('channel_auth_desc') || 'PSK Mesh Network Isolation'} · Streams: ${totalStreams}`;
+                        } else if (normId === 'dcutr') {
+                            detailsStr = `${t('channel_dcutr_desc') || 'Direct Connection Upgrade'} · Streams: ${totalStreams}`;
+                        }
+
+
                         return `
                             <div class="glass-card ext61" style="border-left:3px solid ${cfg.color}; display:flex; flex-direction:column; gap:6px; padding:14px 16px;">
                                 <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
                                     <div style="display:flex; align-items:center; gap:8px;">
                                         <span style="font-size:1.2rem;">${cfg.icon}</span>
-                                        <strong style="color:var(--text-primary); font-size:0.9rem;">${escapeHTML(ch.name)}</strong>
+                                        <strong style="color:var(--text-primary); font-size:0.9rem;">${escapeHTML(chName)}</strong>
                                     </div>
                                     ${channelStatusBadge(ch.status)}
                                 </div>
                                 <div style="font-family:monospace; font-size:0.72rem; color:var(--text-muted); word-break:break-all;">${escapeHTML(ch.protocol)}</div>
                                 <div style="display:flex; gap:10px; font-size:0.78rem; color:var(--text-secondary);">
                                     <span>↓ ${inStr}  ↑ ${outStr}  ∑ ${totalStreams}</span>
-                                    <span style="margin-left:auto; background:var(--glass-fill); padding:1px 7px; border-radius:5px; font-size:0.7rem; color:${cfg.color};">${escapeHTML(ch.category)}</span>
+                                    <span style="margin-left:auto; background:var(--glass-fill); padding:1px 7px; border-radius:5px; font-size:0.7rem; color:${cfg.color};">${escapeHTML(catName)}</span>
                                 </div>
-                                ${ch.details ? `<div style="font-size:0.75rem; color:var(--text-dim); margin-top:2px;">${escapeHTML(ch.details)}</div>` : ''}
+                                ${detailsStr ? `<div style="font-size:0.75rem; color:var(--text-dim); margin-top:2px;">${escapeHTML(detailsStr)}</div>` : ''}
                             </div>
                         `;
                     }).join('');
                 }
             }
+
 
             // --- Streams Table ---
             const query = (document.getElementById('streamSearchInput') || {}).value || '';
@@ -7900,14 +8164,16 @@
                 : streams;
 
             const tbody = document.getElementById('streamsTableBody');
-            if (!tbody) return;
-
             if (filtered.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="5" class="empty-row" style="text-align:center;padding:20px;color:var(--text-muted);">${t('no_matching_streams') || 'No active protocol streams found'}</td></tr>`;
+                const emptyHtml = `<tr><td colspan="5" class="empty-row" style="text-align:center;padding:20px;color:var(--text-muted);">${t('no_matching_streams') || 'No active protocol streams found'}</td></tr>`;
+                if (tbody._lastHtml !== emptyHtml) {
+                    tbody._lastHtml = emptyHtml;
+                    tbody.innerHTML = emptyHtml;
+                }
                 return;
             }
 
-            tbody.innerHTML = filtered.map(s => {
+            const newHtml = filtered.map(s => {
                 const dirLabel = s.direction === 'outbound'
                     ? `<span style="color:#38bdf8;">${t('dir_out') || 'Outbound ↑'}</span>`
                     : `<span style="color:#a78bfa;">${t('dir_in') || 'Inbound ↓'}</span>`;
@@ -7934,7 +8200,13 @@
                     </tr>
                 `;
             }).join('');
+
+            if (tbody._lastHtml !== newHtml) {
+                tbody._lastHtml = newHtml;
+                tbody.innerHTML = newHtml;
+            }
         }
+
 
         function renderExitStatus(data) {
             const panel = document.getElementById('exitStatusPanel');
@@ -8899,6 +9171,7 @@
                                 </div>
                             </td>
                             <td>${connStateBadge(p)}</td>
+                            <td>${returnPathBadge(p)}</td>
                             <td><code>${escapeHTML(p.peer_id)}</code></td>
                             <td style="position:relative;">${addrsHoverHtml}</td>
                             <td><span class="pill-badge" style="padding:3px 10px; font-size:0.75rem">${p.transport || 'P2P'}</span></td>
@@ -8914,7 +9187,7 @@
                         </tr>
                     `}).join('');
                 } else {
-                    peersBody.innerHTML = `<tr><td colspan="16" class="empty-row" data-i18n="no_peers">${t('no_peers')}</td></tr>`;
+                    peersBody.innerHTML = `<tr><td colspan="17" class="empty-row" data-i18n="no_peers">${t('no_peers')}</td></tr>`;
                 }
 
                 // Peer Metadata & Peek-Map Discovery Monitor
@@ -10205,6 +10478,11 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             const connState = p.conn_state || 'unknown';
             const connColor = (connState === 'ok' || connState === 'relay_ok') ? '#34d399' : (connState === 'connecting' ? '#38bdf8' : '#f87171');
             const connHtml = `<div class="tt-row"><span>${t('topo_tt_conn')}</span><span class="tt-val" style="color:${connColor}">${escapeHTML(connState)}</span></div>`;
+            // Return-path liveness (asymmetric routing): shown right next to the
+            // outbound connection verdict so the operator sees when they disagree.
+            const rpState = p.return_path || 'idle';
+            const rpColor = rpState === 'ok' ? '#34d399' : (rpState === 'dead' ? '#f87171' : '#94a3b8');
+            const rpHtml = `<div class="tt-row"><span>${t('col_return_path')}</span><span class="tt-val" style="color:${rpColor}" title="${escapeHTML(p.return_path_detail || '')}">${escapeHTML(t('return_' + rpState))}</span></div>`;
             const pathHtml = (found.relayPathNames && found.relayPathNames.length > 0)
                 ? `<div class="tt-row"><span>${t('topo_tt_route_via')}</span><span class="tt-val" style="color:var(--warn);">${t('topo_via')} ${escapeHTML(found.relayPathNames.join(' ➔ '))}</span></div>`
                 : '';
@@ -10243,6 +10521,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 + (found.relayHop ? `<div class="tt-row"><span>${t('topo_tt_relay_hop')}</span><span class="tt-val" style="color:var(--warn)">${escapeHTML(relayNameOf(found.relayHop))}</span></div>` : '')
                 + encHtml
                 + connHtml
+                + rpHtml
                 + `<div class="tt-row"><span>${t('topo_tt_rtt')}</span><span class="tt-val" style="color:${rttColor}">${p.rtt_ms || 0} ms</span></div>`
                 + `<div class="tt-row"><span>${t('topo_tt_jitter')}</span><span class="tt-val">${(p.jitter_ms || 0).toFixed(1)} ms</span></div>`
                 + `<div class="tt-row"><span>${t('topo_tt_loss')}</span><span class="tt-val" style="color:${(p.loss_rate_percent || 0) > 1 ? 'var(--danger)' : 'var(--text-secondary)'}">${(p.loss_rate_percent || 0).toFixed(1)}%</span></div>`
@@ -10682,6 +10961,25 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 const nodeByID = {};
                 nodes.forEach(n => { nodeByID[n.id] = n; });
 
+                // Merge any live active peers from stats that are not in topology snapshot
+                peers.forEach(p => {
+                    if (p.peer_id && p.peer_id !== selfID && !nodeByID[p.peer_id]) {
+                        const synNode = mkNode({
+                            peer_id: p.peer_id,
+                            node_name: p.node_name,
+                            tap_ip: p.tap_ip,
+                            tap_ipv6: p.tap_ipv6,
+                            direct: p.role !== 'relayed' && p.role !== 'relay',
+                            parent: (p.relay_hop || selfID),
+                            depth: 1,
+                            is_boot: p.role === 'bootstrap'
+                        });
+                        nodes.push(synNode);
+                        nodeByID[p.peer_id] = synNode;
+                    }
+                });
+
+
                 // self node: use display name from stats.
                 const selfNode = nodeByID[selfID] || nodes[0];
                 if (selfNode) {
@@ -10941,8 +11239,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 // The backend serialises `members` as an INTEGER COUNT, NOT an
                 // array of peer IDs. Member node POSITIONS must be derived from
                 // the live node list (each node carries its owning boot id in
-                // `cluster`), so the hull can enclose them. The count label below
-                // still uses the authoritative integer from the backend.
+                // `cluster`), so the hull can enclose them.
                 const cid = c.boot_id;
                 if (cid) {
                     for (let i = 0; i < nodes.length; i++) {
@@ -10950,20 +11247,20 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                         if (n.cluster === cid && n.id !== cid) pts.push(n);
                     }
                 } else if (Array.isArray(c.members)) {
-                    // Defensive: tolerate an array-shaped payload if the contract
-                    // ever changes.
                     c.members.forEach(mid => { if (nodeByID[mid]) pts.push(nodeByID[mid]); });
                 }
                 if (pts.length === 0) return;
                 let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
                 pts.forEach(n => { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x); maxY = Math.max(maxY, n.y); });
-                const pad = 34;
+                const padX = 42;
+                const padTop = 32;
+                const padBottom = 60; // gives room for node circle, title and rate stats
                 boxes.push({
                     name: c.boot_name || c.boot_id || ('boot-' + idx),
                     color: palette[idx % palette.length],
                     local: !!c.local,
-                    x: minX - pad, y: minY - pad,
-                    w: (maxX - minX) + pad * 2, h: (maxY - minY) + pad * 2,
+                    x: minX - padX, y: minY - padTop,
+                    w: (maxX - minX) + padX * 2, h: (maxY - minY) + padTop + padBottom,
                     count: (typeof c.members === 'number') ? c.members : pts.length
                 });
             });
@@ -10980,13 +11277,6 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             const ctx = canvas.getContext('2d');
             const lightT = document.documentElement.getAttribute('data-theme') === 'light';
 
-            // --- Idle throttle ------------------------------------------------
-            // The mesh only "moves" when at least one link carries real traffic
-            // (animated flow particles); otherwise nothing on the canvas changes
-            // frame-to-frame, so repainting at 60fps just burns CPU. When idle we
-            // still repaint at a low rate (gentle self-glow pulse), and any
-            // data/interaction/theme change forces an immediate redraw via
-            // topoNeedsRedraw.
             const nodes = window.latestTopoNodes;
             if (!nodes || nodes.length === 0) {
                 if (!topoNeedsRedraw) {
@@ -11025,7 +11315,6 @@ window.toggleSubnetRoute = async function(cidr, enable) {
 
             // --- Links (node -> its parent in the hierarchy) ---
             const nodeByID = topoRebuildIndex(nodes);
-            // Leaf count + density flag are shared by link labels and node labels.
             const leafNodes = nodes.reduce((a, nn) => a + (nn.isSelf ? 0 : 1), 0);
             const crowded = leafNodes > 12;
 
@@ -11034,28 +11323,42 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             topoClusterBoxes.forEach(b => {
                 ctx.save();
                 ctx.fillStyle = b.color;
-                ctx.globalAlpha = b.local ? 0.10 : 0.05;
-                ctx.fillRect(b.x, b.y, b.w, b.h);
-                ctx.globalAlpha = b.local ? 0.9 : 0.55;
+                ctx.globalAlpha = b.local ? 0.08 : 0.04;
+                ctx.beginPath();
+                if (ctx.roundRect) {
+                    ctx.roundRect(b.x, b.y, b.w, b.h, 12);
+                } else {
+                    ctx.rect(b.x, b.y, b.w, b.h);
+                }
+                ctx.fill();
+                ctx.globalAlpha = b.local ? 0.75 : 0.45;
                 ctx.strokeStyle = b.color;
-                ctx.lineWidth = b.local ? 1.8 : 1.2;
-                ctx.setLineDash([7, 5]);
-                ctx.strokeRect(b.x, b.y, b.w, b.h);
+                ctx.lineWidth = b.local ? 1.5 : 1.0;
+                ctx.setLineDash([6, 4]);
+                ctx.stroke();
                 ctx.setLineDash([]);
-                // Cluster label chip anchored at the top-left corner.
-                const label = b.name + ' · ' + b.count;
+
+                // Cluster label chip with rounded corners anchored at top-left inside box
+                const label = '🟣 ' + b.name + (b.count > 0 ? ` (${b.count})` : '');
                 ctx.font = "bold 10px system-ui, -apple-system, sans-serif";
-                const lw = topoMeasure(ctx, "bold 10px system-ui, -apple-system, sans-serif", label) + 16;
-                ctx.globalAlpha = b.local ? 0.95 : 0.7;
+                const lw = topoMeasure(ctx, "bold 10px system-ui, -apple-system, sans-serif", label) + 18;
+                ctx.globalAlpha = b.local ? 0.95 : 0.8;
                 ctx.fillStyle = b.color;
-                ctx.fillRect(b.x, b.y - 14, lw, 14);
-                ctx.fillStyle = lightT ? '#ffffff' : '#0f172a';
+                ctx.beginPath();
+                if (ctx.roundRect) {
+                    ctx.roundRect(b.x + 8, b.y + 6, lw, 18, 5);
+                } else {
+                    ctx.rect(b.x + 8, b.y + 6, lw, 18);
+                }
+                ctx.fill();
+                ctx.fillStyle = "#ffffff";
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'middle';
-                ctx.fillText(label, b.x + 8, b.y - 7);
+                ctx.fillText(label, b.x + 16, b.y + 15);
                 ctx.textBaseline = 'alphabetic';
                 ctx.restore();
             });
+
 
             for (let i = 0; i < nodes.length; i++) {
                 const target = nodes[i];
@@ -11089,22 +11392,10 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 const blackhole = seqWinMaxForBlackhole > 0 &&
                     ((seqWinMaxForBlackhole - target.rxSeq) >= 1024 || (target.dedupDrops > 0 && target.rxSeq < seqWinMaxForBlackhole));
 
-                // ── Mid-link summary box ──
-                // Replaces the old "↑seq ↓seq" fallback (which surfaced raw 64-bit
-                // tx/rx sequence numbers like 1131821807572339500 — meaningless to
-                // humans) with a human-friendly status. Three lines (two when
-                // crowded):
-                //   • peer short-name           (when room)
-                //   • throughput or "idle"      (compact B/K/M/G units so the
-                //                               arrows + units survive at 9px)
-                //   • RTT · direct/via · dup/skew diagnostics
-                // Box width hugs the widest line via ctx.measureText.
+                // ── Mid-link summary pill badge ──
                 const isIdle = !(target.txSpeed > 0) && !(target.rxSpeed > 0);
-                const showName = !crowded && !!target.name;
-                const shortName = showName ? topoShortLabel(target.name).slice(0, 14) : '';
-
                 const rateLine = isIdle
-                    ? (t('topo_link_idle') || 'idle')
+                    ? ''
                     : '↑' + formatRateCompact(target.txSpeed) + '  ↓' + formatRateCompact(target.rxSpeed);
 
                 const relayFirst = (target.isRelayed && target.relayPathNames && target.relayPathNames[0])
@@ -11114,77 +11405,52 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                     ? ((t('topo_via') || 'via') + (relayFirst ? ' ' + relayFirst : ''))
                     : (t('topo_summary_direct') || 'direct');
                 const dropTxt = target.dedupDrops > 0 ? ` · dup:${target.dedupDrops}` : '';
-                // Pre-existing bug fix: the field actually set by mkNode is
-                // seqWinMax (snake_case → seq_win_max), not rxSeqMax — so the
-                // previous blackhole check was silently dead. Use seqWinMax here
-                // and in the broken-link check so a stalled/dropping link
-                // actually surfaces.
                 const seqWinMax = typeof target.seqWinMax === 'number' ? target.seqWinMax : 0;
                 const skew = seqWinMax > 0 ? (seqWinMax - target.rxSeq) : 0;
                 const skewTxt = blackhole ? ` · ⚠skew ${skew}` : '';
-                const metaLine = `${target.rtt}ms · ${typeLine}${dropTxt}${skewTxt}`;
-                // 4th line (when present): backbone hops across boot clusters and
-                // the overlay-relay hop carrying this peer.
-                const relayHopName = (target.relayHop && nodeByID[target.relayHop])
-                    ? topoShortLabel(nodeByID[target.relayHop].name)
-                    : (target.relayHop ? '…' + target.relayHop.slice(-6) : '');
-                let extraLine = '';
-                if (target.bootHops > 0) extraLine += '🌐 boot×' + target.bootHops;
-                if (relayHopName) extraLine += (extraLine ? ' · ' : '') + '↻ ' + relayHopName;
-                const hasExtra = extraLine.length > 0;
+                let metaLine = `${target.rtt}ms · ${typeLine}${dropTxt}${skewTxt}`;
+                if (target.bootHops > 0) metaLine += ' · 🌐boot×' + target.bootHops;
 
-                // Skip the (relatively expensive) mid-link box when the edge is
-                // dimmed by an active filter/selection — keeps the focus on the
-                // highlighted path and avoids clutter.
+                // Skip when dimmed by active filter/selection
                 if (edgeDim || (topoSelectedId !== null && !edgeHi)) continue;
 
-                // Pre-measure widths so the box hugs its content (cached).
-                const wRate = topoMeasure(ctx, "bold 9px system-ui, -apple-system, sans-serif", rateLine);
+                // Pre-measure widths
+                const wRate = rateLine ? topoMeasure(ctx, "bold 9px system-ui, -apple-system, sans-serif", rateLine) : 0;
                 const wMeta = topoMeasure(ctx, "8px system-ui, -apple-system, sans-serif", metaLine);
-                let wName = 0;
-                if (showName) {
-                    wName = topoMeasure(ctx, "bold 9px system-ui, -apple-system, sans-serif", shortName);
-                }
-                const wExtra = hasExtra ? topoMeasure(ctx, "8px system-ui, -apple-system, sans-serif", extraLine) : 0;
-                const contentW = Math.max(wRate, wMeta, wName, wExtra);
+                const contentW = Math.max(wRate, wMeta);
 
-                const padX = 9, padY = 6, lineH = 11;
-                const numLines = (showName ? 1 : 0) + 2 + (hasExtra ? 1 : 0);
-                const boxW = Math.max(64, contentW + padX * 2);
+                const padX = 8, padY = 3, lineH = 11;
+                const numLines = rateLine ? 2 : 1;
+                const boxW = Math.max(54, contentW + padX * 2);
                 const boxH = padY * 2 + numLines * lineH;
                 const boxX = midX - boxW / 2;
                 const boxY = midY - boxH / 2;
 
-                ctx.fillStyle = lightT ? "rgba(255,255,255,0.94)" : "rgba(15, 23, 42, 0.92)";
-                ctx.fillRect(boxX, boxY, boxW, boxH);
-                ctx.strokeStyle = blackhole ? "#f87171" : target.linkColor;
+                ctx.save();
+                ctx.fillStyle = lightT ? "rgba(255,255,255,0.94)" : "rgba(10, 15, 30, 0.88)";
+                ctx.strokeStyle = blackhole ? "#f87171" : (edgeHi ? "#38bdf8" : target.linkColor);
                 ctx.lineWidth = 1;
-                ctx.strokeRect(boxX, boxY, boxW, boxH);
+                ctx.beginPath();
+                if (ctx.roundRect) {
+                    ctx.roundRect(boxX, boxY, boxW, boxH, 6);
+                } else {
+                    ctx.rect(boxX, boxY, boxW, boxH);
+                }
+                ctx.fill();
+                ctx.stroke();
 
-                const nameColor = blackhole ? (lightT ? "#dc2626" : "#fca5a5") : (target.isRelayed ? (lightT ? "#b45309" : "#fcd34d") : (lightT ? "#0f172a" : "#e2e8f0"));
-                const rateColor = blackhole ? (lightT ? "#dc2626" : "#f87171") : (target.isRelayed ? (lightT ? "#b45309" : "#fcd34d") : (lightT ? "#0369a1" : "#7dd3fc"));
-                const metaColor = blackhole ? (lightT ? "#dc2626" : "#fca5a5") : (lightT ? "rgba(71,85,105,0.95)" : "rgba(148,163,184,0.95)");
-
-                let yCursor = boxY + padY + 9; // first baseline
+                let yCursor = boxY + padY + 8;
                 ctx.textAlign = "center";
-                if (showName) {
-                    ctx.fillStyle = nameColor;
+                if (rateLine) {
+                    ctx.fillStyle = blackhole ? (lightT ? "#dc2626" : "#f87171") : (target.isRelayed ? (lightT ? "#b45309" : "#fcd34d") : (lightT ? "#0284c7" : "#38bdf8"));
                     ctx.font = "bold 9px system-ui, -apple-system, sans-serif";
-                    ctx.fillText(shortName, midX, yCursor);
+                    ctx.fillText(rateLine, midX, yCursor);
                     yCursor += lineH;
                 }
-                ctx.fillStyle = rateColor;
-                ctx.font = "bold 9px system-ui, -apple-system, sans-serif";
-                ctx.fillText(rateLine, midX, yCursor);
-                yCursor += lineH;
                 ctx.font = "8px system-ui, -apple-system, sans-serif";
-                ctx.fillStyle = metaColor;
+                ctx.fillStyle = blackhole ? (lightT ? "#dc2626" : "#fca5a5") : (lightT ? "#475569" : "#94a3b8");
                 ctx.fillText(metaLine, midX, yCursor);
-                if (hasExtra) {
-                    yCursor += lineH;
-                    ctx.fillStyle = lightT ? "rgba(124,58,237,0.95)" : "rgba(196,181,253,0.95)";
-                    ctx.fillText(extraLine, midX, yCursor);
-                }
+                ctx.restore();
             }
 
             // --- Real-Rate Data-Flow Particles (smooth @60fps) ---
@@ -11318,13 +11584,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                             ctx.fillStyle = "#38bdf8";
                             ctx.font = "10px monospace";
                             ctx.fillText(n.tapIP, n.x, labelY);
-                            labelY += 13;
-                        }
-                        if (n.tapIPv6) {
-                            ctx.fillStyle = "#a78bfa";
-                            ctx.font = "10px monospace";
-                            ctx.fillText(n.tapIPv6, n.x, labelY);
-                            labelY += 13;
+                            labelY += 14;
                         }
                         // Role badges: exit-server and/or L2 transit switch.
                         const badges = [];
@@ -11333,7 +11593,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                         if (badges.length) {
                             ctx.fillStyle = "#fbbf24";
                             ctx.font = "bold 10px system-ui, -apple-system, sans-serif";
-                            ctx.fillText(badges.join('   '), n.x, labelY + 2);
+                            ctx.fillText(badges.join('  '), n.x, labelY);
                             labelY += 14;
                         }
                     }
@@ -11341,9 +11601,10 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                     if (n.totalTx > 0 || n.totalRx > 0) {
                         ctx.fillStyle = lightT ? "#0369a1" : "#7dd3fc";
                         ctx.font = (crowded ? 8 : 9) + "px system-ui, -apple-system, sans-serif";
-                        ctx.fillText('⬆ ' + formatSpeed(n.totalTx) + '  ⬇ ' + formatSpeed(n.totalRx), n.x, labelY + 2);
+                        ctx.fillText('⬆ ' + formatSpeed(n.totalTx) + '  ⬇ ' + formatSpeed(n.totalRx), n.x, labelY);
                     }
-                } else {
+                }
+ else {
                     // Per-peer live Rx/Tx rate beneath the node name.
                     const peerTx = typeof n.txSpeed === 'number' ? n.txSpeed : 0; // self -> peer
                     const peerRx = typeof n.rxSpeed === 'number' ? n.rxSpeed : 0; // peer -> self
@@ -12463,6 +12724,8 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 // special-case the default and fall back to `container.children`.
                 const rowSelector = input.getAttribute('data-paginate-row-selector');
 
+                const defaultPageSize = parseInt(input.getAttribute('data-paginate-page-size') || input.getAttribute('data-page-size'), 10) || 25;
+
                 // Build + inject the pagination bar right after the table (or after
                 // the container itself when there is no enclosing <table>, e.g. encList).
                 const bar = document.createElement('div');
@@ -12474,18 +12737,24 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                     '<button type="button" class="pg-btn" id="pg-' + targetId + '-next" data-i18n="next_page">' + t('next_page') + '</button>' +
                     '<label class="pg-size"><span data-i18n="per_page">' + t('per_page') + '</span>' +
                     '<select id="pg-' + targetId + '-size">' +
-                    '<option value="25">25</option>' +
-                    '<option value="50" selected>50</option>' +
-                    '<option value="100">100</option>' +
-                    '<option value="200">200</option>' +
+                    '<option value="25"' + (defaultPageSize === 25 ? ' selected' : '') + '>25</option>' +
+                    '<option value="50"' + (defaultPageSize === 50 ? ' selected' : '') + '>50</option>' +
+                    '<option value="100"' + (defaultPageSize === 100 ? ' selected' : '') + '>100</option>' +
+                    '<option value="200"' + (defaultPageSize === 200 ? ' selected' : '') + '>200</option>' +
                     '</select></label>' +
                     '<span class="pg-nomatch" id="pg-' + targetId + '-nomatch" style="display:none;"></span>';
-                const table = container.tagName === 'TBODY' ? container.closest('table') : null;
-                const ref = table ? table : container;
-                const parent = ref.parentNode;
-                if (parent) parent.insertBefore(bar, ref.nextSibling);
+                const tableResp = container.closest('.table-responsive');
+                if (tableResp && tableResp.parentNode) {
+                    tableResp.parentNode.insertBefore(bar, tableResp.nextSibling);
+                } else {
+                    const table = container.tagName === 'TBODY' ? container.closest('table') : null;
+                    const ref = table ? table : container;
+                    const parent = ref.parentNode;
+                    if (parent) parent.insertBefore(bar, ref.nextSibling);
+                }
 
-                const state = { page: 1, size: 50, term: '' };
+                const state = { page: 1, size: defaultPageSize, term: '' };
+
                 const infoEl = document.getElementById('pg-' + targetId + '-info');
                 const prevEl = document.getElementById('pg-' + targetId + '-prev');
                 const nextEl = document.getElementById('pg-' + targetId + '-next');
@@ -12532,21 +12801,81 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                     if (obs) obs.observe(container, { childList: true });
                 }
 
-                const debouncedApply = debounce(apply, 80);
-                obs = new MutationObserver(debouncedApply);
+                // Microtask synchronous apply on DOM changes prevents rendering unpaged rows before paint
+                obs = new MutationObserver(apply);
                 obs.observe(container, { childList: true });
 
+                const debouncedInput = debounce(apply, 80);
                 input.addEventListener('input', function () {
                     state.term = (input.value || '').trim().toLowerCase();
                     state.page = 1;
-                    debouncedApply();
+                    debouncedInput();
                 });
+
                 if (prevEl) prevEl.addEventListener('click', function () { if (state.page > 1) { state.page--; apply(); } });
                 if (nextEl) nextEl.addEventListener('click', function () { state.page++; apply(); });
                 if (sizeEl) sizeEl.addEventListener('change', function () { state.size = parseInt(sizeEl.value, 10) || 50; state.page = 1; apply(); });
 
                 // Initial pass (container may still be empty before first stats tick).
                 apply();
+            });
+        }
+
+        // ── Mouse Drag-to-Scroll for all .table-responsive containers ──
+        function initTableDragScroll() {
+            document.querySelectorAll('.table-responsive').forEach(function (slider) {
+                if (slider._dragScrollInit) return;
+                slider._dragScrollInit = true;
+
+                let isDown = false;
+                let startX = 0;
+                let scrollLeft = 0;
+                let isDragging = false;
+
+                slider.addEventListener('mousedown', function (e) {
+                    if (e.button !== 0 || e.target.closest('button, input, select, a, textarea, [data-onclick], label, .btn, .btn-glass')) {
+                        return;
+                    }
+                    isDown = true;
+                    isDragging = false;
+                    startX = e.pageX - slider.offsetLeft;
+                    scrollLeft = slider.scrollLeft;
+                    slider.style.cursor = 'grabbing';
+                    slider.style.userSelect = 'none';
+                });
+
+                const endDrag = function () {
+                    if (!isDown) return;
+                    isDown = false;
+                    slider.style.cursor = '';
+                    slider.style.removeProperty('user-select');
+                    if (isDragging) {
+                        const clickBlocker = function (ev) {
+                            ev.stopPropagation();
+                            ev.preventDefault();
+                            window.removeEventListener('click', clickBlocker, true);
+                        };
+                        window.addEventListener('click', clickBlocker, true);
+                        setTimeout(function () {
+                            window.removeEventListener('click', clickBlocker, true);
+                            isDragging = false;
+                        }, 50);
+                    }
+                };
+
+                window.addEventListener('mouseup', endDrag);
+                slider.addEventListener('mouseleave', endDrag);
+
+                slider.addEventListener('mousemove', function (e) {
+                    if (!isDown) return;
+                    e.preventDefault();
+                    const x = e.pageX - slider.offsetLeft;
+                    const walk = (x - startX) * 1.5;
+                    if (Math.abs(walk) > 3) {
+                        isDragging = true;
+                    }
+                    slider.scrollLeft = scrollLeft - walk;
+                });
             });
         }
 
@@ -12558,6 +12887,11 @@ window.toggleSubnetRoute = async function(cidr, enable) {
         // Generic per-table pagination for the large data lists (peers, peer-meta,
         // routes, ARP, MAC, per-peer encryption). Auto-injects its own bar.
         initModulePagination();
+        // Enable mouse click & drag horizontal scrolling for all wide tables (static + dynamically opened modals)
+        initTableDragScroll();
+        const dragScrollObserver = new MutationObserver(debounce(initTableDragScroll, 80));
+        dragScrollObserver.observe(document.body, { childList: true, subtree: true });
+
         // IP Traffic Analytics: self-contained pagination + search (decoupled
         // from the generic .module-search MutationObserver so paging works).
         (function initIpPagination() {
@@ -12581,6 +12915,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
         updateLogPauseUI();
         setInterval(fetchStats, 2000);
         setInterval(pcapRefreshState, 1500);
+
         // Packet frames and the live log are now streamed over WebSockets.
         // pcapStream.connect() / logStream.connect() are idempotent and
         // self-healing; each falls back to its legacy HTTP poller automatically

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"runtime/debug"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -202,9 +203,6 @@ func (n *Node) tapWrite(payload []byte) (int, error) {
 		log.Warn("tapWrite: dropping oversized frame (len=%d > mtu+eth=%d)", len(payload), maxFrame)
 		return 0, nil
 	}
-	if n.Collector != nil {
-		n.Collector.CaptureFrameWithPeers(observer.DirRx, payload, "", "self")
-	}
 	return n.TAP.Write(payload)
 }
 
@@ -213,14 +211,20 @@ func (n *Node) tapWrite(payload []byte) (int, error) {
 // behind a busy normal forwarding queue. It enqueues onto urgentWriteCh; the
 // frame is drained by tapWriteUrgentLoop which owns the actual TAP.Write.
 func (n *Node) tapWriteUrgent(payload []byte) {
+	// Defense in depth: this injects a frame into the local TAP device. If the
+	// node has no TAP device (TAP init failed, or a node type that runs without
+	// one), n.TAP is nil and the select's default branch would dereference a nil
+	// interface and panic — which, inside a libp2p stream handler, resets the
+	// stream with "Application error 0x0". A probe (or any future caller) must
+	// never crash the handler on a TAP-less peer, so no-op safely instead.
+	if n.TAP == nil {
+		return
+	}
 	select {
 	case n.urgentWriteCh <- payload:
 	default:
 		// Queue full: fall back to a direct synchronous write so the probe
 		// reply is never silently dropped.
-		if n.Collector != nil {
-			n.Collector.CaptureFrameWithPeers(observer.DirRx, payload, "", "self")
-		}
 		_, _ = n.TAP.Write(payload)
 	}
 }
@@ -236,15 +240,13 @@ func (n *Node) tapWriteUrgentLoop() {
 		case <-n.ctx.Done():
 			return
 		case payload := <-n.urgentWriteCh:
-			if n.Collector != nil {
-				n.Collector.CaptureFrameWithPeers(observer.DirRx, payload, "", "self")
-			}
 			if _, err := n.TAP.Write(payload); err != nil {
 				log.Debug("urgent TAP write failed: %v", err)
 			}
 		}
 	}
 }
+
 
 func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, packedCopy []byte, rawPayload []byte, readN int, tag string) {
 	if n.Collector != nil {
@@ -341,7 +343,9 @@ func (n *Node) canEgressToPeer(p peer.ID) bool {
 		// NAT'd peer reachable only through a boot: canEgressToPeer returned
 		// false because the boot was never "directly connected" to the target.
 		if n.isBootstrapPeer(hop) {
-			return n.hasBootRelayUplink(hop)
+			// A blacklisted boot can never host a relay uplink; never egress
+			// through it (fall through to false so the caller drops / retries).
+			return n.hasBootRelayUplink(hop) && !n.isBootRelayBlacklisted(hop)
 		}
 		if n.isPeerReady(hop) || n.obfCipherForPeer(hop) != nil {
 			// An overlay-relay hop (a regular peer forwarding the frame
@@ -352,6 +356,62 @@ func (n *Node) canEgressToPeer(p peer.ID) bool {
 		}
 	}
 	return false
+}
+
+// maybeDeliverProbeReply captures inbound ICMP echo-reply frames that belong to
+// a running TAP-probe and hands them to the waiting prober. It is called from the
+// overlay RECEIVE path (see node_streams.go, just before a peer frame is written
+// into our TAP) — NOT from the TAP read loop — because a TUN/TAP device does not
+// re-deliver a frame written to it back to its own read side: the echo reply that
+// left the peer's real TAP, crossed the overlay, and is about to be injected into
+// OUR real TAP must be captured on the receive path to make ProbeTapForward a
+// genuine both-directions TAP-path test.
+//
+// Only a structural check is done here (ICMP echo reply + our probe identifier +
+// dst IP == our TAP IP). The specific peer (src MAC/IP) is validated later by
+// waitProbeReply, so this cheap pre-filter can serve any peer being probed and
+// never blocks the receive loop. Returns true if the frame was a probe reply
+// (captured); the capture is non-blocking so a full buffer simply drops the frame
+// and the prober can retry.
+func (n *Node) maybeDeliverProbeReply(payload []byte) bool {
+	if atomic.LoadInt32(&n.probeActive) == 0 {
+		return false
+	}
+	// Minimum: Ethernet(14) + IPv4(20) + ICMP(8) = 42; the ICMP identifier we
+	// need to match lives inside the ICMP header.
+	if len(payload) < 42 {
+		return false
+	}
+	if binary.BigEndian.Uint16(payload[12:14]) != 0x0800 {
+		return false // not IPv4
+	}
+	ihl := int(payload[14]&0x0f) * 4
+	if ihl < 20 || len(payload) < 14+ihl+8 {
+		return false
+	}
+	if payload[14+9] != 1 { // protocol ICMP
+		return false
+	}
+	icmpStart := 14 + ihl
+	if payload[icmpStart] != 0 { // ICMP type 0 = echo reply
+		return false
+	}
+	if binary.BigEndian.Uint16(payload[icmpStart+4:icmpStart+6]) != tapProbeICMPIdentify {
+		return false
+	}
+	dstIP := net.IP(payload[14+16 : 14+20]).To4()
+	if n.localV4IP == nil || !dstIP.Equal(n.localV4IP) {
+		return false
+	}
+	// Genuine probe echo reply inbound on the real TAP path: hand a copy to the
+	// waiting prober without blocking the receive loop.
+	buf := make([]byte, len(payload))
+	copy(buf, payload)
+	select {
+	case n.probeReplyCh <- buf:
+	default:
+	}
+	return true
 }
 
 // It runs ARP/NDP proxy, WebUI intercept, and dispatch to peers.
@@ -371,8 +431,12 @@ func (n *Node) processTapFrame(payload, outBuf []byte) bool {
 		senderIP := net.IP(payload[28:32])
 		senderMAC := net.HardwareAddr(payload[22:28])
 
+		isDAD := senderIP == nil || senderIP.IsUnspecified() || (n.localV4IP != nil && senderIP.Equal(n.localV4IP))
 		res := n.resolveProxyMAC(targetIP, n.lookupPeerMACByIPv4, n.lookupPeerMACByAdvertisedSubnet,
 			func(ip net.IP) bool {
+				if isDAD && n.localV4IP != nil && ip.Equal(n.localV4IP) {
+					return false
+				}
 				return tap.ShouldRespondToARP(ip, n.localV4IP, n.virtualWebUIV4IP, n.localV4Net)
 			})
 		if res.via != proxyViaNone {
@@ -410,19 +474,25 @@ func (n *Node) processTapFrame(payload, outBuf []byte) bool {
 
 		targetIPv6 := net.IP(payload[62:78])
 		senderIPv6 := net.IP(payload[22:38])
+		senderMAC := net.HardwareAddr(payload[6:12])
 
+		isV6DAD := senderIPv6 == nil || senderIPv6.IsUnspecified() || (n.localV6IP != nil && senderIPv6.Equal(n.localV6IP))
 		res := n.resolveProxyMAC(targetIPv6, n.lookupPeerMACByIPv6, n.lookupPeerMACByAdvertisedSubnet,
 			func(ip net.IP) bool {
+				if isV6DAD && n.localV6IP != nil && ip.Equal(n.localV6IP) {
+					return false
+				}
 				return ip.Equal(n.localV6IP) ||
 					(n.virtualWebUIV6IP != nil && ip.Equal(n.virtualWebUIV6IP))
 			})
 		if res.via != proxyViaNone {
-			naFrame := tap.BuildIPv6NeighborAdvertisementFrame(res.mac, targetIPv6, senderIPv6)
+			naFrame := tap.BuildIPv6NeighborAdvertisementFrameWithMAC(res.mac, senderMAC, targetIPv6, senderIPv6)
 			if len(naFrame) > 0 {
 				if _, err := n.tapWrite(naFrame); err != nil {
 					log.Debug("NDP NA reply (%v) for %s write failed: %v", res.via, targetIPv6, err)
 				}
 			}
+
 			if res.via == proxyViaPeer {
 				n.MACTable.Learn(res.mac, res.peerID)
 			} else if res.via == proxyViaSubnet {
@@ -443,7 +513,11 @@ func (n *Node) processTapFrame(payload, outBuf []byte) bool {
 	}
 
 	if n.isLocalWebUIVirtualPacket(payload) {
-		log.Debug("TAP frame involves local WebUI virtual IP/MAC, dropping from P2P overlay dispatch")
+		var srcIPStr string
+		if len(payload) >= 30 && binary.BigEndian.Uint16(payload[12:14]) == 0x0800 {
+			srcIPStr = net.IP(payload[26:30]).String()
+		}
+		log.Debug("TAPFWD DROP: frame involves local WebUI virtual IP/MAC, dropped from overlay dispatch (srcIP=%s)", srcIPStr)
 		return true
 	}
 
@@ -470,12 +544,19 @@ func (n *Node) processTapFrame(payload, outBuf []byte) bool {
 
 	targetPeer, found := n.MACTable.Lookup(dstMAC)
 	if !found {
+		log.Debug("TAPFWD resolve: MACTable MISS dstMAC=%s srcMAC=%s", dstMAC.String(), srcMAC.String())
 		// Fallback: when the MAC table has no entry for dstMAC (e.g. the peer
 		// hasn't sent a frame yet, so we never learned its MAC), resolve the
 		// destination IP directly from the frame (direct TAP IP, advertised LAN subnet,
 		// or runtime IPTracker) and look up the owning mesh peer.
 		if dstIP := extractFrameDstIP(payload); dstIP != nil {
-			if pid, mac := n.resolvePeerIDByIP(dstIP); pid != "" && pid != n.Host.ID() {
+			pid, mac := n.resolvePeerIDByIP(dstIP)
+			if len(mac) == 0 {
+				log.Debug("TAPFWD resolve: dstIP=%s resolvePeerIDByIP => pid=(empty) mac=(none) [NOT found]", dstIP.String())
+			} else {
+				log.Debug("TAPFWD resolve: dstIP=%s resolvePeerIDByIP => pid=%s mac=%s [found]", dstIP.String(), pid.String(), mac.String())
+			}
+			if pid != "" && pid != n.Host.ID() {
 				targetPeer = pid
 				found = true
 				// Self-learn the peer's tapMAC so that subsequent frames
@@ -486,7 +567,11 @@ func (n *Node) processTapFrame(payload, outBuf []byte) bool {
 					n.MACTable.Learn(mac, pid)
 				}
 			}
+		} else {
+			log.Debug("TAPFWD resolve: dstIP extraction failed (ethertype=%04x len=%d)", binary.BigEndian.Uint16(payload[12:14]), len(payload))
 		}
+	} else {
+		log.Debug("TAPFWD resolve: MACTable HIT dstMAC=%s => targetPeer=%s", dstMAC.String(), targetPeer.String())
 	}
 	if found && targetPeer != n.Host.ID() {
 		// Resolve the route up-front. For a RELAYED destination the final peer is
@@ -507,6 +592,14 @@ func (n *Node) processTapFrame(payload, outBuf []byte) bool {
 		// multi-hop / overlay-relay traffic (e.g. A -> relay -> C could never
 		// deliver).
 		if !n.canEgressToPeer(targetPeer) {
+			hop := n.relayHopForTarget(targetPeer)
+			bootUplink := hop != "" && n.isBootstrapPeer(hop) && n.hasBootRelayUplink(hop)
+			log.Debug("TAPFWD DROP: canEgressToPeer=false for targetPeer=%s (isPeerReady=%v cipherPresent=%v relayHop=%s bootUplink=%v)",
+				targetPeer.String(),
+				n.isPeerReady(targetPeer),
+				n.obfCipherForPeer(targetPeer) != nil,
+				hop.String(),
+				bootUplink)
 			return true
 		}
 
@@ -599,6 +692,7 @@ func (n *Node) processTapFrame(payload, outBuf []byte) bool {
 		// Delivering such a frame "to ourselves" would just drop it, blackholing
 		// the entire Exit Node tunnel. Redirect it to the Exit Node peer by peer
 		// ID so the tunnel comes up even before the peer's MAC is discovered.
+		log.Debug("TAPFWD: dstMAC=%s resolved to SELF (targetPeer==local); checking exit-node redirect (exitNodeActive=%v)", dstMAC.String(), n.isExitNodeActive())
 		if n.isExitNodeActive() {
 			exitPeerID := n.Gateway.ActiveExitPeerID()
 			if exitPeerID != "" && exitPeerID != n.Host.ID().String() {
@@ -625,6 +719,8 @@ func (n *Node) processTapFrame(payload, outBuf []byte) bool {
 			}
 		}
 		// Genuinely local frame — nothing to forward.
+		log.Debug("TAPFWD DROP: genuinely-local frame dstMAC=%s (exitNodeActive=%v, exitPeerID=%s) — nothing to forward",
+			dstMAC.String(), n.isExitNodeActive(), n.Gateway.ActiveExitPeerID())
 		return true
 	}
 

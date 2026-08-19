@@ -58,6 +58,23 @@ func parseHWMac(s string) net.HardwareAddr {
 	return nil
 }
 
+// isLocalAdvertisedSubnet reports whether target IP falls within any of this
+// node's own advertised subnets (i.e. this node is the LAN gateway).
+func (n *Node) isLocalAdvertisedSubnet(ip net.IP) bool {
+	if ip == nil || n.Config == nil || len(n.Config.AdvertisedSubnets) == 0 {
+		return false
+	}
+	for _, sub := range n.Config.AdvertisedSubnets {
+		if _, cidr, err := net.ParseCIDR(sub); err == nil && cidr != nil {
+			if cidr.Contains(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+
 // storePeerMeta persists peer metadata AND rebuilds the read-optimized ARP index
 // so it stays consistent with peerMeta. Must be used at every peerMeta write
 // site; do not call n.peerMeta.Store directly for peer records.

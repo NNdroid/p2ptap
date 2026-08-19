@@ -51,9 +51,9 @@ func (n *Node) rewriteRxDstMAC(payload []byte) {
 	}
 	if binary.BigEndian.Uint16(payload[12:14]) == packet.EtherTypeIPv4 && n.localV4IP != nil {
 		dstIP := net.IP(payload[30:34])
-		if dstIP.Equal(n.localV4IP) {
+		if dstIP.Equal(n.localV4IP) || n.isLocalAdvertisedSubnet(dstIP) {
 			if !bytes.Equal(payload[0:6], n.localMAC) {
-				log.Debug("MAC rewrite IPv4 (local dst): dstIP=%s oldDstMAC=%s newDstMAC=%s", dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+				log.Debug("MAC rewrite IPv4 (local dst / subnet): dstIP=%s oldDstMAC=%s newDstMAC=%s", dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
 				copy(payload[0:6], n.localMAC)
 			}
 			return
@@ -77,13 +77,14 @@ func (n *Node) rewriteRxDstMAC(payload []byte) {
 	}
 	if binary.BigEndian.Uint16(payload[12:14]) == packet.EtherTypeIPv6 && n.localV6IP != nil && len(payload) >= 54 {
 		dstIP := net.IP(payload[38:54])
-		if dstIP.Equal(n.localV6IP) {
+		if dstIP.Equal(n.localV6IP) || n.isLocalAdvertisedSubnet(dstIP) {
 			if !bytes.Equal(payload[0:6], n.localMAC) {
-				log.Debug("MAC rewrite IPv6 (local dst): dstIP=%s oldDstMAC=%s newDstMAC=%s", dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+				log.Debug("MAC rewrite IPv6 (local dst / subnet): dstIP=%s oldDstMAC=%s newDstMAC=%s", dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
 				copy(payload[0:6], n.localMAC)
 			}
 			return
 		}
+
 		if (n.isExitNodeActive() || (n.Config != nil && n.Config.ExitNode.Enable)) &&
 			func() bool { mac, _ := n.lookupPeerMACByIPv6(dstIP); return mac == nil }() &&
 			n.lookupPeerMACByAdvertisedSubnet(dstIP) == nil {
@@ -261,7 +262,13 @@ func (n *Node) handleStream(s network.Stream) {
 			}
 			n.dedupPeersMu.Unlock()
 		}
+		if decOK && obfuscate.IsStructuredSeq(seqID) {
+			if ep := obfuscate.ConnEpochFromSeq(seqID); ep != peerDedup.ConnEpoch() {
+				peerDedup.SetConnEpoch(ep)
+			}
+		}
 		if peerDedup.IsDuplicate(seqID) {
+
 			n.Collector.RecordDedup()
 			n.Collector.RecordPeerDedup(remotePeer.String())
 			log.Debug("Duplicate frame seq=%d from peer %s", seqID, remotePeer.String())
@@ -294,15 +301,19 @@ func (n *Node) handleStream(s network.Stream) {
 					seqID, len(payload), net.HardwareAddr(srcMAC[:]).String(), net.HardwareAddr(dstMAC[:]).String(), remotePeer.String(), describeEthernetFrame(payload))
 			}
 
-			// Content-based dedup for ALL frames (unicast, broadcast, multicast):
-			// when the same L2 payload arrives via multiple peer streams or
+			// Content-based dedup ONLY for broadcast/multicast frames:
+			// when the same L2 broadcast/multicast payload arrives via multiple peer streams or
 			// redundant paths, only the first copy is written to TAP.
-			contentHash := fnvHash64(payload)
-			if n.bcastDedup.isDuplicate(contentHash) {
-				n.Collector.RecordDedup()
-				log.Debug("Content-dup frame hash=0x%x from peer %s dropped", contentHash, remotePeer.String())
-				continue
+			// Unicast frames are handled by per-peer SeqID sliding window deduplication above.
+			if isBroadcastOrMulticastMAC(dstMAC) {
+				contentHash := fnvHash64(payload)
+				if n.bcastDedup.isDuplicate(contentHash) {
+					n.Collector.RecordDedup()
+					log.Debug("Content-dup broadcast frame hash=0x%x from peer %s dropped", contentHash, remotePeer.String())
+					continue
+				}
 			}
+
 		} else {
 			log.Debug("Rx frame: seq=%d len=%d (MAC extract failed) from_peer=%s", seqID, len(payload), remotePeer.String())
 		}
@@ -350,6 +361,16 @@ func (n *Node) handleStream(s network.Stream) {
 		// with the relay-receive path via rewriteRxDstMAC so the two write-back
 		// paths stay identical (see that function for the full rationale).
 		n.rewriteRxDstMAC(payload)
+
+		// End-to-end TAP-probe capture. The peer's ICMP echo reply (which left
+		// the peer's real TAP, traversed the overlay, and is about to be injected
+		// into OUR real TAP) is captured here on the inbound path. We cannot rely
+		// on it looping back through the TAP read fd — a TUN/TAP device does not
+		// re-deliver written frames to its own read side — so the capture must
+		// happen here to make ProbeTapForward a genuine both-directions TAP-path
+		// test. The OS also receives the reply (a harmless stray, since no local
+		// socket originated the request).
+		n.maybeDeliverProbeReply(payload)
 
 		// Write unpadded payload Ethernet frame to TAP
 		if n.TAP == nil {
@@ -744,6 +765,11 @@ func (n *Node) handleRelayStream(s network.Stream) {
 			log.Debug("Relay stream unpack error from %s: %v", remotePeer.String(), err)
 			continue
 		}
+		// Return-path liveness signal: we just received a frame ORIGINATING at
+		// srcPeer (even if we are merely forwarding it), so its return path to
+		// us is currently alive. Recorded for the ping-pong probe's outbound-vs-
+		// return distinction in an asymmetric-routing mesh.
+		n.notePeerRx(srcPeer)
 		if finalDst == n.Host.ID() {
 			// Destination reached: the INNER payload is END-TO-END encrypted for
 			// us (finalDst) by the origin (srcPeer), so decrypt it with the cipher

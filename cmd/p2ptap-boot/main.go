@@ -763,6 +763,105 @@ func makeBootRelayBackboneHandler(rr *relayRouter) func(network.Stream) {
 	}
 }
 
+const RelayCtrlProtocolID protocol.ID = "/p2ptap/relay-ctrl/1.0.0"
+
+type RelayCtrlHeader struct {
+	Origin peer.ID `json:"origin"`
+	Target peer.ID `json:"target"`
+	Proto  string  `json:"proto"`
+	Hops   uint8   `json:"hops"`
+}
+
+// makeRelayCtrlHandler handles /p2ptap/relay-ctrl/1.0.0 control streams on the boot node.
+// It allows clients to establish overlay control tunnels (SeqSync / Meta / LSA) through the boot node.
+func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter) func(network.Stream) {
+	return func(s network.Stream) {
+		defer s.Close()
+		remotePeer := s.Conn().RemotePeer()
+
+		hdrBuf := make([]byte, 4096)
+		n0, err := readFrame(s, hdrBuf)
+		if err != nil || n0 == 0 {
+			return
+		}
+		var hdr RelayCtrlHeader
+		if err := json.Unmarshal(hdrBuf[:n0], &hdr); err != nil {
+			return
+		}
+		if hdr.Origin == "" || hdr.Target == "" {
+			return
+		}
+
+		if acl != nil {
+			if !acl.IsAuthenticated(remotePeer) {
+				return
+			}
+			if !acl.AllowConnect(hdr.Origin, nil, hdr.Target) {
+				return
+			}
+		}
+
+
+		if hdr.Hops >= 8 {
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		sub, err := h.NewStream(ctx, hdr.Target, RelayCtrlProtocolID)
+		if err != nil {
+			if hdr.Proto != "" {
+				sub, err = h.NewStream(ctx, hdr.Target, protocol.ID(hdr.Proto))
+			}
+			if err != nil {
+				return
+			}
+		} else {
+			final := RelayCtrlHeader{
+				Origin: hdr.Origin,
+				Target: hdr.Target,
+				Proto:  hdr.Proto,
+				Hops:   hdr.Hops + 1,
+			}
+			fb, _ := json.Marshal(final)
+			if err := writeFrame(sub, fb); err != nil {
+				sub.Close()
+				return
+			}
+		}
+		if gSessions != nil {
+			netID := ""
+			if acl != nil {
+				netID = acl.NetworkOf(hdr.Origin)
+			}
+			gSessions.Add(hdr.Origin, hdr.Target, netID)
+		}
+		bootAlerts.Add("info", "relay_allowed", hdr.Origin.ShortString(),
+			fmt.Sprintf("🔀 Relay-Ctrl 隧道已建立: %s → %s (%s)", hdr.Origin.ShortString(), hdr.Target.ShortString(), hdr.Proto))
+
+		proxyStreams(s, sub)
+	}
+}
+
+
+func proxyStreams(s1, s2 network.Stream) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		defer s2.CloseWrite()
+		_, _ = io.Copy(s2, s1)
+	}()
+	go func() {
+		defer wg.Done()
+		defer s1.CloseWrite()
+		_, _ = io.Copy(s1, s2)
+	}()
+	wg.Wait()
+}
+
+
 // bootRelayMeshUplinkLoop keeps a boot-relay backbone uplink open to ONE peer
 // boot (mirrors meshUplinkLoop). The remote boot symmetrically subscribes to us,
 // so relay frames for each other's clients flow both ways over the single
@@ -1107,8 +1206,10 @@ func main() {
 	relayRouter := newRelayRouter(aclFilter, pskEnabled)
 	h.SetStreamHandler(BootRelayProtocolID, makeBootRelayHandler(relayRouter))
 	h.SetStreamHandler(BootRelayBackboneProtocolID, makeBootRelayBackboneHandler(relayRouter))
-	fmt.Printf("[+] Boot-relay (relay-over-backbone) handlers registered (protocols: %s, %s)\n",
-		BootRelayProtocolID, BootRelayBackboneProtocolID)
+	h.SetStreamHandler(RelayCtrlProtocolID, makeRelayCtrlHandler(h, aclFilter))
+	fmt.Printf("[+] Boot-relay & relay-control handlers registered (protocols: %s, %s, %s)\n",
+		BootRelayProtocolID, BootRelayBackboneProtocolID, RelayCtrlProtocolID)
+
 
 	// 8. Log peer connection/disconnection events.
 	// Protect() every connected peer from the ConnManager so relay links are
@@ -1704,13 +1805,45 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 		return
 	}
 
+	// Best-effort read the peer's version/capability record. An OLD node sends
+	// only the 32-byte token and closes, so a short read means "unknown version"
+	// — we then authenticate without the extra compatibility gate (the node
+	// side does the same, so an old node never gets hard-rejected).
+	var nodeRec version.Record
+	_ = nodeRec.ReadRecord(s)
+
 	// Verify the token against each configured PSK with a constant-time compare
 	// so a mismatched PSK does not leak, byte-by-byte via timing, how much of the
 	// 32-byte hash matched.
 	for _, e := range entries {
 		if subtle.ConstantTimeCompare(token[:], e.hash[:]) == 1 {
+			// PSK matches — assess version/envelope compatibility. A plain build
+			// difference with an identical envelope is safe (Warn, allowed); only
+			// a genuinely incompatible envelope (no common version) is Danger,
+			// and even that is allowed unless StrictVersionCheck is enabled.
+			switch lvl, reason := version.CurrentRecord().CompatibleWith(nodeRec); lvl {
+			case version.CompatOK:
+				// identical build or unknown peer — nothing to gate on
+			case version.CompatWarn:
+				log.Warn("[auth] peer %s version differs but safe to connect: %s (peer commit=%s)",
+					remotePeer.String(), reason, nodeRec.Commit)
+			case version.CompatDanger:
+				log.Error("[auth] peer %s version INCOMPATIBLE — risk of silent relay corruption: %s (local commit=%s, peer commit=%s)",
+					remotePeer.String(), reason, version.ShortCommit(), nodeRec.Commit)
+				if version.StrictVersionCheck {
+					bootAlerts.Add("error", "auth_version_mismatch", remotePeer.ShortString(),
+						fmt.Sprintf("Peer %s rejected: %s (peer commit=%s)", remotePeer.ShortString(), reason, nodeRec.Commit))
+					_, _ = s.Write([]byte{0x00}) // Auth failed response
+					return
+				}
+				log.Warn("[auth] peer %s version incompatible but StrictVersionCheck=false — allowing: %s (peer commit=%s)",
+					remotePeer.String(), reason, nodeRec.Commit)
+			}
 			acl.AddAuthenticated(remotePeer, e.netID)
 			_, _ = s.Write([]byte{0x01}) // Auth success response
+			// Hand our version record back so the node can also verify (and so
+			// an old node harmlessly sees a closed stream after the 0x01).
+			_ = version.CurrentRecord().WriteRecord(s)
 			log.Debug("[auth] peer %s authenticated for relay (net=%s)", remotePeer.String(), e.netID)
 			bootAlerts.Add("info", "auth_success", remotePeer.ShortString(), fmt.Sprintf("PSK authenticated successfully (network: net=%s)", e.netID))
 			// Announce this boot to the freshly authenticated client so it shows

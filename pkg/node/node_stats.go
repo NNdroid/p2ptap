@@ -17,6 +17,7 @@ import (
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 
+	"p2ptap/pkg/meta"
 	"p2ptap/pkg/observer"
 )
 
@@ -32,6 +33,15 @@ const (
 	connStateObfFailed     = "obf_failed"     // encryption negotiated but decrypt failing
 	connStateUnreachable   = "unreachable"    // no transport / overlay route at all
 )
+
+// returnPathAliveWindow is the liveness window for the WebUI "回程状态" column.
+// If we received an inbound frame from a peer within this window, its return
+// path is considered alive. It is intentionally separate from the circuit-breaker
+// reset window (relayPoolHealthyRxWindow, 10s) — that one only gates relay-hop
+// fail-count resets; this one is the human-facing "is the peer sending us
+// anything back?" indicator and is lenient enough to absorb normal idle gaps
+// between periodic ping-pong / data frames.
+const returnPathAliveWindow = 20 * time.Second
 
 // toDuplicateIPConflictDTOs converts the node-internal DuplicateIPConflict set
 // into the observer DTO shape the WebUI consumes. DetectedAt is formatted to
@@ -128,6 +138,43 @@ func (n *Node) classifyPeerRole(pID peer.ID, bootstrapMap, staticMap map[peer.ID
 	default:
 		return "Peer"
 	}
+}
+
+// humanAgo formats a non-negative duration as a compact Chinese relative-time
+// string for the WebUI return-path detail (e.g. "3 秒前收到帧").
+func humanAgo(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Second {
+		return "刚刚"
+	}
+	sec := int(d.Seconds())
+	if sec < 60 {
+		return fmt.Sprintf("%d 秒", sec)
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%d 分 %d 秒", int(d.Minutes()), sec%60)
+	}
+	return fmt.Sprintf("%d 小时 %d 分", int(d.Hours()), int(d.Minutes())%60)
+}
+
+// deriveReturnPath classifies a peer's asymmetric-routing return-path liveness
+// for the WebUI "回程状态" column, using the same lastRx signal the ping-pong
+// probe relies on. It deliberately does NOT fold the outbound connectivity
+// verdict into this field: the two are independent and the whole point is to
+// surface when they disagree (outbound OK but return dead).
+func (n *Node) deriveReturnPath(pID peer.ID) (status, detail, lastRxISO string) {
+	lastRx := n.lastRxFrom(pID)
+	if lastRx.IsZero() {
+		return "idle", "尚无回程帧记录", ""
+	}
+	ago := time.Since(lastRx)
+	iso := lastRx.Format(time.RFC3339)
+	if ago <= returnPathAliveWindow {
+		return "ok", "回程正常 · " + humanAgo(ago) + "前收到帧", iso
+	}
+	return "dead", "回程断 · " + humanAgo(ago) + "无回程帧(去程可能正常)", iso
 }
 
 func (n *Node) updateWebCollectorState() {
@@ -484,6 +531,9 @@ func (n *Node) updateWebCollectorState() {
 		// (the envelope cipher is negotiated with the hop, not the final peer).
 		connState, connStage, connDetail := n.derivePeerConnState(pID, role)
 
+		// Return-path liveness (asymmetric routing): independent of ConnState.
+		rpStatus, rpDetail, rpLastRxISO := n.deriveReturnPath(pID)
+
 		// Per-peer encryption/obfuscation state negotiated via SeqSync ECDH
 		// (re-derived here for the inline Encryption column of the WebUI).
 		obfNegotiated, obfAlgo, obfEncrypted := n.obfStateForPeer(pID)
@@ -523,6 +573,9 @@ func (n *Node) updateWebCollectorState() {
 			ConnState:         connState,
 			ConnStage:         connStage,
 			ConnDetail:        connDetail,
+			ReturnPath:        rpStatus,
+			ReturnPathDetail:  rpDetail,
+			LastRxISO:         rpLastRxISO,
 		})
 	}
 
@@ -855,17 +908,24 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 		Name     string
 		Category string
 	}{
-		protocol.ID("/p2ptap/seqsync/1.0.0"):            {ID: "seqsync", Name: "Sequence Sync (SeqSync)", Category: "sync"},
+		ProtocolID:                                      {ID: "data", Name: "Virtual TAP Datapath", Category: "data"},
+		OverlayRelayProtocolID:                          {ID: "relay-data", Name: "Overlay L2 Relay Data", Category: "data"},
+		BootRelayProtocolID:                             {ID: "boot-relay", Name: "Backbone Relay Data", Category: "data"},
+		SeqSyncProtocolID:                               {ID: "seqsync", Name: "Sequence Sync (SeqSync)", Category: "sync"},
+		LSAProtocolID:                                   {ID: "lsa", Name: "LSA Mesh Routing", Category: "routing"},
 		protocol.ID("/p2ptap/lsa/1.0.0"):                {ID: "lsa", Name: "LSA Mesh Routing", Category: "routing"},
-		protocol.ID("/p2ptap/peek-map/1.0.0"):           {ID: "peek-map", Name: "Peek-Map Network Pub/Sub", Category: "pubsub"},
-		protocol.ID("/p2ptap/auth/1.0.0"):               {ID: "auth", Name: "Mesh Authentication", Category: "security"},
-		protocol.ID("/p2ptap/echo/1.0.0"):               {ID: "echo", Name: "Diagnostic Echo", Category: "diagnostics"},
+		PeekMapProtocolID:                               {ID: "peekmap", Name: "Peek-Map Network Pub/Sub", Category: "pubsub"},
+		meta.MetaProtocolID:                             {ID: "meta", Name: "Peer Metadata Sync", Category: "pubsub"},
+		protocol.ID(relayAuthProtocol):                  {ID: "auth", Name: "Mesh Authentication", Category: "security"},
+		RelayCtrlProtocolID:                             {ID: "relay-ctrl", Name: "Relay Control Tunnel", Category: "transport"},
+		EchoProtocolID:                                  {ID: "echo", Name: "Diagnostic Echo", Category: "diagnostics"},
 		protocol.ID("/ipfs/ping/1.0.0"):                 {ID: "ping", Name: "libp2p Ping", Category: "diagnostics"},
 		protocol.ID("/libp2p/dcutr"):                    {ID: "dcutr", Name: "Direct Connection Upgrade (DCUtR)", Category: "transport"},
 		protocol.ID("/libp2p/circuit/relay/0.2.0/stop"): {ID: "relay-v2", Name: "Circuit Relay v2", Category: "transport"},
 		protocol.ID("/meshsub/1.1.0"):                   {ID: "pubsub", Name: "GossipSub PubSub", Category: "pubsub"},
 		protocol.ID("/ipfs/id/1.0.0"):                   {ID: "identify", Name: "Identify Protocol", Category: "discovery"},
 		protocol.ID("/ipfs/id/push/1.0.0"):              {ID: "identify-push", Name: "Identify Push", Category: "discovery"},
+		protocol.ID("/libp2p/autonat/1.0.0"):            {ID: "autonat", Name: "AutoNAT Status Probe", Category: "discovery"},
 	}
 
 	streamsList := make([]observer.ProtocolStreamDTO, 0)
@@ -919,8 +979,8 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	}
 
 	// 1. SeqSync Channel
-	seqIn := inboundCounts["/p2ptap/seqsync/1.0.0"]
-	seqOut := outboundCounts["/p2ptap/seqsync/1.0.0"]
+	seqIn := inboundCounts[string(SeqSyncProtocolID)]
+	seqOut := outboundCounts[string(SeqSyncProtocolID)]
 	seqTotal := seqIn + seqOut
 	seqStatus := "idle"
 	if seqTotal > 0 {
@@ -928,8 +988,8 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	}
 
 	// 2. LSA Routing Channel
-	lsaIn := inboundCounts["/p2ptap/lsa/1.0.0"]
-	lsaOut := outboundCounts["/p2ptap/lsa/1.0.0"]
+	lsaIn := inboundCounts[string(LSAProtocolID)] + inboundCounts["/p2ptap/lsa/1.0.0"]
+	lsaOut := outboundCounts[string(LSAProtocolID)] + outboundCounts["/p2ptap/lsa/1.0.0"]
 	lsaTotal := lsaIn + lsaOut
 	lsaStatus := "running"
 	if lsaTotal > 0 {
@@ -937,8 +997,8 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	}
 
 	// 3. Peek-Map Broadcast Channel
-	peekIn := inboundCounts["/p2ptap/peek-map/1.0.0"]
-	peekOut := outboundCounts["/p2ptap/peek-map/1.0.0"]
+	peekIn := inboundCounts[string(PeekMapProtocolID)] + inboundCounts[string(meta.MetaProtocolID)]
+	peekOut := outboundCounts[string(PeekMapProtocolID)] + outboundCounts[string(meta.MetaProtocolID)]
 	peekTotal := peekIn + peekOut
 	peekStatus := "idle"
 	if peekTotal > 0 || len(n.Config.BootstrapPeers) > 0 {
@@ -954,24 +1014,30 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	if obfsMode == "" {
 		obfsMode = "fixed"
 	}
-	dataStatus := "active"
-	if n.TAP == nil {
-		dataStatus = "standby"
+	dataIn := inboundCounts[string(ProtocolID)] + inboundCounts[string(OverlayRelayProtocolID)] + inboundCounts[string(BootRelayProtocolID)]
+	dataOut := outboundCounts[string(ProtocolID)] + outboundCounts[string(OverlayRelayProtocolID)] + outboundCounts[string(BootRelayProtocolID)]
+	dataTotal := dataIn + dataOut
+	dataStatus := "idle"
+	if n.TAP != nil && dataTotal > 0 {
+		dataStatus = "active"
+	} else if n.TAP != nil {
+		dataStatus = "running"
 	}
-	totalConns := len(n.Host.Network().Conns())
 
 	// 5. Mesh Auth
-	authIn := inboundCounts["/p2ptap/auth/1.0.0"]
-	authOut := outboundCounts["/p2ptap/auth/1.0.0"]
+	authIn := inboundCounts[relayAuthProtocol]
+	authOut := outboundCounts[relayAuthProtocol]
 	authTotal := authIn + authOut
 	authStatus := "running"
 	if n.Config.PSK == "" {
 		authStatus = "open-mode"
+	} else if authTotal > 0 {
+		authStatus = "active"
 	}
 
 	// 6. DCUtR / Relay
-	dcutrIn := inboundCounts["/libp2p/dcutr"] + inboundCounts["/libp2p/circuit/relay/0.2.0/stop"]
-	dcutrOut := outboundCounts["/libp2p/dcutr"] + outboundCounts["/libp2p/circuit/relay/0.2.0/stop"]
+	dcutrIn := inboundCounts["/libp2p/dcutr"] + inboundCounts["/libp2p/circuit/relay/0.2.0/stop"] + inboundCounts[string(RelayCtrlProtocolID)]
+	dcutrOut := outboundCounts["/libp2p/dcutr"] + outboundCounts["/libp2p/circuit/relay/0.2.0/stop"] + outboundCounts[string(RelayCtrlProtocolID)]
 	dcutrTotal := dcutrIn + dcutrOut
 	dcutrStatus := "ready"
 	if dcutrTotal > 0 {
@@ -982,7 +1048,7 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 		{
 			ID:              "seqsync",
 			Name:            "Sequence Sync (SeqSync)",
-			Protocol:        "/p2ptap/seqsync/1.0.0",
+			Protocol:        string(SeqSyncProtocolID),
 			Category:        "sync",
 			Status:          seqStatus,
 			ActiveStreams:   seqTotal,
@@ -993,7 +1059,7 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 		{
 			ID:              "lsa",
 			Name:            "LSA Mesh Routing",
-			Protocol:        "/p2ptap/lsa/1.0.0",
+			Protocol:        string(LSAProtocolID),
 			Category:        "routing",
 			Status:          lsaStatus,
 			ActiveStreams:   lsaTotal,
@@ -1002,9 +1068,9 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 			Details:         fmt.Sprintf("Streams: %d (↓%d ↑%d) · Dijkstra Shortest Path", lsaTotal, lsaIn, lsaOut),
 		},
 		{
-			ID:              "peek-map",
+			ID:              "peekmap",
 			Name:            "Peek-Map Broadcast",
-			Protocol:        "/p2ptap/peek-map/1.0.0",
+			Protocol:        string(PeekMapProtocolID),
 			Category:        "pubsub",
 			Status:          peekStatus,
 			ActiveStreams:   peekTotal,
@@ -1015,18 +1081,18 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 		{
 			ID:              "data",
 			Name:            "Virtual TAP Datapath",
-			Protocol:        "Layer-2 Ethernet Overlay",
+			Protocol:        string(ProtocolID),
 			Category:        "data",
 			Status:          dataStatus,
-			ActiveStreams:   totalConns,
-			InboundStreams:  totalConns,
-			OutboundStreams: totalConns,
+			ActiveStreams:   dataTotal,
+			InboundStreams:  dataIn,
+			OutboundStreams: dataOut,
 			Details:         fmt.Sprintf("Cipher: %s · Mode: %s", obfsAlgo, obfsMode),
 		},
 		{
 			ID:              "auth",
 			Name:            "Mesh Authentication",
-			Protocol:        "/p2ptap/auth/1.0.0",
+			Protocol:        relayAuthProtocol,
 			Category:        "security",
 			Status:          authStatus,
 			ActiveStreams:   authTotal,
@@ -1049,6 +1115,7 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 
 	return channels, streamsList
 }
+
 
 // cacheActivePeers stores the latest PeerInfoDTO slice locally so that
 // node-internal lookups (PeekPeerID, resolvePeerIDByName) do not need to read

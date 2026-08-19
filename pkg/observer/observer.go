@@ -259,6 +259,21 @@ type PeerInfoDTO struct {
 	ConnState  string `json:"conn_state"`
 	ConnStage  int    `json:"conn_stage"`  // 0..4 completed stages (1 conn, 2 proto, 3 obf, 4 data)
 	ConnDetail string `json:"conn_detail"` // human-readable supplement (algo, relay hop, error)
+	// ReturnPath exposes the ASYMMETRIC-ROUTING return-path liveness for this
+	// peer, kept deliberately separate from the outbound-connectivity ConnState
+	// verdict. In a mesh where each node picks its outbound and return paths
+	// independently, a healthy outbound path proves nothing about whether the
+	// peer can route frames back to us. Values:
+	//   ok    – we received inbound frames from the peer within the liveness
+	//           window, so the return path is alive
+	//   dead  – no inbound frames within the window even though the outbound
+	//           path may be healthy: a classic asymmetric-routing break AT the
+	//           peer (its relay stream / TAP egress is stuck), not a local
+	//           outbound failure
+	//   idle  – no return-path sample yet (peer just connected, no frames seen)
+	ReturnPath       string `json:"return_path"`
+	ReturnPathDetail string `json:"return_path_detail"` // e.g. "回程正常 · 3 秒前收到帧" / "回程断 · 18 秒无回程帧"
+	LastRxISO        string `json:"last_rx_iso"`        // RFC3339 of last inbound frame; "" if never received
 }
 
 type SpeedTestResultDTO struct {
@@ -774,7 +789,7 @@ type ACLDropDTO struct {
 
 // ProtocolChannelDTO captures high-level status and metrics of a P2P protocol subsystem/channel.
 type ProtocolChannelDTO struct {
-	ID              string `json:"id"`               // e.g. "seqsync", "lsa", "peek-map", "data", "auth", "dcutr", "echo"
+	ID              string `json:"id"`               // e.g. "seqsync", "lsa", "peekmap", "data", "auth", "dcutr", "echo"
 	Name            string `json:"name"`             // Friendly name, e.g. "Sequence Sync (SeqSync)"
 	Protocol        string `json:"protocol"`         // e.g. "/p2ptap/seqsync/1.0.0"
 	Category        string `json:"category"`         // "sync" | "routing" | "pubsub" | "data" | "security" | "transport" | "diagnostics"

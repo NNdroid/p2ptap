@@ -166,6 +166,14 @@
             line-height: 1.2;
         }
 
+        /* Return-path (asymmetric-routing) liveness badges in the peer table.
+           Colours follow the active theme's CSS variables so both dark and
+           light themes render correctly without per-theme overrides here. */
+        .pill-badge.rp-badge { padding: 2px 10px; font-size: 0.72rem; }
+        .pill-badge.rp-ok   { color: var(--success); background: var(--accent-green-fill); border-color: var(--accent-green-border); }
+        .pill-badge.rp-dead { color: var(--danger);  background: var(--danger-fill);        border-color: var(--danger-border); }
+        .pill-badge.rp-idle { color: var(--text-muted); background: var(--glass-fill);      border-color: var(--border-subtle); }
+
         .role-bootstrap {
             background: rgba(168, 85, 247, 0.18) !important;
             color: #d8b4fe !important;
@@ -845,7 +853,49 @@
         .table-responsive {
             width: 100%;
             overflow-x: auto;
+            cursor: grab;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
         }
+
+        .table-responsive:active {
+            cursor: grabbing;
+        }
+
+        .table-responsive::-webkit-scrollbar {
+            height: 6px;
+        }
+
+        .table-responsive::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.02);
+            border-radius: 3px;
+        }
+
+        .table-responsive::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.18);
+            border-radius: 3px;
+        }
+
+        .table-responsive::-webkit-scrollbar-thumb:hover {
+            background: var(--accent-cyan, #06b6d4);
+        }
+
+        html[data-theme="light"] .table-responsive {
+            scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+        }
+
+        html[data-theme="light"] .table-responsive::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.02);
+        }
+
+        html[data-theme="light"] .table-responsive::-webkit-scrollbar-thumb {
+            background: rgba(0, 0, 0, 0.18);
+        }
+
+        html[data-theme="light"] .table-responsive::-webkit-scrollbar-thumb:hover {
+            background: var(--accent-blue, #3b82f6);
+        }
+
 
         table {
             width: 100%;

@@ -190,8 +190,15 @@ func (n *Node) openRelayCtrlNextHop(hdr RelayCtrlHeader, fromPeer peer.ID) (netw
 	if hop := n.relayHopForTarget(hdr.Target); hop != "" && hop != fromPeer {
 		ctx, cancel := context.WithTimeout(n.ctx, 15*time.Second)
 		defer cancel()
+		if n.isBootstrapPeer(hop) {
+			if sub, err := n.openRelayCtrlStream(ctx, hop, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), nextHops); err == nil {
+				return sub, nil
+			}
+			return n.openBootRelayControlStream(hop, hdr.Target, protocol.ID(hdr.Proto))
+		}
 		return n.openRelayCtrlStream(ctx, hop, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), nextHops)
 	}
+
 
 	// Boot circuit relay fall-back: dial Target through the circuit on the
 	// relay-ctrl protocol; the far end dispatches it as a final hop.

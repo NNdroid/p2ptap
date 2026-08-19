@@ -184,7 +184,7 @@ func TestRelayPoolDrainAll_Empty(t *testing.T) {
 
 func TestRelayPoolShutdown(t *testing.T) {
 	t.Log("[relay-pool] shutdown on empty pool should not panic")
-	pool := newRelayStreamPool(nil, nil) // nil host/ctx for unit test
+	pool := newRelayStreamPool(nil, nil, nil) // nil host/ctx/node for unit test
 	if pool == nil {
 		t.Fatal("newRelayStreamPool returned nil")
 	}

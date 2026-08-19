@@ -160,6 +160,10 @@ func calcICMPv6Checksum(srcIP, dstIP []byte, icmpData []byte) uint16 {
 }
 
 func BuildIPv6NeighborAdvertisementFrame(targetMAC net.HardwareAddr, targetIPv6 net.IP, dstIPv6 ...net.IP) []byte {
+	return BuildIPv6NeighborAdvertisementFrameWithMAC(targetMAC, nil, targetIPv6, dstIPv6...)
+}
+
+func BuildIPv6NeighborAdvertisementFrameWithMAC(targetMAC, senderMAC net.HardwareAddr, targetIPv6 net.IP, dstIPv6 ...net.IP) []byte {
 	v6IP := targetIPv6.To16()
 	if len(v6IP) != 16 || len(targetMAC) != 6 {
 		return nil
@@ -173,9 +177,14 @@ func BuildIPv6NeighborAdvertisementFrame(targetMAC net.HardwareAddr, targetIPv6 
 	}
 
 	frame := make([]byte, 86)
-	copy(frame[0:6], []byte{0x33, 0x33, 0x00, 0x00, 0x00, 0x01})
+	if len(senderMAC) == 6 && (flags&0x40 != 0) {
+		copy(frame[0:6], senderMAC)
+	} else {
+		copy(frame[0:6], []byte{0x33, 0x33, 0x00, 0x00, 0x00, 0x01})
+	}
 	copy(frame[6:12], targetMAC)
 	binary.BigEndian.PutUint16(frame[12:14], packet.EtherTypeIPv6)
+
 
 	frame[14] = 0x60
 	binary.BigEndian.PutUint16(frame[18:20], 32)

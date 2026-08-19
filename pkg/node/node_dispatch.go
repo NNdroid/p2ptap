@@ -530,21 +530,44 @@ func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
 	// open libp2p connections by definition) — making this whole branch dead
 	// code. Fixed by only excluding the target and self.
 	var fallback peer.ID
+	// A connected bootstrap peer that has NO boot-relay uplink is useless for
+	// egress (there is no stream to write the relay envelope onto — canEgressToPeer
+	// and sendToPeerViaBootRelay both gate on hasBootRelayUplink). We remember
+	// the first such boot only as a last resort and kick its auth/uplink open so
+	// the path self-heals, but we must NOT return it ahead of a boot that DOES
+	// have an uplink: otherwise relayHopForTarget returns WHBbjX (connected but
+	// no uplink) while canEgressToPeer then rejects it → every reply to a relay-
+	// only peer is silently dropped even though an uplinked boot (e.g. 92NZj)
+	// is right there and the boot backbone would bridge to the target's boot.
+	var bootHopNoUplink peer.ID
 	for _, c := range n.Host.Network().Conns() {
 		pID := c.RemotePeer()
 		if pID == targetPeer || pID == n.Host.ID() {
 			continue
 		}
 		if n.Host.Network().Connectedness(pID) != network.Connected ||
-			!n.supportsOverlayRelay(pID) {
+			!n.supportsOverlayRelay(pID) ||
+			n.isOverlayRelayBlacklisted(pID) {
 			continue
 		}
 		if n.isBootstrapPeer(pID) {
-			// Boot relays are Circuit-Relay v2 servers; their reachability to a
-			// target is NOT reflected in the LSA graph (boot doesn't speak LSA),
-			// so GetEdge cannot be used for them. A connected boot is always a
-			// viable circuit-relay hop — take it immediately.
-			return pID
+			// A boot whose relay-over-backbone uplink has repeatedly failed to
+			// establish (it is not really a boot-relay server) is blacklisted —
+			// skip it so frames fall through to a working hop instead of being
+			// silently dropped every time (the WHBbjX class of bug).
+			if n.isBootRelayBlacklisted(pID) {
+				continue
+			}
+			// Prefer a connected boot that ALREADY has a boot-relay uplink.
+			// The boot backbone federates boots in the same PSK network, so an
+			// uplinked boot reaches the target's boot and bridges the frame.
+			if n.hasBootRelayUplink(pID) {
+				return pID
+			}
+			if bootHopNoUplink == "" {
+				bootHopNoUplink = pID
+			}
+			continue
 		}
 		// Non-boot peers must actually know the target in their link-state
 		// neighbourhood, otherwise forwarding into them is forwarding into the
@@ -579,11 +602,26 @@ func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
 			if pID == targetPeer || pID == n.Host.ID() {
 				continue
 			}
+			if n.isBootRelayBlacklisted(pID) {
+				continue
+			}
 			if !n.isBootstrapPeer(pID) || !n.hasBootRelayUplink(pID) {
 				continue
 			}
 			return pID
 		}
+	}
+	// Last resort: a connected boot exists but its boot-relay uplink was never
+	// opened (e.g. it was discovered via routing/LSA/peek-map federation rather
+	// than from the explicit BootstrapPeers list, so ensureRelayAuth was never
+	// triggered for it). Kick the auth/uplink open; it is idempotent/guarded, so
+	// repeated calls are cheap. This frame may still drop once, but subsequent
+	// frames egress once the uplink is up (self-healing). Skip a boot that is
+	// blacklisted — it will never host an uplink, so returning it would just
+	// drop every frame again.
+	if bootHopNoUplink != "" && !n.isBootRelayBlacklisted(bootHopNoUplink) {
+		go n.ensureRelayAuth(peer.AddrInfo{ID: bootHopNoUplink})
+		return bootHopNoUplink
 	}
 	return fallback
 }

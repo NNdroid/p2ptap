@@ -518,10 +518,11 @@ func standaloneStats() (*statsResponse, error) {
 	}
 	for _, p := range r.ActivePeers {
 		s.ActivePeers = append(s.ActivePeers, peerInfoDTO{
-			PeerID:   p.PeerID,
-			NodeName: p.NodeName,
-			TapIP:    p.TapIP,
-			TapIPv6:  p.TapIPv6,
+			PeerID:     p.PeerID,
+			NodeName:   p.NodeName,
+			TapIP:      p.TapIP,
+			TapIPv6:    p.TapIPv6,
+			IsExitNode: p.IsExitNode,
 		})
 	}
 	return s, nil

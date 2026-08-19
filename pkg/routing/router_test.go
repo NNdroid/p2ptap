@@ -169,3 +169,89 @@ func TestBuildLSAAdvertisedSubnets(t *testing.T) {
 		t.Errorf("LSA with nil AdvertisedSubnets should keep nil field, got %v", lsaEmpty.AdvertisedSubnets)
 	}
 }
+
+func TestCandidatePathsEvaluation(t *testing.T) {
+	nodeLocal := generateTestPeerID(t)
+	nodeTarget := generateTestPeerID(t)
+	nodeRelay1 := generateTestPeerID(t)
+	nodeRelay2 := generateTestPeerID(t)
+
+	r := NewRouter(nodeLocal)
+
+	// Direct link to target: 10ms
+	r.UpdateDirectLink(nodeTarget, 10, LinkDirect)
+	// Direct link to relay1: 20ms, relay1 -> target: 50ms (total 70ms)
+	r.UpdateDirectLink(nodeRelay1, 20, LinkDirect)
+	r.ProcessLSA(&LinkStatePayload{
+		Origin:    nodeRelay1.String(),
+		Seq:       1,
+		TTL:       5,
+		Neighbors: map[string]int64{nodeTarget.String(): 50},
+	})
+	// Direct link to relay2: 100ms, relay2 -> target: 80ms (total 180ms)
+	r.UpdateDirectLink(nodeRelay2, 100, LinkDirect)
+	r.ProcessLSA(&LinkStatePayload{
+		Origin:    nodeRelay2.String(),
+		Seq:       1,
+		TTL:       5,
+		Neighbors: map[string]int64{nodeTarget.String(): 80},
+	})
+
+	dtos := r.GetRouteInfoDTOs(func(pID peer.ID) (string, string, string) {
+		switch pID {
+		case nodeLocal:
+			return "LocalNode", "10.0.0.1", ""
+		case nodeTarget:
+			return "TargetNode", "10.0.0.2", ""
+		case nodeRelay1:
+			return "Relay1", "10.0.0.3", ""
+		case nodeRelay2:
+			return "Relay2", "10.0.0.4", ""
+		}
+		return "", "", ""
+	})
+
+	var targetRouteIndex = -1
+	for i := range dtos {
+		if dtos[i].DestPeer == nodeTarget.String() {
+			targetRouteIndex = i
+			break
+		}
+	}
+
+	if targetRouteIndex < 0 {
+		t.Fatalf("TargetNode route not found in DTOs")
+	}
+	targetRoute := dtos[targetRouteIndex]
+
+	if !targetRoute.IsDirect {
+		t.Errorf("Expected direct route to be chosen as optimal (10ms)")
+	}
+
+	// Candidates should contain:
+	// 1. Direct (10ms, optimal)
+	// 2. Via Relay1 (70ms, sub-optimal)
+	// 3. Via Relay2 (180ms, sub-optimal)
+	if len(targetRoute.Candidates) < 3 {
+		t.Fatalf("Expected at least 3 candidates evaluated, got %d", len(targetRoute.Candidates))
+	}
+
+	optCount := 0
+	for _, c := range targetRoute.Candidates {
+		if c.IsOptimal {
+			optCount++
+			if c.TotalRTT != 10 || !c.IsDirect {
+				t.Errorf("Expected optimal candidate to be Direct (10ms), got %v (RTT=%d)", c.PathNames, c.TotalRTT)
+			}
+		} else {
+			if c.TotalRTT <= 10 && c.TotalRTT > 0 {
+				t.Errorf("Non-optimal candidate has invalid lower/equal RTT: %d", c.TotalRTT)
+			}
+		}
+	}
+	if optCount != 1 {
+		t.Errorf("Expected exactly 1 optimal candidate, got %d", optCount)
+	}
+}
+
+

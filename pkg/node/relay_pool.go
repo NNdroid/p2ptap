@@ -30,6 +30,31 @@ const relayPoolReconnectBackoff = 200 * time.Millisecond
 // without spamming stream negotiations at the reconnect-backoff rate.
 const relayPoolUnsupportedRetry = 60 * time.Second
 
+// relayPoolDropWarnInterval throttles the "write queue full, dropping frame"
+// WARN. A stalled hop otherwise emits hundreds of identical lines per second,
+// burying real signal; we log at most one per interval per hop.
+const relayPoolDropWarnInterval = 5 * time.Second
+
+// relayPoolHealthyRxWindow is how recently we must have RECEIVED a frame back
+// from a relay hop to treat a successful local write as proof the hop is alive.
+// A local write only deposits the frame in the send buffer; in the
+// "peer accepts the stream but never reads" failure class the write still
+// succeeds while the hop is black-holed, so without this independent return-path
+// signal the failure streak would be cleared on every buffered write and the
+// circuit-breaker would never trip.
+const relayPoolHealthyRxWindow = 10 * time.Second
+
+// overlayRelayBlacklistTTL / overlayRelayBlacklistMaxFailures mirror the
+// boot-relay equivalents but for overlay-relay HOPS (mesh peers used as relay
+// next-hops). A shorter TTL lets a transiently-stalled mesh hop be retried
+// sooner, since mesh relay membership is more dynamic than boot server
+// membership. When the relay pool's write loop fails to open or keep a hop's
+// relay stream alive for overlayRelayBlacklistMaxFailures consecutive attempts,
+// the hop is circuit-broken (blacklisted) so relayHopForTarget stops selecting
+// it and frames fall through to a different hop instead of being blackholed.
+const overlayRelayBlacklistTTL = 2 * time.Minute
+const overlayRelayBlacklistMaxFailures = 5
+
 // relayJob represents a single frame to be written on a relay stream.
 type relayJob struct {
 	data   []byte // relay-wrapped payload
@@ -53,6 +78,25 @@ type relayConn struct {
 	// OverlayRelayProtocolID, making Submit reject immediately instead of
 	// queueing frames that can never be delivered.
 	unsupported atomic.Bool
+
+	// node is the owning Node, used to circuit-break (blacklist) the hop when
+	// its relay stream is found to be persistently un-openable or stalled.
+	node *Node
+
+	// unhealthy is invoked when the hop's relay stream fails to open / keep
+	// alive for overlayRelayBlacklistMaxFailures consecutive attempts, so the
+	// Node blacklists it and relayHopForTarget picks a different hop. Set by the
+	// pool at creation.
+	unhealthy func()
+
+	// failCount counts consecutive stream-open / write failures in the single
+	// writeLoop goroutine; reaching overlayRelayBlacklistMaxFailures trips
+	// unhealthy. Reset to 0 on any successful open/write.
+	failCount int
+
+	// lastDropWarn throttles the "queue full, dropping frame" WARN to at most
+	// one per relayPoolDropWarnInterval per hop (atomic unix-nano timestamp).
+	lastDropWarn int64
 }
 
 // isProtocolUnsupported reports whether err is libp2p's permanent
@@ -70,13 +114,15 @@ type relayStreamPool struct {
 	conns map[peer.ID]*relayConn
 	host  host.Host
 	ctx   context.Context
+	node  *Node // back-reference for overlay-relay-hop circuit breaking
 }
 
-func newRelayStreamPool(ctx context.Context, h host.Host) *relayStreamPool {
+func newRelayStreamPool(ctx context.Context, h host.Host, n *Node) *relayStreamPool {
 	return &relayStreamPool{
 		conns: make(map[peer.ID]*relayConn),
 		host:  h,
 		ctx:   ctx,
+		node:  n,
 	}
 }
 
@@ -100,6 +146,15 @@ func (p *relayStreamPool) Submit(hop peer.ID, data []byte, onSent, onFail func()
 		return false
 	}
 
+	// Hop circuit-broken by the overlay-relay health monitor (its relay stream
+	// could not be opened / kept stalling). Fast-fail so the caller falls back
+	// to a different path instead of piling frames onto a dead queue that would
+	// otherwise pin full and drop every frame routed through this hop.
+	if p.node != nil && p.node.isOverlayRelayBlacklisted(hop) {
+		onFail()
+		return false
+	}
+
 	job := relayJob{
 		data:   data,
 		onSent: onSent,
@@ -109,10 +164,25 @@ func (p *relayStreamPool) Submit(hop peer.ID, data []byte, onSent, onFail func()
 	select {
 	case rc.writeCh <- job:
 		return true
-		default:
-			relayLog.Warn("Relay pool write queue full for %s, dropping frame", hop.String())
-			onFail()
-			return false
+	default:
+		// Queue full: drop the frame (onFail already called) but throttle the
+		// WARN — a stalled hop otherwise floods hundreds of identical lines per
+		// second and buries the real signal. One WARN per interval per hop.
+		rc.throttledDropWarn(hop)
+		onFail()
+		return false
+	}
+}
+
+// throttledDropWarn emits the "queue full, dropping frame" WARN at most once per
+// relayPoolDropWarnInterval for this hop, using an atomic timestamp so no mutex
+// is needed on the hot Submit path.
+func (rc *relayConn) throttledDropWarn(hop peer.ID) {
+	now := time.Now().UnixNano()
+	prev := atomic.LoadInt64(&rc.lastDropWarn)
+	if now-prev > int64(relayPoolDropWarnInterval) &&
+		atomic.CompareAndSwapInt64(&rc.lastDropWarn, prev, now) {
+		relayLog.Warn("Relay pool write queue full for %s, dropping frame", hop.String())
 	}
 }
 
@@ -137,6 +207,12 @@ func (p *relayStreamPool) startRelayConn(hop peer.ID) *relayConn {
 		ctx:     ctx,
 		cancel:  cancel,
 		writeCh: make(chan relayJob, relayPoolMaxQueue),
+		node:    p.node,
+	}
+	rc.unhealthy = func() {
+		if rc.node != nil {
+			rc.node.blacklistOverlayRelay(hop)
+		}
 	}
 	rc.wg.Add(1)
 	go rc.writeLoop()
@@ -200,6 +276,21 @@ func (rc *relayConn) ensureStream(backoff *time.Duration) bool {
 		default:
 		}
 
+		// Circuit-broken by the overlay-relay health monitor (relay stream could
+		// not be opened / kept alive). Throttle reconnect attempts to one per TTL
+		// instead of hammering NewStream; the blacklist auto-expires and we retry.
+		if rc.node != nil && rc.node.isOverlayRelayBlacklisted(rc.peer) {
+			rc.drainAll() // hop is circuit-broken: drop queued frames now so they
+			              // fail fast instead of rotting for the whole TTL and being
+			              // retried on every (doomed) reconnect attempt.
+			select {
+			case <-rc.ctx.Done():
+				return false
+			case <-time.After(overlayRelayBlacklistTTL):
+			}
+			continue
+		}
+
 		s, err := rc.host.NewStream(rc.ctx, rc.peer, OverlayRelayProtocolID)
 		if err == nil {
 			rc.mu.Lock()
@@ -207,6 +298,15 @@ func (rc *relayConn) ensureStream(backoff *time.Duration) bool {
 			rc.mu.Unlock()
 			*backoff = relayPoolReconnectBackoff // reset backoff on success
 			rc.unsupported.Store(false)
+			// NOTE: do NOT reset failCount here. A *successful open* only means
+			// the stream handshake completed — it says nothing about whether
+			// frames can actually be written. In the "peer accepts the stream
+			// but never reads" failure mode (the 12D3KooWM9cR... class), NewStream
+			// keeps succeeding while every write times out; resetting failCount
+			// here would pin the streak at 0 forever and the circuit-breaker
+			// would never trip, leaving the hop black-holed and flooding the
+			// "write queue full" WARN. failCount is cleared only on a *successful
+			// write* (see pumpFrames), the only event proving the hop delivers.
 			relayLog.Debug("Relay pool stream established to %s", rc.peer.String())
 			return true
 		}
@@ -230,8 +330,14 @@ func (rc *relayConn) ensureStream(backoff *time.Duration) bool {
 			rc.drainAll()
 			wait = relayPoolUnsupportedRetry
 		} else {
-			relayLog.Debug("Relay pool stream open to %s failed (backoff=%dms): %v",
-				rc.peer.String(), backoff.Milliseconds(), err)
+			rc.failCount++
+			if rc.failCount >= overlayRelayBlacklistMaxFailures && rc.unhealthy != nil {
+				// Hop's relay stream could not be opened after repeated attempts
+				// — circuit-break it so relayHopForTarget routes around it.
+				rc.unhealthy()
+			}
+			relayLog.Debug("Relay pool stream open to %s failed (backoff=%dms, fails=%d): %v",
+				rc.peer.String(), backoff.Milliseconds(), rc.failCount, err)
 		}
 
 		timer := time.NewTimer(wait)
@@ -289,6 +395,7 @@ func (rc *relayConn) pumpFrames(backoff *time.Duration) bool {
 			}
 
 			if err := rc.writeFrame(job); err != nil {
+				rc.bumpFailure()
 				// Stream write failed — mark failed, retry after reconnect.
 				rc.mu.Lock()
 				if rc.stream != nil {
@@ -305,6 +412,7 @@ func (rc *relayConn) pumpFrames(backoff *time.Duration) bool {
 
 				// Retry once after reconnect.
 				if err := rc.writeFrame(job); err != nil {
+					rc.bumpFailure()
 					rc.mu.Lock()
 					if rc.stream != nil {
 						rc.stream.Close()
@@ -313,8 +421,30 @@ func (rc *relayConn) pumpFrames(backoff *time.Duration) bool {
 					rc.mu.Unlock()
 					job.onFail()
 				}
+		} else {
+			// A successful local write only proves the frame entered the send
+			// buffer, NOT that the hop consumed it — in the "peer accepts the
+			// stream but never reads" class writes keep succeeding into a full
+			// flow-control window then stall, so clearing the streak here would
+			// let the circuit-breaker never trip. Only clear when we have
+			// independent return-path proof: we recently received a frame back
+			// FROM this hop.
+			if rc.node != nil && rc.node.peerRxWithin(rc.peer, relayPoolHealthyRxWindow) {
+				rc.failCount = 0
 			}
 		}
+		}
+	}
+}
+
+// bumpFailure records one consecutive relay-stream failure and trips the hop's
+// circuit-breaker once the streak reaches overlayRelayBlacklistMaxFailures. The
+// streak is reset to 0 on any successful open/write, so only a PERSISTENTLY dead
+// hop is blacklisted — a single transient stall never is.
+func (rc *relayConn) bumpFailure() {
+	rc.failCount++
+	if rc.failCount >= overlayRelayBlacklistMaxFailures && rc.unhealthy != nil {
+		rc.unhealthy()
 	}
 }
 

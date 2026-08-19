@@ -182,6 +182,12 @@ type Node struct {
 	directConnected   map[peer.ID]bool
 	directConnectedMu sync.Mutex
 
+	// Tracks monotonically increasing connection generation per peer so delayed
+	// DisconnectedF debounce purges never wipe out a fresh reconnection.
+	connGenCounter  atomic.Uint64
+	connGenerations sync.Map // peer.ID -> uint64
+
+
 	// Guards broadcastLSA so the periodic ticker and the on-connect immediate
 	// trigger do not race on shared Node state (Collector/Config).
 	lsaMu sync.Mutex
@@ -205,6 +211,18 @@ type Node struct {
 	// instead of waiting behind a backlog of ordinary TAP egress frames.
 	urgentDispatchCh chan dispatchTask
 
+	// TAP-probe reply capture. ProbeTapForward dispatches a real ICMP echo
+	// request over the overlay to the peer's TAP device and then waits for the
+	// echo *reply* to come back through THIS node's real TAP device (peer OS
+	// answers -> peer TAP -> overlay -> our TAP -> tapReadLoop -> here). The
+	// read loop hands matching frames to probeReplyCh. probeActive is an atomic
+	// guard so the cheap ICMP-parse in maybeDeliverProbeReply only runs while a
+	// probe is actually in flight (no per-frame cost when idle). probeMu
+	// serialises concurrent probes so they never steal each other's replies.
+	probeReplyCh chan []byte
+	probeActive   int32
+	probeMu       sync.Mutex
+
 	reconnectTimeMu sync.Mutex
 
 	// Persistent relay stream pool — one long-lived OverlayRelayProtocolID
@@ -224,6 +242,34 @@ type Node struct {
 	// bootRelayStarted records boots for which the uplink goroutine has been
 	// spawned, so reconnects do not spawn duplicates (the uplink self-heals).
 	bootRelayStarted map[peer.ID]struct{}
+	// bootRelayBlacklist marks boots whose relay-over-backbone uplink could NOT
+	// be established after repeated attempts — almost always because the "boot"
+	// is actually a plain node (no /p2ptap/boot-relay/1.0.0 handler) mistakenly
+	// listed as a bootstrap peer. A blacklisted boot is skipped by
+	// relayHopForTarget / canEgressToPeer so frames fall through to a working
+	// overlay-relay hop or direct path instead of being silently dropped on
+	// every single frame. Entries auto-expire (bootRelayBlacklistTTL) so a boot
+	// that later comes up is retried.
+	bootRelayBlacklist   map[peer.ID]time.Time
+	bootRelayBlacklistMu sync.Mutex
+	// overlayRelayBlacklist marks overlay-relay HOPS (mesh peers that speak
+	// OverlayRelayProtocolID and are used as relay next-hops) whose relay stream
+	// could not be opened or kept stalling after repeated attempts. Unlike the
+	// boot-relay blacklist (which targets boots), this targets ordinary mesh
+	// relay peers; a stalled one would otherwise pin its per-hop write queue full
+	// and silently drop every frame routed through it while relayHopForTarget
+	// keeps re-selecting it. Entries auto-expire (overlayRelayBlacklistTTL) so a
+	// hop that recovers is retried. Mirrors bootRelayBlacklist.
+	overlayRelayBlacklist   map[peer.ID]time.Time
+	overlayRelayBlacklistMu sync.Mutex
+	// peerLastRx records the last time we received ANY inbound frame (relayed
+	// or direct) from a peer. It is the only local signal for RETURN-path
+	// liveness in an asymmetric-routing mesh (each node selects its outbound
+	// and return paths independently, so a healthy outbound path proves nothing
+	// about whether the peer can route frames back). Used by the ping-pong
+	// probe to distinguish "outbound dead" from "return dead at the peer".
+	peerLastRx map[peer.ID]time.Time
+	peerRxMu   sync.RWMutex
 	bootRelayNetID   string
 	// bootRelayCtrlMu guards bootRelayCtrlStreams. bootRelayCtrlStreams maps a
 	// per-conversation convID to the multiplexed control stream simulator that
@@ -539,31 +585,38 @@ type dispatchTask struct {
 	owned bool
 }
 
+type bcastDedupEntry struct {
+	hash uint64
+	at   time.Time
+}
+
 // bcastDedupRing is a lightweight content-based deduplication ring for
-// broadcast/multicast frames that arrive from multiple peers.  Without this,
+// broadcast/multicast frames that arrive from multiple peers. Without this,
 // the same L2 frame written to TAP N times (once per peer stream) wastes
 // kernel CPU and can confuse upper-layer protocols.
 type bcastDedupRing struct {
-	mu     sync.Mutex
-	hashes [4096]uint64
-	next   int
+	mu      sync.Mutex
+	entries [1024]bcastDedupEntry
+	next    int
 }
 
 func (r *bcastDedupRing) isDuplicate(h uint64) bool {
 	if h == 0 {
 		return false
 	}
+	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for i := range r.hashes {
-		if r.hashes[i] == h {
+	for i := range r.entries {
+		if r.entries[i].hash == h && now.Sub(r.entries[i].at) < 2*time.Second {
 			return true
 		}
 	}
-	r.hashes[r.next] = h
-	r.next = (r.next + 1) % len(r.hashes)
+	r.entries[r.next] = bcastDedupEntry{hash: h, at: now}
+	r.next = (r.next + 1) % len(r.entries)
 	return false
 }
+
 
 // fnvHash64 returns a FNV-1a 64-bit hash of data (fast, good distribution).
 func fnvHash64(data []byte) uint64 {
@@ -1040,6 +1093,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		dispatchCh:          make(chan dispatchTask, 8192), // bounded buffer: 8192 frames for high-throughput scaling
 		urgentWriteCh:       make(chan []byte, 64),         // urgent TAP-inject queue (diagnostics)
 		urgentDispatchCh:    make(chan dispatchTask, 64),   // urgent SEND queue (symmetric to receive)
+		probeReplyCh:        make(chan []byte, 8),          // TAP-probe echo-reply capture (see probeActive)
 		perPeerLastTx:       make(map[peer.ID]uint64),
 		perPeerLastRx:       make(map[peer.ID]uint64),
 		perPeerTxSpeed:      make(map[peer.ID]uint64),
@@ -1056,12 +1110,15 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// reject every LSA from us as stale until CleanStaleNodes purged us, i.e.
 	// up to 60s of invisibility after every restart).
 	node.lsaSeq.Store(uint64(time.Now().UnixNano()))
-	node.relayPool = newRelayStreamPool(ctx, h)
+	node.relayPool = newRelayStreamPool(ctx, h, node)
 	// Boot-relay (relay-over-backbone) uplink pool. The network ID is derived
 	// from the configured PSK so cross-boot envelopes carry the right isolation
 	// tag; in open mode (no PSK) it is empty and the boot accepts all.
 	node.bootRelayConns = make(map[peer.ID]*bootRelayConn)
 	node.bootRelayStarted = make(map[peer.ID]struct{})
+	node.bootRelayBlacklist = make(map[peer.ID]time.Time)
+	node.overlayRelayBlacklist = make(map[peer.ID]time.Time)
+	node.peerLastRx = make(map[peer.ID]time.Time)
 	node.bootRelayCtrlStreams = make(map[string]*bootRelayCtrlStream)
 	node.bootRelayNetID = routing.NetworkIDFromPSK(node.Config.PSK)
 	node.lsaPool = newLSAStreamPool(node, LSAProtocolID)
@@ -1438,8 +1495,6 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	h.SetStreamHandler(EchoProtocolID, node.handleEcho)
 	log.Debug("Stream handler registered for Echo protocol: %s", EchoProtocolID)
 
-	node.registerTapProbeHandler()
-
 	node.registerSeqSyncHandler()
 	log.Debug("Stream handler registered for SeqSync protocol: %s", SeqSyncProtocolID)
 
@@ -1452,6 +1507,11 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			pID := conn.RemotePeer()
 			addrStr := conn.RemoteMultiaddr().String()
 			isCircuitRelay := strings.Contains(addrStr, "/p2p-circuit")
+
+			// Stamp a new monotonically increasing connection generation so any
+			// in-flight DisconnectedF debounce goroutine will not purge this peer.
+			gen := node.connGenCounter.Add(1)
+			node.connGenerations.Store(pID, gen)
 
 			// Protect P2P socket route: when exit node is active, ensure the
 			// peer's physical IP has a /32 host route via the physical gateway
@@ -1558,22 +1618,8 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			go node.syncMetadataToPeer(pID)
 
 			// ECDH re-key on every (re)connect so both sides converge on the
-			// same cipher after a restart, even when in-memory keys were retained.
-			go func() {
-				if node.isResyncLeader(pID) {
-					node.triggerPeerRekey(pID)
-					return
-				}
-				// Follower waits to give the leader time to open its stream first.
-				// Circuit-relay paths get a shorter delay to avoid plaintext
-				// frames on the new link before cipher is negotiated.
-				followerDelay := 5 * time.Second
-				if isCircuitRelay {
-					followerDelay = 2 * time.Second
-				}
-				time.Sleep(followerDelay)
-				node.triggerPeerRekey(pID)
-			}()
+			// same cipher immediately after a restart.
+			go node.triggerPeerRekey(pID)
 
 			// Broadcast our LSA so the new peer learns our current link state.
 			go func() {
@@ -1614,8 +1660,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 
 			if hadDirect {
 				debounceID := pID
+				curGen, _ := node.connGenerations.Load(debounceID)
 				go func() {
 					time.Sleep(2 * time.Second)
+					if latestGen, ok := node.connGenerations.Load(debounceID); ok && latestGen != curGen {
+						log.Debug("Peer %s reconnected with new generation, aborting stale disconnect purge", debounceID.String())
+						return
+					}
 					if node.Host.Network().Connectedness(debounceID) == network.Connected ||
 						len(node.Host.Network().ConnsToPeer(debounceID)) > 0 {
 						log.Debug("Peer %s recovered within debounce window, not purging", debounceID.String())
@@ -1625,34 +1676,35 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 						return
 					}
 					log.Info("Peer disconnected: %s (last transport lost, purging links, metadata & MAC table)", debounceID.String())
-				node.Router.RemoveDirectLink(debounceID)
-				node.deletePeerMeta(debounceID)
-				node.MACTable.CleanPeer(debounceID)
-				node.Dispatcher.RemovePeer(debounceID)
-				node.dedupPeersMu.Lock()
-				delete(node.dedupPeers, debounceID)
-				node.dedupPeersMu.Unlock()
-				node.removePeerObf(debounceID)
-				node.reconcileSubnetRoutes()
-				// Drop cached persistent control streams so the next use re-opens
-				// cleanly instead of hitting a dead stream (10s NewStream timeout).
-				node.lsaPool.Invalidate(debounceID)
-				node.metaPool.Invalidate(debounceID)
-				node.echoPool.Invalidate(debounceID)
-				// Re-flood LSA so peers drop the now-stale edge to this peer
-				// instead of holding a phantom link. Fresh seq + reset gossip
-				// throttle guarantees propagation even if our neighbour set is
-				// otherwise unchanged.
-				go func() {
-					node.lsaMu.Lock()
-					defer node.lsaMu.Unlock()
-					node.lastLSAMu.Lock()
-					node.lastLSAJSON = nil
-					node.lastLSAMu.Unlock()
-					node.broadcastLSA(node.nextLSASeq())
-				}()
+					node.Router.RemoveDirectLink(debounceID)
+					node.deletePeerMeta(debounceID)
+					node.MACTable.CleanPeer(debounceID)
+					node.Dispatcher.RemovePeer(debounceID)
+					node.dedupPeersMu.Lock()
+					delete(node.dedupPeers, debounceID)
+					node.dedupPeersMu.Unlock()
+					node.removePeerObf(debounceID)
+					node.reconcileSubnetRoutes()
+					// Drop cached persistent control streams so the next use re-opens
+					// cleanly instead of hitting a dead stream (10s NewStream timeout).
+					node.lsaPool.Invalidate(debounceID)
+					node.metaPool.Invalidate(debounceID)
+					node.echoPool.Invalidate(debounceID)
+					// Re-flood LSA so peers drop the now-stale edge to this peer
+					// instead of holding a phantom link. Fresh seq + reset gossip
+					// throttle guarantees propagation even if our neighbour set is
+					// otherwise unchanged.
+					go func() {
+						node.lsaMu.Lock()
+						defer node.lsaMu.Unlock()
+						node.lastLSAMu.Lock()
+						node.lastLSAJSON = nil
+						node.lastLSAMu.Unlock()
+						node.broadcastLSA(node.nextLSASeq())
+					}()
 				}()
 			} else {
+
 			log.Info("Peer disconnected: %s via %s (last transport lost, purging links, metadata & MAC table)", pID.String(), addrStr)
 			node.Router.RemoveDirectLink(pID)
 			node.deletePeerMeta(pID)
@@ -2878,8 +2930,35 @@ func (n *Node) GetTopology() TopologyResponse {
 		Depth:    0,
 		Cluster:  localCluster,
 	})
-	// Other nodes.
+	// Build a comprehensive, deduplicated list of all known peer IDs:
+	// 1. Nodes in link-state graph (snap.Nodes)
+	// 2. Nodes with metadata in peerMeta
+	// 3. Directly connected nodes in host network
+	allNodesMap := make(map[peer.ID]bool)
+	allNodesList := make([]peer.ID, 0, len(snap.Nodes)+len(meta)+8)
 	for _, pid := range snap.Nodes {
+		if pid != self && !allNodesMap[pid] {
+			allNodesMap[pid] = true
+			allNodesList = append(allNodesList, pid)
+		}
+	}
+	for pid := range meta {
+		if pid != self && !allNodesMap[pid] {
+			allNodesMap[pid] = true
+			allNodesList = append(allNodesList, pid)
+		}
+	}
+	if n.Host != nil {
+		for _, pid := range n.Host.Network().Peers() {
+			if pid != self && !allNodesMap[pid] {
+				allNodesMap[pid] = true
+				allNodesList = append(allNodesList, pid)
+			}
+		}
+	}
+
+	// Other nodes.
+	for _, pid := range allNodesList {
 		if pid == self {
 			continue
 		}
@@ -2893,12 +2972,28 @@ func (n *Node) GetTopology() TopologyResponse {
 			tn.Version = m.Version
 		}
 		_, tn.Direct = directSet[pid]
+		if !tn.Direct && n.isDirectlyConnected(pid) {
+			tn.Direct = true
+		}
 		if p, ok := parent[pid]; ok {
 			tn.Parent = p.String()
 			tn.Depth = int(dist[pid]) // depth proxy = cumulative RTT; replaced below
+		} else {
+			// Fallback parent when node is not yet connected in the LSA link-state graph
+			if tn.Direct {
+				tn.Parent = self.String()
+				tn.Depth = 1
+			} else if hop := n.relayHopForTarget(pid); hop != "" {
+				tn.Parent = hop.String()
+				tn.Depth = 2
+				tn.RelayHop = hop.String()
+			} else {
+				tn.Parent = self.String()
+				tn.Depth = 1
+			}
 		}
 		// Compute true hop depth via parent chain.
-		if tn.Parent != "" {
+		if tn.Parent != "" && tn.Parent != self.String() {
 			d := 0
 			cur := pid
 			for cur != self {
@@ -2912,11 +3007,20 @@ func (n *Node) GetTopology() TopologyResponse {
 					break
 				}
 			}
-			tn.Depth = d
+			if d > 0 {
+				tn.Depth = d
+			}
+		} else if tn.Parent == self.String() {
+			tn.Depth = 1
 		}
 		if p, ok := parent[pid]; ok {
 			if w, ok := adj[p][pid]; ok {
 				tn.RTT = w
+			}
+		}
+		if tn.RTT == 0 && n.Host != nil {
+			if l := n.Host.Peerstore().LatencyEWMA(pid); l > 0 {
+				tn.RTT = l.Milliseconds()
 			}
 		}
 		// --- Complex-topology annotations ---
@@ -2953,6 +3057,7 @@ func (n *Node) GetTopology() TopologyResponse {
 	}
 	// Expose the raw link-state edges so the WebUI can derive transit/L2-switch
 	// relationships (e.g. self forwarding between two direct-but-not-linked peers).
+	existingEdges := make(map[string]bool)
 	for _, e := range snap.Edges {
 		resp.Edges = append(resp.Edges, TopologyEdge{
 			From:  e.From.String(),
@@ -2960,10 +3065,28 @@ func (n *Node) GetTopology() TopologyResponse {
 			RTT:   e.RTT,
 			Class: linkClassName(e.Class),
 		})
+		existingEdges[e.From.String()+"|"+e.To.String()] = true
+		existingEdges[e.To.String()+"|"+e.From.String()] = true
+	}
+	// Also ensure direct links from self to any active direct peer are present in Edges
+	for _, tn := range resp.Nodes {
+		if !tn.Self && tn.Parent == self.String() {
+			if !existingEdges[self.String()+"|"+tn.PeerID] {
+				resp.Edges = append(resp.Edges, TopologyEdge{
+					From:  self.String(),
+					To:    tn.PeerID,
+					RTT:   tn.RTT,
+					Class: "direct",
+				})
+				existingEdges[self.String()+"|"+tn.PeerID] = true
+				existingEdges[tn.PeerID+"|"+self.String()] = true
+			}
+		}
 	}
 	resp.Clusters = summariseClusters(resp.Nodes, localCluster)
 	return resp
 }
+
 
 // linkClassName renders a routing link class for the topology API.
 func linkClassName(c routing.LinkClass) string {

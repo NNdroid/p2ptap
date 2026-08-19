@@ -9,6 +9,7 @@ require (
 	github.com/libp2p/go-libp2p v0.49.0
 	github.com/libp2p/go-libp2p-kad-dht v0.31.0
 	github.com/multiformats/go-multiaddr v0.16.1
+	github.com/oschwald/geoip2-golang v1.13.0
 	github.com/pion/transport/v3 v3.0.7
 	github.com/quic-go/quic-go v0.60.0
 	github.com/vishvananda/netlink v1.3.1
@@ -79,7 +80,6 @@ require (
 	github.com/multiformats/go-varint v0.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
-	github.com/oschwald/geoip2-golang v1.13.0 // indirect
 	github.com/oschwald/maxminddb-golang v1.13.0 // indirect
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	github.com/pion/datachannel v1.5.10 // indirect

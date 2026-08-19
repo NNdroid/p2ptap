@@ -656,6 +656,70 @@ func (n *Node) mySupportedAlgos() []byte {
 	}
 }
 
+// explicitlyPinnedAES reports whether the advertised algorithm list came from an
+// explicit "aes-gcm"/"aes" configuration. mySupportedAlgos advertises AES first
+// ([AES, ChaCha20, None]) only for that case; "auto" and "chacha20" advertise
+// [ChaCha20, AES, None]. The order is the only signal we have without adding a
+// protocol field, and it is sufficient to detect an explicit AES pin.
+func explicitlyPinnedAES(algos []byte) bool {
+	return len(algos) > 0 && algos[0] == obfuscate.ObfAlgoAESGCM
+}
+
+// algoIntersection returns the algorithms present in BOTH a and b (order follows a).
+func algoIntersection(a, b []byte) []byte {
+	var out []byte
+	seen := make(map[byte]struct{}, len(a))
+	for _, x := range a {
+		if _, ok := seen[x]; ok {
+			continue
+		}
+		seen[x] = struct{}{}
+		for _, y := range b {
+			if x == y {
+				out = append(out, x)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// selectAlgoSymmetric picks the negotiated algorithm from the two advertised
+// support sets. It is commutative: selectAlgoSymmetric(a, b) ==
+// selectAlgoSymmetric(b, a), so both ends of a connection always converge on
+// the same algorithm regardless of PeerID ordering.
+//
+//  1. Intersect the two sets.
+//  2. If AES-GCM is in the intersection and either side explicitly pinned it
+//     (see explicitlyPinnedAES), prefer AES — this honours an explicit choice
+//     instead of silently overriding it.
+//  3. Otherwise fall back to the global default order [ChaCha20, AES, None]
+//     (the both-auto case keeps ChaCha20, the CPU-friendly default on routers
+//     without AES-NI).
+func selectAlgoSymmetric(a, b []byte) byte {
+	set := algoIntersection(a, b)
+	if containsAlgo(set, obfuscate.ObfAlgoAESGCM) &&
+		(explicitlyPinnedAES(a) || explicitlyPinnedAES(b)) {
+		return obfuscate.ObfAlgoAESGCM
+	}
+	for _, pref := range obfuscate.DefaultAlgoPreference {
+		if containsAlgo(set, pref) {
+			return pref
+		}
+	}
+	return obfuscate.ObfAlgoNone
+}
+
+// containsAlgo reports whether v is present in s.
+func containsAlgo(s []byte, v byte) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 // negotiateObfWithPeer performs the ECDH handshake given the peer's public key
 // bytes and advertised algorithm list, derives the per-peer AEAD cipher, and
 // stores it in n.perPeerObf. If the peer sends no public key (encryption
@@ -737,17 +801,22 @@ func (n *Node) negotiateObfWithPeer(p peer.ID, peerPub []byte, peerAlgos []byte,
 		}
 	}()
 
-	// Symmetric algorithm selection: always evaluate using the Resync Leader's
-	// (smaller PeerID) preference order against the follower's supported set.
-	// This ensures both peers select the EXACT same cipher when they advertise
-	// different local preferences (e.g. Node A prefers AES-GCM while Node B is Auto).
-	var leaderPref, followerAlgos []byte
-	if n.Host.ID() < p {
-		leaderPref, followerAlgos = n.mySupportedAlgos(), peerAlgos
-	} else {
-		leaderPref, followerAlgos = peerAlgos, n.mySupportedAlgos()
-	}
-	algo := obfuscate.SelectAlgo(leaderPref, followerAlgos)
+	// Symmetric algorithm negotiation — PeerID-independent.
+	//
+	// Both peers compute the SAME result from the two advertised support sets,
+	// so the chosen cipher never depends on which peer has the smaller PeerID
+	// (the previous leader/follower scheme let a node's explicit config be
+	// silently overridden by PeerID ordering). Rules:
+	//   1. Intersect the two support sets.
+	//   2. If AES-GCM is in the intersection AND at least one side explicitly
+	//      pinned it, prefer AES. Only an explicit "aes-gcm"/"aes" config
+	//      advertises AES first (i.e. [AES, ChaCha20, None]); "auto" and
+	//      "chacha20" advertise [ChaCha20, AES, None]. This honours a node's
+	//      explicit choice.
+	//   3. Otherwise fall back to the global default order [ChaCha20, AES, None]
+	//      (the both-auto case keeps ChaCha20, the CPU-friendly default on
+	//      routers without AES-NI).
+	algo := selectAlgoSymmetric(n.mySupportedAlgos(), peerAlgos)
 	if algo == obfuscate.ObfAlgoNone {
 		log.Debug("SeqSync: no common algorithm with %s, falling back to plaintext", p.String())
 		return

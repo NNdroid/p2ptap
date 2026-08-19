@@ -474,7 +474,9 @@
                     <span class="pill-badge role-static ext50" id="activeStreamsBadge">0 Streams</span>
                 </div>
                 <div class="ext99">
-                    <input type="text" id="streamSearchInput" class="module-search" data-search-target="streamsTableBody" data-paginate="true" data-i18n-ph="search_streams_ph" placeholder="🔍 Search streams, protocols, peers…">
+                    <input type="text" id="streamSearchInput" class="module-search" data-search-target="streamsTableBody" data-paginate="true" data-paginate-page-size="25" data-i18n-ph="search_streams_ph" placeholder="Search streams, protocols, peers…">
+
+
                 </div>
             </div>
 
@@ -484,8 +486,9 @@
             </div>
 
             <!-- Live Active Streams Table -->
-            <div class="glass-card ext53" style="margin-top: 14px; overflow-x: auto; padding: 0;">
+            <div class="glass-card ext53 table-responsive" style="margin-top: 14px; padding: 0;">
                 <table class="data-table" id="streamsTable" style="width: 100%; border-collapse: collapse;">
+
                     <thead>
                         <tr>
                             <th data-i18n="th_stream_proto">Protocol / Channel</th>
@@ -606,6 +609,7 @@
                             <th data-i18n="col_nat">NAT Status</th>
                             <th data-i18n="col_encryption">Encryption</th>
                             <th data-i18n="col_status">Conn Status</th>
+                            <th data-i18n="col_return_path">Return Path</th>
                             <th data-i18n="col_peerid">Peer ID</th>
                             <th data-i18n="col_multiaddr">Network Multiaddr</th>
                             <th data-i18n="col_transport">Transport</th>
@@ -617,7 +621,7 @@
                         </tr>
                     </thead>
                     <tbody id="peersList">
-                        <tr><td colspan="15" class="empty-row" data-i18n="retrieving_metrics">Retrieving peer link metrics...</td></tr>
+                        <tr><td colspan="17" class="empty-row" data-i18n="retrieving_metrics">Retrieving peer link metrics...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -769,11 +773,12 @@
                 <button type="button" class="pg-btn" id="ipNext" data-i18n="next_page">下一页 ›</button>
                 <label class="pg-size"><span data-i18n="per_page">每页</span>
                     <select id="ipPageSize">
-                        <option value="25">25</option>
-                        <option value="50" selected>50</option>
+                        <option value="25" selected>25</option>
+                        <option value="50">50</option>
                         <option value="100">100</option>
                         <option value="200">200</option>
                     </select>
+
                 </label>
             </div>
         </section>
@@ -829,8 +834,9 @@
                 <span class="ext33">tx</span> = 本机发出，<span class="ext96">rx</span> = 本机收到。
                 <span class="ext33">点击任意一行</span>可查看完整详情与原始帧十六进制。
             </p>
-            <div class="ext123" id="pcapScroll">
+            <div class="ext123 table-responsive" id="pcapScroll">
                 <table class="pcap-table">
+
                     <thead class="ext124">
                         <tr>
                             <th data-i18n="pcap_col_seq">#</th><th data-i18n="pcap_col_time">时间</th><th data-i18n="pcap_col_dir">方向</th><th data-i18n="pcap_col_srcmac">源 MAC</th><th data-i18n="pcap_col_dstmac">目的 MAC</th>

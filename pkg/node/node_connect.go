@@ -19,6 +19,8 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/net/swarm"
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
+
+	"p2ptap/pkg/version"
 )
 
 func (n *Node) connectWithRetry(pi peer.AddrInfo, peerType string, baseDelay time.Duration, maxRetries int) {
@@ -108,9 +110,16 @@ func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 	// Compute auth token: SHA-256("p2ptap-relay-auth:" + PSK)
 	token := sha256.Sum256([]byte("p2ptap-relay-auth:" + n.Config.PSK))
 
-	// Send 32-byte auth token
+	// Send 32-byte auth token, then our version/capability record. An OLD boot
+	// simply ignores the trailing record; a NEW boot reads it and replies with
+	// its own record so we can reject envelope/commit mismatches up-front
+	// (the historical 0x8000 "proto field len 32768" silent-corruption bug).
 	if _, err := s.Write(token[:]); err != nil {
 		log.Debug("Relay auth write failed for peer %s: %v", peerID.String(), err)
+		return false
+	}
+	if err := version.CurrentRecord().WriteRecord(s); err != nil {
+		log.Debug("Relay auth version write failed for peer %s: %v", peerID.String(), err)
 		return false
 	}
 
@@ -125,17 +134,45 @@ func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 		return false
 	}
 
-	if resp[0] == 0x01 {
-		if isRefresh {
-			log.Debug("Relay auth SUCCESS with peer %s — relay access granted (refresh)", peerID.String())
-		} else {
-			log.Info("Relay auth SUCCESS with peer %s — relay access granted", peerID.String())
-		}
-		return true
+	if resp[0] != 0x01 {
+		log.Warn("Relay auth FAILED with peer %s — PSK mismatch, relay access denied", peerID.String())
+		return false
 	}
 
-	log.Warn("Relay auth FAILED with peer %s — PSK mismatch, relay access denied", peerID.String())
-	return false
+	// Auth succeeded: best-effort read the boot's version record. An OLD boot
+	// closed the stream after the 1-byte response, so a short read means
+	// "unknown version" — warn and proceed rather than fail the whole link.
+	var peerRec version.Record
+	if err := peerRec.ReadRecord(s); err != nil {
+		log.Warn("Relay peer %s did not report a version record (old build?) — cannot verify envelope compatibility", peerID.String())
+	} else {
+		// Compatibility is a tri-state: OK (safe), Warn (differs but safe to
+		// connect), Danger (incompatible envelope — corruption risk). We NEVER
+		// reject on Warn; on Danger we only reject when StrictVersionCheck is on
+		// (default off), so two peers that CAN interoperate are never blocked.
+		switch lvl, reason := version.CurrentRecord().CompatibleWith(peerRec); lvl {
+		case version.CompatOK:
+			// identical build or unknown peer — nothing to report
+		case version.CompatWarn:
+			log.Warn("Relay peer %s version differs but safe to connect: %s (local commit=%s, peer commit=%s)",
+				peerID.String(), reason, version.ShortCommit(), peerRec.Commit)
+		case version.CompatDanger:
+			log.Error("Relay peer %s version INCOMPATIBLE — risk of silent relay corruption: %s (local commit=%s, peer commit=%s)",
+				peerID.String(), reason, version.ShortCommit(), peerRec.Commit)
+			if version.StrictVersionCheck {
+				log.Error("Relay peer %s rejected (StrictVersionCheck=true) to avoid silent relay corruption", peerID.String())
+				return false
+			}
+			log.Warn("Relay peer %s StrictVersionCheck is off — proceeding despite incompatibility", peerID.String())
+		}
+	}
+
+	if isRefresh {
+		log.Debug("Relay auth SUCCESS with peer %s — relay access granted (refresh)", peerID.String())
+	} else {
+		log.Info("Relay auth SUCCESS with peer %s — relay access granted", peerID.String())
+	}
+	return true
 }
 
 // bootstrapKeepAliveLoop periodically reconnects to bootstrap/static peers that have disconnected
@@ -336,6 +373,34 @@ func (n *Node) resetPingPongFailCountForPeer(pid peer.ID) {
 		n.pingPongFailCount[pid] = 0
 	}
 	n.pingPongFailMu.Unlock()
+	// Any inbound data from pid means its return path to us is alive.
+	n.notePeerRx(pid)
+}
+
+// assertBootRelayUplinkHealth surfaces the "Connected but egress dead" failure
+// mode that plain echo keepalive misses: a boot may be transport-Connected (so
+// its echo stream passes) yet have NO live relay-over-backbone uplink, which
+// silently blackholes every frame to relay-only peers. We warn within one
+// keepalive tick (and re-trigger relay auth) so the operator sees it instead of
+// via packet captures — this is what originally masked the WHBbjX / 92NZj class
+// of relay-drop bug.
+func (n *Node) assertBootRelayUplinkHealth() {
+	for _, pid := range n.Host.Network().Peers() {
+		if pid == n.Host.ID() {
+			continue
+		}
+		if !n.isBootstrapPeer(pid) {
+			continue
+		}
+		if n.Host.Network().Connectedness(pid) != network.Connected {
+			continue
+		}
+		if n.isBootRelayBlacklisted(pid) || n.hasBootRelayUplink(pid) {
+			continue
+		}
+		log.Warn("keepalive: boot %s is transport-Connected but has NO relay-over-backbone uplink — egress to relay-only peers via it is dead; re-triggering relay auth", pid.String())
+		go n.ensureRelayAuth(peer.AddrInfo{ID: pid})
+	}
 }
 
 // peerPingPongLoop sends echo-based keepalive pings to all connected non-bootstrap
@@ -387,6 +452,12 @@ func (n *Node) peerPingPongLoop() {
 				probePeers = append(probePeers, pid)
 			}
 			n.relayOnlyMu.RUnlock()
+
+			// Data-plane health for boot-relay hops: a boot may be
+			// transport-Connected (so its echo keepalive passes) yet have NO live
+			// relay-over-backbone uplink, which silently blackholes every frame to
+			// relay-only peers. Surface that fast instead of via packet captures.
+			n.assertBootRelayUplinkHealth()
 
 			// Probe all peers concurrently (capped by semaphore)
 			var wg sync.WaitGroup
@@ -460,7 +531,19 @@ func (n *Node) pingPongProbePeer(pid peer.ID) {
 	fc := n.pingPongFailCount[pid]
 	n.pingPongFailMu.Unlock()
 	if fc >= pingPongMaxFailures {
-		log.Warn("Ping-pong keepalive failed %d times for %s, forcing reconnect", fc, pid.String())
+		if n.peerRxWithin(pid, pingPongReadTimeout*3) {
+			// We have received OTHER inbound frames from pid recently, so our
+			// outbound path to it clearly works — the failed echo means pid's
+			// RETURN path to us is broken (asymmetric routing: its return hop
+			// differs from our outbound hop and is stalled). A reconnect may not
+			// fix a return-path break at the peer; the operator must check pid's
+			// relay stream / TAP egress.
+			log.Warn("Ping-pong keepalive failed %d times for %s — but return-path frames still arriving recently ⇒ OUTBOUND OK, RETURN dead at peer (asymmetric routing); forcing reconnect, but check %s's relay stream / TAP egress",
+				fc, pid.String(), pid.ShortString())
+		} else {
+			log.Warn("Ping-pong keepalive failed %d times for %s — no recent inbound frames ⇒ OUTBOUND dead (or fully partitioned); forcing reconnect",
+				fc, pid.String())
+		}
 		n.reconnectPeer(pid)
 		n.pingPongFailMu.Lock()
 		delete(n.pingPongFailCount, pid)

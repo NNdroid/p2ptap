@@ -12,14 +12,27 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"p2ptap/pkg/obfuscate"
+	"p2ptap/pkg/observer"
 	"p2ptap/pkg/routing"
+	"p2ptap/pkg/version"
 	vswitch "p2ptap/pkg/switch"
 )
+
 
 // bootRelayMaxQueue is the per-boot write buffer depth for the boot-relay
 // uplink. When full, Submit fails fast and the caller falls back to the circuit
 // path (or drops, and the source retransmits).
 const bootRelayMaxQueue = 128
+
+// bootRelayBlacklistTTL is how long a boot stays blacklisted after its uplink
+// repeatedly failed to establish. Expiry lets a boot that later comes up be
+// retried instead of being permanently avoided.
+const bootRelayBlacklistTTL = 5 * time.Minute
+
+// bootRelayBlacklistMaxFailures is how many consecutive NewStream attempts to a
+// boot must fail before we conclude it is not a real boot-relay server (e.g. a
+// plain node mistakenly listed as a bootstrap peer) and blacklist it.
+const bootRelayBlacklistMaxFailures = 5
 
 // bootRelayJob is a single frame queued for the boot-relay uplink write loop.
 type bootRelayJob struct {
@@ -49,9 +62,27 @@ type bootRelayConn struct {
 func (n *Node) openBootRelayUplink(boot peer.ID) {
 	backoff := 2 * time.Second
 	const maxBackoff = 30 * time.Second
+	// readerBackoff spaces out reconnects AFTER a stream was established and then
+	// died (reader returned). Without it a boot that accepts the stream and
+	// immediately closes would cause a tight reconnect loop.
+	readerBackoff := time.Second
+	const maxReaderBackoff = 15 * time.Second
+	failCount := 0
 	for {
 		if n.ctx.Err() != nil {
 			return
+		}
+		// If this boot is blacklisted (its uplink repeatedly failed to
+		// establish — it is likely not a real boot-relay server), throttle
+		// reconnect attempts to one per TTL instead of hammering NewStream every
+		// few seconds. The blacklist auto-expires, after which we retry.
+		if n.isBootRelayBlacklisted(boot) {
+			select {
+			case <-n.ctx.Done():
+				return
+			case <-time.After(bootRelayBlacklistTTL):
+			}
+			continue
 		}
 		if n.Host.Network().Connectedness(boot) != network.Connected {
 			select {
@@ -63,7 +94,15 @@ func (n *Node) openBootRelayUplink(boot peer.ID) {
 		}
 		s, err := n.Host.NewStream(n.ctx, boot, BootRelayProtocolID)
 		if err != nil {
-			log.Debug("[boot-relay] open uplink to %s failed (backoff=%v): %v", boot.ShortString(), backoff, err)
+			failCount++
+			log.Debug("[boot-relay] open uplink to %s failed (attempt %d, backoff=%v): %v", boot.ShortString(), failCount, backoff, err)
+			if failCount >= bootRelayBlacklistMaxFailures {
+				// The peer does not speak /p2ptap/boot-relay/1.0.0 — it is not a
+				// real boot-relay server (e.g. a plain node mistakenly listed as
+				// a bootstrap peer). Blacklist so relayHopForTarget stops trying
+				// to egress through it and drops frames on every single packet.
+				n.blacklistBootRelay(boot)
+			}
 			select {
 			case <-n.ctx.Done():
 				return
@@ -75,6 +114,8 @@ func (n *Node) openBootRelayUplink(boot peer.ID) {
 			continue
 		}
 		backoff = 2 * time.Second
+		failCount = 0
+		readerBackoff = time.Second
 		log.Info("[boot-relay] uplink established to boot %s", boot.String())
 
 		rcCtx, rcCancel := context.WithCancel(n.ctx)
@@ -91,11 +132,21 @@ func (n *Node) openBootRelayUplink(boot peer.ID) {
 		go n.bootRelayWriteLoop(rc)
 		n.handleBootRelayDownlink(s, boot)
 
-		// Downlink reader returned (stream dead): tear down, cancel writeLoop, and reopen.
+		// Downlink reader returned (stream dead): tear down, cancel writeLoop, and
+		// reopen. Space the reopen out so a boot that accepts-then-closes does
+		// not tight-loop.
 		n.bootRelayUnregister(boot, rc)
 		rcCancel()
 		s.Close()
-		log.Debug("[boot-relay] uplink to %s closed; will reopen", boot.ShortString())
+		log.Debug("[boot-relay] uplink to %s closed; reopening after %v", boot.ShortString(), readerBackoff)
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-time.After(readerBackoff):
+		}
+		if readerBackoff < maxReaderBackoff {
+			readerBackoff *= 2
+		}
 	}
 }
 
@@ -123,6 +174,70 @@ func (n *Node) hasBootRelayUplink(boot peer.ID) bool {
 	_, ok := n.bootRelayConns[boot]
 	n.bootRelayMu.Unlock()
 	return ok
+}
+
+// isBootRelayBlacklisted reports whether boot is currently blacklisted (its
+// relay-over-backbone uplink repeatedly failed to establish). Expired entries
+// are purged on access so a boot that later comes up is retried.
+func (n *Node) isBootRelayBlacklisted(boot peer.ID) bool {
+	n.bootRelayBlacklistMu.Lock()
+	defer n.bootRelayBlacklistMu.Unlock()
+	exp, ok := n.bootRelayBlacklist[boot]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(n.bootRelayBlacklist, boot)
+		return false
+	}
+	return true
+}
+
+// blacklistBootRelay marks boot as unusable for relay-over-backbone until
+// bootRelayBlacklistTTL elapses. It is called when the uplink NewStream fails
+// too many times in a row (the peer is not a real boot-relay server).
+func (n *Node) blacklistBootRelay(boot peer.ID) {
+	n.bootRelayBlacklistMu.Lock()
+	n.bootRelayBlacklist[boot] = time.Now().Add(bootRelayBlacklistTTL)
+	n.bootRelayBlacklistMu.Unlock()
+	log.Warn("[boot-relay] blacklisted boot %s: relay-over-backbone uplink could not be established (is it actually running p2ptap-boot?)", boot.ShortString())
+}
+
+// isOverlayRelayBlacklisted reports whether hop is circuit-broken as an
+// overlay-relay next-hop (its relay stream could not be opened / kept stalling).
+// Expired entries are purged on access so a hop that later recovers is retried.
+// Mirrors isBootRelayBlacklisted but for ordinary mesh relay peers.
+func (n *Node) isOverlayRelayBlacklisted(hop peer.ID) bool {
+	n.overlayRelayBlacklistMu.Lock()
+	defer n.overlayRelayBlacklistMu.Unlock()
+	exp, ok := n.overlayRelayBlacklist[hop]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(n.overlayRelayBlacklist, hop)
+		return false
+	}
+	return true
+}
+
+// blacklistOverlayRelay marks hop as unusable as an overlay-relay next-hop until
+// overlayRelayBlacklistTTL elapses. Called by the relay pool when its write loop
+// fails to open or keep the relay stream alive after overlayRelayBlacklistMaxFailures
+// consecutive attempts, so relayHopForTarget stops selecting it and frames fall
+// through to a different hop instead of being blackholed. Already-active
+// (non-expired) entries are not refreshed/extended.
+func (n *Node) blacklistOverlayRelay(hop peer.ID) {
+	n.overlayRelayBlacklistMu.Lock()
+	exp, ok := n.overlayRelayBlacklist[hop]
+	if ok && time.Now().Before(exp) {
+		n.overlayRelayBlacklistMu.Unlock()
+		return // already blacklisted and still active — do not extend
+	}
+	n.overlayRelayBlacklist[hop] = time.Now().Add(overlayRelayBlacklistTTL)
+	n.overlayRelayBlacklistMu.Unlock()
+	relayLog.Warn("[relay-pool] circuit-broke overlay relay hop %s: stream could not be opened/kept alive; routing around it for %s",
+		hop.ShortString(), overlayRelayBlacklistTTL)
 }
 
 // bootRelaySubmit queues a boot-relay envelope for delivery on the persistent
@@ -207,7 +322,13 @@ func (n *Node) handleBootRelayDownlink(s network.Stream, boot peer.ID) {
 		data := buf[:readN]
 		netID, kind, proto, finalDst, srcPeer, _, innerPayload, uerr := routing.UnpackBootRelayFrame(data)
 		if uerr != nil {
-			log.Debug("[boot-relay] downlink unpack error from %s: %v", boot.String(), uerr)
+			// A truncation / layout error here almost always means the boot is
+			// running a DIFFERENT envelope version than this node (the historical
+			// 0x8000 "proto field len 32768 > 163" class of bug). Surface it as a
+			// WARN with both commits so the operator can immediately see the
+			// version skew instead of silently dropped frames — the auth-handshake
+			// version gate (P0) should normally have rejected this peer already.
+			log.Warn("[boot-relay] downlink unpack error from %s (local commit=%s): %v", boot.String(), version.ShortCommit(), uerr)
 			continue
 		}
 		if finalDst != n.Host.ID() {
@@ -342,13 +463,17 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 			len(tapPayload), net.HardwareAddr(srcMAC[:]).String(), net.HardwareAddr(dstMAC[:]).String(), viaPeer.String())
 	}
 
-	// Content-based frame dedup for all relayed frames.
-	contentHash := fnvHash64(tapPayload)
-	if n.bcastDedup.isDuplicate(contentHash) {
-		n.Collector.RecordDedup()
-		log.Debug("Content-dup relayed frame hash=0x%x from peer %s dropped", contentHash, srcPeer.String())
-		return
+	// Content-based frame dedup ONLY for broadcast/multicast relayed frames.
+	// Unicast frames are handled by per-peer SeqID sliding window deduplication.
+	if len(tapPayload) >= 6 && isBroadcastOrMulticastMAC(net.HardwareAddr(tapPayload[0:6])) {
+		contentHash := fnvHash64(tapPayload)
+		if n.bcastDedup.isDuplicate(contentHash) {
+			n.Collector.RecordDedup()
+			log.Debug("Content-dup relayed broadcast frame hash=0x%x from peer %s dropped", contentHash, srcPeer.String())
+			return
+		}
 	}
+
 
 	// Routing arbitration for relayed transit (mirrors the direct-Rx decision
 	// table): an Exit Node client only sinks frames genuinely for us.
@@ -369,6 +494,9 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 
 	// Write packet to local TAP device.
 	if n.TAP != nil {
+		if n.Collector != nil {
+			n.Collector.CaptureFrameWithPeers(observer.DirRx, tapPayload, srcPeer.String(), "self")
+		}
 		_, _ = n.tapWrite(tapPayload)
 		n.recordPeerRxBytes(srcPeer, len(tapPayload))
 		n.Collector.RecordRecv(len(tapPayload))
@@ -379,4 +507,5 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 			n.Collector.RecordProtocol(ethType)
 		}
 	}
+
 }

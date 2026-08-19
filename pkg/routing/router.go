@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -644,8 +645,84 @@ func (r *Router) ExportFullMap(lookup func(pID peer.ID) *NodeIdentity) *NetworkM
 	return m
 }
 
-// GetRouteInfoDTOs converts computed routes into observer DTOs for dashboard rendering
+// findSubPath finds the shortest path and latency between src and dst in the graph,
+// without visiting the excluded peer (typically the local node, to prevent looping).
+func (r *Router) findSubPath(src, dst, exclude peer.ID) ([]peer.ID, int64) {
+	if src == dst {
+		return []peer.ID{src}, 0
+	}
+	dist := make(map[peer.ID]int64)
+	prev := make(map[peer.ID]peer.ID)
+	visited := make(map[peer.ID]bool)
+
+	pq := &priorityQueue{}
+	heap.Init(pq)
+	dist[src] = 0
+	heap.Push(pq, &priorityItem{node: src, dist: 0})
+
+	for pq.Len() > 0 {
+		curr := heap.Pop(pq).(*priorityItem)
+		u := curr.node
+		if u == dst {
+			break
+		}
+		if visited[u] {
+			continue
+		}
+		visited[u] = true
+
+		for v, edge := range r.graph[u] {
+			if v == exclude || v == u || visited[v] {
+				continue
+			}
+			newDist := dist[u] + edgeCost(edge)
+			if old, ok := dist[v]; !ok || newDist < old {
+				dist[v] = newDist
+				prev[v] = u
+				heap.Push(pq, &priorityItem{node: v, dist: newDist})
+			}
+		}
+	}
+
+	if _, ok := dist[dst]; !ok {
+		return nil, -1
+	}
+
+	// Backtrack path
+	path := []peer.ID{dst}
+	curr := dst
+	for curr != src {
+		p, exists := prev[curr]
+		if !exists {
+			return nil, -1
+		}
+		path = append(path, p)
+		curr = p
+	}
+	// Reverse path
+	for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
+		path[i], path[j] = path[j], path[i]
+	}
+
+	// Calculate raw observed RTT sum for display
+	rawRTT := int64(0)
+	for i := 0; i < len(path)-1; i++ {
+		u := path[i]
+		v := path[i+1]
+		if edge, ok := r.graph[u][v]; ok {
+			rawRTT += edge.Weight
+		}
+	}
+
+	return path, rawRTT
+}
+
+// GetRouteInfoDTOs converts computed routes into observer DTOs for dashboard rendering,
+// evaluating all direct and multi-hop candidate paths across the mesh topology.
 func (r *Router) GetRouteInfoDTOs(lookup func(pID peer.ID) (nodeName string, tapIP string, tapIPv6 string)) []observer.RouteInfoDTO {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	routes := r.ComputeRoutes()
 	dtos := make([]observer.RouteInfoDTO, 0, len(routes))
 
@@ -671,7 +748,15 @@ func (r *Router) GetRouteInfoDTOs(lookup func(pID peer.ID) (nodeName string, tap
 		return "-", "-"
 	}
 
+	localName := getName(r.localPeerID)
+	if localName == "" || (len(r.localPeerID.String()) >= 9 && localName == "..."+r.localPeerID.String()[len(r.localPeerID.String())-9:]) {
+		localName = "Local Node"
+	}
+
+	directLinks := r.graph[r.localPeerID]
+
 	for _, route := range routes {
+		dest := route.Dest
 		pathStrs := make([]string, len(route.Path))
 		pathNames := make([]string, len(route.Path))
 		for i, p := range route.Path {
@@ -684,43 +769,154 @@ func (r *Router) GetRouteInfoDTOs(lookup func(pID peer.ID) (nodeName string, tap
 			savedRTT = route.DirectRTTMs - route.TotalRTTMs
 		}
 
-		localName := getName(r.localPeerID)
-		if localName == "" || (len(r.localPeerID.String()) >= 9 && localName == "..."+r.localPeerID.String()[len(r.localPeerID.String())-9:]) {
-			localName = "Local Node"
+		// Candidate path discovery:
+		// 1. Direct candidate
+		// 2. Multi-hop candidates via all other direct neighbors
+		type candItem struct {
+			pathIDs   []peer.ID
+			pathNames []string
+			totalRTT  int64
+			isDirect  bool
+			isOptimal bool
+			reason    string
 		}
 
-		candidates := make([]observer.CandidatePathDTO, 0)
-		if route.DirectRTTMs > 0 {
+		candidatesMap := make(map[string]*candItem)
+
+		// 1. Evaluate Direct P2P Link
+		if directEdge, ok := directLinks[dest]; ok && directEdge.Weight > 0 {
 			isOpt := route.IsDirect
-			reason := "Direct P2P link chosen: lowest latency path"
-			if !isOpt {
-				reason = fmt.Sprintf("Direct P2P link slower (+%d ms vs optimal relay)", route.DirectRTTMs-route.TotalRTTMs)
+			cand := &candItem{
+				pathIDs:   []peer.ID{r.localPeerID, dest},
+				pathNames: []string{localName, getName(dest)},
+				totalRTT:  directEdge.Weight,
+				isDirect:  true,
+				isOptimal: isOpt,
 			}
-			candidates = append(candidates, observer.CandidatePathDTO{
-				PathNames: []string{localName, getName(route.Dest)},
-				TotalRTT:  route.DirectRTTMs,
-				IsOptimal: isOpt,
-				IsDirect:  true,
-				Reason:    reason,
-			})
+			if isOpt {
+				cand.reason = fmt.Sprintf("Direct P2P link chosen: lowest latency path (%d ms)", directEdge.Weight)
+			} else {
+				diff := directEdge.Weight - route.TotalRTTMs
+				cand.reason = fmt.Sprintf("Direct P2P link slower: %d ms (+%d ms vs optimal relay)", directEdge.Weight, diff)
+			}
+			key := fmt.Sprintf("%s->%s", r.localPeerID, dest)
+			candidatesMap[key] = cand
 		} else {
-			candidates = append(candidates, observer.CandidatePathDTO{
-				PathNames: []string{localName, getName(route.Dest)},
-				TotalRTT:  -1,
-				IsOptimal: false,
-				IsDirect:  true,
-				Reason:    "Direct P2P link unreachable (Symmetric NAT / firewall)",
-			})
+			// Direct unreachable
+			cand := &candItem{
+				pathIDs:   []peer.ID{r.localPeerID, dest},
+				pathNames: []string{localName, getName(dest)},
+				totalRTT:  -1,
+				isDirect:  true,
+				isOptimal: false,
+				reason:    "Direct P2P link unreachable (Symmetric NAT / firewall blocked)",
+			}
+			key := fmt.Sprintf("%s->%s", r.localPeerID, dest)
+			candidatesMap[key] = cand
 		}
 
-		if !route.IsDirect {
-			candidates = append(candidates, observer.CandidatePathDTO{
-				PathNames: pathNames,
-				TotalRTT:  route.TotalRTTMs,
-				IsOptimal: true,
-				IsDirect:  false,
-				Reason:    fmt.Sprintf("Optimal Relay chosen: Saved %d ms latency", savedRTT),
-			})
+		// 2. Evaluate all 1-hop neighbor transits (Overlay Relays)
+		for neighborID, neighborEdge := range directLinks {
+			if neighborID == dest || neighborID == r.localPeerID {
+				continue
+			}
+			subPath, subRTT := r.findSubPath(neighborID, dest, r.localPeerID)
+			if subPath != nil && subRTT >= 0 {
+				fullPath := append([]peer.ID{r.localPeerID}, subPath...)
+				fullNames := make([]string, len(fullPath))
+				for idx, p := range fullPath {
+					fullNames[idx] = getName(p)
+				}
+				totalRTT := neighborEdge.Weight + subRTT
+				isOpt := !route.IsDirect && len(route.Path) == len(fullPath)
+				if isOpt {
+					for idx := range fullPath {
+						if fullPath[idx] != route.Path[idx] {
+							isOpt = false
+							break
+						}
+					}
+				}
+
+				key := ""
+				for _, p := range fullPath {
+					key += string(p) + "->"
+				}
+
+				cand := &candItem{
+					pathIDs:   fullPath,
+					pathNames: fullNames,
+					totalRTT:  totalRTT,
+					isDirect:  false,
+					isOptimal: isOpt,
+				}
+
+				relayName := getName(neighborID)
+				if isOpt {
+					if route.DirectRTTMs > 0 {
+						cand.reason = fmt.Sprintf("Optimal Relay chosen: Saved %d ms latency (via %s) vs direct (%d ms)", savedRTT, relayName, route.DirectRTTMs)
+					} else {
+						cand.reason = fmt.Sprintf("Optimal Relay chosen via %s: total latency %d ms (direct P2P unreachable)", relayName, totalRTT)
+					}
+				} else {
+					diff := totalRTT - route.TotalRTTMs
+					if diff >= 0 {
+						cand.reason = fmt.Sprintf("Sub-optimal transit via %s: total %d ms (+%d ms vs optimal)", relayName, totalRTT, diff)
+					} else {
+						cand.reason = fmt.Sprintf("Transit candidate via %s (evaluated latency %d ms)", relayName, totalRTT)
+					}
+				}
+				candidatesMap[key] = cand
+			} else {
+				// Neighbor cannot reach dest
+				cand := &candItem{
+					pathIDs:   []peer.ID{r.localPeerID, neighborID, dest},
+					pathNames: []string{localName, getName(neighborID), getName(dest)},
+					totalRTT:  -1,
+					isDirect:  false,
+					isOptimal: false,
+					reason:    fmt.Sprintf("Relay transit unreachable: intermediate node %s cannot route to destination", getName(neighborID)),
+				}
+				key := fmt.Sprintf("%s->%s->%s", r.localPeerID, neighborID, dest)
+				candidatesMap[key] = cand
+			}
+		}
+
+		// Convert map to slice and sort
+		candList := make([]*candItem, 0, len(candidatesMap))
+		for _, c := range candidatesMap {
+			candList = append(candList, c)
+		}
+
+		sort.SliceStable(candList, func(i, j int) bool {
+			// Optimal first
+			if candList[i].isOptimal != candList[j].isOptimal {
+				return candList[i].isOptimal
+			}
+			// Reachable before unreachable
+			if (candList[i].totalRTT > 0) != (candList[j].totalRTT > 0) {
+				return candList[i].totalRTT > 0
+			}
+			// Lower RTT first
+			if candList[i].totalRTT > 0 && candList[j].totalRTT > 0 && candList[i].totalRTT != candList[j].totalRTT {
+				return candList[i].totalRTT < candList[j].totalRTT
+			}
+			// Direct before relay on tie
+			if candList[i].isDirect != candList[j].isDirect {
+				return candList[i].isDirect
+			}
+			return len(candList[i].pathIDs) < len(candList[j].pathIDs)
+		})
+
+		candidatesDTO := make([]observer.CandidatePathDTO, len(candList))
+		for idx, c := range candList {
+			candidatesDTO[idx] = observer.CandidatePathDTO{
+				PathNames: c.pathNames,
+				TotalRTT:  c.totalRTT,
+				IsOptimal: c.isOptimal,
+				IsDirect:  c.isDirect,
+				Reason:    c.reason,
+			}
 		}
 
 		v4, v6 := getIPs(route.Dest)
@@ -737,9 +933,10 @@ func (r *Router) GetRouteInfoDTOs(lookup func(pID peer.ID) (nodeName string, tap
 			TotalRTTMs:  route.TotalRTTMs,
 			DirectRTTMs: route.DirectRTTMs,
 			SavedRTTMs:  savedRTT,
-			Candidates:  candidates,
+			Candidates:  candidatesDTO,
 		})
 	}
 
 	return dtos
 }
+

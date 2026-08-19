@@ -1,56 +1,57 @@
 package node
 
+// TAP forwarding probe — WebUI "P2P 通联排查工具 / 端到端 TAP 转发验证".
+//
+// REAL END-TO-END TAP PATH (current design):
+//
+//	The prober builds a genuine ICMP echo-request Ethernet frame addressed to
+//	the peer's TAP IP/MAC (src = our TAP IP/MAC, ICMP id = tapProbeICMPIdentify)
+//	and dispatches it on the PRIORITY overlay send queue (DispatchUrgentFrame)
+//	toward the peer. The frame reaches the peer's real TAP device; the peer's
+//	OS ICMP stack answers it; the echo reply then crosses the peer's TAP ->
+//	overlay -> OUR node, where it is captured off the INBOUND overlay receive
+//	path (maybeDeliverProbeReply in node_tap.go, invoked from node_streams.go
+//	just before the frame is written into our TAP) and handed to the waiting
+//	prober.
+//
+//	A TUN/TAP device does NOT re-deliver a frame written to it back to its own
+//	read fd, so the capture must happen on the RECEIVE path, never on the TAP
+//	read loop. The prober validates the captured reply against the peer's MAC/IP,
+//	so a PASS means a real ping-style frame actually traversed BOTH TAP devices
+//	and the overlay in both directions, and a FAIL means the TAP path is
+//	genuinely broken — exactly what this tool exists to diagnose ("why can't I
+//	ping through the TAP?").
+//
+// This replaced the original design, which only round-tripped the frame over a
+// dedicated control stream and built the ICMP reply IN MEMORY on the responder.
+// That design could neither detect a broken return path nor any TAP-device fault
+// (MAC misresolution, ARP/NDP proxy bug, TAP write failure, MTU mismatch,
+// one-direction stutter), yielding FALSE PASS (overlay up, TAP down) and FALSE
+// FAIL (TAP fine, control stream flaps) — and the in-memory reply path was also
+// a nil-TAP panic vector ("Application error 0x0").
+
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 
-	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/core/protocol"
+
+	"p2ptap/pkg/obfuscate"
 )
 
-// TapProbeProtocolID is a dedicated overlay protocol used by the WebUI
-// "P2P 通联排查工具 / 端到端 TAP 转发验证" feature.
-//
-// It verifies the *entire* TAP data path (TAP frame -> overlay encapsulation /
-// relay -> remote deobfuscation -> remote frame parsing -> remote reply
-// generation -> overlay return -> local reception), which is exactly the path
-// that an application-layer echo (EchoProtocolID) does NOT exercise. This is the
-// test that reproduces "echo works but ping (TAP packet) does not".
-//
-// Message wire format:
-//
-//	+----------------+----------------+----------------+------------------+
-//	| type (1 byte)  | flags (1 byte) | seq (4 bytes)  |  payload ...     |
-//	+----------------+----------------+----------------+------------------+
-//
-//	type 0 = prober -> responder: a full Ethernet frame containing an ICMP
-//	         echo request addressed to the responder's TAP IP.
-//	type 1 = responder -> prober: the same frame with the ICMP echo reply
-//	         constructed from it (src/dst MAC & IP swapped, ICMP type flipped).
-//
-//	flags bit0 = urgent: when set, the responder injects the echo reply into
-//	         its TAP device on the PRIORITY path (tapWriteUrgent) so a
-//	         diagnostic probe reply is not starved behind a busy forwarding
-//	         queue. This is the "urgent flag" for peer-side processing priority.
-//	         The prober ALSO dispatches the real echo-request frame on the
-//	         PRIORITY SEND queue (urgentDispatchCh) so the real TAP frame itself
-//	         is not starved behind ordinary TAP egress — symmetric send priority.
-type TapProbeProtocolID protocol.ID
-
-const tapProbeProtocol = protocol.ID("/p2ptap/tap-probe/1.0.0")
 
 const (
-	tapProbeTypeRequest  byte   = 0
-	tapProbeTypeReply    byte   = 1
-	tapProbeFlagUrgent   byte   = 1 << 0
-	tapProbePayloadMax   int    = 1500
-	tapProbeDefaultRTT          = 3 * time.Second
-	tapProbeICMPIdentify uint16 = 0x5A70 // "Zp" : identify probe-generated ICMP
+	// tapProbeDefaultRTT bounds how long we wait for the echo reply to come back
+	// on the real TAP path before declaring this attempt failed.
+	tapProbeDefaultRTT = 3 * time.Second
+	// tapProbeICMPIdentify ("Zp") marks probe-generated ICMP so our capture can
+	// tell a genuine probe reply from ordinary LAN traffic (a normal OS ping
+	// never uses this id).
+	tapProbeICMPIdentify uint16 = 0x5A70
 )
 
 // TapProbeResult reports the outcome of a single end-to-end TAP forwarding test.
@@ -62,68 +63,6 @@ type TapProbeResult struct {
 	RTTMills  int64  `json:"rtt_ms"`
 	SentBytes int    `json:"sent_bytes"`
 	Error     string `json:"error,omitempty"`
-}
-
-// registerTapProbeHandler registers the responder side of the TAP probe protocol.
-func (n *Node) registerTapProbeHandler() {
-	n.Host.SetStreamHandler(tapProbeProtocol, n.handleTapProbe)
-	log.Debug("Stream handler registered for TAP probe protocol: %s", tapProbeProtocol)
-}
-
-// handleTapProbe is the responder side. It reads a TAP frame from the prober,
-// validates that it is an ICMP echo request to this node's TAP IP, then
-// constructs an ICMP echo reply and sends it back (echoing at the frame level,
-// i.e. the path a real ping reply would take).
-func (n *Node) handleTapProbe(s network.Stream) {
-	defer s.Close()
-	remotePeer := s.Conn().RemotePeer()
-
-	// Bounded read: a malformed/short probe must not block this goroutine
-	// forever (a peer that sends fewer than the nominal 1502 bytes would
-	// otherwise pin the stream until the underlying transport times out).
-	_ = s.SetReadDeadline(time.Now().Add(tapProbeDefaultRTT))
-
-	req := make([]byte, 2+tapProbePayloadMax)
-	readN, err := ReadFrame(s, req)
-	if err != nil {
-		log.Debug("tap-probe: read error from %s: %v", remotePeer.String(), err)
-		return
-	}
-	req = req[:readN]
-
-	if len(req) < 6 {
-		log.Debug("tap-probe: short request from %s", remotePeer.String())
-		return
-	}
-	msgType := req[0]
-	flags := req[1]
-	seq := binary.BigEndian.Uint32(req[2:6])
-	frame := req[6:]
-	if msgType != tapProbeTypeRequest {
-		log.Debug("tap-probe: unexpected msg type %d from %s", msgType, remotePeer.String())
-		return
-	}
-
-	replyFrame, err := n.buildTapProbeReply(frame)
-	if err != nil {
-		log.Debug("tap-probe: cannot build reply for %s: %v", remotePeer.String(), err)
-		// Still echo something back so the prober does not hang, but mark as error.
-		replyFrame = frame
-	} else if flags&tapProbeFlagUrgent != 0 {
-		// Urgent: inject the echo reply into the responder's TAP on the
-		// priority path so diagnostics are not starved behind forwarding.
-		n.tapWriteUrgent(replyFrame)
-	}
-
-	out := make([]byte, 0, 6+len(replyFrame))
-	out = append(out, tapProbeTypeReply)
-	out = append(out, flags) // echo flags back (urgent preserved)
-	out = append(out, byte(seq>>24), byte(seq>>16), byte(seq>>8), byte(seq))
-	out = append(out, replyFrame...)
-
-	if err := WriteFrame(s, out); err != nil {
-		log.Debug("tap-probe: write reply error to %s: %v", remotePeer.String(), err)
-	}
 }
 
 // ProbeTapForward runs the prober side of the TAP forwarding test against peer.
@@ -156,6 +95,23 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 	}
 	res.TapIP = peerTapIPStr
 
+	// Transport context: a RELAYED peer reaches us (and our probe frame reaches
+	// it) through an overlay-relay / circuit hop. If THAT path is down, the real
+	// ICMP request never reaches the peer's TAP (or its reply never returns) and
+	// the probe legitimately FAILs — which is the correct signal for "the TAP
+	// data path is broken". We surface direct/relayed so the troubleshooter can
+	// tell a relay-hopper problem from a same-LAN one.
+	isDirect := n.isDirectlyConnected(peerID)
+	relayHop := n.relayHopForTarget(peerID)
+	transportNote := "direct"
+	if !isDirect {
+		if relayHop != "" {
+			transportNote = "relayed via " + relayHop.ShortString()
+		} else {
+			transportNote = "indirect (no usable relay hop)"
+		}
+	}
+
 	// Build an ICMP echo request frame addressed to the peer's TAP IP.
 	reqFrame, err := buildICMPEchoRequest(n.localMAC, peerTapMAC, n.localV4IP, peerTapIP, tapProbeICMPIdentify)
 	if err != nil {
@@ -164,115 +120,84 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 	}
 	res.SentBytes = len(reqFrame)
 
-	// SEND-side priority: the real TAP/ICMP echo-request frame is dispatched on
-	// the PRIORITY SEND queue (front of the send queue), symmetric to the
-	// receive-side urgent injection.  This ensures the diagnostic probe's real
-	// frame is not starved behind ordinary TAP egress backlog.  The overlay
-	// stream below still carries the probe handshake/reply.
-	reqFrameCopy := make([]byte, len(reqFrame))
-	copy(reqFrameCopy, reqFrame)
-	n.DispatchUrgentFrame(peerID, reqFrameCopy, peerTapMAC, len(reqFrame))
+	// Serialise probes so concurrent troubleshooter calls can't steal each
+	// other's echo replies off the single TAP read loop.
+	n.probeMu.Lock()
+	defer n.probeMu.Unlock()
 
-	seq := randomUint32()
-	reqMsg := make([]byte, 0, 6+len(reqFrame))
-	reqMsg = append(reqMsg, tapProbeTypeRequest)
-	reqMsg = append(reqMsg, tapProbeFlagUrgent) // diagnostics: peer-side priority
-	reqMsg = append(reqMsg, byte(seq>>24), byte(seq>>16), byte(seq>>8), byte(seq))
-	reqMsg = append(reqMsg, reqFrame...)
-
+	// Genuine end-to-end TAP test: the REAL ICMP echo request is dispatched over
+	// the overlay (urgent send queue) and reaches the peer's TAP device; the
+	// peer's OS answers it; the echo reply travels back through the peer's TAP ->
+	// overlay -> OUR node's inbound receive path, where maybeDeliverProbeReply
+	// captures it and hands it to waitProbeReply below. This exercises the real
+	// TAP data path in BOTH directions — not a synthetic control-stream echo —
+	// so a PASS means a real ping-style frame actually traversed both TAP devices
+	// and the overlay, and a FAIL means the TAP path is genuinely broken.
+	const probeAttempts = 2
 	start := time.Now()
-	streamCtx := network.WithAllowLimitedConn(n.ctx, "tap-probe")
-	s, err := n.Host.NewStream(streamCtx, peerID, tapProbeProtocol)
-	if err != nil {
-		res.Error = "failed to open TAP probe stream: " + err.Error()
-		return res, err
-	}
-	defer s.Close()
+	var lastErr error
+	for attempt := 1; attempt <= probeAttempts; attempt++ {
+		// Arm the capture so maybeDeliverProbeReply starts copying matching echo
+		// replies to probeReplyCh for the duration of this attempt's wait.
+		atomic.StoreInt32(&n.probeActive, 1)
 
-	// Length-prefixed write so the responder can read exactly this frame
-	// regardless of size (matches the ReadFrame protocol on the responder side).
-	if err := WriteFrame(s, reqMsg); err != nil {
-		res.Error = "failed to send probe frame: " + err.Error()
-		return res, err
-	}
+		// Dispatch the REAL request frame to the peer (overlay -> peer TAP).
+		seqID := n.Packer.NextSeqID(n.txEpochForPeer(peerID))
+		packedBuf := make([]byte, obfuscate.MaxFrameSize)
+		totalLen, perr := n.Packer.Pack(seqID, reqFrame, packedBuf)
 
-	resp := make([]byte, 2+tapProbePayloadMax)
-	_ = s.SetReadDeadline(time.Now().Add(tapProbeDefaultRTT))
-	readN, err := ReadFrame(s, resp)
-	if err != nil {
-		res.Error = "no reply received (timeout): " + err.Error()
-		return res, err
-	}
-	elapsed := time.Since(start)
-	resp = resp[:readN]
+		if perr != nil {
+			lastErr = fmt.Errorf("probe frame pack error: %w", perr)
+			continue
+		}
+		reqCopy := make([]byte, totalLen)
+		copy(reqCopy, packedBuf[:totalLen])
+		n.DispatchUrgentFrame(peerID, reqCopy, peerTapMAC, len(reqFrame))
 
-	if len(resp) < 6 || resp[0] != tapProbeTypeReply || binary.BigEndian.Uint32(resp[2:6]) != seq {
-		res.Error = "malformed reply"
-		return res, fmt.Errorf("%s", res.Error)
-	}
-	replyFrame := resp[6:]
 
-	// Validate the echoed frame is a well-formed ICMP echo reply to us.
-	if err := verifyICMPEchoReply(replyFrame, peerTapMAC, n.localMAC, peerTapIP, n.localV4IP, tapProbeICMPIdentify, seq); err != nil {
-		res.Error = "reply validation failed: " + err.Error()
-		return res, err
-	}
+		// Wait for the echo reply to arrive on OUR real TAP path (captured off
+		// the inbound overlay receive path).
+		reply, got := n.waitProbeReply(peerTapMAC, peerTapIP, tapProbeDefaultRTT)
+		atomic.StoreInt32(&n.probeActive, 0)
 
-	res.Success = true
-	res.RTTMills = elapsed.Milliseconds()
-	return res, nil
+		if got {
+			if err := verifyICMPEchoReply(reply, peerTapMAC, n.localMAC, peerTapIP, n.localV4IP, tapProbeICMPIdentify, 0); err != nil {
+				lastErr = fmt.Errorf("reply validation failed: %w", err)
+			} else {
+				res.Success = true
+				res.RTTMills = time.Since(start).Milliseconds()
+				return res, nil
+			}
+		} else if lastErr == nil {
+			lastErr = fmt.Errorf("no echo reply on local TAP within %s (%s)", tapProbeDefaultRTT, transportNote)
+		}
+		if attempt < probeAttempts {
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	res.Error = fmt.Sprintf("TAP probe failed (%s): %s", transportNote, lastErr.Error())
+	return res, fmt.Errorf("%s", res.Error)
 }
 
-// buildTapProbeReply turns a received ICMP echo request frame into an ICMP echo
-// reply frame (swap src/dst MAC & IP, flip ICMP type 8->0, recompute checksums).
-func (n *Node) buildTapProbeReply(reqFrame []byte) ([]byte, error) {
-	if len(reqFrame) < 34 {
-		return nil, fmt.Errorf("frame too short (%d bytes)", len(reqFrame))
+// waitProbeReply blocks until a TAP-probe echo reply (matching the peer's MAC
+// and IP) is captured off the local inbound TAP path via probeReplyCh, or the
+// timeout elapses. Frames that arrive but don't match this peer are ignored, so a
+// stray or out-of-order reply doesn't abort the wait.
+func (n *Node) waitProbeReply(peerTapMAC net.HardwareAddr, peerTapIP net.IP, timeout time.Duration) ([]byte, bool) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case frame := <-n.probeReplyCh:
+			if verifyICMPEchoReply(frame, peerTapMAC, n.localMAC, peerTapIP, n.localV4IP, tapProbeICMPIdentify, 0) == nil {
+				return frame, true
+			}
+			// Not ours; keep draining so a later frame can still match.
+			continue
+		case <-timer.C:
+			return nil, false
+		}
 	}
-	etherType := binary.BigEndian.Uint16(reqFrame[12:14])
-	if etherType != 0x0800 {
-		return nil, fmt.Errorf("not IPv4 (ethertype 0x%04x)", etherType)
-	}
-	// IPv4 header length
-	ihl := int(reqFrame[14]&0x0f) * 4
-	if ihl < 20 || len(reqFrame) < 14+ihl+8 {
-		return nil, fmt.Errorf("invalid IPv4 header")
-	}
-	proto := reqFrame[14+9]
-	if proto != 1 { // ICMP
-		return nil, fmt.Errorf("not ICMP (proto %d)", proto)
-	}
-	srcIP := net.IP(reqFrame[14+12 : 14+16]).To4()
-	dstIP := net.IP(reqFrame[14+16 : 14+20]).To4()
-	if !dstIP.Equal(n.localV4IP) {
-		return nil, fmt.Errorf("echo request not addressed to this node (%s != %s)", dstIP, n.localV4IP)
-	}
-	icmpType := reqFrame[14+ihl]
-	if icmpType != 8 { // echo request
-		return nil, fmt.Errorf("not ICMP echo request (type %d)", icmpType)
-	}
-
-	// Build reply frame: swap MACs and IPs, flip ICMP type.
-	reply := make([]byte, len(reqFrame))
-	copy(reply, reqFrame)
-	// swap Ethernet MACs
-	copy(reply[0:6], reqFrame[6:12])
-	copy(reply[6:12], reqFrame[0:6])
-	// swap IPs
-	copy(reply[14+12:14+16], dstIP)
-	copy(reply[14+16:14+20], srcIP)
-	// flip ICMP type request(8) -> reply(0)
-	reply[14+ihl] = 0
-
-	// Recompute ICMP checksum (IPv4 header checksum stays valid; recompute ICMP).
-	icmpStart := 14 + ihl
-	reply[icmpStart+2] = 0
-	reply[icmpStart+3] = 0
-	cs := icmpChecksum(reply[icmpStart:])
-	reply[icmpStart+2] = byte(cs >> 8)
-	reply[icmpStart+3] = byte(cs)
-
-	return reply, nil
 }
 
 // ---- ICMP frame helpers ----
@@ -333,11 +258,15 @@ func verifyICMPEchoReply(frame []byte, expSrcMAC, expDstMAC net.HardwareAddr, ex
 	if frame[14+ihl] != 0 {
 		return fmt.Errorf("not ICMP echo reply (type %d)", frame[14+ihl])
 	}
-	if !bytes.Equal(frame[0:6], expSrcMAC) {
-		return fmt.Errorf("reply src MAC mismatch")
-	}
-	if !bytes.Equal(frame[6:12], expDstMAC) {
+	// Ethernet frame order: frame[0:6] is the DESTINATION MAC, frame[6:12] is
+	// the SOURCE MAC (the reverse of the IPv4 header, where src IP precedes dst
+	// IP). A genuine echo reply has dst == our MAC and src == the peer's MAC, so
+	// frame[0:6] must match expDstMAC and frame[6:12] must match expSrcMAC.
+	if !bytes.Equal(frame[0:6], expDstMAC) {
 		return fmt.Errorf("reply dst MAC mismatch")
+	}
+	if !bytes.Equal(frame[6:12], expSrcMAC) {
+		return fmt.Errorf("reply src MAC mismatch")
 	}
 	if !net.IP(frame[14+12 : 14+16]).Equal(expSrcIP) {
 		return fmt.Errorf("reply src IP mismatch")
@@ -380,12 +309,8 @@ func icmpChecksum(b []byte) uint16 {
 	return ^uint16(sum)
 }
 
-func randomUint32() uint32 {
-	var b [4]byte
-	_, _ = rand.Read(b[:])
-	return binary.BigEndian.Uint32(b[:])
-}
-
+// splitIP returns the IP portion of a "ip/prefix" string (CIDR), or the whole
+// string if it has no prefix.
 func splitIP(cidr string) string {
 	for i := 0; i < len(cidr); i++ {
 		if cidr[i] == '/' {
