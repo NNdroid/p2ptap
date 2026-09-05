@@ -241,13 +241,22 @@ type Node struct {
 	// TAP-probe peer-side ACK channel (方案 B). When the peer detects our probe
 	// request frame at its TAP write boundary it sends an out-of-band
 	// control-plane ack so we can tell "frame reached peer TAP but OS didn't
-	// answer" apart from "frame never arrived". probeAckCh carries the signal;
-	// probeAckToken/probeAckSeq form the per-probe matching token (accessed
-	// atomically so the stream-handler goroutine can read the token without
-	// racing the prober goroutine that writes it under probeMu).
-	probeAckCh    chan struct{}
+	// answer" apart from "frame never arrived". The channel carries a
+	// tapProbeAckFlag* diagnostic: whether the frame's dst IP matched the peer's
+	// own TAP IP when it was written into the peer's TAP device (0 = older peer
+	// build without the flag). probeAckToken/probeAckSeq form the per-probe
+	// matching token (accessed atomically so the stream-handler goroutine can
+	// read the token without racing the prober goroutine that writes it under
+	// probeMu).
+	probeAckCh    chan uint8
 	probeAckToken uint64
 	probeAckSeq   uint64
+
+	// Deferred peer-side probe acks (方案 B): acks for probe requests detected
+	// on the RX path, held until the frame is written into the local TAP so the
+	// ack means "delivered to the kernel" (see deferredProbeAck).
+	deferredProbeAcksMu sync.Mutex
+	deferredProbeAcks   []deferredProbeAck
 
 	reconnectTimeMu sync.Mutex
 
@@ -1280,7 +1289,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		urgentWriteCh:       make(chan []byte, 64),         // urgent TAP-inject queue (diagnostics)
 		urgentDispatchCh:    make(chan dispatchTask, 64),   // urgent SEND queue (symmetric to receive)
 		probeReplyCh:        make(chan []byte, 8),          // TAP-probe echo-reply capture (see probeActive)
-		probeAckCh:          make(chan struct{}, 4),        // TAP-probe peer-side ack (方案 B)
+		probeAckCh:          make(chan uint8, 4),           // TAP-probe peer-side ack (方案 B) + dst-IP flag
 		perPeerLastTx:       make(map[peer.ID]uint64),
 		perPeerLastRx:       make(map[peer.ID]uint64),
 		perPeerTxSpeed:      make(map[peer.ID]uint64),

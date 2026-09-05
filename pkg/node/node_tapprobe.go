@@ -54,6 +54,17 @@ const (
 	tapProbeICMPIdentify uint16 = 0x5A70
 )
 
+// Peer-side ack diagnostic flags carried on probeAckCh (方案 B). A peer running
+// an older build sends no flag (Unknown); a current peer stamps whether the
+// probe request's dst IP matched ITS local TAP IP at the moment the frame was
+// successfully written into its TAP device — turning "peer OS didn't answer"
+// into an actionable diagnosis (stale metadata vs. peer firewall).
+const (
+	tapProbeAckFlagUnknown     uint8 = 0 // older peer: no diagnostic flag
+	tapProbeAckFlagIPMatched   uint8 = 1 // dst IP == peer's local TAP IP (firewall/OS to blame)
+	tapProbeAckFlagIPMismatch uint8 = 2 // dst IP != peer's local TAP IP (stale metadata)
+)
+
 // TapProbeResult reports the outcome of a single end-to-end TAP forwarding test.
 type TapProbeResult struct {
 	PeerID              string `json:"peer_id"`
@@ -105,6 +116,7 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 	// frame from this peer yet (e.g. relayed-only peers whose return path is
 	// entirely overlay) — in that case the probe may legitimately fail until
 	// at least one inbound frame populates the observation table.
+	advertisedMAC := peerTapMAC
 	if obs := n.observedTapMACFrom(peerID); obs != nil {
 		if obs.String() != peerTapMAC.String() {
 			res.MacMismatchDetected = true
@@ -153,12 +165,14 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 	// so a PASS means a real ping-style frame actually traversed both TAP devices
 	// and the overlay, and a FAIL means the TAP path is genuinely broken.
 	const probeAttempts = 2
-	start := time.Now()
 	var lastErr error
 	anyAck := false
 	for attempt := 1; attempt <= probeAttempts; attempt++ {
 		// Arm the capture so maybeDeliverProbeReply starts copying matching echo
-		// replies to probeReplyCh for the duration of this attempt's wait.
+		// replies to probeReplyCh for the duration of this attempt's wait. Disarm
+		// on EVERY exit path below (build/pack failures included): a leaked
+		// probeActive makes the RX path run its ICMP parse on every inbound frame
+		// for the rest of the node's lifetime.
 		atomic.StoreInt32(&n.probeActive, 1)
 
 		// Fresh per-probe token + build the REAL request frame. The ICMP payload
@@ -168,6 +182,7 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 		atomic.StoreUint64(&n.probeAckToken, tok)
 		reqFrame, err := buildICMPEchoRequest(n.localMAC, peerTapMAC, n.localV4IP, peerTapIP, tapProbeICMPIdentify, n.tapProbePayload(tok))
 		if err != nil {
+			atomic.StoreInt32(&n.probeActive, 0)
 			lastErr = fmt.Errorf("probe frame build error: %w", err)
 			continue
 		}
@@ -179,6 +194,7 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 		totalLen, perr := n.Packer.Pack(seqID, reqFrame, packedBuf)
 
 		if perr != nil {
+			atomic.StoreInt32(&n.probeActive, 0)
 			lastErr = fmt.Errorf("probe frame pack error: %w", perr)
 			continue
 		}
@@ -186,31 +202,45 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 		copy(reqCopy, packedBuf[:totalLen])
 		n.DispatchUrgentFrame(peerID, reqCopy, peerTapMAC, len(reqFrame))
 
+		// Per-attempt RTT: must NOT include earlier failed attempts (each up to
+		// 3s) or the inter-attempt sleep, or a second-attempt success reports a
+		// wildly inflated round trip.
+		attemptStart := time.Now()
 
 		// Wait for either the echo reply on OUR real TAP path (captured off
 		// the inbound overlay receive path) OR a peer-side ack proving the frame
 		// reached the peer's TAP (方案 B) — distinguishing "arrived but OS
 		// didn't answer" from "never arrived".
-		reply, gotReply, gotAck := n.waitProbeReplyOrAck(peerTapMAC, peerTapIP, tapProbeDefaultRTT)
+		reply, gotReply, gotAck, ackFlag := n.waitProbeReplyOrAck(peerTapMAC, peerTapIP, tapProbeDefaultRTT, advertisedMAC)
 		atomic.StoreInt32(&n.probeActive, 0)
 
 		if gotReply {
-			if err := verifyICMPEchoReply(reply, peerTapMAC, n.localMAC, peerTapIP, n.localV4IP, tapProbeICMPIdentify, 0); err != nil {
+			if err := verifyICMPEchoReply(reply, peerTapMAC, n.localMAC, peerTapIP, n.localV4IP, tapProbeICMPIdentify, advertisedMAC); err != nil {
 				lastErr = fmt.Errorf("reply validation failed: %w", err)
 			} else {
 				res.Success = true
-				res.RTTMills = time.Since(start).Milliseconds()
+				res.RTTMills = time.Since(attemptStart).Milliseconds()
 				res.ReachedPeerTAP = true
 				n.recordTapProbe(peerID, true, true, "")
 				return res, nil
 			}
 		} else if gotAck {
 			anyAck = true
-			if lastErr == nil {
+			switch ackFlag {
+			case tapProbeAckFlagIPMismatch:
+				// Peer received and wrote the frame into its TAP, but the kernel
+				// drops it: the frame was addressed to an IP the peer no longer
+				// owns. Our metadata for the peer is stale — no OS could answer.
+				lastErr = fmt.Errorf("peer TAP received the probe but its dst IP does not match the peer's current TAP IP (stale peer metadata: we sent to %s); the peer OS cannot and will not answer — refresh peer metadata (relay ack via %s)", peerTapIPStr, transportNote)
+			case tapProbeAckFlagIPMatched:
+				lastErr = fmt.Errorf("probe frame reached peer TAP (dst IP matched) but peer OS sent no echo reply within %s (%s) — check the peer's OS firewall / ICMP settings", tapProbeDefaultRTT, transportNote)
+			default:
 				lastErr = fmt.Errorf("probe frame reached peer TAP but peer OS sent no echo reply within %s (%s)", tapProbeDefaultRTT, transportNote)
 			}
-		} else if lastErr == nil {
-			lastErr = fmt.Errorf("no echo reply on local TAP within %s (%s)", tapProbeDefaultRTT, transportNote)
+		} else {
+			// Overwrite each attempt: the last attempt's failure mode is the
+			// most informative (the first attempt may have raced a cold path).
+			lastErr = fmt.Errorf("no echo reply on local TAP within %s (attempt %d/%d, %s)", tapProbeDefaultRTT, attempt, probeAttempts, transportNote)
 		}
 		if attempt < probeAttempts {
 			time.Sleep(300 * time.Millisecond)
@@ -228,26 +258,53 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 // frame reached the peer's TAP — it does NOT preempt the wait, because the
 // genuine ICMP reply may still be buffered in probeReplyCh; we must keep waiting
 // so a real reply is never misreported as "reached but no answer". On timeout
-// gotAck reports whether an ack was seen at all.
-func (n *Node) waitProbeReplyOrAck(peerTapMAC net.HardwareAddr, peerTapIP net.IP, timeout time.Duration) (reply []byte, gotReply bool, gotAck bool) {
+// gotAck reports whether an ack was seen at all, and ackFlag carries the peer's
+// dst-IP-match diagnostic (tapProbeAckFlagUnknown when no ack arrived or the
+// peer runs an older build without the flag).
+//
+// expSrcMACs are the ACCEPTABLE source MACs of the echo reply: normally exactly
+// one (the MAC we addressed the request to), but callers may pass two when the
+// peer's advertised and wire-observed MACs are known to differ. A reply whose
+// src MAC is neither candidate is skipped (and stays queued for no one) — but a
+// reply matching dst MAC + ICMP id is almost certainly ours, so the looser
+// dst-side check keeps a MAC-table cosmetic mismatch from failing a real probe.
+func (n *Node) waitProbeReplyOrAck(peerTapMAC net.HardwareAddr, peerTapIP net.IP, timeout time.Duration, expSrcMACs ...net.HardwareAddr) (reply []byte, gotReply bool, gotAck bool, ackFlag uint8) {
+	// Drain stale captures/acks left over from a PREVIOUS probe (its waiter may
+	// have timed out just as a late reply/ack was queued). Without this, an old
+	// ack could instantly satisfy THIS probe's gotAck and mislabel the result.
+drain:
+	for {
+		select {
+		case <-n.probeReplyCh:
+		case <-n.probeAckCh:
+		default:
+			break drain
+		}
+	}
+
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	ackSeen := false
+	flag := uint8(tapProbeAckFlagUnknown)
 	for {
 		select {
 		case frame := <-n.probeReplyCh:
-			if verifyICMPEchoReply(frame, peerTapMAC, n.localMAC, peerTapIP, n.localV4IP, tapProbeICMPIdentify, 0) == nil {
-				return frame, true, false
+			if verifyICMPEchoReply(frame, peerTapMAC, n.localMAC, peerTapIP, n.localV4IP, tapProbeICMPIdentify, expSrcMACs...) == nil {
+				return frame, true, ackSeen, flag
 			}
 			// Not ours; keep draining so a later frame can still match.
 			continue
-		case <-n.probeAckCh:
-			// Peer confirms the frame reached its TAP. Remember it but keep
-			// waiting for the genuine ICMP reply (the OS may still answer).
+		case f := <-n.probeAckCh:
+			// Peer confirms the frame reached its TAP. The flag tells us whether
+			// the frame's dst IP matched the peer's own TAP IP at TAP-write time
+			// (tapProbeAckFlagUnknown = older peer build without the flag).
+			// Remember it but keep waiting for the genuine ICMP reply (the OS
+			// may still answer).
 			ackSeen = true
+			flag = f
 			continue
 		case <-timer.C:
-			return nil, false, ackSeen
+			return nil, false, ackSeen, flag
 		}
 	}
 }
@@ -311,7 +368,12 @@ func buildICMPEchoRequest(localMAC, dstMAC net.HardwareAddr, srcIP, dstIP net.IP
 	return frame, nil
 }
 
-func verifyICMPEchoReply(frame []byte, expSrcMAC, expDstMAC net.HardwareAddr, expSrcIP, expDstIP net.IP, identify uint16, seq uint32) error {
+// verifyICMPEchoReply validates a captured echo reply. expSrcMACs is variadic:
+// the first entry is the primary expected source MAC; additional entries are
+// accepted aliases (e.g. the peer's advertised TapMAC when the request was
+// addressed to its wire-observed MAC, or vice versa). Only the dst MAC, IPs and
+// ICMP identifier are strict — a genuine reply always satisfies those.
+func verifyICMPEchoReply(frame []byte, expSrcMAC, expDstMAC net.HardwareAddr, expSrcIP, expDstIP net.IP, identify uint16, altSrcMACs ...net.HardwareAddr) error {
 	if len(frame) < 34+8 {
 		return fmt.Errorf("reply too short (%d bytes)", len(frame))
 	}
@@ -333,6 +395,11 @@ func verifyICMPEchoReply(frame []byte, expSrcMAC, expDstMAC net.HardwareAddr, ex
 		return fmt.Errorf("reply dst MAC mismatch")
 	}
 	if !bytes.Equal(frame[6:12], expSrcMAC) {
+		for _, alt := range altSrcMACs {
+			if bytes.Equal(frame[6:12], alt) {
+				return nil
+			}
+		}
 		return fmt.Errorf("reply src MAC mismatch")
 	}
 	if !net.IP(frame[14+12 : 14+16]).Equal(expSrcIP) {

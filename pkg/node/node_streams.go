@@ -471,12 +471,21 @@ func (n *Node) handleStream(s network.Stream) {
 
 		// 方案 B: peer-side probe ack. If this inbound frame is the genuine
 		// TAP-forward probe request (real ICMP echo request with our marker id),
-		// fire an out-of-band control-plane ack to the prober so it can tell
-		// "frame reached peer TAP but OS didn't answer" from "frame never
-		// arrived" — no need to log onto the peer machine. We still write the
+		// fire an out-of-band control-plane ack to the prober AFTER the frame has
+		// been written into our TAP device — the ack means "physically delivered
+		// to the kernel", not merely "passed our overlay boundary". The ack
+		// carries a dst-IP-match flag: whether the request was addressed to an IP
+		// we currently own on the TAP. A mismatch (stale prober-side metadata)
+		// makes the kernel drop the frame silently, which the prober would
+		// otherwise misreport as "peer firewall blocked ICMP". We still write the
 		// frame to TAP below so the real end-to-end echo reply also flows back.
 		if pid, tok, ok := n.isTapProbeRequest(payload); ok {
-			go n.sendTapProbeAck(pid, tok)
+			dstIP := net.IP(payload[14+16 : 14+20])
+			ackFlag := tapProbeAckFlagIPMismatch
+			if n.localV4IP != nil && dstIP.Equal(n.localV4IP) {
+				ackFlag = tapProbeAckFlagIPMatched
+			}
+			go n.sendTapProbeAckAfterTAP(pid, tok, ackFlag)
 		}
 
 		// Write unpadded payload Ethernet frame to TAP
@@ -493,6 +502,16 @@ func (n *Node) handleStream(s network.Stream) {
 			log.Warn("TAP write error: %v", werr)
 		} else {
 			log.Debug("TAP write ok: %d bytes to %s", wn, n.TAP.Name())
+			// Deliver the deferred probe ack(s) for THIS frame only after the
+			// TAP write succeeded: "reached peer TAP" must mean the kernel got
+			// it, not that we merely passed the frame along. On write failure the
+			// deferred acks are dropped — the probe will report "no ack" which
+			// is the truthful outcome.
+			if deferred := n.takeDeferredProbeAcks(); len(deferred) > 0 {
+				for _, d := range deferred {
+					go n.sendTapProbeAck(d.prober, d.token, d.flag)
+				}
+			}
 			// Gateway packet on the server side: frames received over P2P and
 			// injected into the local TAP by an Exit Node server count as
 			// server→client tunnel traffic. Skip if we are ALSO an Exit Node
@@ -1123,13 +1142,26 @@ func (n *Node) isTapProbeRequest(payload []byte) (peer.ID, uint64, bool) {
 	return pid, tok, true
 }
 
+// deferredProbeAck is a probe request detected on the RX path whose ack is
+// HELD until the frame has been written into the local TAP device. Acking
+// before the TAP write made "reached peer TAP" a lie whenever the write
+// failed (TAP down, oversized frame) or the frame was destined to an IP we
+// no longer own (stale prober metadata) — both looked identical to "peer OS
+// firewall blocked ICMP" on the prober side.
+type deferredProbeAck struct {
+	prober peer.ID
+	token  uint64
+	flag   uint8 // tapProbeAckFlag* diagnostic
+}
+
 // sendTapProbeAck fires the peer-side acknowledgement for a received TAP-forward
 // probe request. It runs in its own goroutine (off the receive loop) and opens a
 // control stream back to the prober via openControlStream, which transparently
 // tunnels through relay-ctrl / boot-circuit when the prober is relay-only — so
 // the ack reaches the prober even on a fully relayed mesh. The ack carries the
-// prober-supplied token it matches against its in-flight probe.
-func (n *Node) sendTapProbeAck(prober peer.ID, tok uint64) {
+// prober-supplied token it matches against its in-flight probe, plus the
+// dst-IP-match diagnostic flag for the prober's failure message.
+func (n *Node) sendTapProbeAck(prober peer.ID, tok uint64, flag uint8) {
 	ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
 	defer cancel()
 	s, err := n.openControlStream(ctx, prober, TapProbeAckProtocolID)
@@ -1138,19 +1170,51 @@ func (n *Node) sendTapProbeAck(prober peer.ID, tok uint64) {
 		return
 	}
 	defer s.Close()
-	buf := make([]byte, 2+8)
+	buf := make([]byte, 2+8+1)
 	binary.BigEndian.PutUint16(buf[0:2], tapProbeAckMagic)
 	binary.BigEndian.PutUint64(buf[2:10], tok)
+	buf[10] = flag
 	if err := WriteFrame(s, buf); err != nil {
 		log.Debug("tapProbeAck: write to %s: %v", prober, err)
 	}
 }
 
+// queueDeferredProbeAck parks a pending probe ack until the frame's TAP write
+// succeeds. The queue is tiny and consumed by the same receive-loop iteration
+// that wrote the frame, so it never grows beyond one entry per in-flight probe.
+func (n *Node) queueDeferredProbeAck(d deferredProbeAck) {
+	n.deferredProbeAcksMu.Lock()
+	n.deferredProbeAcks = append(n.deferredProbeAcks, d)
+	n.deferredProbeAcksMu.Unlock()
+}
+
+// takeDeferredProbeAcks drains and returns acks queued for the frame that was
+// just written into the TAP device (called only on write success).
+func (n *Node) takeDeferredProbeAcks() []deferredProbeAck {
+	n.deferredProbeAcksMu.Lock()
+	defer n.deferredProbeAcksMu.Unlock()
+	if len(n.deferredProbeAcks) == 0 {
+		return nil
+	}
+	out := n.deferredProbeAcks
+	n.deferredProbeAcks = nil
+	return out
+}
+
+// sendTapProbeAckAfterTAP queues the ack so it is sent only if/when the frame
+// is written into the TAP device. This shim keeps the detect site (RX loop)
+// free of locking concerns.
+func (n *Node) sendTapProbeAckAfterTAP(prober peer.ID, tok uint64, flag uint8) {
+	n.queueDeferredProbeAck(deferredProbeAck{prober: prober, token: tok, flag: flag})
+}
+
 // handleTapProbeAck is the TapProbeAckProtocolID stream handler on the PROBER
 // side. It reads the peer-supplied token and, if it matches the in-flight probe
-// token, signals probeAckCh so ProbeTapForward can report "frame reached peer
-// TAP but OS didn't answer". Token matching discards stale acks from a previous
-// probe that may still be in flight.
+// token, signals probeAckCh with the peer's dst-IP-match diagnostic flag so
+// ProbeTapForward can report WHY the peer OS did not answer (stale metadata vs
+// firewall). Token matching discards stale acks from a previous probe that may
+// still be in flight. Backward compatible: a peer running an older build sends
+// a 10-byte frame with no flag byte, which decodes as tapProbeAckFlagUnknown.
 func (n *Node) handleTapProbeAck(s network.Stream) {
 	defer s.Close()
 	buf := make([]byte, 64)
@@ -1165,8 +1229,12 @@ func (n *Node) handleTapProbeAck(s network.Stream) {
 	if tok != atomic.LoadUint64(&n.probeAckToken) {
 		return
 	}
+	flag := uint8(tapProbeAckFlagUnknown)
+	if rn >= 11 {
+		flag = buf[10]
+	}
 	select {
-	case n.probeAckCh <- struct{}{}:
+	case n.probeAckCh <- flag:
 	default:
 	}
 }

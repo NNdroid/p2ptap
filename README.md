@@ -1,35 +1,120 @@
-# p2ptap（中文）
+# p2ptap
 
-基于 [go-libp2p](https://github.com/libp2p/go-libp2p) 构建的二层 P2P TAP VPN。把多个节点连成一张分布式的虚拟以太网交换机，无需中心服务器即可实现局域网互联、组播与 IPv4/IPv6 通信。
+p2ptap is a peer-to-peer Layer 2 TAP VPN built on [go-libp2p](https://github.com/libp2p/go-libp2p). It connects nodes as a distributed virtual Ethernet switch, providing LAN-style IPv4/IPv6 connectivity, broadcast, and multicast without requiring a centralized data-plane server.
 
-## 主要功能
+## Features
 
-- **二层虚拟交换机** — 完整的以太网帧转发、MAC 学习与广播/组播（ARP、mDNS、NDP）洪泛。
-- **多传输协议** — QUIC、WebRTC Direct、WebTransport、TCP，可选 TCP Brutal 拥塞控制。
-- **智能路由** — `best_path`（最低延迟）、`redundant`（双发零丢包）、`fallback`（自动故障转移）。
-- **流量混淆** — 多种填充模式（`fixed`/`block`/`random`/`dynamic`/`auto`）抗 DPI 识别。
-- **安全** — Ed25519 节点身份、Noise/TLS 1.3 加密、PSK 私有网络隔离、MAC 防伪造。
-- **出口网关** — 允许其他节点通过指定的出口节点访问互联网（NAT 转发）。
-- **内置 WebUI** — 实时仪表盘（测速、协议统计、网络诊断），支持 7 种语言。
-- **OpenWrt LuCI 插件** — 原生 OpenWrt 集成，提供完整配置管理界面。
-- **跨平台** — 支持 Linux、Windows、macOS 及 12 种 CPU 架构，单文件静态二进制。
+- **Layer 2 virtual switching** — Forwards complete Ethernet frames, learns MAC addresses, and floods broadcast and multicast traffic such as ARP, mDNS, and NDP.
+- **Multiple transports** — Supports QUIC, WebRTC Direct, WebTransport, and TCP, with optional TCP Brutal congestion control.
+- **Direct-path preference** — Races direct and relayed connections, gives direct connections a preference window, and automatically returns traffic to a direct path when it becomes available.
+- **Flexible routing strategies** — Includes `best_path` for the lowest-latency path, `redundant` for duplicate delivery, and `fallback` for automatic failover.
+- **End-to-end TAP diagnostics** — The Web UI can test real bidirectional ICMP traffic across both TAP interfaces and distinguish stale metadata, peer firewall failures, and unreachable paths.
+- **Traffic obfuscation** — Provides `fixed`, `block`, `random`, `dynamic`, and `auto` padding modes.
+- **Security** — Uses Ed25519 node identities, Noise/TLS 1.3 encryption, PSK-based private-network isolation, and MAC anti-spoofing checks.
+- **Exit nodes** — Allows selected peers to provide Internet access through NAT forwarding.
+- **Built-in Web UI** — Includes live throughput, protocol statistics, and network diagnostics.
+- **OpenWrt integration** — Includes a LuCI application for native configuration management.
+- **Cross-platform builds** — Supports Linux, Windows, macOS, and multiple CPU architectures as a single binary.
 
-## 快速开始
+## Quick Start
 
-从 [Releases](https://github.com/NNdroid/p2ptap/releases) 下载，或从源码编译：
+Download a prebuilt binary from [GitHub Releases](https://github.com/NNdroid/p2ptap/releases), or build from source with Go 1.26 or later:
 
 ```bash
-# 生成默认配置
-p2ptap genconf -o config.json
+go build -o p2ptap ./cmd/p2ptap
 
-# 运行
+# Generate a default configuration.
+./p2ptap genconf -o config.json
+
+# Run p2ptap on Linux.
 sudo ./p2ptap run -c config.json
 ```
 
-WebUI 默认地址：`http://<tap_ip>`（如 `http://10.0.0.1`）。
+On Windows, run the terminal as Administrator and omit `sudo`.
 
-更多配置与构建说明请参见 [英文 README](README.md)。
+The Web UI listens on the configured TAP address. For example, a node with `tap_ip` set to `10.0.0.1/24` is normally available at `http://10.0.0.1`.
 
-## 许可证
+## Two-Node Setup
 
-MIT — 详见 [LICENSE](LICENSE)。
+Each node needs its own configuration and identity key. For two nodes to share the same virtual Ethernet segment:
+
+- Use the same `psk` on both nodes.
+- Assign a unique `tap_ip`, `tap_ipv6`, and `tap_mac` to each node.
+- Give each node a different `node_key_file`; do not copy the same generated node key to both systems.
+- Enable mDNS when both nodes can discover each other on the local network, or add reachable p2ptap addresses under `static_peers`.
+- Make sure both nodes use compatible obfuscation settings.
+
+Example TAP addresses:
+
+| Node | IPv4 | IPv6 | MAC address |
+| --- | --- | --- | --- |
+| A | `10.0.0.1/24` | `fd00::1/64` | `02:d9:99:28:0e:80` |
+| B | `10.0.0.2/24` | `fd00::2/64` | `02:f1:37:4f:8e:8e` |
+
+The public IPFS bootstrap peers can help with DHT discovery, but they are not p2ptap circuit-relay servers. If the nodes cannot establish a direct connection, configure a compatible p2ptap relay or provide reachable static peer addresses.
+
+## Linux TAP Requirements
+
+p2ptap creates and owns its TAP interface through `/dev/net/tun`, then configures its MTU, MAC address, IPv4 address, and IPv6 address. Run it as `root` or grant the binary the capabilities required to create and configure network interfaces.
+
+The configured `tap_name` must not already exist when p2ptap starts. This prevents the process from attaching to an existing TAP queue that it does not own.
+
+At startup, p2ptap reads the interface MAC address back from the Linux kernel and verifies it against `tap_mac`. A mismatch is treated as a fatal startup error because received Ethernet frames are rewritten to the actual local TAP destination MAC. Continuing with a stale MAC would make frame injection appear successful while the kernel silently discards the frame.
+
+## TAP Data-Path Diagnostics
+
+Set `log_level` to `debug` to trace a frame through the complete data path:
+
+```text
+local OS
+  -> TAP ingress
+  -> Tx Pack
+  -> libp2p transport
+  -> Rx raw frame
+  -> TAP inject
+  -> remote OS
+```
+
+The most useful debug messages are:
+
+- `TAP ingress` — p2ptap read an Ethernet frame generated by the local kernel from the TAP device.
+- `TAP ARP request` or `TAP NDP solicitation` — the ingress frame was decoded as address-resolution traffic.
+- `Tx Pack` — the frame was packed and selected for transmission to a peer.
+- `Rx raw frame` — a complete overlay frame was received from a peer stream.
+- `TAP inject` — the complete Ethernet frame was written to the local TAP device.
+
+If `tcpdump` sees an outgoing ARP request on `p2ptap0` but the process never logs `TAP ingress`, the TAP file descriptor is not receiving the kernel frame. If `TAP ingress` is present but `Tx Pack` is absent, inspect peer selection and routing. If the remote node logs `Rx raw frame` but not `TAP inject`, inspect frame validation, unpacking, and the reported injection error. The startup `TAP MAC verified` message confirms that the configured MAC and the kernel interface MAC agree.
+
+## Building Linux Binaries
+
+Cross-compile static Linux binaries with:
+
+```bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o p2ptap-linux-amd64 ./cmd/p2ptap
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o p2ptap-linux-arm64 ./cmd/p2ptap
+```
+
+Copy the binary and a node-specific configuration to each Linux system. Generate or retain a separate `node.key` on every node.
+
+## Testing
+
+Run the complete test suite before distributing a binary:
+
+```bash
+go test ./... -timeout 3m
+```
+
+## Documentation
+
+- [Configuration reference](docs/config-reference.md)
+- [Architecture](docs/architecture.md)
+- [TAP data flow](docs/tap-dataflow.md)
+- [Platform-specific TAP implementation](docs/tap-platform.md)
+- [P2P transport](docs/p2p-transport.md)
+- [Network and forwarding behavior](docs/network-and-forwarding.md)
+- [Exit nodes and protection](docs/exit-node-and-protect.md)
+- [Web UI and API](docs/web-and-api.md)
+
+## License
+
+p2ptap is licensed under the MIT License. See [LICENSE](LICENSE) for details.
