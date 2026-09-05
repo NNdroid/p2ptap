@@ -179,7 +179,10 @@ type CollectorConfig struct {
 	ProbePeerEchoAddr     func(peerIDStr string, targetAddrStr string) *PeerEchoResultDTO
 	ProbePeerSpeedTest    func(peerIDStr string) *SpeedTestResultDTO
 	ProbeTapForward       func(peerIDStr string) *TapProbeResultDTO
-	AddStaticPeer         func(multiaddrStr string) error
+	// RecordPeerPing lets the socket WebUI's live libp2p ping endpoint feed its
+	// completed success/failure samples back into the node telemetry window.
+	RecordPeerPing func(peerIDStr string, rttMillis float64, success bool)
+	AddStaticPeer  func(multiaddrStr string) error
 	// DiagnoseLink performs a deep transport-layer link check on a single
 	// multiaddr (validity → DNS → TCP/QUIC → libp2p transport → Noise/TLS →
 	// peer-id match → connection). Returns nil if the node has not wired it.
@@ -239,10 +242,20 @@ type PeerInfoDTO struct {
 	Transport         string   `json:"transport"`
 	TransportScore    int      `json:"transport_score"`
 	TransportPriority string   `json:"transport_priority"`
-	RTTMs             int64    `json:"rtt_ms"`
-	JitterMs          float64  `json:"jitter_ms"`
-	LossRatePercent   float64  `json:"loss_rate_percent"`
-	GeoLocation       string   `json:"geo_location"`
+	// RTT/Jitter/Loss are populated only from completed probes.  The companion
+	// validity fields are deliberately explicit: zero is a perfectly valid RTT
+	// component, but it must never again mean the old fabricated "10ms default"
+	// or an equally misleading "0% loss" when no probes have run.
+	RTTMs           float64 `json:"rtt_ms"`
+	RTTMeasured     bool    `json:"rtt_measured"`
+	RTTSource       string  `json:"rtt_source,omitempty"` // tap-icmp | libp2p-ping | p2p-echo
+	RTTSampleCount  int     `json:"rtt_sample_count"`
+	RTTUpdatedAt    string  `json:"rtt_updated_at,omitempty"`
+	JitterMs        float64 `json:"jitter_ms"`
+	JitterMeasured  bool    `json:"jitter_measured"`
+	LossRatePercent float64 `json:"loss_rate_percent"`
+	LossMeasured    bool    `json:"loss_measured"`
+	GeoLocation     string  `json:"geo_location"`
 	// Per-link sequence tracking (for topology star-chart visualization).
 	TxSeq      uint64 `json:"tx_seq"`      // latest seqID sent TO this peer
 	RxSeq      uint64 `json:"rx_seq"`      // latest seqID received FROM this peer
@@ -358,7 +371,7 @@ type TracerouteHop struct {
 	IsRelayHop  bool   `json:"is_relay_hop"` // true for intermediate transit nodes
 	// Link TO this hop from the previous hop (empty for index 0):
 	LinkClass       string `json:"link_class,omitempty"`        // "direct" | "circuit-relay"
-	LinkRTTMs       int64  `json:"link_rtt_ms,omitempty"`       // observed latency of this leg
+	LinkRTTMs       int64  `json:"link_rtt_ms,omitempty"`       // routing edge cost; may be provisional/estimated
 	IsRelayedLeg    bool   `json:"is_relayed_leg,omitempty"`    // leg traverses a libp2p circuit
 	CumulativeRTTMs int64  `json:"cumulative_rtt_ms,omitempty"` // sum of leg RTTs up to and including this hop
 	TransportAddr   string `json:"transport_addr,omitempty"`    // best libp2p multiaddr reaching this hop
@@ -367,8 +380,9 @@ type TracerouteHop struct {
 // TracerouteResultDTO is the outcome of an overlay traceroute to a peer. libp2p
 // core has no native traceroute, so p2ptap traces the LSA/Dijkstra routing path
 // (the exact sequence of mesh nodes a frame is forwarded through), enriched
-// with the per-leg transport class and observed latency from the link-state
-// graph.
+// with the per-leg transport class and routing edge cost from the link-state
+// graph. Edge costs can be provisional before a real probe, so clients must
+// present these path totals as estimates rather than end-to-end measurements.
 type TracerouteResultDTO struct {
 	DestPeer      string          `json:"dest_peer"`
 	DestName      string          `json:"dest_name"`
@@ -384,9 +398,8 @@ type TracerouteResultDTO struct {
 	Source        string          `json:"source"`        // "live-router" | "cached-route" | "not-found"
 }
 
-// PingResultDTO is the outcome of a real libp2p-layer ping to a peer. Unlike
-// /api/speedtest (which reports a cached EWMA estimate), this endpoint actually
-// opens a libp2p ping stream and samples live RTTs, then classifies the
+// PingResultDTO is the outcome of a real libp2p-layer ping to a peer. It opens
+// a libp2p ping stream and samples live RTTs, then classifies the
 // underlying transport (direct vs circuit-relay) from the real connection's
 // multiaddr so "Direct" vs "Relay" can never be inferred from RTT alone.
 type PingResultDTO struct {
@@ -397,13 +410,14 @@ type PingResultDTO struct {
 	TapIPv6       string   `json:"tap_ipv6,omitempty"`
 	Success       bool     `json:"success"`
 	Probes        int      `json:"probes"`     // number of ping samples attempted
+	Replies       int      `json:"replies"`    // number of successful replies
 	RTTMinMs      float64  `json:"rtt_min_ms"` // 0 if no replies
 	RTTAvgMs      float64  `json:"rtt_avg_ms"`
 	RTTMaxMs      float64  `json:"rtt_max_ms"`
 	JitterMs      float64  `json:"jitter_ms"`                // avg absolute RTT deviation
 	PacketLoss    float64  `json:"packet_loss"`              // 0..1 fraction of lost probes
 	IsRelayed     bool     `json:"is_relayed"`               // underlying conn traverses a circuit relay
-	TransportPath string   `json:"transport_path"`           // "direct" | "circuit-relay" | "overlay-relay"
+	TransportPath string   `json:"transport_path"`           // "direct" | "circuit-relay" | "overlay-relay" | "unknown"
 	TransportAddr string   `json:"transport_addr,omitempty"` // remote libp2p multiaddr
 	RelayPath     []string `json:"relay_path,omitempty"`     // relay peer IDs traversed (excl. dest)
 	Error         string   `json:"error,omitempty"`
@@ -608,7 +622,7 @@ type RouteInfoDTO struct {
 	// direct link (IsDirect=true) for routing, but its bytes physically hop
 	// through a libp2p relay — so without this field the WebUI would wrongly
 	// show "Direct" for a 500ms+ relayed peer. Values: "direct" | "circuit-relay"
-	// | "overlay-relay".
+	// | "overlay-relay" | "unknown" (no current transport evidence).
 	TransportPath string             `json:"transport_path"`
 	TotalRTTMs    int64              `json:"total_rtt_ms"`
 	DirectRTTMs   int64              `json:"direct_rtt_ms"`
@@ -755,13 +769,14 @@ type SubnetRouteDTO struct {
 }
 
 type MeshMatrixCellDTO struct {
-	SrcPeerID string `json:"src_peer_id"`
-	SrcName   string `json:"src_name"`
-	DstPeerID string `json:"dst_peer_id"`
-	DstName   string `json:"dst_name"`
-	RTTMs     int64  `json:"rtt_ms"`
-	Hops      int    `json:"hops"`
-	IsDirect  bool   `json:"is_direct"`
+	SrcPeerID     string `json:"src_peer_id"`
+	SrcName       string `json:"src_name"`
+	DstPeerID     string `json:"dst_peer_id"`
+	DstName       string `json:"dst_name"`
+	RTTMs         int64  `json:"rtt_ms"`
+	Hops          int    `json:"hops"`
+	IsDirect      bool   `json:"is_direct"`      // overlay routing: next hop is destination
+	TransportPath string `json:"transport_path"` // actual: direct | circuit-relay | overlay-relay | unknown
 }
 
 // DuplicateIPConflictDTO is the WebUI-facing snapshot of a duplicate-IP or

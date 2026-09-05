@@ -52,14 +52,42 @@ func TestBuildAndVerifyICMPEchoReplyRoundTrip(t *testing.T) {
 
 	reply := craftEchoReply(req)
 	// A genuine echo reply from the peer must validate against the peer.
-	if err := verifyICMPEchoReply(reply, peerMAC, localMAC, peerIP, localIP, id, 0); err != nil {
+	if err := verifyICMPEchoReply(reply, peerMAC, localMAC, peerIP, localIP, id); err != nil {
 		t.Fatalf("verifyICMPEchoReply on crafted reply failed: %v", err)
 	}
 
 	// A reply carrying a DIFFERENT identifier must be rejected (prevents a
 	// normal LAN ping from being mistaken for a probe reply).
-	if err := verifyICMPEchoReply(reply, peerMAC, localMAC, peerIP, localIP, 0xBEEF, 0); err == nil {
+	if err := verifyICMPEchoReply(reply, peerMAC, localMAC, peerIP, localIP, 0xBEEF); err == nil {
 		t.Fatalf("expected identifier mismatch error, got nil")
+	}
+}
+
+// TestVerifyICMPEchoReplyAliasSrcMAC pins the alias-source-MAC tolerance: a
+// genuine reply whose src MAC differs from the MAC we probed (peer's advertised
+// TapMAC vs its wire-observed MAC) must validate when the advertised MAC is
+// passed as an alias — it used to be rejected, producing a false "peer OS sent
+// no echo reply" diagnosis on peers whose emitted MAC differs from metadata.
+func TestVerifyICMPEchoReplyAliasSrcMAC(t *testing.T) {
+	localMAC := mustMAC("02:00:0a:00:00:01")
+	peerMAC := mustMAC("02:00:0a:00:00:03")
+	localIP := net.ParseIP("10.0.0.1").To4()
+	peerIP := net.ParseIP("10.0.0.3").To4()
+	const id uint16 = 0x5A70
+
+	req, err := buildICMPEchoRequest(localMAC, peerMAC, localIP, peerIP, id, nil)
+	if err != nil {
+		t.Fatalf("buildICMPEchoRequest: %v", err)
+	}
+	reply := craftEchoReply(req)
+
+	// Strict src MAC still rejects an unexpected MAC.
+	if err := verifyICMPEchoReply(reply, mustMAC("02:00:0a:00:00:99"), localMAC, peerIP, localIP, id); err == nil {
+		t.Fatalf("expected src MAC mismatch error, got nil")
+	}
+	// The advertised MAC as alias accepts the genuine reply.
+	if err := verifyICMPEchoReply(reply, mustMAC("02:00:0a:00:00:99"), localMAC, peerIP, localIP, id, peerMAC); err != nil {
+		t.Fatalf("alias src MAC should have accepted the reply: %v", err)
 	}
 }
 

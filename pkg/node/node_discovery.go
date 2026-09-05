@@ -135,11 +135,19 @@ func (n *Node) isRelayOnlyPeer(pID peer.ID) bool {
 }
 
 func (n *Node) getPeerLatency(pID peer.ID) int64 {
+	if n == nil || n.Host == nil || n.Host.Peerstore() == nil {
+		return 0
+	}
 	ewma := n.Host.Peerstore().LatencyEWMA(pID)
 	if ewma > 0 {
-		return ewma.Milliseconds()
+		// Routing weights are integral milliseconds. Preserve a real sub-ms
+		// measurement as 1ms rather than turning it back into the "unknown" zero.
+		if ms := ewma.Milliseconds(); ms > 0 {
+			return ms
+		}
+		return 1
 	}
-	return 10
+	return 0
 }
 
 // realPeerLatencyMs returns the cached EWMA latency for pID in milliseconds,

@@ -225,7 +225,10 @@ func (w *WintunTAPDevice) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
 		if _, ipNet, err := net.ParseCIDR(ipCIDR); err == nil {
 			mask = net.IP(ipNet.Mask).String()
 		}
-		_ = exec.Command("netsh", "interface", "ipv4", "set", "address", "name="+w.name, "source=static", "address="+ip, "mask="+mask).Run()
+		cmdErr := runNetsh("interface", "ipv4", "set", "address", "name="+w.name, "source=static", "address="+ip, "mask="+mask)
+		if verifyErr := waitForWindowsInterfaceAddress(w.name, ip); verifyErr != nil {
+			return fmt.Errorf("configure Wintun IPv4: %v; address verification: %w", cmdErr, verifyErr)
+		}
 		// Clean up any stale secondary WebUI virtual IP from interface so ipconfig only shows 10.0.0.3
 		_ = exec.Command("netsh", "interface", "ipv4", "delete", "address", "name="+w.name, "address=10.0.0.254").Run()
 		_ = exec.Command("netsh", "interface", "ipv4", "set", "interface", "name="+w.name, "metric=1", "forwarding=enabled", "weakhostreceive=enabled", "weakhostsend=enabled").Run()
@@ -245,10 +248,10 @@ func (w *WintunTAPDevice) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
 	if ipv6CIDR != "" {
 		v6IP := strings.Split(ipv6CIDR, "/")[0]
 		wintunLog.Info("Configuring IPv6 %s on Wintun adapter '%s'...", ipv6CIDR, w.name)
-		_ = exec.Command("netsh", "interface", "ipv6", "add", "address", w.name, ipv6CIDR).Run()
-		_ = exec.Command("netsh", "interface", "ipv6", "add", "address", "interface="+w.name, "address="+ipv6CIDR).Run()
-		_ = exec.Command("netsh", "interface", "ipv6", "add", "address", w.name, v6IP).Run()
-		_ = exec.Command("netsh", "interface", "ipv6", "add", "address", "interface="+w.name, "address="+v6IP).Run()
+		cmdErr := runNetsh("interface", "ipv6", "add", "address", "interface="+w.name, "address="+v6IP)
+		if verifyErr := waitForWindowsInterfaceAddress(w.name, v6IP); verifyErr != nil {
+			return fmt.Errorf("configure Wintun IPv6: %v; address verification: %w", cmdErr, verifyErr)
+		}
 
 		// Add IPv6 Subnet Route (e.g. fd00::/64) so Windows IPv6 routing table directs overlay IPv6 traffic into Wintun
 		prefix := "fd00::/64"

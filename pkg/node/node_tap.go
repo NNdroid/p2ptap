@@ -39,43 +39,36 @@ func (n *Node) tapReadLoop() {
 	}()
 
 	buf := make([]byte, obfuscate.MaxFrameSize)
-	// Hold a fully-sealed on-wire frame. Pack() caps its own output at
-	// MaxFrameSize (pre-AEAD), but the Node TX path then applies
-	// EncryptPayloadRegion which appends a 16-byte AEAD tag, so the
-	// worst-case sealed frame is MaxFrameSize + AEADTagSize — exactly
-	// MaxSealedFrameSize. This must match the RX buffer sizing in
-	// node_streams.go so a maximal frame is never truncated/reallocated.
-	outBuf := make([]byte, obfuscate.MaxSealedFrameSize)
 
 	// Try epoll-based event-driven I/O (Linux).  Falls back to timer-based
 	// polling on non-Linux platforms transparently.
 	if poller, err := tap.NewEpollPoller(n.TAP); err == nil {
 		poller.NotifyOnCancel(n.ctx)
 		defer poller.Close()
-		n.tapReadLoopEpoll(poller, buf, outBuf)
+		n.tapReadLoopEpoll(poller, buf)
 		return
 	}
 
 	// Fallback: timer-based polling (macOS, Windows, others)
-	n.tapReadLoopPoll(buf, outBuf)
+	n.tapReadLoopPoll(buf)
 }
 
 // tapReadLoopEpoll uses epoll to block until the TAP fd is readable,
 // then drains all queued frames in a batch.  Zero CPU burn when idle.
-func (n *Node) tapReadLoopEpoll(poller *tap.EpollPoller, buf, outBuf []byte) {
+func (n *Node) tapReadLoopEpoll(poller *tap.EpollPoller, buf []byte) {
 	for {
 		if err := poller.Wait(n.ctx); err != nil {
 			log.Debug("TAP read loop stopped: %v", err)
 			return
 		}
-		n.drainTapBatch(buf, outBuf)
+		n.drainTapBatch(buf)
 	}
 }
 
 // tapReadLoopPoll is the fallback timer-based polling path for platforms
 // without epoll (macOS, Windows).  It polls TAP.Read with a short timeout
 // and batches up to 32 frames per pass.
-func (n *Node) tapReadLoopPoll(buf, outBuf []byte) {
+func (n *Node) tapReadLoopPoll(buf []byte) {
 	readErrors := 0
 	totalRead := 0
 	lastStats := time.Now()
@@ -119,7 +112,7 @@ func (n *Node) tapReadLoopPoll(buf, outBuf []byte) {
 				// below so the collector never sees garbage.
 				continue
 			}
-			if !n.processTapFrame(buf[:readN], outBuf) {
+			if !n.processTapFrame(buf[:readN]) {
 				return
 			}
 		}
@@ -147,7 +140,7 @@ func (n *Node) tapReadLoopPoll(buf, outBuf []byte) {
 // drainTapBatch reads up to 32 frames from TAP in a tight loop, calling
 // processTapFrame for each.  It expects the fd to be readable (non-blocking
 // reads succeed) and stops on the first EAGAIN / timeout.
-func (n *Node) drainTapBatch(buf, outBuf []byte) {
+func (n *Node) drainTapBatch(buf []byte) {
 	readErrors := 0
 	totalRead := 0
 	for batchIdx := 0; batchIdx < 32; batchIdx++ {
@@ -180,7 +173,7 @@ func (n *Node) drainTapBatch(buf, outBuf []byte) {
 		}
 
 		// Process frame read from local TAP device
-		if !n.processTapFrame(buf[:readN], outBuf) {
+		if !n.processTapFrame(buf[:readN]) {
 			log.Debug("TAP read loop terminating gracefully")
 			return
 		}
@@ -471,7 +464,7 @@ func (n *Node) maybeDeliverProbeReply(payload []byte) bool {
 
 // It runs ARP/NDP proxy, WebUI intercept, and dispatch to peers.
 // Returns false if the read loop should terminate (unrecoverable error).
-func (n *Node) processTapFrame(payload, outBuf []byte) bool {
+func (n *Node) processTapFrame(payload []byte) bool {
 	readN := len(payload)
 	if log.IsDebug() && readN >= ethernetHeaderLen {
 		// This deliberately precedes ARP/NDP proxy early-returns so debug mode
@@ -660,6 +653,10 @@ func (n *Node) processTapFrame(payload, outBuf []byte) bool {
 		}
 	}
 	if found && targetPeer != n.Host.ID() {
+		// Passively timestamp the user's genuine OS ICMP request at the TAP
+		// boundary. The matching reply is observed on the inbound overlay path,
+		// so WebUI RTT includes the same queueing that terminal ping sees.
+		n.observeTapICMPEchoRequest(targetPeer, payload, time.Now())
 		// Resolve the route up-front. For a RELAYED destination the final peer is
 		// by definition never directly connected, so the "is the link usable" gate
 		// below must check the RELAY HOP's readiness (route.NextHop), not the
@@ -693,15 +690,19 @@ func (n *Node) processTapFrame(payload, outBuf []byte) bool {
 		}
 
 		seqID := n.Packer.NextSeqID(n.txEpochForPeer(targetPeer))
-		totalLen, perr := n.Packer.Pack(seqID, payload, outBuf)
+		// Pack DIRECTLY into the pooled buffer (same pattern as the broadcast
+		// fan-out): the old Pack-into-shared-outBuf + copy round-trip cost a
+		// full-frame memcpy on every unicast TAP frame. `payload` (the read
+		// buffer) is only read here, and the pooled buffer is owned by the
+		// dispatch task until it is released after transmission.
+		packedCopy := acquireFrameBuf(n.Packer.MaxPackedLen(readN))
+		totalLen, perr := n.Packer.Pack(seqID, payload, packedCopy)
 		if perr != nil {
+			releaseFrameBuf(packedCopy)
 			log.Debug("Frame pack error: %v", perr)
 			return true
 		}
-		// Copy out of the shared outBuf into a pooled buffer: the read buffer is
-		// reused on the next TAP read while the worker runs in another goroutine.
-		packedCopy := acquireFrameBuf(totalLen)
-		copy(packedCopy, outBuf[:totalLen])
+		packedCopy = packedCopy[:totalLen]
 		n.Collector.RecordPacketDir(payload, true)
 		n.Collector.RecordTxSeq(n.peerIDString(targetPeer), seqID)
 		if n.Collector != nil {
@@ -807,13 +808,14 @@ func (n *Node) processTapFrame(payload, outBuf []byte) bool {
 			exitPID := n.Gateway.ActiveExitPeerPID()
 			if exitPeerID != "" && exitPeerID != n.Host.ID().String() {
 				seqID := n.Packer.NextSeqID(n.txEpochForPeer(exitPID))
-				totalLen, perr := n.Packer.Pack(seqID, payload, outBuf)
+				packedCopy := acquireFrameBuf(n.Packer.MaxPackedLen(readN))
+				totalLen, perr := n.Packer.Pack(seqID, payload, packedCopy)
 				if perr != nil {
+					releaseFrameBuf(packedCopy)
 					log.Debug("Frame pack error: %v", perr)
 					return true
 				}
-				packedCopy := acquireFrameBuf(totalLen)
-				copy(packedCopy, outBuf[:totalLen])
+				packedCopy = packedCopy[:totalLen]
 				n.Collector.RecordPacketDir(payload, true)
 				n.Collector.RecordTxSeq(exitPeerID, seqID)
 				// Count only UNICAST frames as genuine egress; broadcast/multicast
@@ -871,13 +873,14 @@ func (n *Node) processTapFrame(payload, outBuf []byte) bool {
 				exitPID := n.Gateway.ActiveExitPeerPID()
 				if exitPeerID != "" && exitPeerID != n.Host.ID().String() {
 					seqID := n.Packer.NextSeqID(n.txEpochForPeer(exitPID))
-					totalLen, perr := n.Packer.Pack(seqID, payload, outBuf)
+					packedCopy := acquireFrameBuf(n.Packer.MaxPackedLen(readN))
+					totalLen, perr := n.Packer.Pack(seqID, payload, packedCopy)
 					if perr != nil {
+						releaseFrameBuf(packedCopy)
 						log.Debug("Frame pack error: %v", perr)
 						return true
 					}
-					packedCopy := acquireFrameBuf(totalLen)
-					copy(packedCopy, outBuf[:totalLen])
+					packedCopy = packedCopy[:totalLen]
 					n.Collector.RecordPacketDir(payload, true)
 					n.Collector.RecordTxSeq(exitPeerID, seqID)
 					// Count only UNICAST frames as genuine egress (see above);

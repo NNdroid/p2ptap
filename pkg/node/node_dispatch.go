@@ -304,8 +304,13 @@ func (n *Node) dispatchWorker(id int) {
 					for _, t := range tasks {
 						t := t
 						n.relayPool.Submit(t.relayHop, t.relayData,
-							// onSent: track stats at origin
-							func() { n.Collector.RecordSent(t.origLen) },
+							// onSent: track one logical TAP payload at the origin.
+							// Relay envelope and encryption bytes stay in protocol
+							// telemetry rather than the topology payload rate.
+							func() {
+								n.recordPeerTxBytes(t.target, t.origLen)
+								n.Collector.RecordSent(t.origLen)
+							},
 							// onFail: non-blocking fallback to direct unicast
 							func() {
 								if n.peerStalled(t.target) {
@@ -427,7 +432,10 @@ func (n *Node) sendDispatchTask(task dispatchTask) {
 		}
 	case 2: // relay
 		n.relayPool.Submit(task.relayHop, task.relayData,
-			func() { n.Collector.RecordSent(task.origLen) },
+			func() {
+				n.recordPeerTxBytes(task.target, task.origLen)
+				n.Collector.RecordSent(task.origLen)
+			},
 			func() {
 				if n.peerStalled(task.target) {
 					return

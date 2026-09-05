@@ -1,6 +1,7 @@
 package web
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -113,11 +114,6 @@ type Server struct {
 	// those endpoints fall back to the cached collector data.
 	hostProvider   atomic.Pointer[func() host.Host]
 	routerProvider atomic.Pointer[func() *routing.Router]
-	// pingCache short-TTL memoises /api/ping results keyed by peer id, so a
-	// flurry of identical requests (rapid re-clicks, future auto-refresh) does
-	// not spawn a fresh libp2p ping stream each time. Entries expire on their
-	// own (pingCacheEntry.exp); the map is pruned lazily on read.
-	pingCache sync.Map
 }
 
 // SetHostProvider injects the callback returning the live libp2p host (used by
@@ -321,6 +317,15 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	}
 	fileSrv := http.FileServer(http.FS(staticSub))
 
+	// Gzip-compress embeddable static assets when the browser advertises
+	// support. The dashboard ships ~1.2MB (873KB app.js + 206KB css + 107KB
+	// html); the WebUI is frequently reached OVER the VPN tunnel itself, so an
+	// ~4-5x transfer reduction is the single biggest dashboard load-time win.
+	// Only compressible static content is wrapped — /api/* JSON responses and
+	// WebSocket endpoints are untouched (polling payloads are small, and
+	// per-poll gzip would cost CPU on every tick).
+	gzipStatic := gzipStaticMiddleware(fileSrv)
+
 	mux := http.NewServeMux()
 
 	// Favicon: Serve embedded SVG icon to avoid 404 in browser console
@@ -360,7 +365,7 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			// change is invisible until a hard refresh.
 			w.Header().Set("Cache-Control", "no-store")
 		}
-		fileSrv.ServeHTTP(w, r)
+		gzipStatic.ServeHTTP(w, r)
 	})
 
 	// API Endpoint: /api/self — reports the addresses the WebUI is ACTUALLY
@@ -669,9 +674,9 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	// libp2p core has no native traceroute; p2ptap traces the exact sequence of
 	// mesh nodes a frame is forwarded through (local → relay(s) → destination),
 	// reconstructed from the routing table the node already computed via Dijkstra.
-	// API Endpoint: /api/ping — real libp2p-layer ping to a peer. Unlike
-	// /api/speedtest (which reports a cached EWMA estimate), this opens a libp2p
-	// ping stream and samples live RTTs, then classifies the underlying
+	// API Endpoint: /api/ping — real libp2p-layer ping to a peer. This opens a
+	// fresh libp2p ping stream on every request and samples live RTTs, then
+	// classifies the underlying
 	// transport from the real connection multiaddr so "Direct" vs "Relay" is
 	// never inferred from RTT alone.
 	mux.HandleFunc("/api/ping", s.authRequired(func(w http.ResponseWriter, r *http.Request) {
@@ -694,15 +699,6 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			return
 		}
 
-		// Serve a short-TTL cached result for repeated/rapid identical requests
-		// so we do not spawn a fresh libp2p ping stream on every click.
-		if v, ok := s.pingCache.Load(pid.String()); ok {
-			if e, ok := v.(pingCacheEntry); ok && time.Now().Before(e.exp) {
-				writeJSON(w, e.dto)
-				return
-			}
-		}
-
 		res := observer.PingResultDTO{
 			PeerID:      pid.String(),
 			PeerIDShort: shortPeerID(pid.String()),
@@ -713,71 +709,57 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			res.TapIPv6 = strings.Split(info.TapIPv6, "/")[0]
 		}
 
-		// Inspect the real libp2p connection to classify transport + relay path.
-		h := s.hostOrNil()
-		if h != nil {
-			for _, c := range h.Network().ConnsToPeer(pid) {
-				maStr := c.RemoteMultiaddr().String()
-				res.TransportAddr = maStr
-				if strings.Contains(maStr, "/p2p-circuit") {
-					res.IsRelayed = true
-					res.RelayPath = relayPeerIDsFromMaddr(maStr)
-				}
-				break
-			}
-		}
-		res.TransportPath = pingTransportPath(res.IsRelayed, len(res.RelayPath))
-
-		// Measure live RTT via libp2p ping; fall back to cached EWMA if the
-		// ping stream cannot be established.
+		// Measure live RTT via libp2p ping. A cached EWMA is intentionally NOT
+		// substituted on failure: this endpoint promises a live measurement and
+		// must report the failure instead of presenting stale data as a reply.
 		const samples = 4
 		rtts, perr := s.doLibp2pPing(pid, samples)
-		fromCache := false
-		if len(rtts) == 0 {
-			if h != nil {
-				if ewma := h.Peerstore().LatencyEWMA(pid); ewma > 0 {
-					rtts = []time.Duration{ewma}
-					fromCache = true
-				}
+		// Inspect transport AFTER the probe: ping may have established a new
+		// connection. Scan every connection and prefer a real direct transport
+		// over a simultaneously retained circuit fallback.
+		res.TransportPath, res.TransportAddr, res.RelayPath = inspectPeerTransport(s.hostOrNil(), pid)
+		res.IsRelayed = res.TransportPath == "circuit-relay"
+		if collector != nil && collector.RecordPeerPing != nil {
+			for _, rtt := range rtts {
+				collector.RecordPeerPing(pid.String(), float64(rtt.Microseconds())/1000.0, true)
+			}
+			for i := len(rtts); i < samples; i++ {
+				collector.RecordPeerPing(pid.String(), 0, false)
 			}
 		}
+		res.Probes = samples
+		res.Replies = len(rtts)
 		if len(rtts) > 0 {
 			res.Success = true
-			if fromCache {
-				res.Probes = 1
-				res.PacketLoss = 0
-				ms := float64(rtts[0].Milliseconds())
-				res.RTTMinMs, res.RTTAvgMs, res.RTTMaxMs, res.JitterMs = ms, ms, ms, 0
-				res.Error = "live ping unavailable; RTT from cached EWMA"
-			} else {
-				res.Probes = len(rtts)
-				var sum, minD, maxD, jitterSum, prev float64
-				minD = float64(rtts[0].Milliseconds())
-				maxD = minD
-				prev = minD
-				for _, d := range rtts {
-					ms := float64(d.Milliseconds())
-					sum += ms
-					if ms < minD {
-						minD = ms
-					}
-					if ms > maxD {
-						maxD = ms
-					}
+			var sum, minD, maxD, jitterSum, prev float64
+			minD = float64(rtts[0].Microseconds()) / 1000.0
+			maxD = minD
+			for i, d := range rtts {
+				ms := float64(d.Microseconds()) / 1000.0
+				sum += ms
+				if ms < minD {
+					minD = ms
+				}
+				if ms > maxD {
+					maxD = ms
+				}
+				if i > 0 {
 					jitterSum += absF(ms - prev)
-					prev = ms
 				}
-				res.RTTMinMs = minD
-				res.RTTMaxMs = maxD
-				res.RTTAvgMs = sum / float64(len(rtts))
-				res.JitterMs = jitterSum / float64(len(rtts))
-				res.PacketLoss = float64(samples-len(rtts)) / float64(samples)
-				// A ping can return partial samples then break (e.g. stream
-				// reset) — surface the error instead of silently reporting a
-				// clean measurement.
-				if perr != nil && perr.Error() != "" {
-					res.Error = perr.Error()
-				}
+				prev = ms
+			}
+			res.RTTMinMs = minD
+			res.RTTMaxMs = maxD
+			res.RTTAvgMs = sum / float64(len(rtts))
+			if len(rtts) > 1 {
+				res.JitterMs = jitterSum / float64(len(rtts)-1)
+			}
+			res.PacketLoss = float64(samples-len(rtts)) / float64(samples)
+			// A ping can return partial samples then break (e.g. stream
+			// reset) — surface the error instead of silently reporting a
+			// clean measurement.
+			if perr != nil && perr.Error() != "" {
+				res.Error = perr.Error()
 			}
 		} else {
 			res.Error = "no ping reply"
@@ -787,7 +769,6 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			res.PacketLoss = 1
 		}
 
-		s.pingCache.Store(pid.String(), pingCacheEntry{dto: res, exp: time.Now().Add(pingCacheTTL)})
 		writeJSON(w, res)
 	}))
 
@@ -824,7 +805,7 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 				DestName:      dName,
 				DestTapIP:     dTapIP,
 				IsDirect:      route.IsDirect,
-				TransportPath: tracerouteTransportPath(route),
+				TransportPath: tracerouteTransportPath(route, hops),
 				TotalRTTMs:    route.TotalRTTMs,
 				DirectRTTMs:   route.DirectRTTMs,
 				HopCount:      len(hops),
@@ -840,14 +821,14 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 		}
 
 		// Fallback to the cached routing table (degraded: no per-leg detail).
-		if hops, isDirect, total, direct, ok := s.traceRouteCached(pid); ok {
+		if hops, isDirect, transportPath, total, direct, ok := s.traceRouteCached(pid); ok {
 			dName, dTapIP := s.peerDisplay(pid.String())
 			res := observer.TracerouteResultDTO{
 				DestPeer:      pid.String(),
 				DestName:      dName,
 				DestTapIP:     dTapIP,
 				IsDirect:      isDirect,
-				TransportPath: cachedTransportPath(isDirect),
+				TransportPath: transportPath,
 				TotalRTTMs:    total,
 				DirectRTTMs:   direct,
 				HopCount:      len(hops),
@@ -1458,7 +1439,7 @@ func (s *Server) Close() error {
 }
 
 // listenAll (re)binds the WebUI HTTP listeners on the configured addresses,
-// applying the same 0.0.0.0 / [::] / smart-port fallbacks used at startup.
+// applying safe loopback fallbacks for explicitly configured interface IPs.
 // It returns the bound listeners or an error; callers decide whether to swap
 // them in. Used by both StartServer and Rebind.
 func (s *Server) listenAll() ([]net.Listener, error) {
@@ -1476,21 +1457,18 @@ func (s *Server) listenAll() ([]net.Listener, error) {
 			listeners = append(listeners, ln)
 			webLog.Info("Listening on IPv4 http://%s", boundAddr)
 		} else {
-			// Fallback to 0.0.0.0 if specific IP binding failed
+			// A specific interface address is a security boundary. Falling back to
+			// 0.0.0.0 silently exposed the dashboard on every physical NIC and also
+			// hid failed TAP-IP configuration. Keep the service locally reachable,
+			// but never broaden its bind scope unless 0.0.0.0 was explicitly set.
 			if listenIP != "0.0.0.0" {
-				webLog.Warn("Failed to bind IPv4 %s:%d (%v), trying fallback to 0.0.0.0:%d...", listenIP, port, err, port)
-				lnFallback, boundAddrFallback, errFallback := listenTCPWithRetry("tcp4", "0.0.0.0", port, socketProtectHook)
-				if errFallback == nil {
-					listeners = append(listeners, lnFallback)
-					webLog.Info("Listening on IPv4 (fallback) http://%s (accessible via http://%s:%d)", boundAddrFallback, listenIP, port)
+				webLog.Warn("Failed to bind configured IPv4 %s:%d (%v); falling back to loopback only (127.0.0.1:%d)", listenIP, port, err, port)
+				lnLoop, boundLoop, errLoop := listenTCPWithRetry("tcp4", "127.0.0.1", port, socketProtectHook)
+				if errLoop == nil {
+					listeners = append(listeners, lnLoop)
+					webLog.Info("Listening on IPv4 (safe loopback fallback) http://%s; configured address %s is NOT active", boundLoop, listenIP)
 				} else {
-					lnLoop, boundLoop, errLoop := listenTCPWithRetry("tcp4", "127.0.0.1", port, socketProtectHook)
-					if errLoop == nil {
-						listeners = append(listeners, lnLoop)
-						webLog.Info("Listening on IPv4 (loopback) http://%s", boundLoop)
-					} else {
-						webLog.Warn("Failed to bind IPv4 %s:%d or 0.0.0.0:%d: %v", listenIP, port, port, errFallback)
-					}
+					webLog.Warn("Failed to bind configured IPv4 %s:%d and loopback fallback: %v", listenIP, port, errLoop)
 				}
 			} else {
 				lnLoop, boundLoop, errLoop := listenTCPWithRetry("tcp4", "127.0.0.1", port, socketProtectHook)
@@ -1512,17 +1490,13 @@ func (s *Server) listenAll() ([]net.Listener, error) {
 			webLog.Info("Listening on IPv6 http://%s", boundAddr)
 		} else {
 			if listenIPv6 != "::" {
-				webLog.Warn("Failed to bind IPv6 [%s]:%d (%v), trying fallback to [::]:%d...", listenIPv6, port, err, port)
-				lnFallback, boundAddrFallback, errFallback := listenTCPWithRetry("tcp6", "::", port, socketProtectHook)
-				if errFallback == nil {
-					listeners = append(listeners, lnFallback)
-					webLog.Info("Listening on IPv6 (fallback) http://%s", boundAddrFallback)
+				webLog.Warn("Failed to bind configured IPv6 [%s]:%d (%v); falling back to loopback only ([::1]:%d)", listenIPv6, port, err, port)
+				lnLoop, boundLoop, errLoop := listenTCPWithRetry("tcp6", "::1", port, socketProtectHook)
+				if errLoop == nil {
+					listeners = append(listeners, lnLoop)
+					webLog.Info("Listening on IPv6 (safe loopback fallback) http://%s; configured address %s is NOT active", boundLoop, listenIPv6)
 				} else {
-					lnLoop, boundLoop, errLoop := listenTCPWithRetry("tcp6", "::1", port, socketProtectHook)
-					if errLoop == nil {
-						listeners = append(listeners, lnLoop)
-						webLog.Info("Listening on IPv6 (loopback) http://%s", boundLoop)
-					}
+					webLog.Warn("Failed to bind configured IPv6 [%s]:%d and loopback fallback: %v", listenIPv6, port, errLoop)
 				}
 			}
 		}
@@ -1849,31 +1823,46 @@ func relayPeerIDsFromMaddr(maStr string) []string {
 	return out
 }
 
-func pingTransportPath(isRelayed bool, relayCount int) string {
-	if !isRelayed {
-		return "direct"
+func inspectPeerTransport(h host.Host, pid peer.ID) (path, addr string, relays []string) {
+	if h == nil {
+		return "unknown", "", nil
 	}
-	if relayCount <= 1 {
-		return "circuit-relay"
+	addrs := make([]string, 0, len(h.Network().ConnsToPeer(pid)))
+	for _, c := range h.Network().ConnsToPeer(pid) {
+		addrs = append(addrs, c.RemoteMultiaddr().String())
 	}
-	return "overlay-relay"
+	return classifyTransportAddrs(addrs)
 }
 
-func cachedTransportPath(isDirect bool) string {
-	if isDirect {
-		return "direct"
+func classifyTransportAddrs(addrs []string) (path, addr string, relays []string) {
+	var relayAddr string
+	for _, maStr := range addrs {
+		if !strings.Contains(maStr, "/p2p-circuit") {
+			return "direct", maStr, nil
+		}
+		if relayAddr == "" {
+			relayAddr = maStr
+		}
 	}
-	return "overlay-relay"
+	if relayAddr != "" {
+		return "circuit-relay", relayAddr, relayPeerIDsFromMaddr(relayAddr)
+	}
+	return "unknown", "", nil
 }
 
-func tracerouteTransportPath(route *routing.RouteInfo) string {
-	if route.IsDirect {
+func tracerouteTransportPath(route *routing.RouteInfo, hops []observer.TracerouteHop) string {
+	if !route.IsDirect {
+		return "overlay-relay"
+	}
+	for _, hop := range hops {
+		if hop.IsRelayedLeg || hop.LinkClass == "circuit-relay" {
+			return "circuit-relay"
+		}
+	}
+	if len(hops) > 1 && hops[len(hops)-1].LinkClass == "direct" {
 		return "direct"
 	}
-	if len(route.Path) <= 2 {
-		return "circuit-relay"
-	}
-	return "overlay-relay"
+	return "unknown"
 }
 
 func absF(x float64) float64 {
@@ -1935,19 +1924,21 @@ func (s *Server) traceRouteLive(dest peer.ID) ([]observer.TracerouteHop, *routin
 // traceRouteCached falls back to the cached routing table when the live router
 // is unavailable. Per-leg detail is unavailable in the cache, so hops carry
 // identity only.
-func (s *Server) traceRouteCached(dest peer.ID) ([]observer.TracerouteHop, bool, int64, int64, bool) {
+func (s *Server) traceRouteCached(dest peer.ID) ([]observer.TracerouteHop, bool, string, int64, int64, bool) {
 	s.collector.mu.Lock()
-	var matched *observer.RouteInfoDTO
+	var matched observer.RouteInfoDTO
+	found := false
 	for i := range s.collector.RoutesTable {
-		rt := &s.collector.RoutesTable[i]
+		rt := s.collector.RoutesTable[i]
 		if rt.DestPeer == dest.String() {
 			matched = rt
+			found = true
 			break
 		}
 	}
 	s.collector.mu.Unlock()
-	if matched == nil || len(matched.Path) == 0 {
-		return nil, false, 0, 0, false
+	if !found || len(matched.Path) == 0 {
+		return nil, false, "", 0, 0, false
 	}
 	pids := make([]peer.ID, 0, len(matched.Path))
 	for _, p := range matched.Path {
@@ -1955,7 +1946,11 @@ func (s *Server) traceRouteCached(dest peer.ID) ([]observer.TracerouteHop, bool,
 			pids = append(pids, id)
 		}
 	}
-	return s.buildHops(pids, nil, s.snapshotPeers(), nil), matched.IsDirect, matched.TotalRTTMs, matched.DirectRTTMs, true
+	transportPath := matched.TransportPath
+	if transportPath == "" {
+		transportPath = "unknown"
+	}
+	return s.buildHops(pids, nil, s.snapshotPeers(), nil), matched.IsDirect, transportPath, matched.TotalRTTMs, matched.DirectRTTMs, true
 }
 
 // buildHops turns a forwarding path (sequence of peer IDs) into rich traceroute
@@ -2054,12 +2049,115 @@ func (s *Server) hostOrNil() host.Host {
 	return nil
 }
 
-// pingCacheEntry is a memoised /api/ping result with an expiry timestamp.
-type pingCacheEntry struct {
-	dto observer.PingResultDTO
-	exp time.Time
+// ── Static asset gzip (dashboard load-time) ─────────────────────────────────
+//
+// The embedded dashboard is ~1.2MB raw and is commonly fetched over the VPN
+// tunnel itself. This middleware gzip-compresses compressible static content
+// when the client advertises gzip. It decides ONCE per response (at first
+// WriteHeader/Write, when the Content-Type is final): compressible types get
+// Content-Encoding: gzip with Content-Length stripped (chunked), everything
+// else passes through untouched. WebSocket upgrades and /api/* never reach it.
+
+var gzipWriterPool = sync.Pool{New: func() any { return gzip.NewWriter(nil) }}
+
+// gzipStaticMiddleware wraps a static file handler with transparent gzip.
+func gzipStaticMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// HEAD requests still exercise compression decisions via Content-Length
+		// only; simplest correct behaviour is to not compress them.
+		if r.Method != http.MethodGet {
+			next.ServeHTTP(w, r)
+			return
+		}
+		gw := &gzipStaticWriter{ResponseWriter: w, state: gzipDecidePending}
+		defer func() {
+			if gw.gz != nil {
+				_ = gw.gz.Close()
+				gzipWriterPool.Put(gw.gz)
+				gw.gz = nil
+			}
+		}()
+		next.ServeHTTP(gw, r)
+	})
 }
 
-// pingCacheTTL bounds how long a ping result is served from cache. Short enough
-// that genuinely changed connectivity shows up on the next manual run.
-const pingCacheTTL = 2 * time.Second
+type gzipState int
+
+const (
+	gzipDecidePending gzipState = iota
+	gzipCompress
+	gzipPassthrough
+)
+
+// compressibleContentType reports whether a response Content-Type benefits from
+// gzip. The dashboard assets are JS/CSS/HTML/SVG; JSON text is included for
+// completeness (index fallbacks) even though /api/* bypasses this middleware.
+func compressibleContentType(ct string) bool {
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i] // strip "; charset=..." if present
+	}
+	ct = strings.TrimSpace(strings.ToLower(ct))
+	switch {
+	case strings.HasPrefix(ct, "text/"):
+		return true
+	case ct == "application/javascript", ct == "application/x-javascript",
+		ct == "application/json", ct == "image/svg+xml",
+		ct == "application/xml", ct == "application/wasm":
+		return true
+	}
+	return false
+}
+
+type gzipStaticWriter struct {
+	http.ResponseWriter
+	state gzipState
+	gz    *gzip.Writer
+}
+
+func (g *gzipStaticWriter) decide() {
+	if g.state != gzipDecidePending {
+		return
+	}
+	ct := g.Header().Get("Content-Type")
+	if ct != "" && compressibleContentType(ct) {
+		g.Header().Del("Content-Length") // chunked: the compressed size is unknown
+		g.Header().Set("Content-Encoding", "gzip")
+		gz := gzipWriterPool.Get().(*gzip.Writer)
+		gz.Reset(g.ResponseWriter)
+		g.gz = gz
+		g.state = gzipCompress
+		return
+	}
+	g.state = gzipPassthrough
+}
+
+func (g *gzipStaticWriter) WriteHeader(code int) {
+	g.decide()
+	g.ResponseWriter.WriteHeader(code)
+}
+
+func (g *gzipStaticWriter) Write(p []byte) (int, error) {
+	g.decide()
+	if g.state == gzipCompress {
+		return g.gz.Write(p)
+	}
+	return g.ResponseWriter.Write(p)
+}
+
+// Flush pushes compressed bytes through to the client (http.Flusher support —
+// the file server may use it for large content).
+func (g *gzipStaticWriter) Flush() {
+	if g.state == gzipDecidePending {
+		g.decide()
+	}
+	if g.state == gzipCompress && g.gz != nil {
+		_ = g.gz.Flush()
+	}
+	if f, ok := g.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}

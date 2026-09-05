@@ -64,6 +64,7 @@ type StatsCollector struct {
 	ProbePeerEcho      func(peerIDStr string) *PeerEchoResultDTO
 	ProbePeerEchoAddr  func(peerIDStr string, targetAddrStr string) *PeerEchoResultDTO
 	ProbePeerSpeedTest func(peerIDStr string) *SpeedTestResultDTO
+	RecordPeerPing     func(peerIDStr string, rttMillis float64, success bool)
 	// ProbeTapForward performs an end-to-end TAP data-path forwarding test: a full
 	// Ethernet frame (ICMP echo request) is injected into the overlay toward the
 	// peer's TAP IP and the peer echoes back an ICMP echo reply frame. This
@@ -265,6 +266,7 @@ func (s *StatsCollector) SetCallbacks(cfg observer.CollectorConfig) {
 		}
 		return cfg.ProbeTapForward(peerIDStr)
 	}
+	s.RecordPeerPing = cfg.RecordPeerPing
 	s.ForceSeqSync = cfg.ForceSeqSync
 	s.AddStaticPeer = cfg.AddStaticPeer
 	s.DiagnoseLink = func(multiaddrStr string) *LinkDiagnosis {

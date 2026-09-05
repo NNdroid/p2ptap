@@ -35,10 +35,10 @@ const relayCtrlMaxHops = 8
 //	          the tunnel reaches the final peer.
 //	Hops    — relay-hop counter, incremented per transit hop (loop guard).
 type RelayCtrlHeader struct {
-	Origin peer.ID    `json:"o"`
-	Target peer.ID    `json:"t"`
-	Proto  string     `json:"p"`
-	Hops   uint8      `json:"h"`
+	Origin peer.ID `json:"o"`
+	Target peer.ID `json:"t"`
+	Proto  string  `json:"p"`
+	Hops   uint8   `json:"h"`
 }
 
 // openControlStream is the unified control-stream opener used by EVERY control
@@ -151,6 +151,9 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 
 	sub, ferr := n.openRelayCtrlNextHop(hdr, remotePeer)
 	if ferr != nil || sub == nil {
+		if ferr != nil {
+			n.recordRelayControlFailure(hdr.Target, ferr)
+		}
 		log.Warn("RelayCtrl: cannot forward tunnel to %s (origin %s): %v",
 			hdr.Target, hdr.Origin, ferr)
 		return
@@ -203,7 +206,6 @@ func (n *Node) openRelayCtrlNextHop(hdr RelayCtrlHeader, fromPeer peer.ID) (netw
 		}
 		return n.openRelayCtrlStream(ctx, hop, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), nextHops)
 	}
-
 
 	// Boot circuit relay fall-back: dial Target through the circuit on the
 	// relay-ctrl protocol; the far end dispatches it as a final hop.

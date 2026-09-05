@@ -62,10 +62,11 @@ func toDuplicateIPConflictDTOs(in []DuplicateIPConflict) []observer.DuplicateIPC
 // address/transport display logic and the WebUI ConnState verdict, so the two
 // never drift apart.
 type peerConnSignals struct {
-	hasDirect bool // at least one non-relay transport connection
-	hasRelay  bool // at least one circuit/overlay relay connection
-	isRelayed bool // peer is only/primarily reachable through a relay
-	connCount int  // total transport connections to the peer
+	hasDirect     bool // at least one non-relay transport connection
+	hasRelay      bool // at least one live circuit-relay transport connection
+	hasRelayRoute bool // candidate overlay/boot route; not proof of connectivity
+	isRelayed     bool // peer is only/primarily reachable through a relay
+	connCount     int  // actual transport connections to the peer
 }
 
 // deriveConnSignals classifies a peer's live connections the same way the
@@ -82,18 +83,33 @@ func (n *Node) deriveConnSignals(pID peer.ID) peerConnSignals {
 			s.hasDirect = true
 		}
 	}
-	// When there is no direct libp2p connection to the destination peer, check whether
-	// an active relay path exists (via Boot Relay uplink or Dijkstra Overlay Relay hop).
+	// A route-table/peek-map hop is only a CANDIDATE overlay path. Keep it
+	// separate from connCount: the previous code incremented connCount here and
+	// made an unverified or stale route look like a live target connection.
 	if !s.hasDirect {
 		if hop := n.relayHopForTarget(pID); hop != "" {
-			s.hasRelay = true
-			s.connCount++
+			s.hasRelayRoute = true
 		}
 	}
-	// No direct connection (neither circuit relay nor overlay route counted as
-	// direct) ⇒ the peer is reached only through a relay/overlay hop.
-	s.isRelayed = !s.hasDirect
+	s.isRelayed = !s.hasDirect && (s.hasRelay || s.hasRelayRoute)
 	return s
+}
+
+// routeTransportPath keeps routing semantics (IsDirect means the destination is
+// the next overlay hop) separate from transport reality. A mixed direct+relay
+// peer is classified as direct because a real direct connection is available
+// and preferred; a stale direct route with no live connection is unknown.
+func routeTransportPath(isDirect bool, sig peerConnSignals) string {
+	if !isDirect {
+		return "overlay-relay"
+	}
+	if sig.hasDirect {
+		return "direct"
+	}
+	if sig.hasRelay {
+		return "circuit-relay"
+	}
+	return "unknown"
 }
 
 // relayHopLabel returns a human-friendly identifier for a relay hop peer,
@@ -331,17 +347,18 @@ func (n *Node) updateWebCollectorState() {
 	}
 	n.lastPeerSpeedCalc = nowCalc
 	n.lastPeerSpeedMu.Unlock()
+	// Convert unanswered real TAP/ICMP requests into loss samples before the
+	// snapshot is built. Successful replies are recorded immediately on RX.
+	n.expireTapICMPEchoRequests(nowCalc)
 	if intervalSec <= 0 {
 		intervalSec = 10.0 // default ticker interval on first call
 	}
 
+	// Use one routing-table view for the whole WebUI snapshot so different peer
+	// rows cannot reflect different route generations.
+	routes := n.getCachedRoutes()
 	for _, pID := range allActivePeers {
 		sig := n.deriveConnSignals(pID)
-		// Snapshot the current routing table once per snapshot (it is itself
-		// cached with a 2s TTL, so repeated calls are cheap). Sharing one view
-		// across all peers keeps the RTT/jitter numbers consistent, and lets us
-		// read the real multi-hop RTT for overlay-routed peers below.
-		routes := n.getCachedRoutes()
 		addr := "unknown"
 		transport := "P2P"
 		isRelayedPeer := sig.isRelayed
@@ -378,8 +395,9 @@ func (n *Node) updateWebCollectorState() {
 				transport = transport + "+Relay"
 			}
 			// hasDirectConn && !hasRelayConn → normal direct peer (isRelayedPeer=false)
-		} else {
-			// Zero transport connections — peer only reachable through overlay routing.
+		} else if sig.hasRelayRoute {
+			// Zero target transport connections, but a candidate overlay route is
+			// known. Its liveness is decided separately by ConnState.
 			transport = "Overlay Relay"
 			// The description goes on `transport` (the "传输协议" column), NOT
 			// on `addr` — `addr` is the current active multiaddr shown in the
@@ -413,6 +431,9 @@ func (n *Node) updateWebCollectorState() {
 				transport = "Overlay Relay (Multi-Hop)"
 			}
 			log.Debug("Peer %s has zero transport connections; using overlay relay routing", pID.String())
+		} else {
+			transport = "No Live Transport"
+			log.Debug("Peer %s has no transport connection or usable relay route", pID.String())
 		}
 
 		role := n.classifyPeerRole(pID, bootstrapMap, staticMap, isRelayedPeer)
@@ -438,12 +459,10 @@ func (n *Node) updateWebCollectorState() {
 			}
 		}
 		if reachability == "" {
-			// Before metadata arrives: a relayed peer cannot be "Public".
-			if isRelayedPeer {
-				reachability = "Relay"
-			} else {
-				reachability = "Public"
-			}
+			// Peer AutoNAT status has not arrived. The transport connection we
+			// observe says nothing about whether that peer accepts public inbound
+			// dials, so do not infer "Public" from a direct outbound link.
+			reachability = "Unknown"
 		}
 
 		isExitNode := false
@@ -460,8 +479,8 @@ func (n *Node) updateWebCollectorState() {
 			isExitNode = meta.IsExitNode
 			exitNAT = meta.ExitNAT
 			if time.Since(meta.LastSync) < 45*time.Second {
-				// Use locally-tracked per-peer byte counters for accurate
-				// tx/rx speed (bytes sent TO / received FROM this peer).
+				// Use locally tracked TAP-payload counters for accurate tx/rx
+				// speed (Ethernet bytes sent TO / received FROM this peer).
 				// Fall back to remote-reported metadata if local counters are
 				// unavailable (e.g. metadata-only peer with no active stream).
 				var txV, rxV *atomic.Uint64
@@ -514,50 +533,40 @@ func (n *Node) updateWebCollectorState() {
 			}
 		}
 
-		rttMs := n.getPeerLatency(pID)
-		// getPeerLatency returns a 10ms floor when no real latency measurement
-		// exists (the libp2p peerstore has no EWMA for this peer yet). For a
-		// peer we have NO live libp2p connection to, that 10ms is a routing
-		// sentinel, NOT a measured RTT — prefer the real multi-hop RTT from the
-		// overlay routing table so the dashboard does not show a misleading
-		// "10ms" for a peer that actually routes through several hops.
-		if sig.connCount == 0 {
-			if r, ok := routes[pID]; ok && r.TotalRTTMs > 0 {
-				rttMs = r.TotalRTTMs
-			}
-		}
-		// Only register a direct-link edge for peers we actually have a live
-		// transport connection to. Pushing the 10ms sentinel as a "direct" link
-		// for overlay-only peers fabricates a 10ms direct path that shadows the
-		// real (slower, multi-hop) overlay route and misleads the router. Every
-		// connected peer is (re)asserted as a direct link by the loop over
-		// Host.Network().Peers() at the bottom of this function, so connected
-		// peers are still covered.
-		if sig.connCount > 0 && rttMs > 0 {
+		// WebUI link quality comes only from completed probes. Routing's initial
+		// positive edge cost is deliberately kept separate so an unknown link can
+		// never appear as a fabricated 10ms measurement again.
+		rtt := n.peerRTTMeasurement(pID, nowCalc)
+		if sig.connCount > 0 && rtt.rttMeasured && rtt.rttMs > 0 {
 			// UpdateLinkRTT preserves the edge class (direct/circuit) instead of
 			// overwriting it as direct.
-			n.Router.UpdateLinkRTT(pID, rttMs)
-		}
-
-		geoLoc := "🌐 Public Peer"
-		if strings.Contains(addr, "127.0.0.1") || strings.Contains(addr, "::1") {
-			geoLoc = "🏠 Local Loopback"
-		} else if strings.Contains(addr, "10.") || strings.Contains(addr, "192.168.") || strings.Contains(addr, "172.16.") {
-			geoLoc = "🏠 Local Mesh"
-		} else if strings.Contains(addr, "/p2p-circuit") {
-			geoLoc = "🔀 Relay Server"
-		} else if addr == "unknown" && tapIP != "" {
-			// Overlay-only peer: there is no live connection address yet, so fall
-			// back to the peer's synchronised TAP IP to still classify LAN vs
-			// public instead of always reporting "Public Peer".
-			if strings.HasPrefix(tapIP, "10.") || strings.HasPrefix(tapIP, "192.168.") || strings.HasPrefix(tapIP, "172.16.") || strings.HasPrefix(tapIP, "fd") {
-				geoLoc = "🏠 Local Mesh"
+			routingRTT := int64(math.Round(rtt.rttMs))
+			if routingRTT < 1 {
+				routingRTT = 1
 			}
+			n.Router.UpdateLinkRTT(pID, routingRTT)
 		}
 
-		jitterMs := float64(rttMs) * 0.08
-		if jitterMs < 0.1 && rttMs > 0 {
-			jitterMs = 0.5
+		geoLoc := "❔ No live transport address"
+		if strings.Contains(addr, "/p2p-circuit") {
+			geoLoc = "🔀 Relay Server"
+		} else if addr != "" && addr != "unknown" {
+			if ma, err := multiaddr.NewMultiaddr(addr); err == nil {
+				if ip, err := manet.ToIP(ma); err == nil {
+					switch {
+					case ip.IsLoopback():
+						geoLoc = "🏠 Local Loopback"
+					case ip.IsPrivate() || ip.IsLinkLocalUnicast():
+						geoLoc = "🏠 Private/LAN Address"
+					case ip.IsGlobalUnicast():
+						geoLoc = "🌐 Public Transport Address"
+					default:
+						geoLoc = "❔ Non-unicast transport address"
+					}
+				} else {
+					geoLoc = "🌐 DNS Transport Address"
+				}
+			}
 		}
 
 		var earliestOpen time.Time
@@ -724,12 +733,17 @@ func (n *Node) updateWebCollectorState() {
 		if transportScore == 999 {
 			if strings.Contains(addr, "/p2p-circuit") || isRelayedPeer {
 				transportScore = 100
-			} else if strings.Contains(addr, "127.0.0.1") || strings.Contains(addr, "::1") {
-				transportScore = 0
-			} else if strings.Contains(addr, "192.168.") || strings.Contains(addr, "10.") || strings.Contains(addr, "172.16.") || strings.Contains(addr, "172.17.") || strings.Contains(addr, "172.18.") || strings.Contains(addr, "172.19.") || strings.Contains(addr, "172.20.") || strings.Contains(addr, "172.21.") || strings.Contains(addr, "172.22.") || strings.Contains(addr, "172.23.") || strings.Contains(addr, "172.24.") || strings.Contains(addr, "172.25.") || strings.Contains(addr, "172.26.") || strings.Contains(addr, "172.27.") || strings.Contains(addr, "172.28.") || strings.Contains(addr, "172.29.") || strings.Contains(addr, "172.30.") || strings.Contains(addr, "172.31.") || strings.Contains(addr, "fd") {
-				transportScore = 10
 			} else if addr != "" && addr != "unknown" {
 				transportScore = 20
+				if ma, err := multiaddr.NewMultiaddr(addr); err == nil {
+					if ip, err := manet.ToIP(ma); err == nil {
+						if ip.IsLoopback() {
+							transportScore = 0
+						} else if ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+							transportScore = 10
+						}
+					}
+				}
 			}
 		}
 		switch transportScore {
@@ -771,9 +785,15 @@ func (n *Node) updateWebCollectorState() {
 			Transport:         transport,
 			TransportScore:    transportScore,
 			TransportPriority: transportPriority,
-			RTTMs:             rttMs,
-			JitterMs:          float64(int(jitterMs*10)) / 10.0,
-			LossRatePercent:   0.0,
+			RTTMs:             rtt.rttMs,
+			RTTMeasured:       rtt.rttMeasured,
+			RTTSource:         rtt.source,
+			RTTSampleCount:    rtt.sampleCount,
+			RTTUpdatedAt:      formatMeasurementTime(rtt.updatedAt),
+			JitterMs:          rtt.jitterMs,
+			JitterMeasured:    rtt.jitterMeasured,
+			LossRatePercent:   rtt.lossRatePercent,
+			LossMeasured:      rtt.lossMeasured,
 			GeoLocation:       geoLoc,
 			ObfNegotiated:     obfNegotiated,
 			ObfAlgo:           obfAlgo,
@@ -944,9 +964,12 @@ func (n *Node) updateWebCollectorState() {
 	}
 	n.Collector.UpdateListenAddrs(listenAddrsStrs)
 
-	natStatus := "🟢 Public (Directly Reachable)"
-	if len(n.Host.Network().Peers()) == 0 && len(n.Config.BootstrapPeers) > 0 {
-		natStatus = "🟡 Symmetric NAT / Relay Mode"
+	natStatus := "⚪ Unknown (AutoNAT not verified yet)"
+	switch network.Reachability(n.localReachability.Load()) {
+	case network.ReachabilityPublic:
+		natStatus = "🟢 Public (AutoNAT verified)"
+	case network.ReachabilityPrivate:
+		natStatus = "🟡 Private / NAT (relay may be required)"
 	}
 	n.Collector.UpdateNATStatus(natStatus)
 
@@ -1021,11 +1044,11 @@ func (n *Node) updateWebCollectorState() {
 
 	// Ensure all connected peers are present in the Router link-state graph
 	for _, pID := range n.Host.Network().Peers() {
-		rttMs := n.getPeerLatency(pID)
-		if rttMs <= 0 {
-			rttMs = 10
+		// ConnectedF installs a provisional internal edge. Only overwrite it
+		// here when peerstore contains a real completed measurement.
+		if rttMs := n.getPeerLatency(pID); rttMs > 0 {
+			n.Router.UpdateLinkRTT(pID, rttMs)
 		}
-		n.Router.UpdateLinkRTT(pID, rttMs)
 	}
 
 	routesDTO := n.Router.GetRouteInfoDTOs(func(pID peer.ID) (string, string, string) {
@@ -1042,17 +1065,21 @@ func (n *Node) updateWebCollectorState() {
 	//   overlay-relay → NextHop != dest (p2ptap's own overlay relay)
 	//   circuit-relay → IsDirect but the peer's libp2p conn is /p2p-circuit
 	//   direct        → a genuine direct transport connection
+	transportPaths := make(map[string]string, len(routesDTO))
 	for i := range routesDTO {
 		rd := &routesDTO[i]
-		if !rd.IsDirect {
+		if pid, err := peer.Decode(rd.DestPeer); err == nil {
+			if hop := n.relayHopForTarget(pid); hop != "" {
+				rd.TransportPath = "overlay-relay"
+			} else {
+				rd.TransportPath = routeTransportPath(rd.IsDirect, n.deriveConnSignals(pid))
+			}
+		} else if !rd.IsDirect {
 			rd.TransportPath = "overlay-relay"
-			continue
-		}
-		if pid, err := peer.Decode(rd.DestPeer); err == nil && n.peerHasCircuitRelayConn(pid) {
-			rd.TransportPath = "circuit-relay"
 		} else {
-			rd.TransportPath = "direct"
+			rd.TransportPath = "unknown"
 		}
+		transportPaths[rd.DestPeer] = rd.TransportPath
 	}
 	n.Collector.UpdateRoutes(routesDTO)
 
@@ -1111,13 +1138,14 @@ func (n *Node) updateWebCollectorState() {
 			hops = 0
 		}
 		matrixDTOs = append(matrixDTOs, observer.MeshMatrixCellDTO{
-			SrcPeerID: n.Host.ID().String(),
-			SrcName:   n.nodeName,
-			DstPeerID: destPeer.String(),
-			DstName:   destName,
-			RTTMs:     r.TotalRTTMs,
-			Hops:      hops,
-			IsDirect:  r.IsDirect,
+			SrcPeerID:     n.Host.ID().String(),
+			SrcName:       n.nodeName,
+			DstPeerID:     destPeer.String(),
+			DstName:       destName,
+			RTTMs:         r.TotalRTTMs,
+			Hops:          hops,
+			IsDirect:      r.IsDirect,
+			TransportPath: transportPaths[destPeer.String()],
 		})
 	}
 	n.Collector.UpdateMeshMatrix(matrixDTOs)
@@ -1217,22 +1245,22 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	}
 
 	var (
-		seqTxF, seqRxF, seqTxB, seqRxB, seqSyncs, seqErrs uint64
-		seqAgo string
-		lsaTxF, lsaRxF, lsaTxB, lsaRxB, lsaSyncs, lsaErrs uint64
-		lsaAgo string
-		peekTxF, peekRxF, peekTxB, peekRxB, peekSyncs, peekErrs uint64
-		peekAgo string
-		dataTxF, dataRxF, dataTxB, dataRxB, dataSyncs, dataErrs uint64
-		dataAgo string
+		seqTxF, seqRxF, seqTxB, seqRxB, seqSyncs, seqErrs             uint64
+		seqAgo                                                        string
+		lsaTxF, lsaRxF, lsaTxB, lsaRxB, lsaSyncs, lsaErrs             uint64
+		lsaAgo                                                        string
+		peekTxF, peekRxF, peekTxB, peekRxB, peekSyncs, peekErrs       uint64
+		peekAgo                                                       string
+		dataTxF, dataRxF, dataTxB, dataRxB, dataSyncs, dataErrs       uint64
+		dataAgo                                                       string
 		relayTxF, relayRxF, relayTxB, relayRxB, relaySyncs, relayErrs uint64
-		relayAgo string
-		authTxF, authRxF, authTxB, authRxB, authSyncs, authErrs uint64
-		authAgo string
+		relayAgo                                                      string
+		authTxF, authRxF, authTxB, authRxB, authSyncs, authErrs       uint64
+		authAgo                                                       string
 		dcutrTxF, dcutrRxF, dcutrTxB, dcutrRxB, dcutrSyncs, dcutrErrs uint64
-		dcutrAgo string
-		echoTxF, echoRxF, echoTxB, echoRxB, echoSyncs, echoErrs uint64
-		echoAgo string
+		dcutrAgo                                                      string
+		echoTxF, echoRxF, echoTxB, echoRxB, echoSyncs, echoErrs       uint64
+		echoAgo                                                       string
 	)
 
 	if n.protoTracker != nil {
@@ -1490,7 +1518,6 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	return channels, streamsList
 }
 
-
 // cacheActivePeers stores the latest PeerInfoDTO slice locally so that
 // node-internal lookups (PeekPeerID, resolvePeerIDByName) do not need to read
 // back from the Collector interface.  The Collector is a push-only sink.
@@ -1540,12 +1567,12 @@ func peekPeerIDFromList(peers []observer.PeerInfoDTO, idStr string) (string, boo
 // does not create persistent libp2p connections.
 //
 // rtt_ms semantics:
-//   * > 0       — measured dial RTT in milliseconds.
-//   * 0         — never emitted; an inconclusive probe is encoded as -1 below.
-//   * -1        — probe inconclusive (e.g. a non-active raw UDP/TCP dial
-//                 completed in <1ms before any handshake; the kernel route
-//                 exists but the application-layer listener is not verified).
-//                 UI should render this as "unverified / —" rather than 0ms.
+//   - > 0       — measured dial RTT in milliseconds.
+//   - 0         — never emitted; an inconclusive probe is encoded as -1 below.
+//   - -1        — probe inconclusive (e.g. a non-active raw UDP/TCP dial
+//     completed in <1ms before any handshake; the kernel route
+//     exists but the application-layer listener is not verified).
+//     UI should render this as "unverified / —" rather than 0ms.
 func (n *Node) TestMultiaddrLatency(targetStr string) []observer.MultiaddrTestResultEntry {
 	var pID peer.ID
 	var candidateAddrs []string
@@ -1801,16 +1828,38 @@ func lessAddrEntry(a, b observer.MultiaddrTestResultEntry) bool {
 // Stages: 1 connection, 2 app protocol usable, 3 encryption negotiated,
 // 4 data decrypts.
 func (n *Node) derivePeerConnState(pID peer.ID, role string) (string, int, string) {
+	sig := n.deriveConnSignals(pID)
+	failureDetail, relayFailed := n.recentRelayControlFailure(pID, relayFailureResetWindow)
+
 	// Bootstrap/relay nodes are pure Circuit-Relay hops: they register echo/seqsync
-	// but not the application data protocol, so they are reported as healthy relays.
+	// but not the application data protocol. They are healthy only while a real
+	// transport connection exists; the role label itself is not liveness proof.
 	if role == "Bootstrap" {
+		if sig.connCount == 0 {
+			if relayFailed {
+				return connStateUnreachable, 0, "relay hop control path failed: " + failureDetail
+			}
+			return connStateUnreachable, 0, "relay hop has no live transport connection"
+		}
 		return connStateOK, 2, "relay hop (echo/seqsync)"
 	}
 
-	sig := n.deriveConnSignals(pID)
-	connected := sig.connCount > 0
+	// An overlay route is considered live only after both the SeqSync ready
+	// handshake and a recent inbound echo/data frame. Merely finding a next hop
+	// in an LSA/peek-map must never manufacture a connection. A recent control
+	// failure invalidates relay-only evidence until a real success clears it;
+	// a live direct transport remains authoritative.
+	const relayVerificationWindow = 45 * time.Second
+	relayVerified := sig.hasRelayRoute && !relayFailed && n.isPeerReady(pID) && n.peerRxWithin(pID, relayVerificationWindow)
+	connected := sig.hasDirect || (sig.hasRelay && !relayFailed) || relayVerified
 	stage := 0
 	if !connected {
+		if relayFailed {
+			return connStateUnreachable, stage, "relay control path failed: " + failureDetail
+		}
+		if sig.hasRelayRoute {
+			return connStateConnecting, stage, "relay route known, awaiting verified SeqSync/echo response"
+		}
 		return connStateUnreachable, stage, "no direct or relay connection"
 	}
 

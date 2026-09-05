@@ -1472,7 +1472,7 @@
                 </select>
                 
                 <div class="ext212">
-                    <div id="speedGaugeVal" class="ext213">0.0</div>
+                    <div id="speedGaugeVal" class="ext213">—</div>
                     <div data-i18n="mbps_label" class="ext214">Mbps (P2P Throughput Rate)</div>
                     <div class="ext215">
                         <div id="speedProgressBar" class="ext216"></div>
@@ -1492,7 +1492,12 @@
                         <div data-i18n="quality_lbl" class="ext219">Quality</div>
                         <div id="stQuality" class="ext222">-</div>
                     </div>
+                    <div class="ext218">
+                        <div class="ext219">Packet Loss</div>
+                        <div id="stPacketLoss" class="ext222">-</div>
+                    </div>
                 </div>
+                <div id="stMeasurementNote" style="margin-top:10px;color:var(--text-muted);font-size:0.75rem;text-align:center;">No benchmark run yet</div>
 
                 <button class="btn-glass ext223" data-onclick="runSpeedTest()" id="startSpeedTestBtn" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-radar"/></svg><span data-i18n="start_test_btn">Start Benchmark Test</span></button>
             </div>

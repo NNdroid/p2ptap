@@ -77,7 +77,7 @@ func TestDecryptPeerFrameRolloverPrevGen(t *testing.T) {
 
 	// Frame sealed with the PREV gen key must open via prevRxCipher fallback.
 	oldFrame := sealWithCipher(t, prev, "still-sealing-with-old-key")
-	dec, ok, garb := n.decryptPeerFrame(oldFrame, p)
+	dec, ok, garb := n.decryptPeerFrame(nil, oldFrame, p)
 	if garb || !ok {
 		t.Fatalf("prev-gen frame must open via prevRxCipher: ok=%v garb=%v", ok, garb)
 	}
@@ -87,7 +87,7 @@ func TestDecryptPeerFrameRolloverPrevGen(t *testing.T) {
 
 	// Current gen must still open directly.
 	curFrame := sealWithCipher(t, cur, "current-key-frame")
-	if _, ok, garb := n.decryptPeerFrame(curFrame, p); garb || !ok {
+	if _, ok, garb := n.decryptPeerFrame(nil, curFrame, p); garb || !ok {
 		t.Fatalf("current gen must open directly: ok=%v garb=%v", ok, garb)
 	}
 }
@@ -122,7 +122,7 @@ func TestDecryptPeerFrameStructuralCorruptionNotGarbage(t *testing.T) {
 
 	// A clearly-not-obfuscate blob (too short to carry an obfuscate header).
 	junk := []byte("this is not an obfuscate frame at all, just random bytes")
-	_, ok, garb := n.decryptPeerFrame(junk, p)
+	_, ok, garb := n.decryptPeerFrame(nil, junk, p)
 	if ok {
 		t.Fatalf("junk must not decrypt")
 	}

@@ -758,8 +758,30 @@ func EncryptPayloadRegion(frame []byte, cipher ObfCipher) ([]byte, error) {
 //
 // Same single-append-chain assembly with OpenTo to minimise copies on the hot RX path.
 func DecryptPayloadRegion(frame []byte, cipher ObfCipher) ([]byte, error) {
+	return DecryptPayloadRegionInto(nil, frame, cipher)
+}
+
+// DecryptPayloadRegionInto is DecryptPayloadRegion with a caller-supplied
+// destination: the plaintext frame is appended into dst[:0] (dst may be nil,
+// in which case the behaviour is identical to DecryptPayloadRegion). The
+// returned slice may alias a GROWN dst — the caller on a per-frame hot path
+// keeps it as the new scratch base (capacity is preserved) so steady-state
+// frames cost zero allocations, and must not let it outlive the current frame
+// processing iteration without copying (downstream stages may mutate it).
+func DecryptPayloadRegionInto(dst, frame []byte, cipher ObfCipher) ([]byte, error) {
 	if cipher == nil || cipher.Algo() == ObfAlgoNone {
-		return frame, nil
+		// Legacy behaviour returned the input frame itself; with a caller
+		// scratch we must still not alias the caller's READ buffer (it is
+		// reused by the next stream read), so copy into dst when it fits,
+		// allocate only when the scratch is smaller than the frame.
+		if cap(dst)-len(dst) >= len(frame) {
+			out := dst[:len(frame)]
+			copy(out, frame)
+			return out, nil
+		}
+		out := make([]byte, len(frame))
+		copy(out, frame)
+		return out, nil
 	}
 	hLen := headerLenOf(frame)
 	if len(frame) < hLen {
@@ -773,9 +795,9 @@ func DecryptPayloadRegion(frame []byte, cipher ObfCipher) ([]byte, error) {
 	nonce := obfNonceFromHeader(frame)
 	seqID := binary.BigEndian.Uint64(frame[2:10])
 
-	// Reassemble with a single allocation: [header | pt | trailing padding].
-	out := make([]byte, 0, len(frame))
-	out = append(out, frame[:hLen]...)
+	// Reassemble with a single append chain into the caller's buffer:
+	// [header | pt | trailing padding].
+	out := append(dst[:0], frame[:hLen]...)
 	var err error
 	out, err = cipher.OpenTo(out, nonce[:], frame[hLen:hLen+pLen])
 	if err != nil {

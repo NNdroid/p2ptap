@@ -177,9 +177,51 @@ func benchmarkDecryptPeerFrame(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, ok, _ := n.decryptPeerFrame(frame, p); !ok {
+		if _, ok, _ := n.decryptPeerFrame(nil, frame, p); !ok {
 			b.Fatal("decrypt failed")
 		}
+	}
+}
+
+// BenchmarkDecryptPeerFrameScratch is BenchmarkDecryptPeerFrame with the
+// per-stream scratch buffer that the RX hot loops (handleStream /
+// handleRelayStream) now pass. It shows the steady-state per-frame RX cost of
+// the decrypt step itself: zero allocations (the allocating baseline above is
+// what pre-scratch builds paid per frame).
+func BenchmarkDecryptPeerFrameScratch(b *testing.B) {
+	logger.SetGlobalLevel(logger.LevelInfo)
+	defer logger.SetGlobalLevel(logger.LevelDebug)
+	const algo = obfuscate.ObfAlgoChaCha20
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = byte(i)
+	}
+	c, err := obfuscate.NewObfCipher(algo, k)
+	if err != nil {
+		b.Fatalf("cipher build: %v", err)
+	}
+	n := minimalDecryptNode()
+	tbl := make(map[peer.ID]*PeerObf)
+	n.perPeerObf.Store(&tbl)
+	p := benchPeerID(b)
+	n.storePeerObf(p, &PeerObf{
+		algo:       algo,
+		txCipher:   c,
+		rxCipher:   c,
+		negotiated: true,
+		txKey:      bytes.Repeat([]byte{1}, 32),
+		rxKey:      bytes.Repeat([]byte{2}, 32),
+	})
+	frame := benchSealFrame(b, c, bytes.Repeat([]byte("x"), 1200))
+	scratch := make([]byte, 0, 9600)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dec, ok, _ := n.decryptPeerFrame(scratch, frame, p)
+		if !ok {
+			b.Fatal("decrypt failed")
+		}
+		scratch = dec
 	}
 }
 

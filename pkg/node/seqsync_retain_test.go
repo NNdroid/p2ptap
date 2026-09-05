@@ -101,13 +101,13 @@ func TestRemovePeerObfRetainsCipher(t *testing.T) {
 		return enc
 	}
 	oldFrame := sealWith(cOld, "pre-reconnect-direct-frame")
-	if dec, ok, garb := n.decryptPeerFrame(oldFrame, p); garb || !ok {
+	if dec, ok, garb := n.decryptPeerFrame(nil, oldFrame, p); garb || !ok {
 		t.Fatalf("retained ring must open pre-reconnect OLD-key frame (decrypted=%v garbage=%v)", ok, garb)
 	} else if string(dec[hLen:hLen+len("pre-reconnect-direct-frame")]) != "pre-reconnect-direct-frame" {
 		t.Fatalf("retained ring decrypted wrong payload")
 	}
 	newFrame := sealWith(cNew, "post-reconnect-current-frame")
-	if _, ok, garb := n.decryptPeerFrame(newFrame, p); garb || !ok {
+	if _, ok, garb := n.decryptPeerFrame(nil, newFrame, p); garb || !ok {
 		t.Fatalf("current NEW-key frame must open (decrypted=%v garbage=%v)", ok, garb)
 	}
 }
@@ -221,7 +221,7 @@ func TestRxKeyGraceRetainsFullRing(t *testing.T) {
 		{c3, "gen3-current"},
 	} {
 		f := sealWith(tc.c, tc.plain)
-		dec, ok, garb := n.decryptPeerFrame(f, p)
+		dec, ok, garb := n.decryptPeerFrame(nil, f, p)
 		if garb || !ok {
 			t.Fatalf("frame %q must open via retained ring (decrypted=%v garbage=%v)", tc.plain, ok, garb)
 		}

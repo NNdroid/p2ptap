@@ -519,8 +519,8 @@
                 col_dest: "Destination Node",
                 col_hops: "Hops",
                 col_optimal_path: "Visual Route Path",
-                col_total_rtt: "Optimal RTT",
-                col_direct_rtt: "Direct RTT",
+                col_total_rtt: "Optimal RTT (est.)",
+                col_direct_rtt: "Direct RTT (est.)",
                 col_optimization: "Smart Acceleration",
                 col_route_status: "Route Status",
                 col_inspector: "Decision Inspector",
@@ -1388,8 +1388,8 @@
                 col_dest: "目标节点",
                 col_hops: "跳数",
                 col_optimal_path: "可视化路由图谱",
-                col_total_rtt: "最优 RTT",
-                col_direct_rtt: "直连 RTT",
+                col_total_rtt: "最优 RTT（估算）",
+                col_direct_rtt: "直连 RTT（估算）",
                 col_optimization: "智能加速效果",
                 col_route_status: "路由状态",
                 col_inspector: "选路决策分析",
@@ -2125,8 +2125,8 @@
                 col_dest: "目標節點",
                 col_hops: "跳數",
                 col_optimal_path: "視覺化路由圖譜",
-                col_total_rtt: "最優 RTT",
-                col_direct_rtt: "直連 RTT",
+                col_total_rtt: "最優 RTT（估算）",
+                col_direct_rtt: "直連 RTT（估算）",
                 col_optimization: "智慧加速效果",
                 col_route_status: "路由狀態",
                 col_nodename: "節點名稱",
@@ -2879,8 +2879,8 @@
                 col_dest: "宛先ノード",
                 col_hops: "ホップ数",
                 col_optimal_path: "ビジュアルルートパス",
-                col_total_rtt: "最適 RTT",
-                col_direct_rtt: "直接 RTT",
+                col_total_rtt: "最適 RTT（推定）",
+                col_direct_rtt: "直接 RTT（推定）",
                 col_optimization: "スマート加速",
                 col_route_status: "ルート状態",
                 col_nodename: "ノード名",
@@ -3697,8 +3697,8 @@
                 col_dest: "Zielknoten",
                 col_hops: "Hops",
                 col_optimal_path: "Visueller Pfad",
-                col_total_rtt: "Optimale RTT",
-                col_direct_rtt: "Direkte RTT",
+                col_total_rtt: "Optimale RTT (Schätzung)",
+                col_direct_rtt: "Direkte RTT (Schätzung)",
                 col_optimization: "Beschleunigung",
                 col_route_status: "Routen-Status",
                 col_nodename: "Knotenname",
@@ -4515,8 +4515,8 @@
                 col_dest: "Nodo Destino",
                 col_hops: "Saltos",
                 col_optimal_path: "Ruta Visual",
-                col_total_rtt: "RTT Óptimo",
-                col_direct_rtt: "RTT Directo",
+                col_total_rtt: "RTT Óptimo (estimado)",
+                col_direct_rtt: "RTT Directo (estimado)",
                 col_optimization: "Aceleración",
                 col_route_status: "Estado de Ruta",
                 col_nodename: "Nombre del Nodo",
@@ -5395,8 +5395,8 @@
                 col_dest: "Nœud Destinataire",
                 col_hops: "Sauts",
                 col_optimal_path: "Parcours Visuel",
-                col_total_rtt: "RTT Optimal",
-                col_direct_rtt: "RTT Direct",
+                col_total_rtt: "RTT Optimal (estimé)",
+                col_direct_rtt: "RTT Direct (estimé)",
                 col_optimization: "Accélération",
                 col_route_status: "Statut de Route",
                 col_nodename: "Nom du Nœud",
@@ -7470,11 +7470,18 @@
                 return;
             }
 
-            const rtt = d.rtt_avg_ms || 0;
+            const rtt = Number(d.rtt_avg_ms) || 0;
+            const replies = Number.isFinite(Number(d.replies)) ? Number(d.replies) : 0;
+            const probes = Number.isFinite(Number(d.probes)) ? Number(d.probes) : 0;
+            const jitterAvailable = replies > 1 && Number.isFinite(Number(d.jitter_ms));
+            const lossAvailable = probes > 0 && Number.isFinite(Number(d.packet_loss));
             const rttColor = rtt < 50 ? 'var(--success)' : (rtt < 150 ? 'var(--warn)' : 'var(--danger)');
-            const transportBadge = d.is_relayed
-                ? `<span class="pill-badge role-bootstrap">🔄 ${t('topo_tt_circuit_relay') || 'Circuit Relay'}</span>`
-                : `<span class="pill-badge role-static">⚡ ${t('topo_tt_direct_link') || 'Direct P2P'}</span>`;
+            const pingPath = routeTransportPath(d);
+            const transportBadge = pingPath === 'direct'
+                ? `<span class="pill-badge role-static">⚡ ${transportPathLabel(pingPath)}</span>`
+                : (pingPath === 'unknown'
+                    ? `<span class="pill-badge">❔ ${transportPathLabel(pingPath)}</span>`
+                    : `<span class="pill-badge role-bootstrap">🔄 ${transportPathLabel(pingPath)}</span>`);
 
             cont.innerHTML = `
                 <div class="glass-card" style="padding:18px; display:flex; flex-direction:column; gap:14px; border-left:3px solid var(--accent-cyan);">
@@ -7487,24 +7494,24 @@
                     </div>
                     <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:10px;">
                         <div class="proto-stat-box">
-                            <span class="proto-stat-lbl">${t('common_rtt') || 'RTT Avg'}</span>
+                            <span class="proto-stat-lbl">P2P Control RTT Avg</span>
                             <span class="proto-stat-val" style="color:${rttColor}; font-size:1.25rem;">${rtt > 0 ? rtt.toFixed(1) + ' ms' : '-'}</span>
                         </div>
                         <div class="proto-stat-box">
                             <span class="proto-stat-lbl">Jitter (波动)</span>
-                            <span class="proto-stat-val" style="color:var(--accent-purple); font-size:1.1rem;">±${(d.jitter_ms || 0).toFixed(1)} ms</span>
+                            <span class="proto-stat-val" style="color:var(--accent-purple); font-size:1.1rem;">${jitterAvailable ? '±' + Number(d.jitter_ms).toFixed(1) + ' ms' : '—'}</span>
                         </div>
                         <div class="proto-stat-box">
                             <span class="proto-stat-lbl">Packet Loss</span>
-                            <span class="proto-stat-val" style="color:${(d.packet_loss || 0) > 0 ? 'var(--danger)' : 'var(--success)'}; font-size:1.1rem;">${((d.packet_loss || 0) * 100).toFixed(0)}%</span>
+                            <span class="proto-stat-val" style="color:${lossAvailable && Number(d.packet_loss) > 0 ? 'var(--danger)' : 'var(--success)'}; font-size:1.1rem;">${lossAvailable ? (Number(d.packet_loss) * 100).toFixed(0) + '%' : '—'}</span>
                         </div>
                         <div class="proto-stat-box">
                             <span class="proto-stat-lbl">Probes (采样数)</span>
-                            <span class="proto-stat-val" style="color:var(--accent-cyan); font-size:1.1rem;">${d.probes || 4} pkts</span>
+                            <span class="proto-stat-val" style="color:var(--accent-cyan); font-size:1.1rem;">${probes > 0 ? replies + ' / ' + probes : '—'} replies</span>
                         </div>
                     </div>
                     <div style="display:flex; justify-content:space-between; font-size:0.78rem; color:var(--text-secondary); border-top:1px solid var(--border-subtle); padding-top:8px;">
-                        <span>RTT Min / Max: <strong>${(d.rtt_min_ms || 0).toFixed(1)} ms / ${(d.rtt_max_ms || 0).toFixed(1)} ms</strong></span>
+                        <span>RTT Min / Max: <strong>${rtt > 0 ? Number(d.rtt_min_ms).toFixed(1) + ' ms / ' + Number(d.rtt_max_ms).toFixed(1) + ' ms' : '—'}</strong></span>
                         ${d.tap_ip ? `<span>TAP IP: <code style="color:var(--accent-cyan); font-weight:600;">${escapeHTML(d.tap_ip)}</code></span>` : ''}
                     </div>
                 </div>
@@ -7545,28 +7552,35 @@
                 `;
             }).join('<span style="color:var(--text-muted); font-size:1.2rem; margin:0 4px;">➔</span>');
 
+            const tracePath = routeTransportPath(d);
+            const tracePathIcon = tracePath === 'direct' ? '⚡' : (tracePath === 'unknown' ? '❔' : '🔀');
             cont.innerHTML = `
                 <div class="glass-card" style="padding:18px; display:flex; flex-direction:column; gap:14px; border-left:3px solid var(--accent-purple);">
                     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
                         <strong style="font-size:1.05rem; color:var(--text-primary);">🛣️ P2P Overlay Forwarding Path (${hops.length} Nodes)</strong>
-                        <span style="font-size:0.78rem; background:var(--glass-fill); padding:3px 10px; border-radius:6px; color:var(--accent-cyan); border:1px solid var(--border-subtle);">${d.is_direct ? '⚡ Direct Route' : '🔀 Multi-Hop Relay'}</span>
+                        <span style="font-size:0.78rem; background:var(--glass-fill); padding:3px 10px; border-radius:6px; color:var(--accent-cyan); border:1px solid var(--border-subtle);">${tracePathIcon} ${transportPathLabel(tracePath)}</span>
                     </div>
                     <div style="display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:8px; padding:14px 10px; background:rgba(0,0,0,0.2); border-radius:12px; border:1px solid var(--border-subtle);">
                         ${hopsHtml}
                     </div>
                     <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-secondary); border-top:1px solid var(--border-subtle); padding-top:8px;">
-                        <span>Path Latency: <strong style="color:var(--success); font-size:0.92rem;">${d.total_rtt_ms > 0 ? d.total_rtt_ms + ' ms' : '-'}</strong></span>
-                        ${d.saved_rtt_ms > 0 ? `<span style="color:var(--success); font-weight:600;">⚡ Relay Optimization Saved: -${d.saved_rtt_ms} ms</span>` : ''}
+                        <span>Path Cost Estimate: <strong style="color:var(--success); font-size:0.92rem;">${d.total_rtt_ms > 0 ? '≈' + d.total_rtt_ms + ' ms' : '-'}</strong></span>
+                        ${d.saved_rtt_ms > 0 ? `<span style="color:var(--success); font-weight:600;">⚡ Estimated Relay Saving: ≈-${d.saved_rtt_ms} ms</span>` : ''}
                     </div>
                 </div>
             `;
         }
 
         function runPingDiagnostics() {
-            const rawTarget = document.getElementById('pingTargetInput').value.trim() || '10.0.0.2';
-            const target = sanitizePingTarget(rawTarget) || '10.0.0.2';
+            const rawTarget = document.getElementById('pingTargetInput').value.trim();
+            const target = sanitizePingTarget(rawTarget);
             const out = document.getElementById('pingOutput');
             const visualCont = document.getElementById('diagVisualContainer');
+            if (!target) {
+                if (out) out.innerText = 'Enter a TAP IP, node name, or peer ID. No default target was assumed.';
+                renderVisualPingResult({ error: 'missing or invalid target' }, rawTarget || '(empty)', false);
+                return;
+            }
 
             if (visualCont) {
                 visualCont.innerHTML = `
@@ -7607,14 +7621,15 @@
                     }
                     const d = result.data;
                     const t = (x) => (x != null ? x.toFixed(1) : '-');
-                    const transport = d.is_relayed ? '🔄 Circuit Relay (中转)' : '⚡ Direct P2P (直连)';
+                    const pingPath = routeTransportPath(d);
+                    const transport = `${pingPath === 'direct' ? '⚡' : (pingPath === 'unknown' ? '❔' : '🔄')} ${transportPathLabel(pingPath)}`;
                     lines.push('');
                     lines.push(`Peer: ${d.node_name || d.peer_id_short}  (${d.peer_id_short})`);
                     if (d.tap_ip) lines.push(`  TAP: ${d.tap_ip}`);
-                    lines.push(`Transport: ${transport}  [${d.transport_path}]`);
-                    lines.push(`Probes: ${d.probes}   Loss: ${(d.packet_loss * 100).toFixed(0)}%`);
+                    lines.push(`Transport: ${transport}  [${pingPath}]`);
+                    lines.push(`Replies: ${d.replies || 0}/${d.probes || 0}   Loss: ${d.probes > 0 ? (d.packet_loss * 100).toFixed(0) + '%' : '-'}`);
                     lines.push(`RTT  min/avg/max: ${t(d.rtt_min_ms)} / ${t(d.rtt_avg_ms)} / ${t(d.rtt_max_ms)} ms`);
-                    lines.push(`Jitter: ${t(d.jitter_ms)} ms`);
+                    lines.push(`Jitter: ${(d.replies || 0) > 1 ? t(d.jitter_ms) + ' ms' : '- (needs 2+ replies)'}`);
                     if (d.is_relayed && d.relay_path && d.relay_path.length) {
                         lines.push(`Relay path (${d.relay_path.length} hop): ` + d.relay_path.map(r => '…' + r.slice(-9)).join(' → '));
                     }
@@ -7633,25 +7648,23 @@
         }
 
         function showPingFallback(lines, target, matchedPeer) {
-            let baseRTT = 0;
-            if (matchedPeer) { baseRTT = matchedPeer.rtt_ms || 0; }
-            if (baseRTT <= 0) { baseRTT = 80; }
-
-            const rtts = [Math.round(baseRTT*0.92), Math.round(baseRTT), Math.round(baseRTT*1.04), Math.round(baseRTT*0.96)];
-            lines.push(`Fallback estimate (based on cached routing RTT ≈${baseRTT} ms):`);
-            rtts.forEach((r, i) => {
-                lines.push(`  64 bytes: icmp_seq=${i+1} rtt≈${r} ms [estimated]`);
-            });
-            const avg = (rtts.reduce((a,b)=>a+b,0)/4).toFixed(1);
-            lines.push('', `--- ESTIMATED ---`, `4 probes, rtt avg≈${avg} ms`);
-            lines.push(`WARNING: This is an estimation, not real ICMP! Run 'ping ${target}' in terminal.`);
+            lines.push('', `No live RTT measurement is available; no fallback number was generated.`);
+            if (peerRTTIsMeasured(matchedPeer)) {
+                lines.push(`Last measured peer RTT: ${peerRTTText(matchedPeer)} [${peerRTTSourceLabel(matchedPeer)}; not a reply to this request]`);
+            }
+            lines.push(`Run 'ping ${target}' in terminal for TAP/ICMP RTT; those replies are now passively recorded by the WebUI.`);
         }
 
         function runTracerouteDiagnostics() {
-            const rawTarget = document.getElementById('pingTargetInput').value.trim() || '10.0.0.2';
-            const target = sanitizePingTarget(rawTarget) || '10.0.0.2';
+            const rawTarget = document.getElementById('pingTargetInput').value.trim();
+            const target = sanitizePingTarget(rawTarget);
             const out = document.getElementById('pingOutput');
             const visualCont = document.getElementById('diagVisualContainer');
+            if (!target) {
+                if (out) out.innerText = 'Enter a TAP IP, node name, or peer ID. No default target was assumed.';
+                renderVisualTraceResult({ error: 'missing or invalid target' }, rawTarget || '(empty)', false);
+                return;
+            }
 
             if (visualCont) {
                 visualCont.innerHTML = `
@@ -7693,7 +7706,8 @@
                     const d = tr.data;
                     const relayCount = (d.hops || []).filter(h => h.role === 'relay').length;
                     lines.push('');
-                    lines.push(`Path (${d.hop_count} node, ${relayCount} relay): ${d.is_direct ? 'Direct' : d.transport_path}   [source: ${d.source}]`);
+                    const tracePath = routeTransportPath(d);
+                    lines.push(`Path (${d.hop_count} node, ${relayCount} relay): ${transportPathLabel(tracePath)}   [source: ${d.source}]`);
                     (d.hops || []).forEach((h, i) => {
                         const badge = h.role === 'local' ? '⟡ LOCAL' : (h.role === 'destination' ? '▶ DEST' : '↺ RELAY');
                         const exit = h.is_exit_node ? ' 🚀EXIT' : '';
@@ -7701,14 +7715,16 @@
                         const short = h.peer_id_short || h.peer_id;
                         let line = `  ${i + 1}  ${badge}  ${h.node_name || short}${ip}${exit}`;
                         if (h.link_class) {
-                            const leg = h.link_class === 'circuit-relay' ? '🔄 circuit' : '⚡ direct';
+                            const leg = h.link_class === 'circuit-relay'
+                                ? '🔄 circuit'
+                                : (h.link_class === 'direct' ? '⚡ direct' : '❔ unverified');
                             line += `\n      ↳ ${leg}  leg RTT ~${h.link_rtt_ms} ms  cum ~${h.cumulative_rtt_ms} ms`;
                             if (h.transport_addr) line += `\n      ↳ ${h.transport_addr}`;
                         }
                         lines.push(line);
                     });
                     if (d.total_rtt_ms > 0) lines.push('', `Path RTT (sum of overlay edges): ~${d.total_rtt_ms} ms`);
-                    if (!d.is_direct && d.saved_rtt_ms > 0) lines.push(`  [relay saved ${d.saved_rtt_ms} ms vs direct ${d.direct_rtt_ms} ms]`);
+                    if (tracePath === 'overlay-relay' && d.saved_rtt_ms > 0) lines.push(`  [estimated relay saving ≈${d.saved_rtt_ms} ms vs direct ≈${d.direct_rtt_ms} ms]`);
                     lines.push('', `---`, `For real ICMP traceroute: traceroute ${target}`);
                     if (out) out.innerText = lines.join('\n');
                     renderVisualTraceResult(d, target, true);
@@ -7749,13 +7765,20 @@
 
             let decisionBadge = '';
             let decisionText = '';
-            if (r.is_direct) {
+            const path = routeTransportPath(r);
+            if (path === 'direct') {
                 decisionBadge = `<span class="pill-badge role-static" style="font-size:0.85rem; padding:4px 12px;">🟢 ${t('direct_optimal_title')}</span>`;
-                decisionText = `<strong>${t('direct_optimal_title')}:</strong> ${t('direct_optimal_desc')} (<strong>${r.direct_rtt_ms} ms</strong>).`;
-            } else {
+                decisionText = `<strong>${t('direct_optimal_title')}:</strong> ${t('direct_optimal_desc')} (<strong>≈${r.direct_rtt_ms} ms routing estimate</strong>).`;
+            } else if (path === 'circuit-relay') {
+                decisionBadge = `<span class="pill-badge role-bootstrap" style="font-size:0.85rem; padding:4px 12px;">🔄 ${transportPathLabel(path)}</span>`;
+                decisionText = `<strong>Actual transport:</strong> the destination is the next overlay hop, but the live libp2p connection traverses a circuit relay. RTT values below are routing estimates.`;
+            } else if (path === 'overlay-relay') {
                 decisionBadge = `<span class="pill-badge role-bootstrap" style="font-size:0.85rem; padding:4px 12px;">🔀 ${t('relay_chosen_title')} (${r.next_hop_name})</span>`;
-                const savedStr = r.saved_rtt_ms > 0 ? `${t('saved_latency')} <strong style="color:var(--success);">${r.saved_rtt_ms} ms</strong> (${t('vs_direct')} <strong>${r.direct_rtt_ms} ms</strong>)` : `${t('nat_fallback_desc')}`;
-                decisionText = `<strong>${t('relay_accel_active')}:</strong> ${t('relay_accel_desc')} <strong>${r.next_hop_name}</strong> (${r.total_rtt_ms} ms), ${savedStr}.`;
+                const savedStr = r.saved_rtt_ms > 0 ? `${t('saved_latency')} <strong style="color:var(--success);">≈${r.saved_rtt_ms} ms</strong> (${t('vs_direct')} <strong>≈${r.direct_rtt_ms} ms</strong>)` : `${t('nat_fallback_desc')}`;
+                decisionText = `<strong>${t('relay_accel_active')}:</strong> ${t('relay_accel_desc')} <strong>${r.next_hop_name}</strong> (≈${r.total_rtt_ms} ms routing estimate), ${savedStr}.`;
+            } else {
+                decisionBadge = `<span class="pill-badge" style="font-size:0.85rem; padding:4px 12px;">❔ ${transportPathLabel(path)}</span>`;
+                decisionText = `<strong>Transport not verified:</strong> a cached routing entry exists, but there is no live connection evidence proving direct or relay transport.`;
             }
 
             let candidateRows = '';
@@ -7765,7 +7788,7 @@
                     const optTag = c.is_optimal 
                         ? `<span style="color:var(--success); font-weight:bold;">${t('chosen_optimal')}</span>` 
                         : `<span style="color:var(--text-secondary);">${t('rejected')}</span>`;
-                    const rttStr = c.total_rtt > 0 ? `${c.total_rtt} ms` : `<span style="color:var(--danger);">∞ (${t('unreachable')})</span>`;
+                    const rttStr = c.total_rtt > 0 ? `≈${c.total_rtt} ms` : `<span style="color:var(--danger);">∞ (${t('unreachable')})</span>`;
                     const pathStr = c.path_names.join(' ➔ ');
                     return `
                         <tr>
@@ -8053,22 +8076,24 @@
                 const tapResult = await safeFetchJSON('/api/tap/info');
                 if (tapResult.ok && tapResult.data && !tapResult.data.error) {
                     const tapInfo = tapResult.data;
-                    const ifName = tapInfo.interface_name || tapInfo.name || 'tap0';
-                    const mtuVal = tapInfo.mtu || 1500;
-                    const isUp = tapInfo.is_up !== undefined ? tapInfo.is_up : true;
-                    tapDetails = `Interface: <strong>${ifName}</strong><br>MAC: <code>${tapInfo.mac || 'N/A'}</code> | MTU: ${mtuVal}<br>IPv4: <code>${tapInfo.ipv4 || 'Not configured'}</code><br>IPv6: <code>${tapInfo.ipv6 || 'Not configured'}</code>`;
-                    if (isUp && mtuVal >= 1280) {
+                    const ifName = tapInfo.interface_name || tapInfo.name || 'Unknown';
+                    const mtuKnown = Number.isFinite(Number(tapInfo.mtu)) && Number(tapInfo.mtu) > 0;
+                    const mtuVal = mtuKnown ? Number(tapInfo.mtu) : null;
+                    const upKnown = typeof tapInfo.is_up === 'boolean';
+                    const isUp = tapInfo.is_up === true;
+                    tapDetails = `Interface: <strong>${escapeHTML(ifName)}</strong><br>MAC: <code>${escapeHTML(tapInfo.mac || 'Unknown')}</code> | MTU: ${mtuKnown ? mtuVal : 'Unknown'}<br>IPv4: <code>${escapeHTML(tapInfo.ipv4 || 'Not reported')}</code><br>IPv6: <code>${escapeHTML(tapInfo.ipv6 || 'Not reported')}</code>`;
+                    if (upKnown && isUp && mtuKnown && mtuVal >= 1280) {
                         tapStatus = "PASS";
                     } else {
                         tapStatus = "WARN";
-                        tapDetails += `<br><span style="color:var(--warn);">Warning: Interface may be down or MTU < 1280.</span>`;
+                        tapDetails += `<br><span style="color:var(--warn);">TAP state is down, below MTU 1280, or not fully reported.</span>`;
                     }
                 } else {
                     if (latestStatsData) {
-                        const tapIPv4 = latestStatsData.tap_ip || 'Configured';
-                        const tapIPv6 = latestStatsData.tap_ipv6 || 'Configured';
-                        tapStatus = "PASS";
-                        tapDetails = `Local Node: <strong>${latestStatsData.node_name || 'p2ptap'}</strong><br>Peer ID: <code>${latestStatsData.peer_id || 'N/A'}</code><br>IPv4: <code>${tapIPv4}</code><br>IPv6: <code>${tapIPv6}</code><br><span style="color:var(--accent-cyan); font-size:0.75rem;">(Dual-stack TAP state extracted from local stats context)</span>`;
+                        const tapIPv4 = latestStatsData.tap_ip || 'Not reported';
+                        const tapIPv6 = latestStatsData.tap_ipv6 || 'Not reported';
+                        tapStatus = "WARN";
+                        tapDetails = `Local Node: <strong>${escapeHTML(latestStatsData.node_name || 'Unknown')}</strong><br>Peer ID: <code>${escapeHTML(latestStatsData.peer_id || 'Unknown')}</code><br>IPv4: <code>${escapeHTML(tapIPv4)}</code><br>IPv6: <code>${escapeHTML(tapIPv6)}</code><br><span style="color:var(--warn); font-size:0.75rem;">TAP info probe failed; these are configured addresses, not proof that the interface is up.</span>`;
                     } else {
                         tapDetails = `Failed to query TAP info: ${tapResult.error || 'Unknown error'}`;
                     }
@@ -8081,10 +8106,11 @@
                 if (targetPeer) {
                     peerStatus = "PASS";
                     const transType = targetPeer.transport || 'P2P Stream';
-                    const reachability = targetPeer.reachability || 'Public';
+                    const reachability = targetPeer.reachability || 'Unknown';
+                    const actualPath = peerTransportPath(targetPeer);
                     const v4Str = targetPeer.tap_ip ? `<code>${escapeHTML(targetPeer.tap_ip)}</code>` : 'None';
                     const v6Str = targetPeer.tap_ipv6 ? `<code>${escapeHTML(targetPeer.tap_ipv6)}</code>` : 'None';
-                    peerDetails = `Found Peer: <strong>${escapeHTML(targetPeer.node_name) || 'Unknown'}</strong><br>Peer ID: <code>${escapeHTML(targetPeer.peer_id)}</code><br>TAP IPv4: ${v4Str} | TAP IPv6: ${v6Str}<br>Transport: ${escapeHTML(transType)} | Reachability: ${escapeHTML(reachability)}` + (targetPeer.relay_only ? '<br><span style="color:var(--warn);">⚠ ' + t('relay_only') + '</span>' : '');
+                    peerDetails = `Found Peer: <strong>${escapeHTML(targetPeer.node_name) || 'Unknown'}</strong><br>Peer ID: <code>${escapeHTML(targetPeer.peer_id)}</code><br>TAP IPv4: ${v4Str} | TAP IPv6: ${v6Str}<br>Actual Transport: ${escapeHTML(transportPathLabel(actualPath))} | Peer AutoNAT: ${escapeHTML(reachability)}<br>Protocol: ${escapeHTML(transType)}` + (targetPeer.relay_only ? '<br><span style="color:var(--warn);">⚠ ' + t('relay_only') + '</span>' : '');
                 } else {
                     peerDetails = `Target <code>${inputTarget}</code> is not in the active connections list.<br><span style="color:var(--warn);">Suggestion: Check if peer is online, running p2ptap, and uses matching PSK key.</span>`;
                 }
@@ -8097,7 +8123,8 @@
                 if (echoResult.ok && echoResult.data && (echoResult.data.success || echoResult.data.payload_matched)) {
                     const echoData = echoResult.data;
                     echoStatus = "PASS";
-                    const linkType = echoData.is_relayed ? '🔄 Circuit Relay v2' : '⚡ Direct P2P Link';
+                    const echoPath = peerTransportPath({is_relayed: echoData.is_relayed, addr: echoData.transport_addr});
+                    const linkType = `${echoPath === 'direct' ? '⚡' : (echoPath === 'unknown' ? '❔' : '🔄')} ${transportPathLabel(echoPath)}`;
                     const matchBadge = echoData.payload_matched ? '✅ Verified (100% Byte Match)' : '❌ Corrupted';
                     const rttStr = typeof echoData.rtt_ms === 'number' ? `${echoData.rtt_ms.toFixed(2)} ms` : `${echoData.rtt_ms} ms`;
                     echoDetails = `P2P Echo Status: <strong>SUCCESS</strong> (${linkType})<br>` +
@@ -8111,8 +8138,8 @@
                         const probeInfo = probeResult.data;
                         echoDetails = `Stream State: Reachable | RTT: ${probeInfo.rtt_ms || 'N/A'} ms<br><span style="color:var(--text-secondary); font-size:0.75rem;">(Basic stream probe active. Restart p2ptap binary for microsecond Echo payload test)</span>`;
                     } else if (targetPeer) {
-                        echoStatus = "PASS";
-                        echoDetails = `Stream State: Connected (via PeerStore)<br>Transport: ${targetPeer.transport || 'libp2p'}<br><span style="color:var(--text-secondary); font-size:0.75rem;">(Restart p2ptap binary to enable live microsecond Echo payload test)</span>`;
+                        echoStatus = "WARN";
+                        echoDetails = `Peer is listed, but the live echo probe did not succeed.<br>Observed transport: ${escapeHTML(transportPathLabel(peerTransportPath(targetPeer)))}<br><span style="color:var(--warn); font-size:0.75rem;">A PeerStore entry is not proof that the end-to-end stream works.</span>`;
                     } else {
                         echoDetails = `Echo stream failed: ${echoResult.data && echoResult.data.error ? echoResult.data.error : echoResult.error}`;
                     }
@@ -8183,7 +8210,7 @@
                                 const isActive = (a === targetPeer.addr);
                                 const isV6 = a.includes('/ip6/');
                                 const protoTag = isV6 ? '<span style="color:var(--accent-purple);">[IPv6]</span>' : '<span style="color:var(--accent-cyan);">[IPv4]</span>';
-                                const rttStr = targetPeer.rtt_ms ? `<span class="pill-badge" style="background:var(--accent-cyan-fill); color:var(--accent-cyan); border:1px solid var(--accent-cyan-border); font-size:0.72rem; padding:1px 6px; margin-left:4px;">⏱️ Latency: ${targetPeer.rtt_ms} ms</span>` : '';
+                                const rttStr = peerRTTIsMeasured(targetPeer) ? `<span class="pill-badge" style="background:var(--accent-cyan-fill); color:var(--accent-cyan); border:1px solid var(--accent-cyan-border); font-size:0.72rem; padding:1px 6px; margin-left:4px;" title="${escapeHTML(peerRTTSourceLabel(targetPeer))}">⏱️ Latency: ${peerRTTText(targetPeer)}</span>` : '';
                                 const btnEcho = `<button type="button" class="btn-glass" style="padding:1px 6px; font-size:0.7rem; margin-left:6px; background:var(--accent-cyan-fill);" data-onclick="testSingleMultiaddrEcho(${attrStr(peerID)}, ${attrStr(a)})">${t('echo_test')}</button>`;
                                 const linkCheckMA = toLinkCheckMA(a, peerID);
                                 const btnLinkCheck = `<button type="button" class="btn-glass btn-linkcheck-inline" data-onclick="runLinkCheckFor(${attrStr(linkCheckMA)})" title="${escapeHTML(t('linkcheck_inline_title') || 'Run 7-stage link diagnosis on this multiaddr')}">🔗 ${t('linkcheck_inline') || 'Link Check'}</button>`;
@@ -8202,21 +8229,23 @@
                 if (cachedRoutes && cachedRoutes.length > 0) {
                     const route = cachedRoutes.find(r => r.dest_peer === peerID || r.dest_name === peerID || (targetPeer && (r.tap_ip === targetPeer.tap_ip || r.tap_ip === targetPeer.tap_ipv6)));
                     if (route) {
-                        routeStatus = "PASS";
-                        const isDirect = route.is_direct !== undefined ? route.is_direct : (route.next_hop_peer === route.dest_peer);
-                        const rttStr = route.total_rtt_ms ? `${route.total_rtt_ms} ms` : 'N/A';
-                        const pathStr = (route.path_names && route.path_names.length > 0) ? route.path_names.join(' ➔ ') : (isDirect ? 'Direct P2P' : 'Multi-hop Relay');
-                        routeDetails = `Path Type: <strong>${isDirect ? 'Direct P2P Link' : 'Multi-Hop Overlay Relay'}</strong><br>Routing Path: <code>${pathStr}</code><br>Total Path RTT: ${rttStr}`;
+                        const path = routeTransportPath(route);
+                        routeStatus = path === 'unknown' ? "WARN" : "PASS";
+                        const rttStr = route.total_rtt_ms ? `≈${route.total_rtt_ms} ms (routing estimate)` : 'N/A';
+                        const pathStr = (route.path_names && route.path_names.length > 0) ? route.path_names.join(' ➔ ') : transportPathLabel(path);
+                        routeDetails = `Actual Transport: <strong>${transportPathLabel(path)}</strong><br>Routing Path: <code>${pathStr}</code><br>Total Path RTT: ${rttStr}`;
                         if (route.saved_rtt_ms && route.saved_rtt_ms > 0) {
-                            routeDetails += `<br><span style="color:var(--success);">⚡ Optimized path saves ${route.saved_rtt_ms} ms vs direct link!</span>`;
+                            routeDetails += `<br><span style="color:var(--success);">⚡ Estimated path saving ≈${route.saved_rtt_ms} ms vs direct link</span>`;
                         }
                     } else if (targetPeer) {
-                        routeStatus = "PASS";
-                        routeDetails = `Path Type: <strong>Direct P2P Link</strong><br>Destination: <code>${targetPeer.node_name || targetPeer.peer_id}</code><br>RTT: ${targetPeer.rtt_ms ? targetPeer.rtt_ms + ' ms' : 'N/A'}`;
+                        const path = peerTransportPath(targetPeer);
+                        routeStatus = path === 'unknown' ? "WARN" : "PASS";
+                        routeDetails = `Actual Transport: <strong>${transportPathLabel(path)}</strong><br>Destination: <code>${targetPeer.node_name || targetPeer.peer_id}</code><br>Measured RTT: ${peerRTTText(targetPeer)}`;
                     }
                 } else if (targetPeer) {
-                    routeStatus = "PASS";
-                    routeDetails = `Path Type: <strong>Direct P2P Link</strong><br>Destination: <code>${targetPeer.node_name || targetPeer.peer_id}</code><br>RTT: ${targetPeer.rtt_ms ? targetPeer.rtt_ms + ' ms' : 'N/A'}`;
+                    const path = peerTransportPath(targetPeer);
+                    routeStatus = path === 'unknown' ? "WARN" : "PASS";
+                    routeDetails = `Actual Transport: <strong>${transportPathLabel(path)}</strong><br>Destination: <code>${targetPeer.node_name || targetPeer.peer_id}</code><br>Measured RTT: ${peerRTTText(targetPeer)}`;
                 }
                 resultsHTML += renderCard(t('troubleshoot_step5') || 'Overlay Routing Path Analysis', routeStatus, routeDetails);
 
@@ -8958,7 +8987,10 @@
         let cachedPeers = [];
         let cachedRoutes = [];
         let transitRelaySet = new Set();
-        let localNodeInfo = { name: "Local Node", ip: "10.0.0.1", ipv6: "fd00::1", peerID: "" };
+        // Empty addresses are intentional until /api/stats supplies the real
+        // interface values. Example addresses must never leak into topology or
+        // exported configuration as if they belonged to this node.
+        let localNodeInfo = { name: "Local Node", ip: "", ipv6: "", peerID: "" };
 
         // Cache of multiaddr probe results, keyed by peer ID.
         //
@@ -8999,14 +9031,36 @@
         ];
 
         function isPeerRelayed(peer) {
-            if (!peer) return false;
-            if (peer.is_relayed !== undefined) {
-                return peer.is_relayed;
-            }
-            const trans = peer.transport || '';
-            if (trans === 'Circuit Relay' || trans === 'Overlay Relay') return true;
-            const addr = peer.addr || peer.address || '';
-            return addr.includes('/p2p-circuit');
+            const path = peerTransportPath(peer);
+            return path === 'circuit-relay' || path === 'overlay-relay';
+        }
+
+        function peerTransportPath(peer) {
+            if (!peer) return 'unknown';
+            // The backend scans all live connections and explicitly prefers a
+            // direct connection when direct+circuit transports coexist.
+            if (peer.is_relayed === false) return 'direct';
+            const trans = String(peer.transport || '');
+            if (trans.includes('Overlay Relay')) return 'overlay-relay';
+            if (peer.is_relayed === true || trans.includes('Circuit Relay')) return 'circuit-relay';
+            const addr = String(peer.addr || peer.address || '');
+            if (addr && addr !== 'unknown') return addr.includes('/p2p-circuit') ? 'circuit-relay' : 'direct';
+            return 'unknown';
+        }
+
+        function routeTransportPath(route) {
+            const path = route && String(route.transport_path || '');
+            if (path === 'direct' || path === 'circuit-relay' || path === 'overlay-relay' || path === 'unknown') return path;
+            // Legacy route payloads can prove an overlay hop from is_direct=false,
+            // but is_direct=true alone cannot distinguish direct from circuit.
+            return route && route.is_direct === false ? 'overlay-relay' : 'unknown';
+        }
+
+        function transportPathLabel(path) {
+            if (path === 'direct') return t('topo_tt_direct_link') || 'Direct P2P Link';
+            if (path === 'circuit-relay') return t('topo_tt_circuit_relay') || 'Circuit Relay';
+            if (path === 'overlay-relay') return 'Multi-Hop Overlay Relay';
+            return 'Unknown / not verified';
         }
 
         // encBadge renders a per-peer encryption/obfuscation status chip for the
@@ -9431,8 +9485,8 @@
         function renderMeshHealthScore(data) {
             const peers = data.active_peers || [];
             const totalPeers = peers.length;
-            const directPeers = peers.filter(p => !p.is_relayed).length;
-            const directRatio = totalPeers > 0 ? (directPeers / totalPeers) : 1;
+            const directPeers = peers.filter(p => peerTransportPath(p) === 'direct').length;
+            const directRatio = totalPeers > 0 ? (directPeers / totalPeers) : null;
             const decryptErrs = peers.reduce((sum, p) => sum + (p.obf_decrypt_errs || 0), 0);
             const dupIPs = (data.duplicate_ips || []).length;
             const dedupCount = (data.packet_stats ? data.packet_stats.dedup_count : 0);
@@ -9440,7 +9494,7 @@
 
             let score = 100;
             if (!tapAvailable) score -= 50;
-            if (totalPeers > 0 && directRatio < 1) score -= Math.round((1 - directRatio) * 15);
+            if (directRatio !== null && directRatio < 1) score -= Math.round((1 - directRatio) * 15);
             if (decryptErrs > 0) score -= Math.min(30, decryptErrs * 5);
             if (dupIPs > 0) score -= Math.min(40, dupIPs * 20);
             score = Math.max(0, Math.min(100, score));
@@ -9458,7 +9512,7 @@
             if (metricsRow) {
                 const algoStr = data.obfs_algo || 'AES-GCM (PFS)';
                 metricsRow.innerHTML = `
-                    <span class="mesh-health-pill">🌐 ${t('lbl_direct_ratio') || 'Direct Ratio'}: <strong>${(directRatio * 100).toFixed(0)}%</strong> (${directPeers}/${totalPeers})</span>
+                    <span class="mesh-health-pill">🌐 ${t('lbl_direct_ratio') || 'Direct Ratio'}: <strong>${directRatio === null ? '—' : (directRatio * 100).toFixed(0) + '%'}</strong> (${directPeers}/${totalPeers})</span>
                     <span class="mesh-health-pill">🔐 ${t('lbl_crypto_grade') || 'Encryption'}: <strong>${escapeHTML(algoStr)}</strong></span>
                     <span class="mesh-health-pill">🛡️ ${t('lbl_dedup_drops') || 'Window Dedup'}: <strong>${dedupCount.toLocaleString()}</strong></span>
                     <span class="mesh-health-pill">⚠️ ${t('lbl_dup_conflicts') || 'IP Conflicts'}: <strong style="color:${dupIPs > 0 ? '#f87171' : '#34d399'}">${dupIPs}</strong></span>
@@ -9892,12 +9946,12 @@
                     const nameLabel = isExitServer ? `${name} · ${t('topo_badge_exit_server') || 'Exit Server'}` : name;
                     const v4 = (p.tap_ip || '').trim();
                     const v6 = (p.tap_ipv6 || '').trim();
-                    const rtt = (p.rtt_ms != null && p.rtt_ms !== '') ? Number(p.rtt_ms) : null;
+                    const rtt = peerRTTIsMeasured(p) ? Number(p.rtt_ms) : null;
                     // RTT pill sits in the top-right of the card, color-coded by latency.
                     let rttPill = '';
                     if (rtt != null) {
                         const rttCls = rtt < 80 ? '' : (rtt < 200 ? ' rtt-warn' : ' rtt-err');
-                        rttPill = `<span class="exit-peer-rtt${rttCls}" title="Round-trip time">⏱ ${rtt} ms</span>`;
+                        rttPill = `<span class="exit-peer-rtt${rttCls}" title="Measured by ${escapeHTML(peerRTTSourceLabel(p))}">⏱ ${rtt.toFixed(1)} ms</span>`;
                     }
                     const metaRows = [];
                     if (v4) {
@@ -10536,8 +10590,7 @@
                     }
                     if (fpBtn) fpBtn.disabled = !fullFp;
                     
-                    let natText = data.nat_status || 'Public';
-                    if (natText === 'Public') natText = t('public_direct');
+                    let natText = data.nat_status || '⚪ Unknown (AutoNAT not verified yet)';
                     document.getElementById('secNAT').innerText = natText;
                 }
 
@@ -10631,20 +10684,24 @@
                 const peersBody = document.getElementById('peersList');
                 if (peers.length > 0) {
                     peersBody.innerHTML = peers.map(p => {
-                        // Reachability: prefer the peer's self-reported reachability ("Public" = green),
-                        // but also detect if our connection to them is relayed from the transport field.
-                        const isMyConnRelayed = isPeerRelayed(p);
-                        const isPeerPublic = p.reachability === 'Public';
-                        let reachClass, reachText;
-                        if (isMyConnRelayed) {
+                        // Show the transport WE actually observe. Peer-reported
+                        // AutoNAT is supplemental and never used to infer direct.
+                        const peerPath = peerTransportPath(p);
+                        const peerAutoNAT = p.reachability && p.reachability !== 'Unknown'
+                            ? ` · AutoNAT ${p.reachability}` : '';
+                        let reachClass, reachText, reachIcon;
+                        if (peerPath === 'circuit-relay' || peerPath === 'overlay-relay') {
                             reachClass = '#fbbf24';
-                            reachText = t('relayed_conn') || 'Relayed';
-                        } else if (isPeerPublic) {
+                            reachText = transportPathLabel(peerPath) + peerAutoNAT;
+                            reachIcon = '🟡';
+                        } else if (peerPath === 'direct') {
                             reachClass = '#34d399';
-                            reachText = t('public_direct') || 'Public/Direct';
+                            reachText = transportPathLabel(peerPath) + peerAutoNAT;
+                            reachIcon = '🟢';
                         } else {
-                            reachClass = '#38bdf8';
-                            reachText = p.reachability || 'Direct';
+                            reachClass = '#94a3b8';
+                            reachText = transportPathLabel(peerPath) + peerAutoNAT;
+                            reachIcon = '⚪';
                         }
                         const tapIPs = (
                             [p.tap_ip ? `<code class="is-v4">${escapeHTML(p.tap_ip)}</code>` : '',
@@ -10657,9 +10714,16 @@
                                 ? '<span class="pill-badge role-static">🟦 Static</span>'
                                 : '<span class="pill-badge role-peer">🟢 Peer</span>');
 
-                        const geoBadge = p.geo_location || '🌐 Public Peer';
-                        const jitterStr = (p.jitter_ms || 0.5).toFixed(1);
-                        const lossStr = (p.loss_rate_percent || 0.0).toFixed(1);
+                        const geoBadge = p.geo_location || '❔ Unknown address scope';
+                        const rttMeasured = peerRTTIsMeasured(p);
+                        const jitterMeasured = p.jitter_measured === true && Number.isFinite(Number(p.jitter_ms));
+                        const lossMeasured = p.loss_measured === true && Number.isFinite(Number(p.loss_rate_percent));
+                        const jitterStr = jitterMeasured ? `±${Number(p.jitter_ms).toFixed(1)} ms` : '—';
+                        const lossStr = lossMeasured ? `${Number(p.loss_rate_percent).toFixed(1)}%` : '—';
+                        const rttColor = !rttMeasured ? 'var(--text-muted)' : (p.rtt_ms < 50 ? 'var(--success)' : (p.rtt_ms < 150 ? 'var(--warn)' : 'var(--danger)'));
+                        const rttTitle = rttMeasured
+                            ? `Measured by ${peerRTTSourceLabel(p)}; ${p.rtt_sample_count || 1} sample(s)${p.rtt_updated_at ? '; updated ' + p.rtt_updated_at : ''}`
+                            : 'No completed RTT measurement yet';
 
                         const allAddrsList = (p.all_addrs && p.all_addrs.length > 0) ? p.all_addrs : [p.addr];
                         // Resolve what to show as the "current active pathway":
@@ -10720,12 +10784,12 @@
                             <td>${roleBadge}</td>
                             <td>
                                 <div style="display:flex; flex-direction:column; gap:2px;">
-                                    <span style="color:var(--text-dim); font-size:0.8rem; font-weight:500;">${escapeHTML(p.os_arch || 'linux')}</span>
-                                    <span style="color:var(--accent-purple); font-size:0.72rem; font-family:monospace;" title="Node Software Version">${escapeHTML(p.version ? (p.version.startsWith('v') ? p.version : 'v' + p.version) : 'dev')}</span>
+                                    <span style="color:var(--text-dim); font-size:0.8rem; font-weight:500;">${escapeHTML(p.os_arch || '—')}</span>
+                                    <span style="color:var(--accent-purple); font-size:0.72rem; font-family:monospace;" title="Node Software Version">${escapeHTML(p.version ? (p.version.startsWith('v') ? p.version : 'v' + p.version) : '—')}</span>
                                 </div>
                             </td>
                             <td><div class="tap-ip-cell">${tapIPs}</div></td>
-                            <td><span style="color:${reachClass}; font-size:0.8rem">🟢 ${reachText}</span></td>
+                            <td><span style="color:${reachClass}; font-size:0.8rem">${reachIcon} ${escapeHTML(reachText)}</span></td>
                             <td>
                                 <div style="display:flex; flex-direction:column; gap:2px;">
                                     ${encBadge(p)}
@@ -10749,8 +10813,8 @@
                             </td>
                             <td><span style="color:var(--accent-purple); font-size:0.82rem;" title="Connected at ${p.connected_at}">${p.connected_since || '-'}</span></td>
                             <td><span style="color:var(--accent-cyan); font-size:0.82rem;">${p.last_seen || 'Just now'}</span></td>
-                            <td><strong style="color:${p.rtt_ms < 50 ? 'var(--success)' : (p.rtt_ms < 150 ? 'var(--warn)' : 'var(--danger)')}">${p.rtt_ms} ms</strong></td>
-                            <td><span style="color:var(--accent-purple); font-size:0.8rem">±${jitterStr} ms</span> <span style="color:var(--text-muted); font-size:0.75rem">(${lossStr}%)</span></td>
+                            <td><strong style="color:${rttColor}" title="${escapeHTML(rttTitle)}">${peerRTTText(p)}</strong><div style="font-size:0.68rem;color:var(--text-muted);">${rttMeasured ? escapeHTML(peerRTTSourceLabel(p)) : 'not measured'}</div></td>
+                            <td><span style="color:var(--accent-purple); font-size:0.8rem">${jitterStr}</span> <span style="color:var(--text-muted); font-size:0.75rem">(${lossStr})</span></td>
                             <td>
                                 <div style="display:flex; gap:6px; align-items:center;">
                                     <button class="btn-glass" style="padding:2px 8px; font-size:0.75rem; background:rgba(56, 189, 248, 0.15); border-color:rgba(56, 189, 248, 0.4); color:#38bdf8;" title="${t('btn_crypto_inspector') || 'Crypto & Seq Inspector'}" data-onclick="openCryptoInspector(${attrStr(p.peer_id)})">🔐</button>
@@ -10851,8 +10915,11 @@
                 let maxSavedMs = 0;
 
                 cachedRoutes.forEach(r => {
-                    if (!r.is_direct && r.next_hop_peer) {
+                    const path = routeTransportPath(r);
+                    if (path === 'overlay-relay' && r.next_hop_peer) {
                         transitRelaySet.add(r.next_hop_peer);
+                    }
+                    if (path === 'overlay-relay' || path === 'circuit-relay') {
                         relayedCount++;
                     }
                     if (r.saved_rtt_ms > maxSavedMs) {
@@ -10866,12 +10933,13 @@
                 const statRelay = document.getElementById('statRelayedRoutes');
                 if (statRelay) statRelay.innerText = relayedCount;
                 const statSaved = document.getElementById('statMaxSavings');
-                if (statSaved) statSaved.innerText = maxSavedMs > 0 ? `⚡ -${maxSavedMs} ms` : `0 ms`;
+                if (statSaved) statSaved.innerText = maxSavedMs > 0 ? `⚡ ≈-${maxSavedMs} ms` : `0 ms`;
 
                 const routeBody = document.getElementById('routeList');
                 if (cachedRoutes.length > 0) {
                     routeBody.innerHTML = cachedRoutes.map(r => {
                         const hopCount = (r.path && r.path.length > 1) ? r.path.length - 1 : 1;
+                        const routePath = routeTransportPath(r);
                         
                         // Render visual hop pills
                         let visualPath = '';
@@ -10890,13 +10958,22 @@
                         }
 
                         // Render Smart Optimization Progress Bar & Gain Badge
-                        let optHtml = `<div style="display:flex; align-items:center; gap:6px;"><span style="color:var(--text-secondary); font-size:0.8rem;">Direct Route</span><span style="color:var(--text-secondary); font-size:0.7rem; background:var(--border-subtle); padding:1px 6px; border-radius:4px;">Optimal</span></div>`;
+                        let optHtml;
+                        if (routePath === 'direct') {
+                            optHtml = `<div style="display:flex; align-items:center; gap:6px;"><span style="color:var(--text-secondary); font-size:0.8rem;">Direct Route</span><span style="color:var(--text-secondary); font-size:0.7rem; background:var(--border-subtle); padding:1px 6px; border-radius:4px;">Optimal</span></div>`;
+                        } else if (routePath === 'circuit-relay') {
+                            optHtml = `<span style="color:var(--warn); font-size:0.8rem;">Circuit fallback</span>`;
+                        } else if (routePath === 'overlay-relay') {
+                            optHtml = `<span style="color:var(--accent-purple); font-size:0.8rem;">Overlay route</span>`;
+                        } else {
+                            optHtml = `<span style="color:var(--text-muted); font-size:0.8rem;">Not verified</span>`;
+                        }
                         if (r.saved_rtt_ms > 0 && r.direct_rtt_ms > 0) {
                             const percent = Math.min(100, Math.round((r.saved_rtt_ms * 100) / r.direct_rtt_ms));
                             optHtml = `
                                 <div style="display:flex; flex-direction:column; gap:3px; min-width:120px;">
                                     <div style="display:flex; align-items:center; justify-content:space-between; font-size:0.78rem;">
-                                        <span style="color:var(--success); font-weight:bold;">⚡ -${r.saved_rtt_ms} ms</span>
+                                        <span style="color:var(--success); font-weight:bold;">⚡ ≈-${r.saved_rtt_ms} ms</span>
                                         <span style="color:var(--success); font-size:0.7rem; background:var(--accent-green-fill); padding:1px 5px; border-radius:4px; font-weight:bold;">+${percent}% Faster</span>
                                     </div>
                                     <div style="width:100%; height:5px; background:var(--glass-fill-strong); border-radius:3px; overflow:hidden;">
@@ -10911,14 +10988,16 @@
                         // by the routing layer, so checking is_direct alone would wrongly
                         // label a 500ms+ relayed peer as "Direct".
                         let statusBadge;
-                        if (r.transport_path === 'circuit-relay') {
+                        if (routePath === 'circuit-relay') {
                             statusBadge = `<span class="pill-badge role-bootstrap" style="padding:3px 9px; font-size:0.75rem;">🔄 Circuit Relay</span>`;
-                        } else if (!r.is_direct) {
-                            statusBadge = `<span class="pill-badge role-bootstrap" style="padding:3px 9px; font-size:0.75rem;">🔀 Relayed via ${r.next_hop_name}</span>`;
-                        } else {
+                        } else if (routePath === 'overlay-relay') {
+                            statusBadge = `<span class="pill-badge role-bootstrap" style="padding:3px 9px; font-size:0.75rem;">🔀 Relayed via ${escapeHTML(r.next_hop_name || 'unknown hop')}</span>`;
+                        } else if (routePath === 'direct') {
                             statusBadge = `<span class="pill-badge role-static" style="padding:3px 9px; font-size:0.75rem;">⚡ Direct</span>`;
+                        } else {
+                            statusBadge = `<span class="pill-badge" style="padding:3px 9px; font-size:0.75rem;">❔ Unverified</span>`;
                         }
-                        const directText = r.direct_rtt_ms > 0 ? `${r.direct_rtt_ms} ms` : '-';
+                        const directText = r.direct_rtt_ms > 0 ? `≈${r.direct_rtt_ms} ms` : '-';
                         const hopBadge = `<span style="white-space:nowrap; background:var(--glass-fill); border:1px solid var(--glass-fill-strong); color:var(--text-dim); padding:2px 8px; border-radius:12px; font-size:0.75rem;">${hopCount} ${hopCount === 1 ? 'Hop' : 'Hops'}</span>`;
 
                         let ipHtml = '';
@@ -10938,7 +11017,7 @@
                                 <td>${ipHtml}</td>
                                 <td>${hopBadge}</td>
                                 <td><div style="display:flex; align-items:center; flex-wrap:wrap;">${visualPath}</div></td>
-                                <td><strong style="color:${r.total_rtt_ms < 50 ? 'var(--success)' : 'var(--warn)'}">${r.total_rtt_ms} ms</strong></td>
+                                <td><strong style="color:${r.total_rtt_ms > 0 && r.total_rtt_ms < 50 ? 'var(--success)' : (r.total_rtt_ms > 0 ? 'var(--warn)' : 'var(--text-muted)')}" title="Dijkstra routing estimate, not an end-to-end probe">${r.total_rtt_ms > 0 ? '≈' + r.total_rtt_ms + ' ms' : '—'}</strong></td>
                                 <td style="color:var(--text-secondary)">${directText}</td>
                                 <td>${optHtml}</td>
                                 <td>${statusBadge}</td>
@@ -10967,13 +11046,18 @@
                     const matrix = data.mesh_matrix || [];
                     if (matrix.length > 0) {
                         matrixBody.innerHTML = matrix.map(m => {
-                            const rttColor = m.rtt_ms < 50 ? '#34d399' : (m.rtt_ms < 150 ? '#fbbf24' : '#f87171');
-                            const typeBadge = m.is_direct ? `<span style="color:var(--accent-cyan); font-weight:bold;">⚡ Direct P2P</span>` : `<span style="color:var(--accent-purple); font-weight:bold;">🔀 Multi-Hop Relay</span>`;
+                            const rttColor = m.rtt_ms > 0 && m.rtt_ms < 50 ? '#34d399' : (m.rtt_ms > 0 && m.rtt_ms < 150 ? '#fbbf24' : (m.rtt_ms > 0 ? '#f87171' : '#94a3b8'));
+                            const path = routeTransportPath(m);
+                            const typeBadge = path === 'direct'
+                                ? `<span style="color:var(--accent-cyan); font-weight:bold;">⚡ ${transportPathLabel(path)}</span>`
+                                : (path === 'unknown'
+                                    ? `<span style="color:var(--text-muted); font-weight:bold;">❔ ${transportPathLabel(path)}</span>`
+                                    : `<span style="color:var(--accent-purple); font-weight:bold;">🔀 ${transportPathLabel(path)}</span>`);
                             return `
                                 <tr>
                                     <td><strong style="color:var(--text-primary);">💻 ${escapeHTML(m.src_name)}</strong></td>
                                     <td><strong style="color:var(--accent-cyan); cursor:pointer;" data-onclick="setPingTarget(${attrStr(m.dst_peer_id)})">🎯 ${escapeHTML(m.dst_name)}</strong></td>
-                                    <td><strong style="color:${rttColor}">${m.rtt_ms} ms</strong></td>
+                                    <td><strong style="color:${rttColor}" title="Routing-table path estimate">${m.rtt_ms > 0 ? '≈' + m.rtt_ms + ' ms' : '—'}</strong></td>
                                     <td><span class="pill-badge role-static" style="font-size:0.75rem;">${m.hops} Hops</span></td>
                                     <td>${typeBadge}</td>
                                 </tr>
@@ -11376,6 +11460,22 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 .replace(/'/g, "&#039;");
         }
 
+        function peerRTTIsMeasured(peer) {
+            return !!peer && peer.rtt_measured === true && Number.isFinite(Number(peer.rtt_ms)) && Number(peer.rtt_ms) > 0;
+        }
+
+        function peerRTTText(peer) {
+            return peerRTTIsMeasured(peer) ? Number(peer.rtt_ms).toFixed(1) + ' ms' : '—';
+        }
+
+        function peerRTTSourceLabel(peer) {
+            const source = peer && peer.rtt_source;
+            if (source === 'tap-icmp') return 'TAP ICMP data path';
+            if (source === 'libp2p-ping') return 'live libp2p ping';
+            if (source === 'p2p-echo') return 'P2P echo control stream';
+            return source || 'measured probe';
+        }
+
         // attrStr() returns an HTML-encoded JS string literal for safe use inside
         // a double-quoted HTML attribute (e.g. data-onclick="foo(${attrStr(x)})").
         //
@@ -11622,12 +11722,19 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                     cachedPeers.forEach(p => {
                         const name = p.node_name || p.peer_id.substring(0, 10);
                         const selected = (targetPeerID && p.peer_id === targetPeerID) ? 'selected' : '';
-                        select.innerHTML += `<option value="${escapeHTML(p.peer_id)}" ${selected}>${escapeHTML(name)} (${escapeHTML(p.tap_ip) || 'No IP'}) - ${p.rtt_ms}ms</option>`;
+                        select.innerHTML += `<option value="${escapeHTML(p.peer_id)}" ${selected}>${escapeHTML(name)} (${escapeHTML(p.tap_ip) || 'No IP'}) - ${peerRTTText(p)}</option>`;
                     });
                 }
             }
             const modal = document.getElementById('speedTestModal');
             if (modal) {
+                document.getElementById('speedGaugeVal').innerText = '—';
+                document.getElementById('speedProgressBar').style.width = '0%';
+                document.getElementById('stRTTAvg').innerText = '—';
+                document.getElementById('stJitter').innerText = '—';
+                document.getElementById('stQuality').innerText = '—';
+                document.getElementById('stPacketLoss').innerText = '—';
+                document.getElementById('stMeasurementNote').innerText = 'No benchmark run yet';
                 modal.classList.add('active');
                 modal.style.display = 'flex';
             }
@@ -11646,13 +11753,18 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             const btn = document.getElementById('startSpeedTestBtn');
             btn.disabled = true;
             btn.innerText = '⏳ Testing P2P Link...';
+            document.getElementById('speedGaugeVal').innerText = '—';
+            document.getElementById('stRTTAvg').innerText = '—';
+            document.getElementById('stJitter').innerText = '—';
+            document.getElementById('stQuality').innerText = '—';
+            document.getElementById('stPacketLoss').innerText = '—';
+            document.getElementById('stMeasurementNote').innerText = 'Running live benchmark…';
             
             let progress = 0;
             const progressInterval = setInterval(() => {
                 progress += 5;
                 if (progress <= 100) {
                     document.getElementById('speedProgressBar').style.width = progress + '%';
-                    document.getElementById('speedGaugeVal').innerText = (Math.random() * 400 + 100).toFixed(1);
                 }
             }, 50);
 
@@ -11662,6 +11774,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                     console.warn("SpeedTest request failed:", result.error);
                     clearInterval(progressInterval);
                     document.getElementById('speedProgressBar').style.width = '0%';
+                    document.getElementById('stMeasurementNote').innerText = result.error || 'SpeedTest request failed';
                     showToast(result.error || 'SpeedTest request failed', true);
                     return;
                 }
@@ -11673,9 +11786,13 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 document.getElementById('stRTTAvg').innerText = data.rtt_avg + ' ms';
                 document.getElementById('stJitter').innerText = '±' + data.jitter + ' ms';
                 document.getElementById('stQuality').innerText = data.quality_grade;
+                document.getElementById('stPacketLoss').innerText = Number.isFinite(Number(data.packet_loss)) ? (Number(data.packet_loss) * 100).toFixed(0) + '%' : '—';
+                document.getElementById('stMeasurementNote').innerText = data.measurement_note || 'Measured by the live P2P stream benchmark';
             } catch (e) {
                 console.error("SpeedTest error:", e);
                 clearInterval(progressInterval);
+                document.getElementById('speedProgressBar').style.width = '0%';
+                document.getElementById('stMeasurementNote').innerText = e.message || 'SpeedTest error';
                 showToast(e.message || 'SpeedTest error', true);
             } finally {
                 btn.disabled = false;
@@ -11920,7 +12037,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             }
             const container = document.getElementById('qrCodeContainer');
             if (container) {
-                const shareData = JSON.stringify((currentFullConfig && Object.keys(currentFullConfig).length > 0) ? currentFullConfig : { node_name: localNodeInfo.name || 'P2P TAP Node', tap_ip: localNodeInfo.ip || '10.0.0.1' }, null, 2);
+                const shareData = JSON.stringify((currentFullConfig && Object.keys(currentFullConfig).length > 0) ? currentFullConfig : { node_name: localNodeInfo.name || 'P2P TAP Node', tap_ip: localNodeInfo.ip || '' }, null, 2);
                 container.innerHTML = generateQRCodeSVG(shareData);
             }
             const modal = document.getElementById('shareModal');
@@ -11939,7 +12056,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
         }
 
         function copyConfigJSON() {
-            const shareData = JSON.stringify((currentFullConfig && Object.keys(currentFullConfig).length > 0) ? currentFullConfig : { node_name: localNodeInfo.name || 'P2P TAP Node', tap_ip: localNodeInfo.ip || '10.0.0.1' }, null, 2);
+            const shareData = JSON.stringify((currentFullConfig && Object.keys(currentFullConfig).length > 0) ? currentFullConfig : { node_name: localNodeInfo.name || 'P2P TAP Node', tap_ip: localNodeInfo.ip || '' }, null, 2);
             copyToClipboard(shareData).then(() => {
                 showToast(t('copied_toast') || '📋 Config JSON copied to clipboard!');
             }).catch(err => {
@@ -11949,7 +12066,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
         }
 
         function downloadConfigJSON() {
-            const shareData = JSON.stringify((currentFullConfig && Object.keys(currentFullConfig).length > 0) ? currentFullConfig : { node_name: localNodeInfo.name || 'P2P TAP Node', tap_ip: localNodeInfo.ip || '10.0.0.1' }, null, 2);
+            const shareData = JSON.stringify((currentFullConfig && Object.keys(currentFullConfig).length > 0) ? currentFullConfig : { node_name: localNodeInfo.name || 'P2P TAP Node', tap_ip: localNodeInfo.ip || '' }, null, 2);
             const blob = new Blob([shareData], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
@@ -12057,7 +12174,10 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             const roleText = p.role === 'Bootstrap' ? t('topo_badge_boot') : (p.role === 'Static' ? t('topo_badge_static') : (t('topo_badge_peer') || escapeHTML(p.role || 'Peer')));
             const nodeTitle = (p.node_name && p.node_name.trim()) ? escapeHTML(p.node_name) : escapeHTML(found.name);
             const tapIPs = [p.tap_ip, p.tap_ipv6].filter(Boolean).join(' / ') || '-';
-            const rttColor = (p.rtt_ms || 0) < 50 ? '#34d399' : '#fbbf24';
+            const rttMeasured = peerRTTIsMeasured(p);
+            const jitterMeasured = p.jitter_measured === true && Number.isFinite(Number(p.jitter_ms));
+            const lossMeasured = p.loss_measured === true && Number.isFinite(Number(p.loss_rate_percent));
+            const rttColor = !rttMeasured ? '#94a3b8' : (p.rtt_ms < 50 ? '#34d399' : (p.rtt_ms < 150 ? '#fbbf24' : '#f87171'));
 
             // Encryption / connection-state / path summaries for the tooltip.
             const encAlgo = p.obf_algo || 'none';
@@ -12076,12 +12196,18 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 : '';
 
             const matchedRoute = cachedRoutes.find(r => r.dest_peer === p.peer_id);
-            let routeHtml = `<div class="tt-row tt-full"><span>${t('topo_tt_route')}</span><span class="tt-val" style="color:var(--success);">🟢 ${t('topo_tt_direct_link')}</span></div>`;
-            if (found.isRelayed) {
+            const actualPath = found.transportPath || routeTransportPath(matchedRoute);
+            let routeHtml;
+            if (actualPath === 'circuit-relay') {
                 routeHtml = `<div class="tt-row tt-full"><span>${t('topo_tt_route')}</span><span class="tt-val" style="color:var(--warn);">🔀 ${t('topo_tt_circuit_relay')}</span></div>`;
-            } else if (matchedRoute && !matchedRoute.is_direct) {
-                routeHtml = `<div class="tt-row tt-full"><span>${t('topo_tt_optimal_route')}</span><span class="tt-val" style="color:var(--accent-purple);">🔀 ${escapeHTML(matchedRoute.path_names.join(' ➔ '))}</span></div>`
-                    + `<div class="tt-row tt-full"><span>${t('topo_tt_route_gain')}</span><span class="tt-val" style="color:var(--success);">⚡ -${matchedRoute.saved_rtt_ms} ms</span></div>`;
+            } else if (actualPath === 'overlay-relay' && matchedRoute) {
+                const routeNames = Array.isArray(matchedRoute.path_names) ? matchedRoute.path_names.join(' ➔ ') : transportPathLabel(actualPath);
+                routeHtml = `<div class="tt-row tt-full"><span>${t('topo_tt_optimal_route')}</span><span class="tt-val" style="color:var(--accent-purple);">🔀 ${escapeHTML(routeNames)}</span></div>`
+                    + `<div class="tt-row tt-full"><span>${t('topo_tt_route_gain')}</span><span class="tt-val" style="color:var(--success);" title="Routing estimate">⚡ ≈-${matchedRoute.saved_rtt_ms} ms</span></div>`;
+            } else if (actualPath === 'direct') {
+                routeHtml = `<div class="tt-row tt-full"><span>${t('topo_tt_route')}</span><span class="tt-val" style="color:var(--success);">🟢 ${t('topo_tt_direct_link')}</span></div>`;
+            } else {
+                routeHtml = `<div class="tt-row tt-full"><span>${t('topo_tt_route')}</span><span class="tt-val" style="color:var(--text-muted);">⚪ ${transportPathLabel('unknown')}</span></div>`;
             }
 
             const isTransit = transitRelaySet.has(p.peer_id);
@@ -12105,19 +12231,20 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             return `<div class="tt-title"><span>${nodeTitle}</span><div><span class="pill-badge ${roleClass}" style="font-size:0.68rem;padding:2px 8px;">${roleIcon} ${roleText}</span>${transitBadge}</div></div>`
                 + `<div class="tt-grid">`
                 + `<div class="tt-row tt-full"><span>${t('topo_tt_tap_ip')}</span><span class="tt-val">${escapeHTML(tapIPs)}</span></div>`
-                + `<div class="tt-row"><span>${t('topo_tt_os_arch')}</span><span class="tt-val">${escapeHTML(p.os_arch || 'linux')}</span></div>`
+                + `<div class="tt-row"><span>${t('topo_tt_os_arch')}</span><span class="tt-val">${escapeHTML(p.os_arch || '—')}</span></div>`
                 + `<div class="tt-row"><span>${t('topo_tt_version')}</span><span class="tt-val">${escapeHTML(p.version || '-')}</span></div>`
                 + `<div class="tt-row"><span>${t('topo_tt_transport')}</span><span class="tt-val">${escapeHTML(p.transport || 'P2P')}</span></div>`
-                + (found.transportPath ? `<div class="tt-row"><span>${t('topo_tt_transport_path')}</span><span class="tt-val">${escapeHTML(found.transportPath)}</span></div>` : (found.relayHop ? `<div class="tt-row"><span>${t('topo_tt_relay_hop')}</span><span class="tt-val" style="color:var(--warn)">${escapeHTML(relayNameOf(found.relayHop))}</span></div>` : `<div class="tt-row"><span>${t('topo_tt_transport_path')}</span><span class="tt-val">direct</span></div>`))
+                + `<div class="tt-row"><span>${t('topo_tt_transport_path')}</span><span class="tt-val">${escapeHTML(transportPathLabel(actualPath))}</span></div>`
+                + (found.relayHop ? `<div class="tt-row"><span>${t('topo_tt_relay_hop')}</span><span class="tt-val" style="color:var(--warn)">${escapeHTML(relayNameOf(found.relayHop))}</span></div>` : '')
                 + (found.cluster ? `<div class="tt-row"><span>${t('topo_tt_cluster')}</span><span class="tt-val" style="color:var(--accent-purple)">${escapeHTML(clusterNameOf(found.cluster))}</span></div>` : '')
                 + (found.bootHops > 0 ? `<div class="tt-row"><span>${t('topo_tt_boot_hops')}</span><span class="tt-val" style="color:var(--accent-cyan)">${found.bootHops}</span></div>` : '')
                 + encHtml
                 + connHtml
                 + rpHtml
                 + linkIntegrityHtml
-                + `<div class="tt-row"><span>${t('topo_tt_rtt')}</span><span class="tt-val" style="color:${rttColor}">${p.rtt_ms || 0} ms</span></div>`
-                + `<div class="tt-row"><span>${t('topo_tt_jitter')}</span><span class="tt-val">${(p.jitter_ms || 0).toFixed(1)} ms</span></div>`
-                + `<div class="tt-row"><span>${t('topo_tt_loss')}</span><span class="tt-val" style="color:${(p.loss_rate_percent || 0) > 1 ? 'var(--danger)' : 'var(--text-secondary)'}">${(p.loss_rate_percent || 0).toFixed(1)}%</span></div>`
+                + `<div class="tt-row"><span>${t('topo_tt_rtt')}</span><span class="tt-val" style="color:${rttColor}" title="${escapeHTML(peerRTTSourceLabel(p))}">${peerRTTText(p)}</span></div>`
+                + `<div class="tt-row"><span>${t('topo_tt_jitter')}</span><span class="tt-val">${jitterMeasured ? Number(p.jitter_ms).toFixed(1) + ' ms' : '—'}</span></div>`
+                + `<div class="tt-row"><span>${t('topo_tt_loss')}</span><span class="tt-val" style="color:${lossMeasured && Number(p.loss_rate_percent) > 1 ? 'var(--danger)' : 'var(--text-secondary)'}">${lossMeasured ? Number(p.loss_rate_percent).toFixed(1) + '%' : '—'}</span></div>`
                 + `<div class="tt-row"><span>${t('topo_tt_uptime')}</span><span class="tt-val">${escapeHTML(p.uptime || '-')}</span></div>`
                 + `<div class="tt-row"><span>${t('topo_tt_since')}</span><span class="tt-val">${escapeHTML(p.connected_since || '-')}</span></div>`
                 + (p.geo_location ? `<div class="tt-row"><span>${t('topo_tt_geo')}</span><span class="tt-val">${escapeHTML(p.geo_location)}</span></div>` : '')
@@ -12133,7 +12260,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
         // --- Selection + filter (interaction) -------------------------------
         function topoNodeMatchesFilter(n) {
             if (topoFilterMode === 'all') return true;
-            if (topoFilterMode === 'direct') return !n.isSelf && !n.isRelayed;
+            if (topoFilterMode === 'direct') return !n.isSelf && n.transportPath === 'direct';
             if (topoFilterMode === 'relayed') return n.isRelayed;
             if (topoFilterMode === 'remote') {
                 const localCluster = (latestTopologyData && latestTopologyData.local_cluster) || '';
@@ -12505,14 +12632,17 @@ window.toggleSubnetRoute = async function(cidr, enable) {
 
                 const mkNode = (tn) => {
                     const live = liveByID[tn.peer_id] || {};
-                    const rtt = (typeof live.rtt_ms === 'number') ? live.rtt_ms : (tn.rtt || 0);
-                    const isRelayed = !tn.direct && !tn.self;
+                    const rttMeasured = peerRTTIsMeasured(live);
+                    const rtt = rttMeasured ? Number(live.rtt_ms) : (tn.rtt || 0);
+                    const rttEstimated = !rttMeasured && rtt > 0;
+                    const transportPath = tn.self ? '' : (tn.transport_path || 'unknown');
+                    const isRelayed = !tn.self && (transportPath === 'circuit-relay' || transportPath === 'overlay-relay');
+                    const isUnknown = !tn.self && transportPath === 'unknown';
                     const isRelayAny = isRelayed || !!tn.relay; // relayed reach OR transit-relay role
                     const isBoot = !!tn.is_boot;
                     const isStatic = !!tn.static;
                     const cluster = tn.cluster || null;
                     const bootHops = (typeof tn.boot_hops === 'number') ? tn.boot_hops : 0;
-                    const transportPath = tn.transport_path || (tn.direct ? 'direct' : '');
                     const relayHop = tn.relay_hop || '';
                     // Resolve the link-state class of the edge from this node up
                     // to its parent (best-effort; SPT parent may not equal graph edge).
@@ -12523,7 +12653,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                     let lineStyle = 'solid';
                     if (transportPath === 'overlay-relay') lineStyle = 'overlay';
                     else if (transportPath === 'circuit-relay' || linkClass === 'circuit') lineStyle = 'circuit';
-                    let linkColor = "#34d399";
+                    let linkColor = isUnknown ? "#94a3b8" : "#34d399";
                     if (isRelayAny || rtt > 100) linkColor = "#fbbf24";
                     else if (rtt > 30) linkColor = "#38bdf8";
                     return {
@@ -12534,6 +12664,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                         isSelf: !!tn.self,
                         isRelay: !!tn.relay,
                         isRelayed: isRelayed,
+                        isUnknown: isUnknown,
                         isBoot: isBoot,
                         isStatic: isStatic,
                         cluster: cluster,
@@ -12543,10 +12674,12 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                         linkClass: linkClass,
                         lineStyle: lineStyle,
                         rtt: rtt,
+                        rttMeasured: rttMeasured,
+                        rttEstimated: rttEstimated,
                         linkColor: linkColor,
-                        particleColor: isRelayAny ? "#f59e0b" : (rtt < 30 ? "#34d399" : "#38bdf8"),
-                        glowColor: isRelayAny ? "#fbbf24" : "#38bdf8",
-                        role: live.role || (tn.relay ? 'relay' : (isRelayed ? 'relayed' : (isBoot ? 'bootstrap' : 'direct'))),
+                        particleColor: isRelayAny ? "#f59e0b" : (isUnknown ? "#94a3b8" : (rtt < 30 ? "#34d399" : "#38bdf8")),
+                        glowColor: isRelayAny ? "#fbbf24" : (isUnknown ? "#94a3b8" : "#38bdf8"),
+                        role: live.role || (tn.relay ? 'relay' : (isRelayed ? 'relayed' : (isUnknown ? 'unknown' : (isBoot ? 'bootstrap' : 'direct')))),
                         txSeq: (typeof live.tx_seq === 'number') ? live.tx_seq : 0,
                         rxSeq: (typeof live.rx_seq === 'number') ? live.rx_seq : 0,
                         dedupDrops: (typeof live.dedup_drops === 'number') ? live.dedup_drops : 0,
@@ -12566,12 +12699,14 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 // Merge any live active peers from stats that are not in topology snapshot
                 peers.forEach(p => {
                     if (p.peer_id && p.peer_id !== selfID && !nodeByID[p.peer_id]) {
+                        const peerPath = peerTransportPath(p);
                         const synNode = mkNode({
                             peer_id: p.peer_id,
                             node_name: p.node_name,
                             tap_ip: p.tap_ip,
                             tap_ipv6: p.tap_ipv6,
-                            direct: p.role !== 'relayed' && p.role !== 'relay',
+                            direct: peerPath === 'direct',
+                            transport_path: peerPath,
                             parent: (p.relay_hop || selfID),
                             depth: 1,
                             is_boot: p.role === 'bootstrap'
@@ -12729,7 +12864,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                         totalTx += (n.txSpeed || 0);
                         totalRx += (n.rxSpeed || 0);
                     });
-                    const directCount = directPeers.length;
+                    const directCount = nodes.filter(n => !n.isSelf && n.transportPath === 'direct').length;
                     const relayedCount = nodes.filter(n => !n.isSelf && n.isRelayed).length;
                     const relayNodeCount = nodes.filter(n => n.isRelay).length;
                     const bootCount = nodes.filter(n => n.isBoot).length;
@@ -12770,8 +12905,10 @@ window.toggleSubnetRoute = async function(cidr, enable) {
 
             peers.forEach((p, idx) => {
                 const angle = idx * angleStep - Math.PI / 2;
-                const rtt = p.rtt_ms || 0;
-                const isRelayed = isPeerRelayed(p);
+                const rttMeasured = peerRTTIsMeasured(p);
+                const rtt = rttMeasured ? Number(p.rtt_ms) : 0;
+                const peerPath = peerTransportPath(p);
+                const isRelayed = peerPath === 'circuit-relay' || peerPath === 'overlay-relay';
                 let linkColor = "#34d399";
                 if (isRelayed || rtt > 100) linkColor = "#fbbf24";
                 else if (rtt > 30) linkColor = "#38bdf8";
@@ -12782,10 +12919,14 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                     baseY: centerY + radius * Math.sin(angle),
                     parentId: 'self',
                     isRelayed: isRelayed,
+                    isUnknown: peerPath === 'unknown',
+                    transportPath: peerPath,
                     rtt: rtt,
+                    rttMeasured: rttMeasured,
+                    rttEstimated: false,
                     linkColor: linkColor,
-                    particleColor: isRelayed ? "#f59e0b" : (rtt < 30 ? "#34d399" : "#38bdf8"),
-                    glowColor: isRelayed ? "#fbbf24" : "#38bdf8",
+                    particleColor: isRelayed ? "#f59e0b" : (peerPath === 'unknown' ? "#94a3b8" : (rtt < 30 ? "#34d399" : "#38bdf8")),
+                    glowColor: isRelayed ? "#fbbf24" : (peerPath === 'unknown' ? "#94a3b8" : "#38bdf8"),
                     role: p.role,
                     txSeq: (typeof p.tx_seq === 'number') ? p.tx_seq : 0,
                     rxSeq: (typeof p.rx_seq === 'number') ? p.rx_seq : 0,
@@ -13038,14 +13179,24 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 const relayFirst = (target.isRelayed && target.relayPathNames && target.relayPathNames[0])
                     ? topoShortLabel(target.relayPathNames[0]).slice(0, 12)
                     : '';
-                const typeLine = target.isRelayed
-                    ? ((t('topo_via') || 'via') + (relayFirst ? ' ' + relayFirst : ''))
-                    : (t('topo_summary_direct') || '直连');
+                let typeLine;
+                if (target.transportPath === 'circuit-relay') {
+                    typeLine = t('topo_tt_circuit_relay') || 'Circuit Relay';
+                } else if (target.transportPath === 'overlay-relay') {
+                    typeLine = (t('topo_via') || 'via') + (relayFirst ? ' ' + relayFirst : ' relay');
+                } else if (target.transportPath === 'direct') {
+                    typeLine = t('topo_summary_direct') || '直连';
+                } else {
+                    typeLine = transportPathLabel('unknown');
+                }
                 const dropTxt = target.dedupDrops > 0 ? ` · dup:${target.dedupDrops}` : '';
                 const seqWinMax = typeof target.seqWinMax === 'number' ? target.seqWinMax : 0;
                 const skew = seqWinMax > 0 ? (seqWinMax - target.rxSeq) : 0;
                 const skewTxt = blackhole ? ` · ⚠skew ${skew}` : '';
-                let metaLine = `${target.rtt}ms · ${typeLine}${dropTxt}${skewTxt}`;
+                const rttLine = target.rttMeasured
+                    ? `${Number(target.rtt).toFixed(1)}ms`
+                    : (target.rttEstimated ? `≈${target.rtt}ms route est.` : 'RTT —');
+                let metaLine = `${rttLine} · ${typeLine}${dropTxt}${skewTxt}`;
                 if (target.bootHops > 0) metaLine += ' · 🌐boot×' + target.bootHops;
 
                 // Skip when dimmed by active filter/selection
@@ -13179,8 +13330,8 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 }
 
                 // 3D Glass Sphere with Radial Highlight
-                const baseFill = n.isSelf ? "#6366f1" : (n.isBoot ? "#a855f7" : (n.isRelayed ? "#f59e0b" : "#10b981"));
-                const strokeCol = n.isSelf ? (lightT ? "#4338ca" : "#c7d2fe") : (n.isBoot ? (lightT ? "#7c3aed" : "#ddd6fe") : (n.isRelayed ? (lightT ? "#b45309" : "#fef3c7") : (lightT ? "#047857" : "#a7f3d0")));
+                const baseFill = n.isSelf ? "#6366f1" : (n.isBoot ? "#a855f7" : (n.isRelayed ? "#f59e0b" : (n.isUnknown ? "#64748b" : "#10b981")));
+                const strokeCol = n.isSelf ? (lightT ? "#4338ca" : "#c7d2fe") : (n.isBoot ? (lightT ? "#7c3aed" : "#ddd6fe") : (n.isRelayed ? (lightT ? "#b45309" : "#fef3c7") : (n.isUnknown ? (lightT ? "#475569" : "#cbd5e1") : (lightT ? "#047857" : "#a7f3d0"))));
                 const grad = ctx.createRadialGradient(n.x - nodeRadius * 0.35, n.y - nodeRadius * 0.35, nodeRadius * 0.15, n.x, n.y, nodeRadius);
                 grad.addColorStop(0, lightenHex(baseFill, lightT ? 0.40 : 0.55));
                 grad.addColorStop(0.6, baseFill);
@@ -14641,4 +14792,3 @@ window.toggleSubnetRoute = async function(cidr, enable) {
         window.setDiagViewMode = setDiagViewMode;
         window.runPingDiagnostics = runPingDiagnostics;
         window.runTracerouteDiagnostics = runTracerouteDiagnostics;
-

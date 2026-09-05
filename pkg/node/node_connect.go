@@ -391,7 +391,16 @@ func (n *Node) openStreamViaRelay(target peer.ID, proto protocol.ID) (network.St
 	if n.Host.Network().Connectedness(target) == network.Connected {
 		ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
 		defer cancel()
-		return n.Host.NewStream(ctx, target, proto)
+		s, err := n.Host.NewStream(ctx, target, proto)
+		if err != nil {
+			n.recordRelayControlFailure(target, err)
+			return nil, err
+		}
+		n.clearRelayControlFailure(target)
+		return s, nil
+	}
+	if err := n.relayPermissionCooldownError(target); err != nil {
+		return nil, err
 	}
 
 	relayAddrs := n.SynthesizeRelayCircuitAddrs(target)
@@ -413,7 +422,13 @@ func (n *Node) openStreamViaRelay(target peer.ID, proto protocol.ID) (network.St
 
 	ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
 	defer cancel()
-	return n.Host.NewStream(ctx, target, proto)
+	s, err := n.Host.NewStream(ctx, target, proto)
+	if err != nil {
+		n.recordRelayControlFailure(target, err)
+		return nil, err
+	}
+	n.clearRelayControlFailure(target)
+	return s, nil
 }
 
 // handleUnicastFailure centralizes unicast send-error handling. When the failure
@@ -713,24 +728,23 @@ func (n *Node) pingPongProbePeer(pid peer.ID) {
 		return
 	}
 
-	// Passive liveness detection: if real traffic (user frames, TCP/UDP/ICMP, LSA, etc.)
-	// was received from pid in the last 15 seconds, we ALREADY have proof the return path is alive.
-	// Suppressing redundant synthetic echo probes prevents multiplexer contention, queue stalls,
-	// and false reconnects during active data transmission.
-	if n.peerRxWithin(pid, 15*time.Second) {
-		if c := n.pingPongFailCounter(pid); c != nil {
-			c.Store(0)
-		}
-		return
-	}
+	// Do not skip the measurement merely because application traffic is active.
+	// Data proves liveness, but it says nothing about RTT, jitter, or loss.  The
+	// old early-return left the WebUI permanently unmeasured during a continuous
+	// ping/iperf run and then displayed the fabricated 10ms fallback.  This is a
+	// four-byte probe once per interval on a persistent stream; failures still
+	// consult recent data below before deciding whether to reconnect.
 
 	pingPayload := []byte{0x50, 0x49, 0x4E, 0x47} // "PING"
-	start := time.Now()
 	replyBuf := make([]byte, 16)
+	var measuredRTT time.Duration
 
 	// Reuse the persistent echo stream (WithStream runs write+read inside the
 	// peer's lock so a concurrent manual WebUI probe can't interleave on it).
 	ok := n.echoPool.WithStream(pid, func(s network.Stream) error {
+		// Exclude stream lookup/opening from the wire RTT. Cold connection setup
+		// is a separate availability metric, not round-trip latency.
+		start := time.Now()
 		_ = s.SetWriteDeadline(time.Now().Add(pingPongWriteTimeout))
 		if err := WriteFrame(s, pingPayload); err != nil {
 			return err
@@ -744,20 +758,30 @@ func (n *Node) pingPongProbePeer(pid peer.ID) {
 				pid.String(), rtt.Milliseconds(), rn, rerr)
 			return fmt.Errorf("bad echo: readBytes=%d err=%v", rn, rerr)
 		}
+		measuredRTT = rtt
 		log.Debug("Ping-pong OK for %s RTT=%dms", pid.String(), rtt.Milliseconds())
 		return nil
 	})
 
 	if ok {
+		// Feed the real completed echo round trip into both libp2p's EWMA and
+		// the source-labelled rolling WebUI window. Previously the RTT was only
+		// printed at DEBUG and discarded.
+		if measuredRTT > 0 {
+			n.Host.Peerstore().RecordLatency(pid, measuredRTT)
+			n.recordPeerRTTProbe(pid, rttSourceP2PEcho, measuredRTT, true)
+		}
 		// Success: reset if a counter exists and record return-path liveness
 		if c := n.pingPongFailCounter(pid); c != nil {
 			c.Store(0)
 		}
 		n.notePeerRx(pid)
+		n.clearRelayControlFailure(pid)
 		return
 	}
 
 	// WithStream returned false => stream open failed or bad echo (cache dropped).
+	n.recordPeerRTTProbe(pid, rttSourceP2PEcho, 0, false)
 	fc := n.pingPongFailCounterFor(pid).Add(1)
 	if fc >= pingPongMaxFailures {
 		if n.peerRxWithin(pid, 45*time.Second) {
@@ -845,13 +869,14 @@ func allAddrsLoopback(addrs []multiaddr.Multiaddr) bool {
 }
 
 // prioritizeMultiaddrs sorts candidate multiaddrs by connectivity likelihood and performance:
-// 1. Public Global Unicast IPv6 (2000::/3) with QUIC/UDP (score: 130) or TCP (score: 110)
-//    -> Native public route, zero NAT traversal overhead, near 100% direct connect rate.
-// 2. Public IPv4 with QUIC/UDP (score: 90)
-//    -> 0-RTT and optimal UDP hole punching protocol for NAT traversal.
-// 3. Public IPv4 with WebRTC (score: 80)
-// 4. Public IPv4 with TCP (score: 70)
-// 5. Private / CGNAT IPv4 / ULA IPv6 (score: 30-40)
+//  1. Public Global Unicast IPv6 (2000::/3) with QUIC/UDP (score: 130) or TCP (score: 110)
+//     -> Native public route, zero NAT traversal overhead, near 100% direct connect rate.
+//  2. Public IPv4 with QUIC/UDP (score: 90)
+//     -> 0-RTT and optimal UDP hole punching protocol for NAT traversal.
+//  3. Public IPv4 with WebRTC (score: 80)
+//  4. Public IPv4 with TCP (score: 70)
+//  5. Private / CGNAT IPv4 / ULA IPv6 (score: 30-40)
+//
 // Loopback addresses are excluded.
 func prioritizeMultiaddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 	if len(addrs) <= 1 {
@@ -1005,6 +1030,13 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 		// Relay path needs more time: connect to relay (1.5s) + auth (2s) + circuit connect
 		relayLaunched = true
 		go func() {
+			if cooldownErr := n.relayPermissionCooldownError(pi.ID); cooldownErr != nil {
+				select {
+				case ch <- result{err: cooldownErr, mode: "circuit-relay"}:
+				case <-raceCtx.Done():
+				}
+				return
+			}
 			// race and the relay-priority control path now use the exact same shape.
 			for _, bStr := range n.Config.BootstrapPeers {
 				bMA, berr := multiaddr.NewMultiaddr(bStr)
@@ -1060,16 +1092,17 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 				if relayErr == nil {
 					break
 				}
-				// Transient relay errors: 203 (CONNECTION_FAILED) or PERMISSION_DENIED / relay_denied.
-				// When the destination node has just connected and is in the middle of PSK authentication,
-				// or is mid-reconnect, retry with exponential backoff (1s -> 2s -> 4s) so the dial
-				// completes seamlessly once auth finishes.
+				// 203/CONNECTION_FAILED is transient: the destination may be
+				// reconnecting to the relay. A 202/PERMISSION_DENIED is an ACL
+				// decision (authentication or PSK-network mismatch), so record it
+				// and stop this immediate retry burst.
 				errLower := strings.ToLower(relayErr.Error())
+				if isRelayPermissionDenied(relayErr) {
+					n.recordRelayControlFailure(pi.ID, relayErr)
+					break
+				}
 				isTransient := strings.Contains(errLower, "203") ||
-					strings.Contains(errLower, "connection_failed") ||
-					strings.Contains(errLower, "permission_denied") ||
-					strings.Contains(errLower, "relay_denied") ||
-					strings.Contains(errLower, "denied")
+					strings.Contains(errLower, "connection_failed")
 				if !isTransient {
 					break
 				}
@@ -1084,6 +1117,9 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 					}
 					n.clearSwarmBackoff(pi.ID) // drop any dial backoff accrued on the failed attempt
 				}
+			}
+			if relayErr == nil {
+				n.clearRelayControlFailure(pi.ID)
 			}
 			select {
 			case ch <- result{err: relayErr, mode: "circuit-relay"}:
@@ -1148,11 +1184,11 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 	case second := <-ch:
 		if second.err == nil {
 			log.Info("%s peer %s connected via %s (parallel race fallback)", peerType, pi.ID.String(), second.mode)
-		if peerType == "bootstrap" {
-			go n.ensureRelayAuth(pi)
+			if peerType == "bootstrap" {
+				go n.ensureRelayAuth(pi)
+			}
+			return nil
 		}
-		return nil
-	}
 		log.Debug("%s peer %s: direct=%v, relay=%v", peerType, pi.ID.String(), first.err, second.err)
 		return fmt.Errorf("direct: %v | relay: %v", first.err, second.err)
 	case <-ctx.Done():

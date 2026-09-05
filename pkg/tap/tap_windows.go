@@ -518,8 +518,7 @@ func (w *WindowsTAPDevice) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
 
 	luid, err := getLUIDByName(w.name)
 	if err != nil {
-		winTapLog.Warn("winipcfg getLUIDByName(%s) failed: %v", w.name, err)
-		return nil
+		return fmt.Errorf("winipcfg getLUIDByName(%s): %w", w.name, err)
 	}
 
 	var prefixes []netip.Prefix
@@ -545,9 +544,18 @@ func (w *WindowsTAPDevice) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
 					maskStr := net.IP(ipNet.Mask).String()
 					if ipStr != "" && maskStr != "" {
 						winTapLog.Info("netsh fallback: set address %s %s on %s", ipStr, maskStr, w.name)
-						_ = exec.Command("netsh", "interface", "ipv4", "set", "address",
-							"name="+w.name, "static", ipStr, maskStr).Run()
+						cmdErr := runNetsh("interface", "ipv4", "set", "address",
+							"name="+w.name, "static", ipStr, maskStr)
+						if verifyErr := waitForWindowsInterfaceAddress(w.name, ipStr); verifyErr != nil {
+							return fmt.Errorf("winipcfg SetIPAddresses: %v; netsh fallback: %v; address verification: %w", err, cmdErr, verifyErr)
+						}
 					}
+				}
+			}
+		} else {
+			for _, p := range prefixes {
+				if err := waitForWindowsInterfaceAddress(w.name, p.Addr().String()); err != nil {
+					return err
 				}
 			}
 		}
@@ -557,10 +565,15 @@ func (w *WindowsTAPDevice) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
 	if ipv6CIDR != "" {
 		if p, err := netip.ParsePrefix(ipv6CIDR); err == nil {
 			winTapLog.Info("Adding IPv6 %s on Windows TAP '%s' via winipcfg...", p, w.name)
-			if err := luid.AddIPAddress(p); err != nil {
-				winTapLog.Warn("winipcfg AddIPAddress IPv6 failed: %v", err)
+			if addErr := luid.AddIPAddress(p); addErr != nil {
+				winTapLog.Warn("winipcfg AddIPAddress IPv6 failed: %v", addErr)
+			}
+			if err := waitForWindowsInterfaceAddress(w.name, p.Addr().String()); err != nil {
+				return err
 			}
 			addWindowsFirewallRule("p2ptap ICMPv6 Allow", true)
+		} else {
+			return fmt.Errorf("invalid TAP IPv6 address %q: %w", ipv6CIDR, err)
 		}
 	}
 

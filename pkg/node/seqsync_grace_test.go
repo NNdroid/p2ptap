@@ -104,12 +104,12 @@ func TestRxKeyGraceAbsorbsLingeringOldConnectionFrame(t *testing.T) {
 	}
 
 	// The NEW (current) RX cipher must NOT open it...
-	if _, _, garbage := n.decryptPeerFrame(encOld, p); garbage {
+	if _, _, garbage := n.decryptPeerFrame(nil, encOld, p); garbage {
 		t.Fatalf("current NEW key unexpectedly opened an OLD-key frame (premise broken)")
 	}
 	// ...but the grace-seeded previous cipher must, so the link tolerates the
 	// lingering old-connection frame instead of dropping it.
-	dec, decrypted, garbage := n.decryptPeerFrame(encOld, p)
+	dec, decrypted, garbage := n.decryptPeerFrame(nil, encOld, p)
 	if garbage {
 		t.Fatalf("expected OLD-key lingering frame to open via grace fallback, got garbage")
 	}
@@ -125,7 +125,7 @@ func TestRxKeyGraceAbsorbsLingeringOldConnectionFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encrypt with new key: %v", err)
 	}
-	if _, decrypted, garbage := n.decryptPeerFrame(encNew, p); garbage || !decrypted {
+	if _, decrypted, garbage := n.decryptPeerFrame(nil, encNew, p); garbage || !decrypted {
 		t.Fatalf("expected NEW-key frame to open on current cipher (garbage=%v decrypted=%v)", garbage, decrypted)
 	}
 }

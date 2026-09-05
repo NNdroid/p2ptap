@@ -2,6 +2,7 @@ package tap
 
 import (
 	"bytes"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -173,5 +174,45 @@ func BenchmarkMemTAPThroughput(b *testing.B) {
 		if _, err := tapB.Read(readBuf); err != nil {
 			b.Fatalf("Read failed: %v", err)
 		}
+	}
+}
+
+// TestMemTAPConcurrentReadDetected pins the concurrent-reader guard: a second
+// concurrent Read must fail loudly with ErrConcurrentRead instead of silently
+// splitting the frame stream between readers (the bug class that made the
+// protocol-matrix HTTP leg starve behind the DNS responder).
+func TestMemTAPConcurrentReadDetected(t *testing.T) {
+	devA, devB := NewMemTAPPair("tapA", "pipeA")
+
+	// Reader 1 parks in Read (blocks until a frame or close).
+	reader1Err := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 2048)
+		_, err := devA.Read(buf)
+		reader1Err <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	// Reader 2 must get ErrConcurrentRead immediately.
+	buf := make([]byte, 2048)
+	_, err := devA.Read(buf)
+	if err == nil || !strings.Contains(err.Error(), "concurrent Read") {
+		t.Fatalf("expected ErrConcurrentRead for second reader, got: %v", err)
+	}
+
+	// Deliver a frame and confirm reader 1 still works normally.
+	if _, err := devB.Write([]byte("HELLO")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := <-reader1Err; err != nil {
+		t.Fatalf("first reader errored: %v", err)
+	}
+	// Sequential reads after the first reader returned must work again.
+	if _, err := devB.Write([]byte("WORLD")); err != nil {
+		t.Fatalf("write 2: %v", err)
+	}
+	n, err := devA.Read(buf)
+	if err != nil || string(buf[:n]) != "WORLD" {
+		t.Fatalf("sequential read after contention failed: n=%d err=%v", n, err)
 	}
 }

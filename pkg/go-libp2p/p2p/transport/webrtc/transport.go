@@ -76,7 +76,10 @@ const (
 	// Besides throughput, this only matters if an application is using multiple dependent
 	// streams, say streams 1 & 2. It reads from stream 1 only after receiving message from
 	// stream 2. A buffer of 10 messages should serve all such situations.
-	sctpReceiveBufferSize = 10 * maxReceiveMessageSize
+	// Tuned up from 10x (approx 2.5MB): under a saturated bulk flow the
+	// 2.5MB window stalled the sender far too often (measured 30-70% frame
+	// loss in BenchmarkThroughput vs 0% for QUIC with a 10MB window).
+	sctpReceiveBufferSize = 40 * maxReceiveMessageSize
 )
 
 type WebRTCTransport struct {

@@ -116,21 +116,39 @@ func (n *Node) triggerPeerRekey(p peer.ID) {
 		go func() {
 			defer n.rekeyPeers.Delete(p)
 			log.Debug("SeqSync: starting re-key loop for %s (iAmResyncLeader=%v) — driving handshake to break any decrypt-fail deadlock", p.String(), n.isResyncLeader(p))
+			consecutiveFailures := 0
 			for {
 				if n.Host.Network().Connectedness(p) != network.Connected &&
 					n.relayHopForTarget(p) == "" {
 					return
 				}
-				if err := n.SyncSeqToPeer(p); err == nil {
+				attemptStarted := time.Now()
+				err := n.SyncSeqToPeer(p)
+				if err == nil {
 					log.Info("SeqSync: rotated/anchored encryption key with %s (re-key converged)", p.String())
 					n.lastRekeySuccess.Store(p, time.Now())
+					n.clearRelayControlFailure(p)
 					return
 				}
+				consecutiveFailures++
+				n.recordRelayControlFailure(p, err)
 				retryDelay := 5 * time.Second
 				if n.peerHasCircuitRelayConn(p) || n.relayHopForTarget(p) != "" {
-					retryDelay = 3 * time.Second
+					retryDelay = 3 * time.Second * time.Duration(1<<min(consecutiveFailures-1, 5))
+					if retryDelay > 2*time.Minute {
+						retryDelay = 2 * time.Minute
+					}
 				}
-				log.Warn("SeqSync: re-key to %s failed; retrying in %v (peer still connected, awaiting relay recovery)", p.String(), retryDelay)
+				pathState := "transport connection present"
+				if n.Host.Network().Connectedness(p) != network.Connected {
+					pathState = "relay route known but not verified"
+				}
+				if cooldown := n.relayPermissionCooldownRemaining(p); cooldown > retryDelay {
+					retryDelay = cooldown
+					pathState = "relay permission-denial cooldown active"
+				}
+				log.Warn("SeqSync: re-key to %s failed after %v: %v; next attempt in %v (%s)",
+					p.String(), time.Since(attemptStarted).Round(time.Millisecond), err, retryDelay, pathState)
 				select {
 				case <-n.ctx.Done():
 					return
@@ -157,7 +175,11 @@ func (n *Node) triggerPeerRekey(p peer.ID) {
 				return
 			}
 			log.Warn("SeqSync: follower rekeyReq to leader for %s did not converge in 10s; escalating to self-initiated handshake (NAT fallback)", p.String())
-			_ = n.SyncSeqToPeer(p)
+			if err := n.SyncSeqToPeer(p); err != nil {
+				n.recordRelayControlFailure(p, err)
+			} else {
+				n.clearRelayControlFailure(p)
+			}
 		}()
 	}
 }
@@ -205,13 +227,20 @@ func (n *Node) obfDecryptCipherForPeer(p peer.ID) obfuscate.ObfCipher {
 }
 
 // decryptPeerFrame attempts per-peer payload decryption.
-func (n *Node) decryptPeerFrame(data []byte, remotePeer peer.ID) (out []byte, decrypted bool, garbage bool) {
+//
+// scratch is an optional caller-owned reusable buffer for the decrypted
+// plaintext (per-frame hot paths pass one so steady-state frames cost zero
+// allocations; nil restores the allocating behaviour). The returned slice may
+// alias a grown scratch — hot-path callers re-base their scratch on the return
+// value and must not let it outlive the current frame-processing iteration
+// without copying (fragment reassembly copies internally, so it is safe).
+func (n *Node) decryptPeerFrame(scratch []byte, data []byte, remotePeer peer.ID) (out []byte, decrypted bool, garbage bool) {
 	cipher := n.obfDecryptCipherForPeer(remotePeer)
 	if cipher == nil {
 		log.Debug("Rx: decrypt skipped for %s (no cipher); assuming frame is plaintext", remotePeer.String())
 		return data, false, false
 	}
-	dec, derr := obfuscate.DecryptPayloadRegion(data, cipher)
+	dec, derr := obfuscate.DecryptPayloadRegionInto(scratch[:0], data, cipher)
 	if derr != nil {
 		if errors.Is(derr, obfuscate.ErrFrameCorrupted) {
 			log.Debug("Rx: frame from %s is not a well-formed obfuscate frame (%v) — structural, not a key failure; skipping resync",

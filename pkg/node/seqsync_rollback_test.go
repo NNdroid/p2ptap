@@ -94,11 +94,11 @@ func TestDecryptPeerFrameRolloverFallback(t *testing.T) {
 	}
 
 	// The NEW (current) RX cipher must NOT open it...
-	if _, _, garbage := n.decryptPeerFrame(enc, p); garbage {
+	if _, _, garbage := n.decryptPeerFrame(nil, enc, p); garbage {
 		t.Fatalf("current NEW key unexpectedly opened an OLD-key frame (test premise broken)")
 	}
 	// ...but decryptPeerFrame must fall back to the previous cipher and succeed.
-	dec, decrypted, garbage := n.decryptPeerFrame(enc, p)
+	dec, decrypted, garbage := n.decryptPeerFrame(nil, enc, p)
 	if garbage {
 		t.Fatalf("expected OLD-key frame to open via fallback, got garbage")
 	}

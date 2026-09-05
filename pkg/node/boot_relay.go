@@ -413,7 +413,10 @@ func (sd *StrategyDispatcher) sendToPeerViaBootRelay(target, bootHop peer.ID, pa
 	if n == nil {
 		return fmt.Errorf("boot-relay send to %s requires node", target.String())
 	}
-	txBytes := len(packedData)
+	// Keep the topology rate in original TAP bytes. The boot-relay envelope,
+	// fixed-size padding, and encryption overhead belong to wire telemetry, not
+	// to the user-facing upload/download rate.
+	txBytes := tapPayloadLenFromPackedFrame(packedData)
 
 	// 1. End-to-end seal for the final destination.
 	inner := packedData
@@ -546,12 +549,37 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 	// L2 MAC fixup so the kernel TAP accepts the frame as addressed to us.
 	n.rewriteRxDstMAC(tapPayload)
 
+	// TAP-probe hooks on the RELAYED receive path. Without these, a probe to a
+	// relay-only peer (or a peer whose return path is relayed) can never pass:
+	//   - maybeDeliverProbeReply captures the peer's ICMP echo REPLY coming back
+	//     to us through the relay (the direct-RX path in handleStream does this
+	//     for direct return paths);
+	//   - isTapProbeRequest + deferred ack tells the peer prober its frame made
+	//     it through the relay into our TAP.
+	// n.probeActive guards both so idle frames pay nothing.
+	n.maybeDeliverProbeReply(tapPayload)
+	n.observeTapICMPEchoReply(srcPeer, tapPayload, time.Now())
+	if pid, tok, ok := n.isTapProbeRequest(tapPayload); ok {
+		dstIP := net.IP(tapPayload[14+16 : 14+20])
+		ackFlag := tapProbeAckFlagIPMismatch
+		if n.localV4IP != nil && dstIP.Equal(n.localV4IP) {
+			ackFlag = tapProbeAckFlagIPMatched
+		}
+		n.queueDeferredProbeAck(deferredProbeAck{prober: pid, token: tok, flag: ackFlag})
+	}
+
 	// Write packet to local TAP device.
 	if n.TAP != nil {
 		if n.Collector != nil {
 			n.Collector.CaptureFrameWithPeers(observer.DirRx, tapPayload, n.peerIDString(srcPeer), "self")
 		}
 		_, _ = n.tapWrite(tapPayload)
+		// Probe acks are delivered ONLY on write success (see deferredProbeAck).
+		if deferred := n.takeDeferredProbeAcks(); len(deferred) > 0 {
+			for _, d := range deferred {
+				go n.sendTapProbeAck(d.prober, d.token, d.flag)
+			}
+		}
 		n.recordPeerRxBytes(srcPeer, len(tapPayload))
 		n.resetPingPongFailCountForPeer(srcPeer)
 		n.Collector.RecordRecv(len(tapPayload))
@@ -561,6 +589,10 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 			ethType := binary.BigEndian.Uint16(tapPayload[12:14])
 			n.Collector.RecordProtocol(ethType)
 		}
+	} else {
+		// No TAP device: drop the deferred acks so a later successful write of
+		// an unrelated frame cannot ack a probe that never reached a TAP.
+		n.takeDeferredProbeAcks()
 	}
 
 }

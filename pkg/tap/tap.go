@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -63,7 +64,18 @@ type MemTAP struct {
 	closedChan chan struct{}
 	closeOnce  *sync.Once
 	mu         sync.Mutex
+	// reading guards against concurrent Read callers. A real NIC delivers
+	// each frame to exactly ONE consumer; the MemTAP channel does the same.
+	// Two concurrent readers therefore SILENTLY split the frame stream between
+	// them — the nastiest class of e2e-test bug (a second responder starves
+	// the first, and both intermittently see nothing). Make it loud instead.
+	reading atomic.Bool
 }
+
+// ErrConcurrentRead is returned by MemTAP.Read when a second goroutine calls
+// Read while another one is already blocked in it. Test harnesses that need
+// to observe frames AND respond to them must use a single demuxing consumer.
+var ErrConcurrentRead = errors.New("memtap: concurrent Read detected (a NIC delivers each frame to exactly one reader; use a single demuxing consumer)")
 
 // NewMemTAPPair creates a pair of connected MemTAP devices (devA and devB)
 func NewMemTAPPair(nameA, nameB string) (*MemTAP, *MemTAP) {
@@ -137,6 +149,10 @@ func (m *MemTAP) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
 }
 
 func (m *MemTAP) Read(b []byte) (int, error) {
+	if !m.reading.CompareAndSwap(false, true) {
+		return 0, ErrConcurrentRead
+	}
+	defer m.reading.Store(false)
 	select {
 	case packet, ok := <-m.readChan:
 		if !ok {

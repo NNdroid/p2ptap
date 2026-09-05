@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -497,57 +498,38 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 	}
 
 	if bytes.HasPrefix(lines[0], []byte("GET /api/speedtest")) {
-		reqStr := string(lines[0])
-		targetPeerID := ""
-		if idx := strings.Index(reqStr, "peer_id="); idx != -1 {
-			targetPeerID = reqStr[idx+8:]
-			if endIdx := strings.IndexAny(targetPeerID, " &\r\n"); endIdx != -1 {
-				targetPeerID = targetPeerID[:endIdx]
+		targetPeerID := extractHTTPQueryParam(lines[0], "peer_id")
+		if targetPeerID == "" {
+			return it.buildHTTPResponse(400, "application/json", []byte(`{"error":"missing peer_id"}`))
+		}
+		if it.collector == nil || it.collector.ProbePeerSpeedTest == nil {
+			return it.buildHTTPResponse(503, "application/json", []byte(`{"error":"speedtest benchmark service not available"}`))
+		}
+		result := it.collector.ProbePeerSpeedTest(targetPeerID)
+		if result == nil {
+			return it.buildHTTPResponse(500, "application/json", []byte(`{"error":"speedtest benchmark failed"}`))
+		}
+		data, _ := json.Marshal(result)
+		return it.buildHTTPResponse(200, "application/json", data)
+	}
+
+	// The TAP virtual-IP WebUI has its own tiny HTTP stack, so it must execute
+	// the same real probes as the socket-based server. Returning dashboard HTML
+	// for this missing route previously made the frontend fabricate four RTTs.
+	if bytes.HasPrefix(lines[0], []byte("GET /api/ping")) || bytes.HasPrefix(lines[0], []byte("POST /api/ping")) {
+		peerID := extractHTTPQueryParam(lines[0], "peer_id")
+		if peerID == "" {
+			body := extractHTTPBody(req)
+			var bodyReq struct {
+				PeerID string `json:"peer_id"`
 			}
+			_ = json.Unmarshal(body, &bodyReq)
+			peerID = bodyReq.PeerID
 		}
-
-		result := SpeedTestResultDTO{
-			PeerID:       targetPeerID,
-			NodeName:     "Target Peer",
-			Mbps:         350.5,
-			RTTMin:       12.0,
-			RTTAvg:       18.5,
-			RTTMax:       25.0,
-			Jitter:       1.2,
-			QualityGrade: "EXCELLENT (Direct P2P Link)",
+		if peerID == "" {
+			return it.buildHTTPResponse(400, "application/json", []byte(`{"error":"missing peer_id"}`))
 		}
-
-		if it.collector != nil {
-			it.collector.mu.Lock()
-			for _, p := range it.collector.ActivePeers {
-				if p.PeerID == targetPeerID {
-					result.NodeName = p.NodeName
-					rtt := float64(p.RTTMs)
-					if rtt <= 0 {
-						rtt = 15.0
-					}
-					result.RTTAvg = rtt
-					result.RTTMin = rtt * 0.85
-					result.RTTMax = rtt * 1.25
-					result.Jitter = p.JitterMs
-					mbps := 500.0 - (rtt * 1.5)
-					if mbps < 10.0 {
-						mbps = 15.5
-					}
-					result.Mbps = float64(int(mbps*10)) / 10.0
-					if rtt < 50 {
-						result.QualityGrade = "EXCELLENT (Direct P2P Link)"
-					} else if rtt < 150 {
-						result.QualityGrade = "GOOD (Relay/Direct Link)"
-					} else {
-						result.QualityGrade = "FAIR (High Latency Link)"
-					}
-					break
-				}
-			}
-			it.collector.mu.Unlock()
-		}
-
+		result := it.probePingViaEcho(peerID, 4)
 		data, _ := json.Marshal(result)
 		return it.buildHTTPResponse(200, "application/json", data)
 	}
@@ -810,6 +792,26 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 		return it.buildHTTPResponse(200, "application/json", []byte(`{"error":"TAP state not available"}`))
 	}
 
+	// ── /api/tap/forward-test — real TAP -> overlay -> peer TAP -> reply ──
+	if bytes.HasPrefix(lines[0], []byte("POST /api/tap/forward-test")) {
+		body := extractHTTPBody(req)
+		var bodyReq struct {
+			PeerID string `json:"peer_id"`
+		}
+		if err := json.Unmarshal(body, &bodyReq); err != nil || bodyReq.PeerID == "" {
+			return it.buildHTTPResponse(400, "application/json", []byte(`{"error":"missing or invalid peer_id"}`))
+		}
+		if it.collector == nil || it.collector.ProbeTapForward == nil {
+			return it.buildHTTPResponse(503, "application/json", []byte(`{"error":"TAP forwarding probe not available"}`))
+		}
+		result := it.collector.ProbeTapForward(bodyReq.PeerID)
+		if result == nil {
+			return it.buildHTTPResponse(500, "application/json", []byte(`{"error":"TAP forwarding probe failed"}`))
+		}
+		data, _ := json.Marshal(result)
+		return it.buildHTTPResponse(200, "application/json", data)
+	}
+
 	// ── /api/multiaddr-test — per-address RTT probing (POST) ──
 	if bytes.HasPrefix(lines[0], []byte("POST /api/multiaddr-test")) {
 		body := extractHTTPBody(req)
@@ -835,7 +837,100 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 		return it.buildHTTPResponse(200, "application/json", resp)
 	}
 
+	// Never return HTML with status 200 for an unsupported API. Besides hiding
+	// deployment/version mismatches, that response used to trigger frontend
+	// estimate fallbacks that looked like measured telemetry.
+	if bytes.Contains(lines[0], []byte(" /api/")) {
+		return it.buildHTTPResponse(404, "application/json", []byte(`{"error":"API endpoint not available on TAP WebUI"}`))
+	}
 	return it.buildHTTPResponse(200, "text/html; charset=utf-8", it.htmlDashboard)
+}
+
+func (it *TAPInterceptor) probePingViaEcho(target string, attempts int) *PingResultDTO {
+	res := &PingResultDTO{PeerID: target, PeerIDShort: shortPeerID(target), Probes: attempts}
+	if attempts <= 0 {
+		res.Error = "invalid probe count"
+		return res
+	}
+	if it.collector == nil || it.collector.ProbePeerEcho == nil {
+		res.Error = "live ping service not available"
+		res.PacketLoss = 1
+		return res
+	}
+
+	it.collector.mu.RLock()
+	for _, p := range it.collector.ActivePeers {
+		if p.PeerID == target || p.TapIP == target || p.TapIPv6 == target || strings.EqualFold(p.NodeName, target) {
+			res.PeerID = p.PeerID
+			res.PeerIDShort = shortPeerID(p.PeerID)
+			res.NodeName = p.NodeName
+			res.TapIP = strings.Split(p.TapIP, "/")[0]
+			res.TapIPv6 = strings.Split(p.TapIPv6, "/")[0]
+			break
+		}
+	}
+	it.collector.mu.RUnlock()
+
+	rtts := make([]float64, 0, attempts)
+	for i := 0; i < attempts; i++ {
+		probe := it.collector.ProbePeerEcho(res.PeerID)
+		if probe == nil {
+			if res.Error == "" {
+				res.Error = "echo probe returned no result"
+			}
+			continue
+		}
+		if probe.NodeName != "" {
+			res.NodeName = probe.NodeName
+		}
+		if probe.TransportAddr != "" {
+			res.TransportAddr = probe.TransportAddr
+		}
+		res.IsRelayed = probe.IsRelayed
+		if !probe.Success || probe.RTTMs <= 0 {
+			if res.Error == "" && probe.Error != "" {
+				res.Error = probe.Error
+			}
+			continue
+		}
+		rtts = append(rtts, probe.RTTMs)
+	}
+
+	res.Replies = len(rtts)
+	res.PacketLoss = float64(attempts-len(rtts)) / float64(attempts)
+	if res.TransportAddr == "" {
+		res.TransportPath = "unknown"
+	} else if res.IsRelayed {
+		res.TransportPath = "circuit-relay"
+	} else {
+		res.TransportPath = "direct"
+	}
+	if len(rtts) == 0 {
+		if res.Error == "" {
+			res.Error = "no live ping reply"
+		}
+		return res
+	}
+	res.Success = true
+	res.RTTMinMs, res.RTTMaxMs = rtts[0], rtts[0]
+	var sum, jitter float64
+	for i, rtt := range rtts {
+		sum += rtt
+		if rtt < res.RTTMinMs {
+			res.RTTMinMs = rtt
+		}
+		if rtt > res.RTTMaxMs {
+			res.RTTMaxMs = rtt
+		}
+		if i > 0 {
+			jitter += absF(rtt - rtts[i-1])
+		}
+	}
+	res.RTTAvgMs = sum / float64(len(rtts))
+	if len(rtts) > 1 {
+		res.JitterMs = jitter / float64(len(rtts)-1)
+	}
+	return res
 }
 
 func isHTTPRequestComplete(buf []byte) bool {
@@ -899,9 +994,9 @@ func extractHTTPBody(req []byte) []byte {
 }
 
 func (it *TAPInterceptor) buildHTTPResponse(code int, contentType string, body []byte) []byte {
-	statusText := "OK"
-	if code == 400 {
-		statusText = "Bad Request"
+	statusText := http.StatusText(code)
+	if statusText == "" {
+		statusText = "Unknown Status"
 	}
 	respHeader := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
 		code, statusText, contentType, len(body))

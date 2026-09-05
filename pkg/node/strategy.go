@@ -401,8 +401,9 @@ func (sd *StrategyDispatcher) SendToPeer(ctx context.Context, targetPeer peer.ID
 
 // encryptAndFragment seals rawData with the per-peer cipher and splits it into
 // length-prefixed frames. It is non-blocking and safe to call under ps.writeMu
-// or on a hot path. Returns the frames and the post-inner-encrypt payload length
-// used for TX byte accounting. cipher may be nil (plaintext obfuscation only).
+// or on a hot path. Returns the frames and the original TAP Ethernet-frame
+// length used for WebUI throughput accounting. cipher may be nil (plaintext
+// obfuscation only).
 // SendToPeer and writeFrameLocked both route through it so the two paths can
 // never drift apart.
 //
@@ -413,6 +414,7 @@ func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, cipher obfu
 	if sd.node == nil {
 		return [][]byte{rawData}, len(rawData), nil
 	}
+	tapPayloadLen := tapPayloadLenFromPackedFrame(rawData)
 	data := rawData
 	if cipher != nil {
 		enc, err := sd.node.sealPeerFrame(targetPeer, cipher, data)
@@ -451,7 +453,7 @@ func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, cipher obfu
 			frags[i] = enc
 		}
 	}
-	return frags, len(data), nil
+	return frags, tapPayloadLen, nil
 }
 
 // removeStreamUnderLock drops a stream from ps while the caller holds
@@ -480,7 +482,7 @@ func (sd *StrategyDispatcher) writeOverStreams(ps *PeerStreams, targetPeer peer.
 		if s == nil {
 			continue
 		}
-		if err := sd.writeFragsToStreams(ps, targetPeer, []network.Stream{s}, origLen, frags); err == nil {
+		if err := sd.writeFragsToStreams(ps, targetPeer, []network.Stream{s}, origLen, frags, true); err == nil {
 			return nil
 		} else {
 			lastErr = err
@@ -508,7 +510,7 @@ func (sd *StrategyDispatcher) retryWithFreshStream(ctx context.Context, targetPe
 	ps2.writeMu.Lock()
 	remaining := ps2.GetAllStreams()
 	if len(remaining) > 0 {
-		err := sd.writeFragsToStreams(ps2, targetPeer, remaining, origLen, frags)
+		err := sd.writeFragsToStreams(ps2, targetPeer, remaining, origLen, frags, true)
 		ps2.writeMu.Unlock()
 		if err == nil {
 			return nil
@@ -537,7 +539,7 @@ func (sd *StrategyDispatcher) sendBestPath(ctx context.Context, targetPeer peer.
 		ps.writeMu.Unlock()
 		return sd.retryWithFreshStream(ctx, targetPeer, ps, frags, origLen, rawData, nil)
 	}
-	err := sd.writeFragsToStreams(ps, targetPeer, streams, origLen, frags)
+	err := sd.writeFragsToStreams(ps, targetPeer, streams, origLen, frags, true)
 	if err == nil {
 		ps.writeMu.Unlock()
 		return nil
@@ -573,7 +575,7 @@ func (sd *StrategyDispatcher) sendFallback(ctx context.Context, targetPeer peer.
 	ps2.writeMu.Lock()
 	remaining := ps2.GetAllStreams()
 	if len(remaining) > 0 {
-		err := sd.writeFragsToStreams(ps2, targetPeer, remaining, origLen, frags)
+		err := sd.writeFragsToStreams(ps2, targetPeer, remaining, origLen, frags, true)
 		ps2.writeMu.Unlock()
 		if err == nil {
 			return nil
@@ -604,7 +606,10 @@ func (sd *StrategyDispatcher) sendRedundant(ctx context.Context, targetPeer peer
 		if s == nil {
 			continue
 		}
-		if err := sd.writeFragsToStreams(ps, targetPeer, []network.Stream{s}, origLen, frags); err == nil {
+		// Redundant mode writes the same logical TAP frame over every healthy
+		// transport. Count that payload once in the topology, while the protocol
+		// tracker still records every physical copy below.
+		if err := sd.writeFragsToStreams(ps, targetPeer, []network.Stream{s}, origLen, frags, !sentAny); err == nil {
 			sentAny = true
 		} else {
 			sd.removeStreamUnderLock(ps, s)
@@ -625,7 +630,7 @@ func (sd *StrategyDispatcher) sendRedundant(ctx context.Context, targetPeer peer
 	ps2.writeMu.Lock()
 	remaining := ps2.GetAllStreams()
 	if len(remaining) > 0 {
-		err := sd.writeFragsToStreams(ps2, targetPeer, remaining, origLen, frags)
+		err := sd.writeFragsToStreams(ps2, targetPeer, remaining, origLen, frags, true)
 		ps2.writeMu.Unlock()
 		if err == nil {
 			return nil
@@ -660,12 +665,12 @@ func (sd *StrategyDispatcher) sendToPeerViaOverlayRelay(targetPeer, relayHop pee
 		return fmt.Errorf("overlay relay send to %s requires node", targetPeer.String())
 	}
 
-	// Capture the on-wire payload length up-front. The frame buffer may be a
+	// Capture the original TAP payload length up-front. The frame buffer may be a
 	// pooled buffer (acquireFrameBuf) that the dispatch worker releases and
 	// reuses the instant SendToPeer returns; onSent runs asynchronously inside
-	// the relay pool's write loop, so reading len(packedData) there would race
-	// with reuse and report a wrong (often zero) TX byte count.
-	txBytes := len(packedData)
+	// the relay pool's write loop, so parsing packedData there would race with
+	// reuse and report a wrong TX byte count.
+	txBytes := tapPayloadLenFromPackedFrame(packedData)
 
 	// 1. END-TO-END seal for the final destination. packedData IS an obfuscate
 	//    frame, so sealing it in place is structurally valid. The error is NOT
@@ -849,7 +854,7 @@ func (sd *StrategyDispatcher) writeFrameLocked(targetPeer peer.ID, ps *PeerStrea
 	if err != nil {
 		return err
 	}
-	return sd.writeFragsToStreams(ps, targetPeer, streams, origLen, frags)
+	return sd.writeFragsToStreams(ps, targetPeer, streams, origLen, frags, true)
 }
 
 // writeFragsToStreams writes the (already encrypted + fragmented) frags to
@@ -859,7 +864,7 @@ func (sd *StrategyDispatcher) writeFrameLocked(targetPeer peer.ID, ps *PeerStrea
 // ps must not be nil. Callers must hold ps.writeMu. The write deadline is
 // refreshed at most once per second (throttled via ps.nextWriteDeadlineRenew)
 // to avoid the per-frame SetWriteDeadline syscall cost under high PPS.
-func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer peer.ID, streams []network.Stream, origLen int, frags [][]byte) error {
+func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer peer.ID, streams []network.Stream, tapPayloadLen int, frags [][]byte, recordPeerPayload bool) error {
 	// Throttle SetWriteDeadline: only call it when the existing deadline is
 	// within writeDeadlineRenewThreshold of expiry. All callers hold
 	// ps.writeMu, so ps.nextWriteDeadlineRenew is safe to read/write here.
@@ -883,9 +888,18 @@ func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer pe
 
 	record := func() {
 		if sd.node != nil {
-			sd.node.recordPeerTxBytes(targetPeer, origLen)
+			if recordPeerPayload {
+				sd.node.recordPeerTxBytes(targetPeer, tapPayloadLen)
+			}
 			if sd.node.protoTracker != nil {
-				sd.node.protoTracker.Data.RecordTx(uint64(len(frags)), uint64(origLen))
+				// Protocol telemetry intentionally reports encrypted/fragmented
+				// overlay bytes. Keep that wire-oriented metric separate from the
+				// TAP-payload rate shown in the topology.
+				wireBytes := 0
+				for _, frag := range frags {
+					wireBytes += len(frag)
+				}
+				sd.node.protoTracker.Data.RecordTx(uint64(len(frags)), uint64(wireBytes))
 			}
 		}
 	}

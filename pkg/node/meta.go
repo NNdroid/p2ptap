@@ -300,18 +300,18 @@ func (n *Node) buildLocalMetaPayload() meta.NodeMetaPayload {
 	}
 }
 
-// computeReachability returns "Public" if ANY peer has a direct (non-circuit)
-// transport link; otherwise "Relay".
+// computeReachability reports libp2p AutoNAT's verified local verdict. A direct
+// outbound connection does not prove that unsolicited inbound dials can reach
+// this node, so it must never be promoted to "Public" here.
 func (n *Node) computeReachability() string {
-	for _, p := range n.Host.Network().Peers() {
-		conns := n.Host.Network().ConnsToPeer(p)
-		for _, conn := range conns {
-			if !strings.Contains(conn.RemoteMultiaddr().String(), "/p2p-circuit") {
-				return "Public"
-			}
-		}
+	switch network.Reachability(n.localReachability.Load()) {
+	case network.ReachabilityPublic:
+		return "Public"
+	case network.ReachabilityPrivate:
+		return "Private"
+	default:
+		return "Unknown"
 	}
-	return "Relay"
 }
 
 // handleMetaResponse processes an inbound meta response payload from a peer:

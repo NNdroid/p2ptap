@@ -22,6 +22,7 @@ import (
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	libp2pconnmgr "github.com/libp2p/go-libp2p/core/connmgr"
 	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -154,9 +155,14 @@ type Node struct {
 	// a control-plane sync (SeqSync + Meta) for a relay-only peer, so it can
 	// apply a per-peer cooldown instead of re-triggering every tick.
 	relayCtrlSyncAt sync.Map
-	ctx             context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
+	// relayControlHealth tracks failed relay-control handshakes per final target.
+	// It separates a candidate route from a verified working path and applies a
+	// target-level cooldown after repeated Circuit Relay ACL denials.
+	relayControlHealthMu sync.Mutex
+	relayControlHealth   map[peer.ID]relayControlFailureState
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	wg                   sync.WaitGroup
 	// closeOnce makes Close idempotent; it can be invoked from the signal
 	// handler, the tray UI and the web shutdown endpoint concurrently.
 	closeOnce sync.Once
@@ -207,6 +213,19 @@ type Node struct {
 	pingPongFailCount atomic.Pointer[map[peer.ID]*atomic.Int32]
 	pingPongFailMu    sync.Mutex // structural (CoW) changes only; never taken per frame
 
+	// peerRTT keeps bounded, source-labelled REAL probe outcomes for WebUI
+	// telemetry.  Routing may still need an internal cost before the first
+	// measurement, but that estimate is never stored here or exposed as RTT.
+	peerRTTMu sync.RWMutex
+	peerRTT   map[peer.ID]*peerRTTState
+
+	// tapICMPEchoPending correlates the local OS' real ICMP echo requests read
+	// from TAP with replies returning from the overlay.  Unlike libp2p control
+	// pings, these samples include the exact queues and TAP data path seen by a
+	// user's `ping 10.x.x.x` command.
+	tapICMPEchoMu      sync.Mutex
+	tapICMPEchoPending map[tapICMPEchoKey]time.Time
+
 	// Reconnect cooldown per peer to prevent rapid-fire reconnect loops on send failures
 	lastReconnectTime map[peer.ID]time.Time
 
@@ -241,13 +260,22 @@ type Node struct {
 	// TAP-probe peer-side ACK channel (方案 B). When the peer detects our probe
 	// request frame at its TAP write boundary it sends an out-of-band
 	// control-plane ack so we can tell "frame reached peer TAP but OS didn't
-	// answer" apart from "frame never arrived". probeAckCh carries the signal;
-	// probeAckToken/probeAckSeq form the per-probe matching token (accessed
-	// atomically so the stream-handler goroutine can read the token without
-	// racing the prober goroutine that writes it under probeMu).
-	probeAckCh    chan struct{}
+	// answer" apart from "frame never arrived". The channel carries a
+	// tapProbeAckFlag* diagnostic: whether the frame's dst IP matched the peer's
+	// own TAP IP when it was written into the peer's TAP device (0 = older peer
+	// build without the flag). probeAckToken/probeAckSeq form the per-probe
+	// matching token (accessed atomically so the stream-handler goroutine can
+	// read the token without racing the prober goroutine that writes it under
+	// probeMu).
+	probeAckCh    chan uint8
 	probeAckToken uint64
 	probeAckSeq   uint64
+
+	// Deferred peer-side probe acks (方案 B): acks for probe requests detected
+	// on the RX path, held until the frame is written into the local TAP so the
+	// ack means "delivered to the kernel" (see deferredProbeAck).
+	deferredProbeAcksMu sync.Mutex
+	deferredProbeAcks   []deferredProbeAck
 
 	reconnectTimeMu sync.Mutex
 
@@ -411,6 +439,10 @@ type Node struct {
 	// startTime records when the node was created, used for uptime calculation
 	// in metadata exchange.
 	startTime time.Time
+	// localReachability is updated only from libp2p's stateful AutoNAT event.
+	// Zero is ReachabilityUnknown, so startup never claims public reachability
+	// before an inbound dial-back has actually verified it.
+	localReachability atomic.Int32
 
 	// nodeName is the resolved display name (auto → hostname).  Cached locally
 	// because the Collector interface no longer exposes a readable NodeName field.
@@ -703,7 +735,10 @@ func (n *Node) peerSeqSyncConvergeMs(remotePeer peer.ID) uint64 {
 	return 0
 }
 
-// recordPeerTxBytes atomically adds n bytes to the send counter for targetPeer.
+// recordPeerTxBytes atomically adds n TAP-payload bytes to the send counter for
+// targetPeer. Overlay padding, encryption overhead, relay envelopes, and
+// control-plane traffic must not be included: the WebUI presents this value as
+// application-facing TAP throughput.
 func (n *Node) recordPeerTxBytes(targetPeer peer.ID, nBytes int) {
 	if nBytes <= 0 {
 		return
@@ -712,13 +747,27 @@ func (n *Node) recordPeerTxBytes(targetPeer peer.ID, nBytes int) {
 	v.(*atomic.Uint64).Add(uint64(nBytes))
 }
 
-// recordPeerRxBytes atomically adds n bytes to the receive counter for sourcePeer.
+// recordPeerRxBytes atomically adds n accepted TAP-payload bytes to the receive
+// counter for sourcePeer. Keep it symmetric with recordPeerTxBytes so a padded
+// TCP ACK is displayed at its real Ethernet size instead of the padded wire size.
 func (n *Node) recordPeerRxBytes(sourcePeer peer.ID, nBytes int) {
 	if nBytes <= 0 {
 		return
 	}
 	v, _ := n.peerRxBytes.LoadOrStore(sourcePeer, new(atomic.Uint64))
 	v.(*atomic.Uint64).Add(uint64(nBytes))
+}
+
+// tapPayloadLenFromPackedFrame returns the original Ethernet-frame length from
+// a plaintext p2ptap frame. Send paths call this before per-peer encryption and
+// fragmentation so the topology rate is independent of obfuscation settings.
+// Invalid/non-p2ptap data contributes nothing to TAP throughput.
+func tapPayloadLenFromPackedFrame(packed []byte) int {
+	_, payload, err := obfuscate.Unpack(packed)
+	if err != nil {
+		return 0
+	}
+	return len(payload)
 }
 
 // getPeerSpeed returns the locally-computed tx/rx speed (bytes/sec) for a peer.
@@ -1274,13 +1323,16 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		NFTManager:          NewNFTManager(&cfg.ExitNode),
 		relayLatency:        make(map[peer.ID]time.Duration),
 		relayAuthInProgress: make(map[peer.ID]bool),
+		relayControlHealth:  make(map[peer.ID]relayControlFailureState),
+		peerRTT:             make(map[peer.ID]*peerRTTState),
+		tapICMPEchoPending:  make(map[tapICMPEchoKey]time.Time),
 		directConnected:     make(map[peer.ID]bool),
 		aclStats:            newACLStats(),
 		dispatchCh:          make(chan dispatchTask, 8192), // bounded buffer: 8192 frames for high-throughput scaling
 		urgentWriteCh:       make(chan []byte, 64),         // urgent TAP-inject queue (diagnostics)
 		urgentDispatchCh:    make(chan dispatchTask, 64),   // urgent SEND queue (symmetric to receive)
 		probeReplyCh:        make(chan []byte, 8),          // TAP-probe echo-reply capture (see probeActive)
-		probeAckCh:          make(chan struct{}, 4),        // TAP-probe peer-side ack (方案 B)
+		probeAckCh:          make(chan uint8, 4),           // TAP-probe peer-side ack (方案 B) + dst-IP flag
 		perPeerLastTx:       make(map[peer.ID]uint64),
 		perPeerLastRx:       make(map[peer.ID]uint64),
 		perPeerTxSpeed:      make(map[peer.ID]uint64),
@@ -1499,6 +1551,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		},
 		ProbePeerSpeedTest: func(peerIDStr string) *observer.SpeedTestResultDTO {
 			return node.ProbePeerSpeedTest(peerIDStr)
+		},
+		RecordPeerPing: func(peerIDStr string, rttMillis float64, success bool) {
+			pid, err := peer.Decode(peerIDStr)
+			if err != nil {
+				return
+			}
+			node.recordPeerRTTProbe(pid, rttSourceLibp2pPing, time.Duration(rttMillis*float64(time.Millisecond)), success)
 		},
 		ProbeTapForward: func(peerIDStr string) *observer.TapProbeResultDTO {
 			pid, err := peer.Decode(peerIDStr)
@@ -1761,7 +1820,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				}
 				// p2p-circuit provides transparent L3 connectivity, so register
 				// it as a direct link for routing purposes.
-				rttMs := node.getPeerLatency(pID)
+				rttMs := node.routingPeerLatencyMs(pID)
 				node.directConnectedMu.Lock()
 				hadDirect := node.directConnected[pID]
 				node.directConnectedMu.Unlock()
@@ -1786,10 +1845,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				node.directConnected[pID] = true
 				node.directConnectedMu.Unlock()
 				node.clearRelayOnlyPeer(pID)
-				rttMs := node.getPeerLatency(pID)
-				if rttMs <= 0 {
-					rttMs = 10
-				}
+				rttMs := node.routingPeerLatencyMs(pID)
 				node.Router.UpdateDirectLink(pID, rttMs, routing.LinkDirect)
 
 				// Direct link came up: drop any circuit-routed data streams so
@@ -1881,14 +1937,38 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		DisconnectedF: func(netw network.Network, conn network.Conn) {
 			pID := conn.RemotePeer()
 			addrStr := conn.RemoteMultiaddr().String()
-			isCircuitRelay := strings.Contains(addrStr, "/p2p-circuit")
 			remaining := len(netw.ConnsToPeer(pID))
 
 			if remaining > 0 {
-				if isCircuitRelay {
-					log.Debug("Relay transport dropped for %s (direct connection still active, %d remaining)", pID.String(), remaining)
+				// Recompute from the transports that ACTUALLY remain. The old early
+				// return left directConnected=true and the router edge LinkDirect
+				// after the direct leg disappeared while a circuit fallback survived.
+				hasDirect, hasCircuit := false, false
+				for _, remainingConn := range netw.ConnsToPeer(pID) {
+					if strings.Contains(remainingConn.RemoteMultiaddr().String(), "/p2p-circuit") {
+						hasCircuit = true
+					} else {
+						hasDirect = true
+					}
+				}
+				rttMs := node.routingPeerLatencyMs(pID)
+				node.directConnectedMu.Lock()
+				if hasDirect {
+					node.directConnected[pID] = true
 				} else {
-					log.Debug("Direct transport dropped for %s (%d other transports still active)", pID.String(), remaining)
+					delete(node.directConnected, pID)
+				}
+				node.directConnectedMu.Unlock()
+				if hasDirect {
+					node.clearRelayOnlyPeer(pID)
+					node.Router.UpdateDirectLink(pID, rttMs, routing.LinkDirect)
+					log.Debug("Transport dropped for %s; a direct connection remains (%d total)", pID.String(), remaining)
+				} else if hasCircuit {
+					node.Router.UpdateDirectLink(pID, rttMs, routing.LinkCircuit)
+					if !node.isBootstrapPeer(pID) {
+						node.markRelayOnlyPeer(pID)
+					}
+					log.Info("Direct transport unavailable for %s; downgraded to circuit relay (%d remaining)", pID.String(), remaining)
 				}
 				return
 			}
@@ -2101,6 +2181,11 @@ func computeExitMSS(mtu int, obfMode string) int {
 }
 
 func (n *Node) Start() {
+	// Subscribe before starting connection work so the stateful AutoNAT event is
+	// reflected in WebUI/peer metadata as soon as libp2p has a verdict.
+	n.wg.Add(1)
+	go n.localReachabilityLoop()
+
 	// Connect to Bootstrap Peers with retry
 	for _, bStr := range n.Config.BootstrapPeers {
 		ma, err := multiaddr.NewMultiaddr(bStr)
@@ -2623,7 +2708,7 @@ type TopologyNode struct {
 	OSArch   string `json:"os_arch"`
 	Version  string `json:"version"`
 	Self     bool   `json:"self"`
-	Direct   bool   `json:"direct"` // directly connected to self (no relay)
+	Direct   bool   `json:"direct"` // verified live non-circuit transport to self
 	Parent   string `json:"parent"` // parent node id in the shortest-path tree ("" for self)
 	Depth    int    `json:"depth"`  // hops from self in the SPT (0 = self)
 	Relay    bool   `json:"relay"`  // this node is a transit relay for others
@@ -2813,16 +2898,14 @@ func (n *Node) GetTopology() TopologyResponse {
 			tn.OSArch = m.OSArch
 			tn.Version = m.Version
 		}
-		_, tn.Direct = directSet[pid]
-		if !tn.Direct && n.isDirectlyConnected(pid) {
-			tn.Direct = true
-		}
+		_, graphAdjacent := directSet[pid]
+		tn.Direct = n.isDirectlyConnected(pid)
 		if p, ok := parent[pid]; ok {
 			tn.Parent = p.String()
 			tn.Depth = int(dist[pid]) // depth proxy = cumulative RTT; replaced below
 		} else {
 			// Fallback parent when node is not yet connected in the LSA link-state graph
-			if tn.Direct {
+			if graphAdjacent || n.Host.Network().Connectedness(pid) == network.Connected {
 				tn.Parent = self.String()
 				tn.Depth = 1
 			} else if hop := n.relayHopForTarget(pid); hop != "" {
@@ -3008,16 +3091,50 @@ func (n *Node) localBootCluster() string {
 // "direct" link — reporting that would hide the overlay hop actually carrying
 // the data frames.
 func (n *Node) describeTransportPath(pID peer.ID) (path string, relayHop string) {
+	_, relayFailed := n.recentRelayControlFailure(pID, relayFailureResetWindow)
 	if hop := n.relayHopForTarget(pID); hop != "" {
-		return "overlay-relay", hop.String()
+		// Route knowledge alone is not transport evidence. The periodic echo
+		// keeps peerLastRx fresh for a healthy idle overlay path, while a broken
+		// RelayCtrl/SeqSync path naturally ages out instead of remaining labelled
+		// as a working relay forever.
+		if !relayFailed && n.isPeerReady(pID) && n.peerRxWithin(pID, 45*time.Second) {
+			return "overlay-relay", hop.String()
+		}
 	}
-	if n.Host.Network().Connectedness(pID) != network.Connected {
-		return "", ""
+	sig := n.deriveConnSignals(pID)
+	if sig.hasDirect {
+		return "direct", ""
 	}
-	if n.peerHasCircuitRelayConn(pID) {
+	if sig.hasRelay && !relayFailed {
 		return "circuit-relay", ""
 	}
-	return "direct", ""
+	return "", ""
+}
+
+// localReachabilityLoop consumes libp2p AutoNAT's stateful reachability event.
+// Unlike the old heuristic ("any direct outbound peer means public"), this is
+// based on an external dial-back and therefore actually proves public ingress.
+func (n *Node) localReachabilityLoop() {
+	defer n.wg.Done()
+	sub, err := n.Host.EventBus().Subscribe(new(event.EvtLocalReachabilityChanged))
+	if err != nil {
+		log.Warn("AutoNAT reachability subscription failed: %v", err)
+		return
+	}
+	defer sub.Close()
+	for {
+		select {
+		case raw, ok := <-sub.Out():
+			if !ok {
+				return
+			}
+			if ev, ok := raw.(event.EvtLocalReachabilityChanged); ok {
+				n.localReachability.Store(int32(ev.Reachability))
+			}
+		case <-n.ctx.Done():
+			return
+		}
+	}
 }
 
 // summariseClusters counts membership per boot cluster. Members exclude the boot

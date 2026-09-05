@@ -95,7 +95,7 @@ func TestDecryptPeerFrameMultiConnectionRing(t *testing.T) {
 
 	// Current generation (3) must open on the first attempt.
 	cur := sealWith(ciphers[2], "gen3-current-connection")
-	if dec, ok, garb := n.decryptPeerFrame(cur, p); garb || !ok {
+	if dec, ok, garb := n.decryptPeerFrame(nil, cur, p); garb || !ok {
 		t.Fatalf("current gen3 frame should open directly: decrypted=%v garbage=%v", ok, garb)
 	} else if string(dec[hLen:hLen+len("gen3-current-connection")]) != "gen3-current-connection" {
 		t.Fatalf("current gen3 decrypted wrong payload")
@@ -104,10 +104,10 @@ func TestDecryptPeerFrameMultiConnectionRing(t *testing.T) {
 	// Oldest generation (1) — the peer is STILL sealing with its DIRECT-connection
 	// key while we flipped to the RELAY-connection key — must open via the ring.
 	old := sealWith(ciphers[0], "gen1-old-direct-connection")
-	if _, _, garb := n.decryptPeerFrame(old, p); garb {
+	if _, _, garb := n.decryptPeerFrame(nil, old, p); garb {
 		t.Fatalf("expected gen1 frame to open via ring, got garbage")
 	}
-	dec, ok, garb := n.decryptPeerFrame(old, p)
+	dec, ok, garb := n.decryptPeerFrame(nil, old, p)
 	if garb || !ok {
 		t.Fatalf("gen1 frame must open via ring: decrypted=%v garbage=%v", ok, garb)
 	}
@@ -117,7 +117,7 @@ func TestDecryptPeerFrameMultiConnectionRing(t *testing.T) {
 
 	// Middle generation (2) must also open via the ring.
 	mid := sealWith(ciphers[1], "gen2-mid-connection")
-	if dec, ok, garb := n.decryptPeerFrame(mid, p); garb || !ok {
+	if dec, ok, garb := n.decryptPeerFrame(nil, mid, p); garb || !ok {
 		t.Fatalf("gen2 frame must open via ring: decrypted=%v garbage=%v", ok, garb)
 	} else if string(dec[hLen:hLen+len("gen2-mid-connection")]) != "gen2-mid-connection" {
 		t.Fatalf("gen2 ring-decrypted wrong payload")
@@ -130,7 +130,7 @@ func TestDecryptPeerFrameMultiConnectionRing(t *testing.T) {
 		t.Fatalf("rogue cipher build: %v", err)
 	}
 	rogueFrame := sealWith(rogue, "never-negotiated-key")
-	if _, ok, garb := n.decryptPeerFrame(rogueFrame, p); !garb || ok {
+	if _, ok, garb := n.decryptPeerFrame(nil, rogueFrame, p); !garb || ok {
 		t.Fatalf("rogue-key frame must be garbage (garbage=%v decrypted=%v)", garb, ok)
 	}
 }
