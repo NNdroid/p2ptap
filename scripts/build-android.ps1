@@ -34,18 +34,35 @@ if (-not (Test-Path $AAR_DIR)) {
     New-Item -ItemType Directory -Force -Path $AAR_DIR | Out-Null
 }
 $AAR_OUT = "$AAR_DIR\p2ptap.aar"
+$GIT_COMMIT = (& git -C $ROOT_DIR rev-parse --short HEAD).Trim()
+& git -C $ROOT_DIR diff --quiet --
+if ($LASTEXITCODE -ne 0) {
+    $GIT_COMMIT = "$GIT_COMMIT-dirty"
+}
+$BUILD_TIME = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+$ENGINE_VERSION = "dev-$GIT_COMMIT"
+$env:GO_COMMIT_HASH = $GIT_COMMIT
+$VERSION_LDFLAGS = "-X p2ptap/pkg/version.Version=$ENGINE_VERSION -X p2ptap/pkg/version.BuildTime=$BUILD_TIME -X p2ptap/pkg/version.GitCommit=$GIT_COMMIT"
 
 Write-Host "Step 1: Compiling Go native engine into AAR for all architectures (arm64, arm, x86_64, x86)..." -ForegroundColor Yellow
-gomobile bind -target="android" -androidapi 21 -javapkg com.p2ptap -ldflags="-checklinkname=0 -extldflags '-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384'" -o $AAR_OUT "$ROOT_DIR\pkg\android"
+gomobile bind -target="android" -androidapi 21 -javapkg com.p2ptap -ldflags="-s -w $VERSION_LDFLAGS -checklinkname=0 -extldflags '-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384'" -o $AAR_OUT "$ROOT_DIR\pkg\android"
+if ($LASTEXITCODE -ne 0) {
+    throw "gomobile bind failed with exit code $LASTEXITCODE"
+}
 
 Write-Host "AAR generated: $AAR_OUT ($( (Get-Item $AAR_OUT).Length / 1MB ) MB)" -ForegroundColor Green
 
 # 3. Assemble Debug APK
 Write-Host "Step 2: Building Android APK with Gradle..." -ForegroundColor Yellow
 Set-Location $ANDROID_PROJ
-.\gradlew.bat assembleDebug
-
 $APK_PATH = "$ANDROID_PROJ\app\build\outputs\apk\debug\app-debug.apk"
+if (Test-Path -LiteralPath $APK_PATH) {
+    Remove-Item -LiteralPath $APK_PATH -Force
+}
+.\gradlew.bat assembleDebug
+if ($LASTEXITCODE -ne 0) {
+    throw "Gradle assembleDebug failed with exit code $LASTEXITCODE"
+}
 if (Test-Path $APK_PATH) {
     Write-Host "=========================================================" -ForegroundColor Green
     Write-Host "  APK Build Complete!" -ForegroundColor Green

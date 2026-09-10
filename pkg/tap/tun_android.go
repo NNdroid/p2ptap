@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
 
 	"p2ptap/pkg/tuntap"
 )
@@ -50,6 +51,7 @@ func CreateTunTAPDevice(tunFd int, name, mac string, mtu int) (TAPDevice, error)
 	}
 	f := os.NewFile(uintptr(tunFd), name)
 	if f == nil {
+		_ = syscall.Close(tunFd)
 		return nil, errors.New("tun: failed to wrap TUN fd")
 	}
 	return &TunTAPDevice{
@@ -87,7 +89,12 @@ func (d *TunTAPDevice) SetMAC(mac string) error {
 	return nil
 }
 
-func (d *TunTAPDevice) SetMTU(mtu int) error { d.mtu = mtu; return nil }
+func (d *TunTAPDevice) SetMTU(mtu int) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.mtu = mtu
+	return nil
+}
 
 // ConfigureIP is a no-op: the Android VpnService establishes the tunnel
 // address itself (builder.addAddress), so the node must not reconfigure it.
@@ -100,8 +107,13 @@ func (d *TunTAPDevice) UpdateFd(newTunFd int) error {
 	if newTunFd <= 0 {
 		return errors.New("tun: invalid new TUN fd")
 	}
+	if d.closed {
+		_ = syscall.Close(newTunFd)
+		return errors.New("tun: device closed")
+	}
 	f := os.NewFile(uintptr(newTunFd), d.name)
 	if f == nil {
+		_ = syscall.Close(newTunFd)
 		return errors.New("tun: failed to wrap new TUN fd")
 	}
 	oldFile := d.file

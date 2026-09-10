@@ -20,30 +20,6 @@
 // machinery on a TUN-only client) and is rejected at Start.
 package P2PTap
 
-/*
-#include <dlfcn.h>
-#include <stdint.h>
-
-enum android_fdsan_error_level {
-	ANDROID_FDSAN_ERROR_LEVEL_DISABLED = 0,
-	ANDROID_FDSAN_ERROR_LEVEL_WARN_ONCE = 1,
-	ANDROID_FDSAN_ERROR_LEVEL_WARN_ALWAYS = 2,
-	ANDROID_FDSAN_ERROR_LEVEL_FATAL = 3,
-};
-
-static void disable_fdsan_abort() {
-	void* lib = dlopen("libc.so", RTLD_NOW);
-	if (lib) {
-		void (*set_level)(enum android_fdsan_error_level) = (void (*)(enum android_fdsan_error_level))dlsym(lib, "android_fdsan_set_error_level");
-		if (set_level) {
-			set_level(ANDROID_FDSAN_ERROR_LEVEL_WARN_ONCE);
-		}
-		dlclose(lib);
-	}
-}
-*/
-import "C"
-
 import (
 	"context"
 	crand "crypto/rand"
@@ -92,10 +68,6 @@ func SetInterfaceProvider(p InterfaceProvider) {
 }
 
 func init() {
-	// Android 10+ (API 29+) fdsan aborts when Go runtime or Chromium WebView closes fds owned across JNI.
-	// Downgrade error level to WARN_ONCE to prevent process crash.
-	C.disable_fdsan_abort()
-
 	// Android lacks /etc/resolv.conf. Configure a robust DNS resolver using standard DNS
 	// servers (Alibaba 223.5.5.5, Google 8.8.8.8, Cloudflare 1.1.1.1) protected from the VPN tunnel.
 	net.DefaultResolver = &net.Resolver{
@@ -205,12 +177,19 @@ func SetStateListener(l StateListener) {
 // SetProtector registers the Android VpnService socket protector. It MUST be
 // called before Start, otherwise P2P sockets may loop into the tunnel.
 func SetProtector(p Protector) {
+	if p == nil {
+		node.SetAndroidProtectFunc(nil)
+		return
+	}
 	node.SetAndroidProtectFunc(func(fd int) bool {
-		if p == nil {
-			return false
-		}
 		return p.Protect(int32(fd))
 	})
+}
+
+func closeDetachedTunFD(fd int) {
+	if fd > 0 {
+		_ = syscall.Close(fd)
+	}
 }
 
 // Start launches the P2P TAP node over the provided Android TUN file descriptor.
@@ -218,42 +197,38 @@ func SetProtector(p Protector) {
 // cfgJSON is the node configuration in JSON (same schema as config.json). The
 // Exit Node server (exit_node.enable=true) is rejected because it is not
 // supported on Android. tunFd is the detached file descriptor obtained from
-// android.os.ParcelFileDescriptor.detachFd(). Start returns immediately; the
-// node runs in background goroutines until Stop is called.
+// android.os.ParcelFileDescriptor.detachFd(). Start consumes tunFd on every
+// path, including validation or startup failure. It returns after local node
+// initialization; peer/bootstrap connectivity is established asynchronously.
 func Start(cfgJSON string, tunFd int) error {
-	mu.Lock()
-	defer mu.Unlock()
-
-	if instance != nil {
-		log.Warn("android: node already running, stopping previous instance before starting new one")
-		old := instance
-		instance = nil
-		activeCollector = nil
-		if metricsCancel != nil {
-			metricsCancel()
-			metricsCancel = nil
-		}
-		_ = old.Close()
+	if tunFd <= 0 {
+		return errors.New("android: invalid TUN fd")
 	}
 
 	cfg := config.DefaultConfig()
 	if cfgJSON != "" {
 		if err := json.Unmarshal([]byte(cfgJSON), cfg); err != nil {
+			closeDetachedTunFD(tunFd)
 			return fmt.Errorf("android: invalid config JSON: %w", err)
 		}
+	}
+	if err := cfg.Validate(); err != nil {
+		closeDetachedTunFD(tunFd)
+		return fmt.Errorf("android: invalid config: %w", err)
 	}
 
 	// Exit Node server is not supported on Android (TUN-only client, no host
 	// routing/NAT). Reject it explicitly rather than silently doing nothing.
 	if cfg.ExitNode.Enable {
+		closeDetachedTunFD(tunFd)
 		return errors.New("android: exit node server is not supported on this build")
 	}
 
-	if cfg.MTU <= 0 {
-		cfg.MTU = 1500
-	}
-	if cfg.TapMAC == "" {
-		cfg.TapMAC = config.GenerateRandomMAC()
+	mu.Lock()
+	defer mu.Unlock()
+	if instance != nil {
+		closeDetachedTunFD(tunFd)
+		return errors.New("android: node already running; call Stop() and wait for it to return before Start()")
 	}
 
 	dev, err := tap.CreateTunTAPDevice(tunFd, cfg.TapName, cfg.TapMAC, cfg.MTU)
@@ -335,6 +310,13 @@ func metricsLoop(ctx context.Context, n *node.Node, collector *web.StatsCollecto
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			mu.Lock()
+			active := instance == n
+			mu.Unlock()
+			if !active {
+				return
+			}
+
 			stateListenerMu.RLock()
 			sl := stateListener
 			stateListenerMu.RUnlock()
@@ -352,13 +334,16 @@ func metricsLoop(ctx context.Context, n *node.Node, collector *web.StatsCollecto
 
 			var directCount, relayCount int32
 			for _, p := range resp.ActivePeers {
-				if p.ConnState == "relay_ok" {
+				if p.ConnState == "relay_ok" || (p.ConnState == "ok" && p.IsRelayed) {
 					relayCount++
-				} else if p.ConnState == "ok" {
+				} else if p.ConnState == "ok" && !p.IsRelayed {
 					directCount++
 				}
 			}
-			totalPeers := int32(len(resp.ActivePeers))
+			// Active means a verified healthy direct or relay data path. The
+			// ActivePeers DTO also carries known/connecting/unreachable rows for
+			// diagnostics, so len(ActivePeers) is not a truthful active count.
+			totalPeers := directCount + relayCount
 
 			sl.OnMetricsUpdate(totalPeers, directCount, relayCount, txSpd, rxSpd, totTx, totRx)
 		}
@@ -367,20 +352,35 @@ func metricsLoop(ctx context.Context, n *node.Node, collector *web.StatsCollecto
 
 // Stop shuts down the running node and releases the TUN fd. It is safe to call
 // when no node is running.
+//
+// ORDERING GUARANTEE (Android lifecycle contract): Stop() is fully synchronous.
+// n.Close() runs to completion — including every multi-second timeout phase —
+// while mu is held, and instance is cleared plus the IDLE callback fired only
+// AFTER that. A concurrently blocked IsRunning()/Start()/GetStatsJSON() caller
+// therefore unblocks to observe a fully released engine: no half-closed libp2p
+// Host, TUN fd or WebUI port can ever be observed as "running", and a queued
+// Start() (the Android service serializes lifecycle commands on a single
+// executor) cannot race the teardown for ports or devices.
 func Stop() error {
 	mu.Lock()
 	n := instance
-	instance = nil
-	activeCollector = nil
 	if metricsCancel != nil {
 		metricsCancel()
 		metricsCancel = nil
 	}
-	mu.Unlock()
 
 	if n == nil {
+		activeCollector = nil
+		mu.Unlock()
 		return nil
 	}
+
+	err := n.Close()
+	if instance == n {
+		instance = nil
+		activeCollector = nil
+	}
+	mu.Unlock()
 
 	stateListenerMu.RLock()
 	sl := stateListener
@@ -388,8 +388,7 @@ func Stop() error {
 	if sl != nil {
 		sl.OnStateChange("IDLE", "Node stopped")
 	}
-
-	return n.Close()
+	return err
 }
 
 // IsRunning reports whether the P2P TAP node is currently active.
@@ -678,17 +677,23 @@ func setExitNodeLocked(n *node.Node, peerID, tapIPv4, tapIPv6 string) error {
 	return nil
 }
 
-// UpdateTunFd hot-swaps the underlying Android TUN file descriptor safely without tearing down the P2P engine.
+// UpdateTunFd hot-swaps the underlying Android TUN file descriptor safely
+// without tearing down the P2P engine. It consumes newTunFd on every path.
 func UpdateTunFd(newTunFd int) error {
+	if newTunFd <= 0 {
+		return errors.New("android: invalid new TUN fd")
+	}
 	mu.Lock()
 	n := instance
 	mu.Unlock()
 	if n == nil || n.TAP == nil {
+		closeDetachedTunFD(newTunFd)
 		return errors.New("android: node not running")
 	}
 	if updater, ok := n.TAP.(interface{ UpdateFd(int) error }); ok {
 		return updater.UpdateFd(newTunFd)
 	}
+	closeDetachedTunFD(newTunFd)
 	return errors.New("android: TAP device does not support UpdateFd")
 }
 
@@ -733,4 +738,3 @@ func (a *P2PTap) GetActiveExitNode() string {
 func (a *P2PTap) Version() string {
 	return Version()
 }
-
