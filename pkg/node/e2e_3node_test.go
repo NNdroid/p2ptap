@@ -179,15 +179,15 @@ func TestE2EConcurrentBidirectional3Node(t *testing.T) {
 
 // dir is one directed e2e flow used by TestE2EConcurrentBidirectional3Node.
 type dir struct {
-	writer  tap.TAPDevice // TAP pipe the sender injects into
-	srcIP   string
-	dstIP   string
-	srcMAC  net.HardwareAddr
-	dstMAC  net.HardwareAddr
-	tag     string
-	reader  *frameReader // receiving pipe's reader
+	writer   tap.TAPDevice // TAP pipe the sender injects into
+	srcIP    string
+	dstIP    string
+	srcMAC   net.HardwareAddr
+	dstMAC   net.HardwareAddr
+	tag      string
+	reader   *frameReader // receiving pipe's reader
 	tagBytes []byte
-	frame   []byte
+	frame    []byte
 }
 
 // wantFrom returns the set of marker payloads expected on the given reader.

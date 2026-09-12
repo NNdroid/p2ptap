@@ -500,7 +500,9 @@ func TestOverlayRelayForwardThreeHop(t *testing.T) {
 //
 // The bug class we are guarding against: a RELAYED (non-direct) destination is
 // never directly connected to the origin, so a gate written as
-//   !isPeerReady(dest) && obfCipherForPeer(dest)==nil  -> drop
+//
+//	!isPeerReady(dest) && obfCipherForPeer(dest)==nil  -> drop
+//
 // is ALWAYS true for it and blackholes every relay-only frame. The gate must
 // instead check the RELAY HOP's readiness.
 //

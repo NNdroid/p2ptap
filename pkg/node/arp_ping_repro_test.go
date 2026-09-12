@@ -16,15 +16,15 @@ import (
 func buildARPRequest(senderMAC net.HardwareAddr, senderIP, targetIP net.IP) []byte {
 	f := make([]byte, 60)
 	copy(f[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}) // dst MAC broadcast
-	copy(f[6:12], senderMAC)                                   // src MAC
-	binary.BigEndian.PutUint16(f[12:14], 0x0806)               // EtherType ARP
-	binary.BigEndian.PutUint16(f[14:16], 1)                   // HW type Ethernet
-	binary.BigEndian.PutUint16(f[16:18], 0x0800)              // protocol IPv4
-	f[18] = 6                                                 // HW size
-	f[19] = 4                                                 // proto size
-	binary.BigEndian.PutUint16(f[20:22], 1)                   // opcode = request
-	copy(f[22:28], senderMAC)                                 // sender MAC
-	copy(f[28:32], senderIP.To4())                            // sender IP
+	copy(f[6:12], senderMAC)                                 // src MAC
+	binary.BigEndian.PutUint16(f[12:14], 0x0806)             // EtherType ARP
+	binary.BigEndian.PutUint16(f[14:16], 1)                  // HW type Ethernet
+	binary.BigEndian.PutUint16(f[16:18], 0x0800)             // protocol IPv4
+	f[18] = 6                                                // HW size
+	f[19] = 4                                                // proto size
+	binary.BigEndian.PutUint16(f[20:22], 1)                  // opcode = request
+	copy(f[22:28], senderMAC)                                // sender MAC
+	copy(f[28:32], senderIP.To4())                           // sender IP
 	// target MAC left zero
 	copy(f[38:42], targetIP.To4()) // target IP
 	return f

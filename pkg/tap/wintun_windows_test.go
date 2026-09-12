@@ -13,9 +13,9 @@ import (
 // being treated as broadcast.
 func TestMulticastDstMAC_MDNS(t *testing.T) {
 	cases := []struct {
-		name   string
-		dstIP  net.IP
-		want   net.HardwareAddr
+		name  string
+		dstIP net.IP
+		want  net.HardwareAddr
 	}{
 		{
 			name:  "mDNS IPv4 224.0.0.251",

@@ -93,10 +93,10 @@ func short(s string, n int) string {
 // It is length-prefixed (2 bytes) so an OLD peer that sends none is detected by
 // a short read rather than a parse error.
 type Record struct {
-	Version   string   `json:"v"`            // human version string (e.g. "dev", "1.2.3")
-	Commit    string   `json:"c"`            // GitCommit injected at build time
-	Envelope  uint8    `json:"e"`            // preferred wire envelope version (EnvelopeVersion)
-	Envelopes []uint8  `json:"ev,omitempty"` // set of envelope versions supported (negotiation)
+	Version   string  `json:"v"`            // human version string (e.g. "dev", "1.2.3")
+	Commit    string  `json:"c"`            // GitCommit injected at build time
+	Envelope  uint8   `json:"e"`            // preferred wire envelope version (EnvelopeVersion)
+	Envelopes []uint8 `json:"ev,omitempty"` // set of envelope versions supported (negotiation)
 }
 
 // CurrentRecord returns the local node/boot's version Record.
@@ -153,11 +153,11 @@ func (r Record) known() bool {
 // is enabled). Levels:
 //   - CompatOK:     identical build, or peer version unknown (old build) — safe.
 //   - CompatWarn:   builds differ but the relay envelope wire format is safe to
-//                   use (same envelope, OR a common version was negotiated) — log
-//                   and allow.
+//     use (same envelope, OR a common version was negotiated) — log
+//     and allow.
 //   - CompatDanger: envelope wire formats are incompatible with NO common version
-//                   — connecting risks silent relay-frame corruption. Log loudly;
-//                   reject only if StrictVersionCheck is on.
+//     — connecting risks silent relay-frame corruption. Log loudly;
+//     reject only if StrictVersionCheck is on.
 func (r Record) CompatibleWith(peer Record) (CompatLevel, string) {
 	// Unknown peer (old build) — cannot verify, allow but note. The node/boot
 	// side already warned on the short read; this keeps a single upgraded side

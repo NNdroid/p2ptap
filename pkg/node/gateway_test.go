@@ -681,7 +681,7 @@ func TestExitNodeTransitNeverPoisonsPeerMeta(t *testing.T) {
 	// srcIP = 142.250.190.46 (Google), dstIP = 10.0.0.88 (Client)
 	transitPayload := make([]byte, 64)
 	transitPayload[12] = 0x08
-	transitPayload[13] = 0x00 // IPv4
+	transitPayload[13] = 0x00                              // IPv4
 	copy(transitPayload[26:30], []byte{142, 250, 190, 46}) // WAN src IP
 	copy(transitPayload[30:34], []byte{10, 0, 0, 88})      // Client dst IP
 

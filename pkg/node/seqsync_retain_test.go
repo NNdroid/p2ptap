@@ -58,13 +58,13 @@ func TestRemovePeerObfRetainsCipher(t *testing.T) {
 	// (e.g. a lingering DIRECT-connection key while the RELAY-connection key is
 	// current).
 	n.storePeerObf(p, &PeerObf{
-		algo:     algo,
-		txCipher: cNew,
-		rxCipher: cNew,
+		algo:       algo,
+		txCipher:   cNew,
+		rxCipher:   cNew,
 		negotiated: true,
-		txKey:    append([]byte(nil), kNew...),
-		rxKey:    append([]byte(nil), kNew...),
-		rxRing:   []rxRingSlot{{cipher: cOld, key: append([]byte(nil), kOld...)}},
+		txKey:      append([]byte(nil), kNew...),
+		rxKey:      append([]byte(nil), kNew...),
+		rxRing:     []rxRingSlot{{cipher: cOld, key: append([]byte(nil), kOld...)}},
 	})
 
 	// Disconnect: the real removePeerObf path. Must RETAIN the entry.
@@ -152,12 +152,12 @@ func TestRxKeyGraceRetainsFullRing(t *testing.T) {
 
 	// Current generation 3, with generations 1 and 2 retained in the ring.
 	n.storePeerObf(p, &PeerObf{
-		algo:     algo,
-		txCipher: c3,
-		rxCipher: c3,
+		algo:       algo,
+		txCipher:   c3,
+		rxCipher:   c3,
 		negotiated: true,
-		txKey:    append([]byte(nil), k3...),
-		rxKey:    append([]byte(nil), k3...),
+		txKey:      append([]byte(nil), k3...),
+		rxKey:      append([]byte(nil), k3...),
 		rxRing: []rxRingSlot{
 			{cipher: c1, key: append([]byte(nil), k1...)},
 			{cipher: c2, key: append([]byte(nil), k2...)},
@@ -180,12 +180,12 @@ func TestRxKeyGraceRetainsFullRing(t *testing.T) {
 	// already po.rxKey/current and is tried first by decryptPeerFrame) so ANY
 	// lingering frame opens.
 	po := &PeerObf{
-		algo:     algo,
-		txCipher: c3,
-		rxCipher: c3,
+		algo:       algo,
+		txCipher:   c3,
+		rxCipher:   c3,
 		negotiated: true,
-		txKey:    append([]byte(nil), k3...),
-		rxKey:    append([]byte(nil), k3...),
+		txKey:      append([]byte(nil), k3...),
+		rxKey:      append([]byte(nil), k3...),
 	}
 	if !n.seedPrevRxFromGrace(p, po) {
 		t.Fatalf("expected grace key to seed on post-clear re-handshake")

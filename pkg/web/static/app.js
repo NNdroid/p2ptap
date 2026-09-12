@@ -402,6 +402,8 @@
                 sec_peer_tx_fp: "TX Key Fingerprint (SHA-256, first 8 hex)",
                 sec_peer_rx_fp: "RX Key Fingerprint (SHA-256, first 8 hex)",
                 sec_peer_pfs_eph: "Ephemeral ECDH Public-Key Fingerprint",
+                sec_peer_sni: "Handshake SNI (peer presented)",
+                sec_peer_psk: "PSK verified",
                 sec_peer_epoch_local: "Local Handshake Epoch",
                 sec_peer_epoch_peer: "Peer Handshake Epoch",
                 sec_peer_copy: "Copy",
@@ -623,6 +625,10 @@
                 enable_mdns_desc: "Auto-discover peers on the same LAN via mDNS (local network only)",
                 cfg_disable_relay_lbl: "Disable Circuit Relay (diagnostic)",
                 cfg_disable_relay_desc: "Turn OFF libp2p circuit-relay client/service, AutoRelay & DCUtR hole-punching. Requires restart. If a slow peer becomes unreachable with this ON, it was being auto-relayed through a static relay. Does NOT touch p2ptap's own overlay relay.",
+                cfg_tls_sni_lbl: "TLS/QUIC SNI (outgoing)",
+                cfg_tls_sni_desc: "Static server_name sent on every outbound TLS/QUIC handshake so the mesh resembles ordinary HTTP/3 to a DPI. Empty = no SNI (upstream default). Cosmetic only — peers are authenticated via the signed certificate, never the SNI. Requires restart.",
+                cfg_tls_sni_suffix_lbl: "TLS SNI suffix (per-peer)",
+                cfg_tls_sni_suffix_desc: "When set, overrides the static SNI: each link presents \"<hash-of-peer-id>.<suffix>\" — a distinct, stable SNI per peer under one base domain, avoiding a shared global constant. Use a domain you control. Requires restart.",
                 section_obfs: "Traffic Obfuscation",
                 section_obfs_desc: "Packet padding to defeat DPI fingerprinting",
                 obfs_mode_desc: "Padding strategy for P2P data frames",
@@ -755,6 +761,7 @@
                 save_btn: "Save & Apply",
                 save_success: "Configuration saved successfully!",
                 cfg_needs_restart: "⚠️ Disable-relay changed — restart p2ptap to apply.",
+                cfg_restart_required: "Some settings apply only after a restart",
                 save_failed: "Failed to save configuration: ",
                 req_error: "Save request error: ",
                 unnamed_node: "Unnamed Node",
@@ -1272,6 +1279,8 @@
                 sec_peer_tx_fp: "TX 密钥指纹 (SHA-256 前 8 位)",
                 sec_peer_rx_fp: "RX 密钥指纹 (SHA-256 前 8 位)",
                 sec_peer_pfs_eph: "临时 ECDH 公钥指纹",
+                sec_peer_sni: "握手 SNI（对端出示）",
+                sec_peer_psk: "PSK 已验证",
                 sec_peer_epoch_local: "本端握手 epoch",
                 sec_peer_epoch_peer: "对端握手 epoch",
                 sec_peer_copy: "复制",
@@ -1493,6 +1502,10 @@
                 enable_mdns_desc: "通过 mDNS 自动发现同一局域网内的节点（仅限本地网络）",
                 cfg_disable_relay_lbl: "禁用标准中继 (排障诊断)",
                 cfg_disable_relay_desc: "关闭 libp2p 标准 circuit-relay 客户端/服务端、AutoRelay 和 DCUtR 打洞。需重启生效。若开启后某些慢节点无法访问，说明原先通过静态中继转发。不影响 p2ptap 自有骨干中继。",
+                cfg_tls_sni_lbl: "TLS/QUIC SNI（出站）",
+                cfg_tls_sni_desc: "在每次出站 TLS/QUIC 握手上发送的静态 server_name，使网格对 DPI 更像普通 HTTP/3。留空＝不发 SNI（上游默认）。仅外观——对端通过签名证书认证，从不校验 SNI。需重启生效。",
+                cfg_tls_sni_suffix_lbl: "TLS SNI 后缀（按对端）",
+                cfg_tls_sni_suffix_desc: "设置后覆盖静态 SNI：每条链路出示 \"<对端ID哈希>.<后缀>\"——在同一基域下每个 peer 唯一且稳定，避免全网共享同一常量。请使用你掌控的域名。需重启生效。",
                 section_obfs: "流量混淆",
                 section_obfs_desc: "通过报文填充对抗 DPI 指纹识别",
                 obfs_mode_desc: "P2P 数据帧的填充策略",
@@ -1625,6 +1638,7 @@
                 save_btn: "保存并生效",
                 save_success: "配置更新保存成功！",
                 cfg_needs_restart: "⚠️ 禁用中继已变更，需重启 p2ptap 后生效。",
+                cfg_restart_required: "部分设置需重启后生效",
                 save_failed: "保存失败: ",
                 req_error: "保存网络请求错误: ",
                 unnamed_node: "未命名节点",
@@ -2019,6 +2033,8 @@
                 sec_peer_tx_fp: "TX 金鑰指紋 (SHA-256 前 8 位)",
                 sec_peer_rx_fp: "RX 金鑰指紋 (SHA-256 前 8 位)",
                 sec_peer_pfs_eph: "臨時 ECDH 公鑰指紋",
+                sec_peer_sni: "握手 SNI（對端出示）",
+                sec_peer_psk: "PSK 已驗證",
                 sec_peer_epoch_local: "本端握手 epoch",
                 sec_peer_epoch_peer: "對端握手 epoch",
                 sec_peer_copy: "複製",
@@ -2196,6 +2212,10 @@
                 enable_mdns_desc: "透過 mDNS 自動發現同一區域網路內的節點（僅限本地網路）",
                 cfg_disable_relay_lbl: "停用標準中繼 (排障診斷)",
                 cfg_disable_relay_desc: "關閉 libp2p 標準 circuit-relay 客戶端/服務端、AutoRelay 與 DCUtR 打洞。需重啟生效。若開啟後某些慢節點無法連線，說明原先透過靜態中繼轉發。不影響 p2ptap 自有骨幹中繼。",
+                cfg_tls_sni_lbl: "TLS/QUIC SNI（出站）",
+                cfg_tls_sni_desc: "在每次出站 TLS/QUIC 握手發送的靜態 server_name，使網格對 DPI 更像普通 HTTP/3。留空＝不發 SNI（上游預設）。僅外觀——對端透過簽章憑證認證，從不校驗 SNI。需重啟生效。",
+                cfg_tls_sni_suffix_lbl: "TLS SNI 後綴（按對端）",
+                cfg_tls_sni_suffix_desc: "設定後覆蓋靜態 SNI：每條鏈路出示 \"<對端ID雜湊>.<後綴>\"——在同一基域下每個 peer 唯一且穩定，避免全網共享同一常數。請使用你掌控的網域。需重啟生效。",
                 section_obfs: "流量混淆",
                 section_obfs_desc: "通過封包填充對抗 DPI 指紋識別",
                 obfs_mode_desc: "P2P 資料幀的填充策略",
@@ -2311,6 +2331,7 @@
                 save_btn: "儲存並套用",
                 save_success: "設定更新儲存成功！",
                 cfg_needs_restart: "⚠️ 停用中繼已變更，需重新啟動 p2ptap 後生效。",
+                cfg_restart_required: "部分設定需重新啟動後生效",
                 save_failed: "儲存失敗: ",
                 req_error: "儲存網路請求錯誤: ",
                 unnamed_node: "未命名節點",
@@ -2837,6 +2858,8 @@
                 sec_peer_tx_fp: "TX 鍵フィンガープリント (SHA-256 先頭 8 桁)",
                 sec_peer_rx_fp: "RX 鍵フィンガープリント (SHA-256 先頭 8 桁)",
                 sec_peer_pfs_eph: "一時 ECDH 公開鍵フィンガープリント",
+                sec_peer_sni: "ハンドシェーク SNI（ピア提示）",
+                sec_peer_psk: "PSK 検証済み",
                 sec_peer_epoch_local: "ローカル ハンドシェイク epoch",
                 sec_peer_epoch_peer: "ピア ハンドシェイク epoch",
                 sec_peer_copy: "コピー",
@@ -2951,6 +2974,10 @@
                 enable_mdns_desc: "mDNS で同一 LAN 内のノードを自動検出します（ローカルネットワークのみ）",
                 cfg_disable_relay_lbl: "標準リレーを無効化 (診断用)",
                 cfg_disable_relay_desc: "libp2pの標準circuit-relayクライアント/サービス、AutoRelayおよびDCUtRホールパンチングを無効化します（要再起動）。p2ptap独自のオーバーレイリレーには影響しません。",
+                cfg_tls_sni_lbl: "TLS/QUIC SNI（送信時）",
+                cfg_tls_sni_desc: "すべての送信 TLS/QUIC ハンドシェークで送る静的 server_name。DPI に対して通常の HTTP/3 に似せます。空＝SNI なし（上流の既定）。外見上のもののみ——ピアは署名済み証明書で認証され、SNI は検証されません。要再起動。",
+                cfg_tls_sni_suffix_lbl: "TLS SNI サフィックス（ピア別）",
+                cfg_tls_sni_suffix_desc: "設定すると静的 SNI を上書き：各リンクは \"<ピアIDハッシュ>.<サフィックス>\" を提示します。単一のベースドメイン下でピアごとに一意かつ安定で、全网共通の定数を回避します。所有するドメインを使用してください。要再起動。",
                 section_obfs: "トラフィック難読化",
                 section_obfs_desc: "パケットパディングでDPIフィンガープリントを回避",
                 obfs_mode_desc: "P2Pデータフレームのパディング戦略",
@@ -2977,6 +3004,7 @@
                 save_btn: "保存して適用",
                 save_success: "設定が正常に保存されました！",
                 cfg_needs_restart: "⚠️ 中継無効の変更は、p2ptap の再起動後に反映されます。",
+                cfg_restart_required: "一部の設定は再起動後に反映されます",
                 save_failed: "保存に失敗しました: ",
                 req_error: "保存リクエストエラー: ",
                 unnamed_node: "名前なしノード",
@@ -3656,6 +3684,8 @@
                 sec_peer_tx_fp: "TX-Schlüssel-Fingerabdruck (SHA-256, erste 8 Hex)",
                 sec_peer_rx_fp: "RX-Schlüssel-Fingerabdruck (SHA-256, erste 8 Hex)",
                 sec_peer_pfs_eph: "Ephemeraler ECDH-Public-Key-Fingerabdruck",
+                sec_peer_sni: "Handshake-SNI (Gegenüber präsentiert)",
+                sec_peer_psk: "PSK verifiziert",
                 sec_peer_epoch_local: "Lokale Handshake-Epoche",
                 sec_peer_epoch_peer: "Peer-Handshake-Epoche",
                 sec_peer_copy: "Kopieren",
@@ -3770,6 +3800,10 @@
                 enable_mdns_desc: "Erkennt Peers im selben LAN automatisch via mDNS (nur lokales Netzwerk)",
                 cfg_disable_relay_lbl: "Circuit-Relay deaktivieren (Diagnose)",
                 cfg_disable_relay_desc: "Deaktiviert libp2p Circuit-Relay, AutoRelay & DCUtR Hole-Punching (Neustart erforderlich). Hat keine Auswirkungen auf das p2ptap-Overlay-Relay.",
+                cfg_tls_sni_lbl: "TLS/QUIC-SNI (ausgehend)",
+                cfg_tls_sni_desc: "Statischer server_name bei jedem ausgehenden TLS/QUIC-Handshake, damit der Mesh für DPI wie normales HTTP/3 wirkt. Leer = kein SNI (Upstream-Standard). Nur optisch — Gegenstellen werden über das signierte Zertifikat authentifiziert, nie über den SNI. Neustart erforderlich.",
+                cfg_tls_sni_suffix_lbl: "TLS-SNI-Suffix (pro Gegenstelle)",
+                cfg_tls_sni_suffix_desc: "Wenn gesetzt, überschreibt es den statischen SNI: Jeder Link präsentiert \"<Peer-ID-Hash>.<Suffix>\" — unter einer Basisdomain pro Gegenstelle eindeutig und stabil, ohne globalen Konstanten. Verwenden Sie eine eigene Domain. Neustart erforderlich.",
                 section_obfs: "Verkehrsobfuskation",
                 section_obfs_desc: "Paketauffüllung zur Abwehr von DPI-Fingerprinting",
                 obfs_mode_desc: "Auffüllstrategie für P2P-Datenrahmen",
@@ -3796,6 +3830,7 @@
                 save_btn: "Speichern & Anwenden",
                 save_success: "Konfiguration erfolgreich gespeichert!",
                 cfg_needs_restart: "⚠️ Relay deaktivieren geändert — zum Übernehmen p2ptap neu starten.",
+                cfg_restart_required: "Einige Einstellungen erfordern einen Neustart",
                 save_failed: "Fehler beim Speichern: ",
                 req_error: "Speicheranfragefehler: ",
                 unnamed_node: "Unbenannter Knoten",
@@ -4475,6 +4510,8 @@
                 sec_peer_tx_fp: "Huella de Clave TX (SHA-256, primeros 8 hex)",
                 sec_peer_rx_fp: "Huella de Clave RX (SHA-256, primeros 8 hex)",
                 sec_peer_pfs_eph: "Huella de Clave Pública ECDH Efímera",
+                sec_peer_sni: "SNI del handshake (presentado por el par)",
+                sec_peer_psk: "PSK verificado",
                 sec_peer_epoch_local: "Época de Handshake Local",
                 sec_peer_epoch_peer: "Época de Handshake del Peer",
                 sec_peer_copy: "Copiar",
@@ -4589,6 +4626,10 @@
                 enable_mdns_desc: "Descubre automáticamente nodos en la misma LAN vía mDNS (solo red local)",
                 cfg_disable_relay_lbl: "Desactivar Circuit Relay (diagnóstico)",
                 cfg_disable_relay_desc: "Desactiva el cliente/servicio circuit-relay libp2p, AutoRelay y perforación DCUtR (requiere reinicio). No afecta al relé de superposición de p2ptap.",
+                cfg_tls_sni_lbl: "SNI TLS/QUIC (saliente)",
+                cfg_tls_sni_desc: "server_name estático enviado en cada handshake TLS/QUIC saliente para que la malla parezca HTTP/3 normal ante un DPI. Vacío = sin SNI (valor de upstream). Solo cosmético: los pares se autentican mediante el certificado firmado, nunca por el SNI. Requiere reinicio.",
+                cfg_tls_sni_suffix_lbl: "Sufijo SNI TLS (por par)",
+                cfg_tls_sni_suffix_desc: "Si se define, anula el SNI estático: cada enlace presenta \"<hash-del-id-del-par>.<sufijo>\" — único y estable por par bajo un dominio base, evitando una constante global compartida. Usa un dominio propio. Requiere reinicio.",
                 section_obfs: "Ofuscación de Tráfico",
                 section_obfs_desc: "Relleno de paquetes para evitar huellas DPI",
                 obfs_mode_desc: "Estrategia de relleno para tramas de datos P2P",
@@ -4615,6 +4656,7 @@
                 save_btn: "Guardar y Aplicar",
                 save_success: "¡Configuración guardada correctamente!",
                 cfg_needs_restart: "⚠️ Relay desactivado cambiado — reinicia p2ptap para aplicarlo.",
+                cfg_restart_required: "Algunos ajustes requieren reiniciar",
                 save_failed: "Error al guardar: ",
                 req_error: "Error en la solicitud de guardado: ",
                 unnamed_node: "Nodo Sin Nombre",
@@ -5294,6 +5336,8 @@
                 sec_peer_tx_fp: "Empreinte de Clé TX (SHA-256, 8 premiers hex)",
                 sec_peer_rx_fp: "Empreinte de Clé RX (SHA-256, 8 premiers hex)",
                 sec_peer_pfs_eph: "Empreinte de Clé Publique ECDH Éphémère",
+                sec_peer_sni: "SNI de handshake (présenté par le pair)",
+                sec_peer_psk: "PSK vérifié",
                 sec_peer_epoch_local: "Époque de Handshake Locale",
                 sec_peer_epoch_peer: "Époque de Handshake du Pair",
                 sec_peer_copy: "Copier",
@@ -5449,6 +5493,10 @@
                 enable_mdns_desc: "Découvre automatiquement les nœuds du même LAN via mDNS (réseau local uniquement)",
                 cfg_disable_relay_lbl: "Désactiver Circuit Relay (diagnostic)",
                 cfg_disable_relay_desc: "Désactive le client/service circuit-relay libp2p, AutoRelay et perforation DCUtR (redémarrage requis). N'affecte pas le relais propre à p2ptap.",
+                cfg_tls_sni_lbl: "SNI TLS/QUIC (sortant)",
+                cfg_tls_sni_desc: "server_name statique envoyé à chaque poignée de main TLS/QUIC sortante pour que le maillage ressemble à du HTTP/3 normal face à un DPI. Vide = pas de SNI (défaut amont). Purement cosmétique — les pairs sont authentifiés via le certificat signé, jamais le SNI. Redémarrage requis.",
+                cfg_tls_sni_suffix_lbl: "Suffixe SNI TLS (par pair)",
+                cfg_tls_sni_suffix_desc: "S'il est défini, remplace le SNI statique : chaque liaison présente \"<hash-id-pair>.<suffixe>\" — unique et stable par pair sous un domaine de base, évitant une constante globale partagée. Utilisez un domaine que vous contrôlez. Redémarrage requis.",
                 section_obfs: "Offuscation du Trafic",
                 section_obfs_desc: "Remplissage de paquets contre l'empreinte DPI",
                 obfs_mode_desc: "Stratégie de remplissage pour les trames de données P2P",
@@ -5558,6 +5606,7 @@
                 save_btn: "Enregistrer & Appliquer",
                 save_success: "Configuration enregistrée avec succès !",
                 cfg_needs_restart: "⚠️ Désactivation du relay modifiée — redémarrez p2ptap pour l'appliquer.",
+                cfg_restart_required: "Certains paramètres nécessitent un redémarrage",
                 save_failed: "Échec de l'enregistrement : ",
                 req_error: "Erreur de requête d'enregistrement : ",
                 unnamed_node: "Nœud Sans Nom",
@@ -5967,6 +6016,10 @@
                     disableRelayEl.checked = !!transports.disable_relay;
                     updateToggleLabel(disableRelayEl, 'cfgDisableRelayLabel', 'Off', 'On');
                 }
+                const sniEl = document.getElementById('cfgTlsServerName');
+                if (sniEl) sniEl.value = transports.tls_server_name || '';
+                const sniSuffixEl = document.getElementById('cfgTlsSniSuffix');
+                if (sniSuffixEl) sniSuffixEl.value = transports.tls_sni_suffix || '';
                 document.getElementById('cfgEnableMDNS').checked = !!currentFullConfig.enable_mdns;
                 updateToggleLabel(document.getElementById('cfgEnableMDNS'), 'cfgEnableMDNSLabel', 'Off', 'On');
 
@@ -6970,6 +7023,10 @@
                 if (!currentFullConfig.transports) currentFullConfig.transports = {};
                 const disableRelayEl = document.getElementById('cfgDisableRelay');
                 if (disableRelayEl) currentFullConfig.transports.disable_relay = disableRelayEl.checked;
+                const sniEl = document.getElementById('cfgTlsServerName');
+                if (sniEl) currentFullConfig.transports.tls_server_name = sniEl.value.trim();
+                const sniSuffixEl = document.getElementById('cfgTlsSniSuffix');
+                if (sniSuffixEl) currentFullConfig.transports.tls_sni_suffix = sniSuffixEl.value.trim();
 
                 if (!currentFullConfig.obfuscation) currentFullConfig.obfuscation = {};
                 const ob = currentFullConfig.obfuscation;
@@ -7010,13 +7067,17 @@
                 }));
 
                 if (res.ok) {
-                    // `disable_relay` only persists to disk and is read at
-                    // startup — the running node won't re-evaluate it until a
-                    // restart (same as the rest of the `transports` block).
-                    const newDisableRelay = !!(currentFullConfig.transports && currentFullConfig.transports.disable_relay);
-                    if (prevDisableRelay !== newDisableRelay) {
-                        const hint = t('cfg_needs_restart') || 'Disable-relay changed — restart p2ptap to apply.';
-                        showToast(t('save_success') + ' ' + hint, false, true);
+                    // The server tells us authoritatively whether any changed field
+                    // is restart-only (transports/SNI/TAP/listen/PSK/peers/strategy/
+                    // web_ui bind) vs hot-applied (obfuscation/exit-node/name). Show a
+                    // warning naming the fields so "saved" is never mistaken for
+                    // "live" when a restart is actually required.
+                    let saveData = null;
+                    try { saveData = await res.json(); } catch (e) { /* older binary */ }
+                    if (saveData && saveData.restart_required) {
+                        const fields = (saveData.restart_fields || []).join(', ');
+                        const hint = (t('cfg_restart_required') || 'Some settings apply only after a restart') + (fields ? ': ' + fields : '');
+                        showToast(t('save_success') + ' — ⚠️ ' + hint, false, true);
                     } else {
                         showToast(t('save_success'));
                     }
@@ -10349,6 +10410,16 @@
                 sni.title = 'Peer presented server_name "' + e.handshake_server_name + '" in its TLS handshake';
                 badges.appendChild(sni);
             }
+            // PSK network but no verified per-peer cipher → this link cannot carry
+            // encrypted mesh traffic (PSK mismatch or handshake not done). Distinguishes
+            // "PSK misconfigured" from "just unreachable".
+            if (e.psk_required && !e.psk_verified) {
+                const pw = document.createElement('span');
+                pw.className = 'enc-no-pfs';
+                pw.textContent = '🔒 PSK unverified';
+                pw.title = 'This node is in a PSK network but has no negotiated cipher with this peer — it cannot exchange encrypted mesh traffic (wrong/absent PSK, or handshake incomplete).';
+                badges.appendChild(pw);
+            }
             head.appendChild(badges);
             row.appendChild(head);
 
@@ -10439,6 +10510,14 @@
             if (e.pfs && e.pfs_pubkey_fp) addTextRow('sec_peer_pfs_eph',
                 e.pfs_pubkey_fp,
                 { code: true, copyField: 'pfs' });
+            // SNI the peer presented when it dialed us (TLS/QUIC ClientHello).
+            // Empty when the peer sent no SNI (tls_server_name unset) or the
+            // connection is one WE dialed (a TLS server presents no SNI).
+            addTextRow('sec_peer_sni', e.handshake_server_name || '—');
+            if (e.psk_required) {
+                addTextRow('sec_peer_psk', e.psk_verified ? '✓' : '✗',
+                    { valCls: e.psk_verified ? 'ped-yes' : 'ped-no' });
+            }
             addTextRow('sec_peer_epoch_local',
                 (e.local_epoch != null && e.local_epoch !== '') ? String(e.local_epoch) : '—');
             addTextRow('sec_peer_epoch_peer',

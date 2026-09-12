@@ -201,7 +201,11 @@ func DeriveKeysPSK(priv *ecdh.PrivateKey, peerPub, psk []byte) (keyA, keyB []byt
 	}
 	// Wipe the raw shared secret immediately — it is only needed to seed HKDF,
 	// and must not persist in memory alongside the derived keys.
-	defer func() { for i := range shared { shared[i] = 0 } }()
+	defer func() {
+		for i := range shared {
+			shared[i] = 0
+		}
+	}()
 
 	// Domain-separated PSK → HKDF salt. Empty PSK yields a nil salt so the
 	// derivation is identical to DeriveKeys for PSK-less deployments.

@@ -114,7 +114,7 @@ func TestChaosDecryptFailureAutoRecovery(t *testing.T) {
 // only active live connections.
 func TestChaosRelayFailover(t *testing.T) {
 	cfg := &config.Config{
-		NodeName:       "chaos-node-relay",
+		NodeName: "chaos-node-relay",
 		BootstrapPeers: []string{
 			"/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWEKwbArMjvrtryUt57BWy5NSXa6yZehX9ffP56M6St7bZ",
 			"/ip4/127.0.0.1/tcp/4002/p2p/12D3KooWM3wrbKuSf2mG3qm6Godd1s1e1irP6da3VwHMC2nxkTNu",

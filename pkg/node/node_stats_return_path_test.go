@@ -101,7 +101,7 @@ func TestReturnPathRobustnessAndProvenance(t *testing.T) {
 	// 2. An inbound frame arrives from target via bootB
 	payload := make([]byte, 64)
 	payload[12] = 0x08
-	payload[13] = 0x00 // IPv4
+	payload[13] = 0x00                         // IPv4
 	copy(payload[26:30], []byte{10, 0, 0, 88}) // src IP = 10.0.0.88
 	srcMAC := []byte{0x02, 0x11, 0x22, 0x33, 0x44, 0x55}
 

@@ -41,10 +41,10 @@ func TestRegisterPeekMapAddrsAcceptsOwnAndRejectsForged(t *testing.T) {
 	victim := test.RandPeerIDFatal(t)
 
 	n.registerPeekMapAddrs(publisher, []string{
-		"/ip4/203.0.113.10/tcp/4001",                            // plain addr -> accept
+		"/ip4/203.0.113.10/tcp/4001",                                   // plain addr -> accept
 		"/ip4/203.0.113.11/udp/4001/quic-v1/p2p/" + publisher.String(), // own /p2p/ suffix -> strip + accept
-		"/ip4/203.0.113.12/tcp/4001/p2p/" + victim.String(),     // claims another peer -> reject
-		"totally-not-a-multiaddr",                               // garbage -> skip
+		"/ip4/203.0.113.12/tcp/4001/p2p/" + victim.String(),            // claims another peer -> reject
+		"totally-not-a-multiaddr",                                      // garbage -> skip
 	})
 
 	got := n.Host.Peerstore().Addrs(publisher)

@@ -105,8 +105,8 @@ type MeshPeerDTO struct {
 // AlertEventDTO represents a diagnostic or security alert event.
 type AlertEventDTO struct {
 	Timestamp string `json:"timestamp"`
-	Level     string `json:"level"`  // "warn" | "error" | "info"
-	Type      string `json:"type"`   // see alert type constants in main.go
+	Level     string `json:"level"` // "warn" | "error" | "info"
+	Type      string `json:"type"`  // see alert type constants in main.go
 	PeerID    string `json:"peer_id"`
 	Message   string `json:"message"`
 }
@@ -120,7 +120,7 @@ type NetworkGroup struct {
 
 // TrafficPoint is one per-minute time-series sample for the traffic sparkline chart.
 type TrafficPoint struct {
-	Time       string `json:"time"`        // "HH:MM"
+	Time       string `json:"time"` // "HH:MM"
 	PeerCount  int    `json:"peer_count"`
 	RelayCount int    `json:"relay_count"`
 }

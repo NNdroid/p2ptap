@@ -465,6 +465,19 @@ func (sd *StrategyDispatcher) sendToPeerViaBootRelay(target, bootHop peer.ID, pa
 // relay-over-backbone). Centralising this stops the two relay paths from
 // drifting apart.
 func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer.ID, seqID uint64) {
+	// PSK-required fail-closed (RX twin of canEgressToPeer + the direct-path
+	// gate in handleStream): a relayed frame from an origin we have NOT
+	// negotiated an end-to-end cipher with carries no proof the sender knows the
+	// PSK, so it must never be sunk into the TAP — otherwise a non-PSK peer
+	// could inject plaintext via a relay hop even though the direct path is
+	// gated. Only overlay-relay / boot-relay transit reaches here, so this
+	// single choke point covers both relay paths.
+	if n.pskRequired() && !n.hasNegotiatedCipher(srcPeer) {
+		if log.IsDebug() {
+			log.Debug("Rx: dropping relayed frame from origin %s — PSK network requires a negotiated cipher", srcPeer.String())
+		}
+		return
+	}
 	// Valid end-to-end frame: record return-path liveness and success
 	n.notePeerRx(srcPeer)
 	if viaPeer != "" && viaPeer != srcPeer {

@@ -15,14 +15,14 @@ func TestIsLocalAddr(t *testing.T) {
 		ma  string
 		got bool
 	}{
-		{"/ip4/127.0.0.1/tcp/4001", true},                              // loopback
-		{"/ip4/10.0.0.5/tcp/4001", true},                              // private RFC1918
-		{"/ip4/192.168.1.10/udp/4001/quic-v1", true},                 // private RFC1918 (QUIC)
-		{"/ip4/172.16.0.5/tcp/4001", true},                           // private RFC1918
-		{"/ip6/fe80::1/tcp/4001", true},                              // link-local
-		{"/ip6/fd00::1/tcp/4001", true},                              // ULA (IsPrivate)
-		{"/ip4/8.8.8.8/tcp/4001", false},                             // public
-		{"/ip6/2001:db8::1/tcp/4001", false},                         // public (documentation range)
+		{"/ip4/127.0.0.1/tcp/4001", true},            // loopback
+		{"/ip4/10.0.0.5/tcp/4001", true},             // private RFC1918
+		{"/ip4/192.168.1.10/udp/4001/quic-v1", true}, // private RFC1918 (QUIC)
+		{"/ip4/172.16.0.5/tcp/4001", true},           // private RFC1918
+		{"/ip6/fe80::1/tcp/4001", true},              // link-local
+		{"/ip6/fd00::1/tcp/4001", true},              // ULA (IsPrivate)
+		{"/ip4/8.8.8.8/tcp/4001", false},             // public
+		{"/ip6/2001:db8::1/tcp/4001", false},         // public (documentation range)
 		{"/ip4/1.2.3.4/tcp/4001/p2p-circuit/p2p/12D3KooWM9cRwmQq9a7hvbgsJ19wSeRAUkAJ5j6u84jTFvFrwX3a", false}, // circuit addr has no IP
 	}
 	for _, c := range cases {

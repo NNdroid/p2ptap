@@ -8,7 +8,6 @@ import (
 	"p2ptap/pkg/tap"
 )
 
-
 // TestLSASnapshotReplayConvergesLateJoiner verifies that a node joining an
 // ALREADY-CONVERGED mesh immediately receives the full topology, not just its
 // new neighbour's links.

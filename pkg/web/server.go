@@ -1284,9 +1284,15 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 				}
 			}
 
-			writeJSON(w, map[string]string{
-				"status":  "ok",
-				"message": "Configuration saved and applied successfully",
+			// Which restart-only fields actually changed (compared AFTER the
+			// preserve-zero-value block, so untouched fields don't false-trigger).
+			restartFields := restartRequiredFields(c, &incoming)
+
+			writeJSON(w, map[string]interface{}{
+				"status":           "ok",
+				"message":          "Configuration saved and applied successfully",
+				"restart_required": len(restartFields) > 0,
+				"restart_fields":   restartFields,
 			})
 			return
 		}
@@ -2160,4 +2166,58 @@ func (g *gzipStaticWriter) Flush() {
 	if f, ok := g.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// restartRequiredFields returns the human-readable names of config fields whose
+// change is NOT applied by the runtime hot-reload (applyHotReload only handles
+// obfuscation, exit-node NAT, and node-name re-announce) and therefore only
+// takes effect after a process restart. The /api/config save handler compares the
+// running config against the incoming one and, if any of these differ, tells the
+// WebUI so it can warn "saved, but these need a restart" instead of a bare
+// "applied successfully" that would silently mislead the operator (e.g. editing
+// transports.tls_server_name / disable_relay / TAP address).
+func restartRequiredFields(old, new *config.Config) []string {
+	if old == nil || new == nil {
+		return nil
+	}
+	var out []string
+	add := func(name string, changed bool) {
+		if changed {
+			out = append(out, name)
+		}
+	}
+	add("tap_name", old.TapName != new.TapName)
+	add("tap_ip", old.TapIP != new.TapIP)
+	add("tap_ipv6", old.TapIPv6 != new.TapIPv6)
+	add("tap_mac", old.TapMAC != new.TapMAC)
+	add("mtu", old.MTU != new.MTU)
+	add("driver_type", old.DriverType != new.DriverType)
+	add("listen_addrs", !stringSliceEqual(old.ListenAddrs, new.ListenAddrs))
+	add("transports", old.Transports != new.Transports)
+	add("bootstrap_peers", !stringSliceEqual(old.BootstrapPeers, new.BootstrapPeers))
+	add("static_peers", !stringSliceEqual(old.StaticPeers, new.StaticPeers))
+	add("enable_mdns", old.EnableMDNS != new.EnableMDNS)
+	// Changing the PSK invalidates every PSK-bound per-peer key; it is applied at
+	// startup (transport pnet + SeqSync salt), so it needs a restart.
+	add("psk", old.PSK != new.PSK)
+	add("transport_strategy", old.TransportStrategy != new.TransportStrategy)
+	// Only the WebUI bind/port/enable need a restart; auth_token and
+	// pcap_sample_every are read live, so exclude them from the comparison.
+	add("web_ui", old.WebUI.Enable != new.WebUI.Enable ||
+		old.WebUI.ListenIP != new.WebUI.ListenIP ||
+		old.WebUI.ListenIPv6 != new.WebUI.ListenIPv6 ||
+		old.WebUI.Port != new.WebUI.Port)
+	return out
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

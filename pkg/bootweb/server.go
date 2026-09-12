@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"p2ptap/pkg/logger"
-
 )
 
 //go:embed static
@@ -221,7 +220,6 @@ func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(authVerifyResp{OK: ok})
 }
-
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	dashboard := CollectDashboard(s.provider)

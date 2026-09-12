@@ -30,13 +30,13 @@ import (
 // production loops, which is what makes it a real "can I run a p2ptap mesh
 // without any bootstrap server?" contract:
 //
-//	1. B floods its LSA on connect      -> A learns the B-C edge
-//	2. B replays its cached LSA snapshot -> A learns C's OWN self-advertised
-//	   edges + identity immediately (a late joiner otherwise waits for C's next
-//	   15s broadcast, or never learns them at all)
-//	3. relayControlReconciler (5s)       -> A<->C cipher over the relay-ctrl tunnel
-//	4. metaSyncLoop / LSA piggyback      -> A learns C's identity
-//	5. dispatch                          -> encrypted ICMP A -> B -> C
+//  1. B floods its LSA on connect      -> A learns the B-C edge
+//  2. B replays its cached LSA snapshot -> A learns C's OWN self-advertised
+//     edges + identity immediately (a late joiner otherwise waits for C's next
+//     15s broadcast, or never learns them at all)
+//  3. relayControlReconciler (5s)       -> A<->C cipher over the relay-ctrl tunnel
+//  4. metaSyncLoop / LSA piggyback      -> A learns C's identity
+//  5. dispatch                          -> encrypted ICMP A -> B -> C
 //
 // C joins B FIRST and A joins LAST on purpose, so A is the late joiner whose
 // convergence depends on the snapshot replay rather than luck of ordering.

@@ -129,7 +129,7 @@ type PacketCapture struct {
 	// sampleCounter is the running frame counter used by the downsampler.
 	sampleCounter atomic.Uint64
 	// maxRatePerSec caps captures per second (0 = unlimited). Rate-limit net.
-	maxRatePerSec atomic.Int64
+	maxRatePerSec   atomic.Int64
 	rateMu          sync.Mutex
 	rateWindowStart time.Time
 	rateCount       int
@@ -419,17 +419,17 @@ func (p *PacketCapture) broadcast(ev PcapEvent) {
 
 // State describes the current capture status for the WebUI.
 type CaptureState struct {
-	Running        bool   `json:"running"`
-	Count          int    `json:"count"`
-	Capacity       int    `json:"capacity"`
-	StartSeq       uint64 `json:"start_seq"`
-	LastSeq        uint64 `json:"last_seq"`
-	StartTime      string `json:"start_time,omitempty"`
-	PersistOn      bool   `json:"persist_on"`
-	SampleEvery    int    `json:"sample_every"`
-	MaxRatePerSec  int    `json:"max_rate_per_sec"`
-	IdleSkip       bool   `json:"idle_skip"`
-	Subscribers    int    `json:"subscribers"`
+	Running       bool   `json:"running"`
+	Count         int    `json:"count"`
+	Capacity      int    `json:"capacity"`
+	StartSeq      uint64 `json:"start_seq"`
+	LastSeq       uint64 `json:"last_seq"`
+	StartTime     string `json:"start_time,omitempty"`
+	PersistOn     bool   `json:"persist_on"`
+	SampleEvery   int    `json:"sample_every"`
+	MaxRatePerSec int    `json:"max_rate_per_sec"`
+	IdleSkip      bool   `json:"idle_skip"`
+	Subscribers   int    `json:"subscribers"`
 }
 
 // State returns a snapshot of the capture status.

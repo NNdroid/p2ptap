@@ -185,7 +185,6 @@ func BuildIPv6NeighborAdvertisementFrameWithMAC(targetMAC, senderMAC net.Hardwar
 	copy(frame[6:12], targetMAC)
 	binary.BigEndian.PutUint16(frame[12:14], packet.EtherTypeIPv6)
 
-
 	frame[14] = 0x60
 	binary.BigEndian.PutUint16(frame[18:20], 32)
 	frame[20] = 58  // Next Header: ICMPv6

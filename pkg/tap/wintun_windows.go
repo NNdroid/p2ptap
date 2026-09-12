@@ -312,6 +312,10 @@ func (w *WintunTAPDevice) Read(b []byte) (int, error) {
 		)
 
 		if retPtr != 0 {
+			// retPtr points into wintun's shared-mapping ring buffer (NOT the Go
+			// heap), so the GC never moves it and the uintptr->Pointer conversion
+			// is correct by construction. go vet's unsafeptr check is a known
+			// false positive for this driver-FFI pattern.
 			packetData := unsafe.Slice((*byte)(unsafe.Pointer(retPtr)), packetSize)
 
 			// Prepend 14-byte Ethernet Header (Destination MAC, Source MAC, EtherType)
@@ -483,6 +487,9 @@ func (w *WintunTAPDevice) Write(b []byte) (int, error) {
 			return 0, nil
 		}
 
+		// retAlloc is a pointer into wintun's shared send buffer (not the Go
+		// heap); the uintptr->Pointer conversion is correct here — see the
+		// ReceivePacket site for the vet-unsafeptr rationale.
 		destBuf := unsafe.Slice((*byte)(unsafe.Pointer(retAlloc)), packetLen)
 		copy(destBuf, ipPayload)
 
@@ -631,6 +638,8 @@ func (w *WintunTAPDevice) injectARPPayloadToWintun(arpPayload []byte) {
 		return
 	}
 
+	// retAlloc points into wintun's shared send buffer (not the Go heap); the
+	// uintptr->Pointer conversion is correct — see the ReceivePacket site.
 	destBuf := unsafe.Slice((*byte)(unsafe.Pointer(retAlloc)), packetLen)
 	copy(destBuf, arpPayload)
 

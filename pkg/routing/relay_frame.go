@@ -93,5 +93,3 @@ func UnpackRelayFrame(buf []byte) (finalDst, source peer.ID, ttl uint8, payload 
 
 	return pID, srcID, ttl, buf[headerLen:], nil
 }
-
-

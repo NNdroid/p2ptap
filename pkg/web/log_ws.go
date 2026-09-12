@@ -36,12 +36,12 @@ const (
 // logWSMessage is the wire envelope for /api/logs/stream. Exactly one payload
 // field is set per message — type discriminates them.
 type logWSMessage struct {
-	Type     string            `json:"type"`               // "backlog" | "entry" | "cleared" | "stats" | "error" | "pong"
-	Entries  []logger.LogEntry `json:"entries,omitempty"`  // when type=backlog
-	Entry    *logger.LogEntry  `json:"entry,omitempty"`    // when type=entry
-	Error    string            `json:"error,omitempty"`    // when type=error
-	Dropped  uint64            `json:"dropped,omitempty"`  // entries this subscriber lost (so the UI can flag stagnation)
-	ServerTs int64             `json:"ts,omitempty"`       // server-side timestamp (ms) for latency tracking
+	Type     string            `json:"type"`              // "backlog" | "entry" | "cleared" | "stats" | "error" | "pong"
+	Entries  []logger.LogEntry `json:"entries,omitempty"` // when type=backlog
+	Entry    *logger.LogEntry  `json:"entry,omitempty"`   // when type=entry
+	Error    string            `json:"error,omitempty"`   // when type=error
+	Dropped  uint64            `json:"dropped,omitempty"` // entries this subscriber lost (so the UI can flag stagnation)
+	ServerTs int64             `json:"ts,omitempty"`      // server-side timestamp (ms) for latency tracking
 }
 
 // logWsHandler returns an http.HandlerFunc that streams new log entries to the

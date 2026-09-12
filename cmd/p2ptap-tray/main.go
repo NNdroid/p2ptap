@@ -17,12 +17,10 @@ import (
 	"time"
 	"unsafe"
 
-
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
-
 
 	"p2ptap/cmd/internal/bootstrap"
 	"p2ptap/pkg/config"
@@ -91,7 +89,6 @@ const (
 	GMEM_MOVEABLE  = 0x0002
 	CF_UNICODETEXT = 13
 )
-
 
 type WNDCLASSEXW struct {
 	CbSize        uint32
@@ -355,7 +352,6 @@ func runTray() {
 		return
 	}
 
-
 	configPath := flag.String("c", "config.json", "Path to p2ptap configuration file")
 	flag.Parse()
 
@@ -376,7 +372,6 @@ func runTray() {
 		configLoadedPath = abs
 	}
 	globalConfigPath = configLoadedPath
-
 
 	// Initialize i18n early so messages shown before the node starts
 	// (e.g. the "already running" dialog) are localized.
@@ -437,7 +432,6 @@ func runTray() {
 		nodeStateMu.Unlock()
 		log.Info("Windows System Tray (standalone mode) active for p2ptap (%s)", configLoadedPath)
 	}
-
 
 	// Pre-generate dynamic status icons in memory
 	iconGreen = generateStatusIcon("green")
@@ -526,7 +520,6 @@ func switchFromStandaloneToService() error {
 	}
 	return nil
 }
-
 
 // daemonClientSnapshot returns the current daemon client under the node-state lock.
 func daemonClientSnapshot() *DaemonClient {
@@ -1002,7 +995,6 @@ func handleMenuCommand(cmdID uint16) {
 
 		}()
 
-
 	case IDM_CLEAR_EXITNODE:
 		if err := clearExitNode(); err != nil {
 			showErrorBox(tT("err_exitnode_title"), fmt.Sprintf(tT("err_clear_exit_msg"), err))
@@ -1073,7 +1065,6 @@ func isServiceInstalled() bool {
 	return false
 }
 
-
 func installService() error {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -1120,8 +1111,6 @@ func installService() error {
 		return fmt.Errorf("CreateService failed: %w", err)
 	}
 	defer s.Close()
-
-
 
 	// Configure recovery: restart on failure so an unexpected crash doesn't
 	// leave the VPN silently down.
@@ -1216,7 +1205,6 @@ func startService() error {
 	}
 	return nil
 }
-
 
 // ensureDaemonRunning brings the p2ptap daemon up if it isn't already. The tray
 // is a pure client, so the VPN only works when the daemon (service, or a
@@ -1373,9 +1361,6 @@ func resolveWebuiURL() string {
 	return targetBaseURL
 }
 
-
-
-
 // webuiURLSidecar mirrors the server-side sidecar filename; the server writes
 // the actual bound WebUI URLs here (one per line) on every (re)bind.
 const webuiURLSidecar = ".p2ptap_webui_url"
@@ -1460,7 +1445,6 @@ func showErrorBox(title, msg string) {
 		0x00000010|0x00040000|0x00010000, // MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND
 	)
 }
-
 
 func openConfigInEditor(configPath string) {
 	absPath, err := filepath.Abs(configPath)
@@ -1559,4 +1543,3 @@ func runAsAdmin() {
 	_ = windows.ShellExecute(0, verbPtr, exePtr, argsPtr, cwdPtr, windows.SW_SHOWNORMAL)
 	os.Exit(0)
 }
-

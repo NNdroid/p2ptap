@@ -1170,7 +1170,11 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// their client tls.Config from the shared p2ptls Identity.ConfigForPeer. Empty
 	// (default) sends no server_name, matching upstream. Cosmetic only: peer identity
 	// is verified from the signed cert extension, never the SNI.
+	//
+	// Two modes: static tls_server_name, or per-peer tls_sni_suffix (SNI =
+	// "<label(peerID)>.<suffix>", distinct+stable per link). Suffix wins if set.
 	p2ptls.SetDialServerName(cfg.Transports.TLSServerName)
+	p2ptls.SetDialSNISuffix(cfg.Transports.TLSSNISuffix)
 
 	// Socket protection for QUIC (UDP): libp2p's QUIC transport routes every UDP
 	// socket — both listening and dialing — through a single ConnManager factory
@@ -1314,7 +1318,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		obfsMode = fmt.Sprintf("🛡️ Active (%s mode, %dB)", cfg.Obfuscation.Mode, cfg.Obfuscation.FixedSize)
 	}
 
-	collector.SetSecurity(pskStatus, obfsMode, computeKeyFingerprint(cfg.NodeKeyFile), cfg.Transports.TLSServerName)
+	// Effective outgoing-SNI display for the WebUI: per-peer suffix mode wins,
+	// shown as "*.<suffix> (per-peer)"; else the static name; else none.
+	sniDisplay := cfg.Transports.TLSServerName
+	if cfg.Transports.TLSSNISuffix != "" {
+		sniDisplay = "*." + strings.Trim(cfg.Transports.TLSSNISuffix, ".") + " (per-peer)"
+	}
+	collector.SetSecurity(pskStatus, obfsMode, computeKeyFingerprint(cfg.NodeKeyFile), sniDisplay)
 
 	node := &Node{
 		Host:                h,
@@ -3288,16 +3298,19 @@ func (n *Node) pushPeerEncryption() {
 	}
 
 	seen := make(map[peer.ID]struct{}, len(negotiated))
-	// Map each connected peer to the remote host(s) it reached us from, so the
-	// SNI observed in its ClientHello (keyed by host, see p2ptls sni.go) can be
-	// attributed back to it for display. Peers dialing from multiple IPs match on
-	// any one.
+	// Map each connected peer to the remote address(es) (IP:port) it reached us
+	// from, so the SNI observed in its ClientHello (keyed by the same IP:port,
+	// see p2ptls sni.go) can be attributed back to it for display. Keying by
+	// IP:port, not just IP, avoids misattributing two distinct peers that share
+	// one NAT egress address (their ephemeral source ports differ per link).
 	hostByPeer := make(map[peer.ID][]string)
 	if n.Host != nil && n.Host.Network() != nil {
 		for _, c := range n.Host.Network().Conns() {
 			if ra := c.RemoteMultiaddr(); ra != nil {
-				if ip, err := manet.ToIP(ra); err == nil {
-					host := ip.String()
+				// IP:port (not just IP) so two peers behind one NAT egress are
+				// not conflated; matches the ClientHello key in p2ptls sni.go.
+				if na, err := manet.ToNetAddr(ra); err == nil {
+					host := na.String()
 					p := c.RemotePeer()
 					// De-dup host per peer.
 					dup := false
@@ -3328,6 +3341,7 @@ func (n *Node) pushPeerEncryption() {
 	}
 
 	snapshot := make([]observer.PeerObfInfoDTO, 0, len(negotiated))
+	pskReq := n.pskRequired()
 	for p, po := range negotiated {
 		seen[p] = struct{}{}
 		snapshot = append(snapshot, observer.PeerObfInfoDTO{
@@ -3342,6 +3356,8 @@ func (n *Node) pushPeerEncryption() {
 			PFS:                 len(po.pfsPubKey) > 0,
 			PFSPubKeyFP:         keyFingerprint(po.pfsPubKey),
 			HandshakeServerName: peerSNI(p),
+			PSKRequired:         pskReq,
+			PSKVerified:         po.negotiated && po.txCipher != nil,
 		})
 	}
 	// Also surface connected peers that never negotiated (unencrypted).
@@ -3360,6 +3376,8 @@ func (n *Node) pushPeerEncryption() {
 				Algo:                "none",
 				Encrypted:           false,
 				HandshakeServerName: peerSNI(p),
+				PSKRequired:         pskReq,
+				PSKVerified:         false,
 			})
 		}
 	}

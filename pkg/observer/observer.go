@@ -696,6 +696,14 @@ type PeerObfInfoDTO struct {
 	// PFSPubKeyFP is the fingerprint of the peer's ephemeral ECDH public key;
 	// empty when PFS is false / plaintext.
 	PFSPubKeyFP string `json:"pfs_pubkey_fp,omitempty"`
+	// PSKRequired: this node is in a PSK network (membership is enforced).
+	// PSKVerified: we hold a negotiated per-peer cipher with it, which (in a PSK
+	// network) is the proof the peer knows the PSK. PSKRequired && !PSKVerified on
+	// a connected peer means it cannot carry encrypted mesh traffic — typically a
+	// PSK mismatch (wrong/absent key) or a not-yet-handshaked link — letting an
+	// operator distinguish "PSK misconfigured" from "just unreachable".
+	PSKRequired bool `json:"psk_required,omitempty"`
+	PSKVerified bool `json:"psk_verified,omitempty"`
 	// HandshakeServerName is the TLS SNI this peer presented when it connected to
 	// us (observed from the ClientHello, attributed via the connection's remote
 	// host). Empty when the peer sent no SNI or the transport/security path did

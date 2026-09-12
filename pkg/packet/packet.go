@@ -34,8 +34,8 @@ var DefaultTapMAC = net.HardwareAddr{0x02, 0x00, 0x5e, 0x10, 0x00, 0x01}
 // Header is the parsed 14-byte Ethernet frame header. Payload points into the
 // original slice (no copy) so callers on the hot path pay nothing for parsing.
 type Header struct {
-	DstMAC   net.HardwareAddr
-	SrcMAC   net.HardwareAddr
+	DstMAC    net.HardwareAddr
+	SrcMAC    net.HardwareAddr
 	EtherType uint16
 	// Payload is the L3 data following the Ethernet header. Empty if the frame
 	// is shorter than 14 bytes.

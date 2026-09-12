@@ -91,4 +91,3 @@ func SaveBootConfig(path string, cfg *BootConfig) error {
 	}
 	return os.WriteFile(path, data, 0600)
 }
-

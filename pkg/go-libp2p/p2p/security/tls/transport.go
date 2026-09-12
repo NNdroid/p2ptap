@@ -77,12 +77,9 @@ func (t *Transport) SecureInbound(ctx context.Context, insecure net.Conn, p peer
 		// (lets an operator confirm a tls_server_name rollout reached every node).
 		// Best-effort and non-authoritative — never blocks the handshake.
 		if info != nil && info.ServerName != "" && info.Conn != nil && info.Conn.RemoteAddr() != nil {
-			ra := info.Conn.RemoteAddr().String()
-			if host, _, err := net.SplitHostPort(ra); err == nil {
-				observeInboundServerName(host, info.ServerName)
-			} else {
-				observeInboundServerName(ra, info.ServerName)
-			}
+			// Key by the full IP:port (matches the node-side attribution) so two
+			// peers sharing one NAT egress IP are not conflated.
+			observeInboundServerName(info.Conn.RemoteAddr().String(), info.ServerName)
 		}
 	alpnLoop:
 		for _, proto := range info.SupportedProtos {
@@ -168,12 +165,13 @@ func (t *Transport) setupConn(tlsConn *tls.Conn, remotePubKey ci.PubKey) (sec.Se
 	}
 
 	nextProto := tlsConn.ConnectionState().NegotiatedProtocol
-	// The special ALPN extension value "libp2p" is used by libp2p versions
-	// that don't support early muxer negotiation. If we see this sepcial
-	// value selected, that means we are handshaking with a version that does
-	// not support early muxer negotiation. In this case return empty nextProto
-	// to indicate no muxer is selected.
-	if nextProto == "libp2p" {
+	// The special ALPN extension values "libp2p" (upstream) and "h3" (p2ptap
+	// LOCAL PATCH — we advertise "h3" as the non-muxer ALPN to defeat DPI
+	// classification) are placeholders used when early muxer negotiation did
+	// not select a real multiplexer. If we see either selected, treat it as "no
+	// muxer negotiated" so the caller falls back to multistream-select rather
+	// than wrongly reading "h3" as a muxer ID.
+	if nextProto == "libp2p" || nextProto == "h3" {
 		nextProto = ""
 	}
 

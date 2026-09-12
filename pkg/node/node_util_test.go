@@ -64,12 +64,12 @@ func TestFilterAdvertisedAddrsDropsLoopbackAndTap(t *testing.T) {
 	const webUIPv6 = ""
 
 	inputs := []string{
-		"/ip4/127.0.0.1/tcp/4001",     // loopback v4 -> drop
+		"/ip4/127.0.0.1/tcp/4001",         // loopback v4 -> drop
 		"/ip4/127.0.0.2/udp/4001/quic-v1", // loopback v4 (entire /8) -> drop
-		"/ip6/::1/tcp/4001",           // loopback v6 -> drop
-		"/ip4/10.0.0.1/tcp/4001",      // == TAP IP -> drop
-		"/ip4/192.168.1.50/tcp/4001",  // physical NIC -> keep
-		"/ip6/2001:db8::10/tcp/4001",  // physical NIC -> keep
+		"/ip6/::1/tcp/4001",               // loopback v6 -> drop
+		"/ip4/10.0.0.1/tcp/4001",          // == TAP IP -> drop
+		"/ip4/192.168.1.50/tcp/4001",      // physical NIC -> keep
+		"/ip6/2001:db8::10/tcp/4001",      // physical NIC -> keep
 	}
 	mas := make([]multiaddr.Multiaddr, 0, len(inputs))
 	for _, s := range inputs {

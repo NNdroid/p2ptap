@@ -293,16 +293,12 @@ func (t *transport) CanDial(addr ma.Multiaddr) bool {
 func (t *transport) Listen(addr ma.Multiaddr) (tpt.Listener, error) {
 	var tlsConf tls.Config
 	tlsConf.GetConfigForClient = func(info *tls.ClientHelloInfo) (*tls.Config, error) {
-		// p2ptap LOCAL PATCH: record the peer's presented SNI (keyed by remote
-		// host) so the WebUI can show it per connected peer — same observability
-		// the TCP-TLS path has. Non-blocking, never affects the handshake.
+		// p2ptap LOCAL PATCH: record the peer's presented SNI (keyed by the full
+		// remote IP:port, matching the node-side attribution so two peers behind
+		// one NAT egress IP are not conflated) for WebUI display. Non-blocking,
+		// never affects the handshake.
 		if info != nil && info.ServerName != "" && info.Conn != nil && info.Conn.RemoteAddr() != nil {
-			ra := info.Conn.RemoteAddr().String()
-			if host, _, herr := net.SplitHostPort(ra); herr == nil {
-				p2ptls.ObserveInboundServerName(host, info.ServerName)
-			} else {
-				p2ptls.ObserveInboundServerName(ra, info.ServerName)
-			}
+			p2ptls.ObserveInboundServerName(info.Conn.RemoteAddr().String(), info.ServerName)
 		}
 		// return a tls.Config that verifies the peer's certificate chain.
 		// Note that since we have no way of associating an incoming QUIC connection with

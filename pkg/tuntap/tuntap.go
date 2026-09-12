@@ -122,4 +122,3 @@ func (c *Converter) FrameToPacket(frame []byte) ([]byte, error) {
 	copy(res, pkt)
 	return res, nil
 }
-

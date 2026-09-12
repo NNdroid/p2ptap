@@ -43,7 +43,6 @@ import (
 	"p2ptap/pkg/obfuscate"
 )
 
-
 const (
 	// tapProbeDefaultRTT bounds how long we wait for the echo reply to come back
 	// on the real TAP path before declaring this attempt failed.
@@ -60,8 +59,8 @@ const (
 // successfully written into its TAP device — turning "peer OS didn't answer"
 // into an actionable diagnosis (stale metadata vs. peer firewall).
 const (
-	tapProbeAckFlagUnknown     uint8 = 0 // older peer: no diagnostic flag
-	tapProbeAckFlagIPMatched   uint8 = 1 // dst IP == peer's local TAP IP (firewall/OS to blame)
+	tapProbeAckFlagUnknown    uint8 = 0 // older peer: no diagnostic flag
+	tapProbeAckFlagIPMatched  uint8 = 1 // dst IP == peer's local TAP IP (firewall/OS to blame)
 	tapProbeAckFlagIPMismatch uint8 = 2 // dst IP != peer's local TAP IP (stale metadata)
 )
 

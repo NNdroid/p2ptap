@@ -31,22 +31,22 @@ const (
 	pcapStreamMaxBacklog     = 2000 // same hard cap as /api/pcap/packets
 	pcapStreamPingInterval   = 25 * time.Second
 	pcapStreamWriteTimeout   = 10 * time.Second
-	pcapStreamReadTimeout    = 60 * time.Second // for pong / client messages
-	pcapStreamBatchMax       = 64               // frames coalesced into one WS message
+	pcapStreamReadTimeout    = 60 * time.Second      // for pong / client messages
+	pcapStreamBatchMax       = 64                    // frames coalesced into one WS message
 	pcapStreamBatchFlush     = 20 * time.Millisecond // max latency before a partial batch is flushed
-	pcapStreamStatsInterval  = 5 * time.Second // how often Dropped is re-reported while idle
+	pcapStreamStatsInterval  = 5 * time.Second       // how often Dropped is re-reported while idle
 )
 
 // pcapWSMessage is the wire envelope sent to the dashboard. Exactly one
 // payload field is set per message — type discriminates them.
 type pcapWSMessage struct {
-	Type     string          `json:"type"`                // "state" | "backlog" | "frames" | "frame" | "cleared" | "error" | "pong"
-	State    *CaptureState   `json:"state,omitempty"`     // when type=state
-	Frames   []CapturedFrame `json:"frames,omitempty"`    // when type=backlog
-	Frame    *CapturedFrame  `json:"frame,omitempty"`     // when type=frame
-	Error    string          `json:"error,omitempty"`     // when type=error
-	Dropped  uint64          `json:"dropped,omitempty"`   // frames this subscriber lost (so the UI can flag stagnation)
-	ServerTs int64           `json:"ts,omitempty"`        // server-side timestamp (ms) for latency tracking
+	Type     string          `json:"type"`              // "state" | "backlog" | "frames" | "frame" | "cleared" | "error" | "pong"
+	State    *CaptureState   `json:"state,omitempty"`   // when type=state
+	Frames   []CapturedFrame `json:"frames,omitempty"`  // when type=backlog
+	Frame    *CapturedFrame  `json:"frame,omitempty"`   // when type=frame
+	Error    string          `json:"error,omitempty"`   // when type=error
+	Dropped  uint64          `json:"dropped,omitempty"` // frames this subscriber lost (so the UI can flag stagnation)
+	ServerTs int64           `json:"ts,omitempty"`      // server-side timestamp (ms) for latency tracking
 }
 
 // pcapWSOptions configures a pcapWsHandler.

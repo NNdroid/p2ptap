@@ -227,11 +227,11 @@ func connectRelayClient(t *testing.T, boot host.Host, psk string) *relayClient {
 // production Node does) and reads length-prefixed downlink frames (as the
 // production Node's handleBootRelayDownlink does).
 type relayClient struct {
-	h       host.Host
-	bootID  peer.ID
-	uplink  network.Stream
-	rxCh    chan relayRx
-	done    chan struct{}
+	h      host.Host
+	bootID peer.ID
+	uplink network.Stream
+	rxCh   chan relayRx
+	done   chan struct{}
 }
 
 type relayRx struct {

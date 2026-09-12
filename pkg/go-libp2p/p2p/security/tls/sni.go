@@ -1,7 +1,9 @@
 package libp2ptls
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,40 +19,94 @@ import (
 // ordinary HTTP/3. Doing it per-transport (only QUIC) would be inconsistent, so
 // it is done here where both transports share the client tls.Config.
 
-// dialServerName is the SNI we advertise on outgoing handshakes (both TCP-TLS and
-// QUIC). Empty = no SNI (upstream behaviour). Guarded like the other p2ptap
-// runtime hooks; set once from config before any dial.
+// dialServerName / dialSNISuffix are the two SNI modes; suffix wins if set.
+//   - suffix != "": per-peer SNI = "<label(remote PeerID)>.<suffix>" — a distinct,
+//     stable DNS-safe label per link under one base domain.
+//   - else name != "": static SNI for every dial.
+//   - else: no SNI (upstream behaviour).
+//
+// Guarded like the other p2ptap runtime hooks; set once from config before dials.
 var (
 	sniMu          sync.RWMutex
 	dialServerName string
+	dialSNISuffix  string
 )
 
-// SetDialServerName registers the SNI placed on outgoing TLS/QUIC ClientHellos.
-// An empty value (the default) sends no server_name, preserving upstream
-// behaviour and full interop with stock libp2p peers.
+// SetDialServerName registers the static SNI placed on outgoing TLS/QUIC
+// ClientHellos. An empty value (the default) sends no server_name, preserving
+// upstream behaviour and full interop with stock libp2p peers.
 func SetDialServerName(name string) {
 	sniMu.Lock()
 	dialServerName = name
 	sniMu.Unlock()
 }
 
-// DialServerName returns the configured outgoing SNI ("" = none). Surfaced to the
-// WebUI "本机信息" panel so the operator can confirm what this node advertises.
+// SetDialSNISuffix enables per-peer derived SNI: outgoing ClientHellos carry
+// "<label(remote PeerID)>.<suffix>". Takes precedence over SetDialServerName.
+// An empty suffix disables it (falls back to the static name, or none).
+func SetDialSNISuffix(suffix string) {
+	suffix = strings.Trim(strings.TrimSpace(suffix), ".")
+	sniMu.Lock()
+	dialSNISuffix = suffix
+	sniMu.Unlock()
+}
+
+// DialServerName returns the configured static outgoing SNI ("" = none).
 func DialServerName() string {
 	sniMu.RLock()
 	defer sniMu.RUnlock()
 	return dialServerName
 }
 
-// applyDialServerName sets conf.ServerName for an outgoing (client) handshake
-// when SNI is configured and the config does not already carry one. Called from
-// ConfigForPeer. Server-side configs ignore ServerName in crypto/tls, so it is
-// harmless to apply on the shared clone.
-func applyDialServerName(conf *tls.Config) {
+// DialSNISuffix returns the configured per-peer SNI suffix ("" = disabled).
+func DialSNISuffix() string {
+	sniMu.RLock()
+	defer sniMu.RUnlock()
+	return dialSNISuffix
+}
+
+// peerSNILabel turns a remote Peer ID into a short, lowercase, DNS-label-safe
+// prefix (RFC1123: [a-z0-9-], no leading/trailing '-'). Uses the first 8 bytes
+// of SHA-256 hex — stable for a given peer, distinct across peers, no entropy
+// beyond the peer identity already implied by the connection.
+func peerSNILabel(remote string) string {
+	if remote == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("p2ptap-sni:" + remote))
+	const hexdigits = "0123456789abcdef"
+	var b [16]byte
+	for i := range b {
+		b[i] = hexdigits[sum[i]&0xf]
+	}
+	return string(b[:])
+}
+
+// resolveDialServerName computes the SNI for a dial to the given remote peer ID.
+// Suffix mode wins; else static name; else empty (no SNI).
+func resolveDialServerName(remote string) string {
+	sniMu.RLock()
+	name, suffix := dialServerName, dialSNISuffix
+	sniMu.RUnlock()
+	if suffix != "" {
+		if label := peerSNILabel(remote); label != "" {
+			return label + "." + suffix
+		}
+		// No peer id yet (rare): fall back to the static name if any.
+		return name
+	}
+	return name
+}
+
+// applyDialServerName sets conf.ServerName for an outgoing (client) handshake to
+// the resolved SNI (per-peer suffix or static name). remote is the peer ID being
+// dialed (empty for the listener / unknown). Server-side configs ignore
+// ServerName in crypto/tls, so it is harmless to apply on the shared clone.
+func applyDialServerName(conf *tls.Config, remote string) {
 	if conf == nil || conf.ServerName != "" {
 		return
 	}
-	if sni := DialServerName(); sni != "" {
+	if sni := resolveDialServerName(remote); sni != "" {
 		conf.ServerName = sni
 	}
 }
@@ -59,9 +115,10 @@ func applyDialServerName(conf *tls.Config) {
 //
 // When a peer handshakes with US, its ClientHello server_name is visible in
 // GetConfigForClient before the peer identity is known. We key it by the remote
-// host (IP) — the same host the connection ends up attributed to — in a small
-// bounded map, and expose it so the node can show, per connected peer, the SNI
-// the peer actually presented. This lets an operator verify a tls_server_name
+// IP:port (the same string the node attributes connections by) — in a small
+// bounded map — and expose it so the node can show, per connected peer, the SNI
+// the peer actually presented. Keying by IP:port (not just IP) avoids conflating
+// two peers behind one NAT egress. This lets an operator verify a tls_server_name
 // rollout reached every node instead of assuming it.
 
 type observedSNI struct {

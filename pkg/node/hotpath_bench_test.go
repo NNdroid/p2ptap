@@ -96,11 +96,11 @@ func BenchmarkPerFrameDiagnostics(b *testing.B) {
 	frame[1] = 0x54
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_ = p.String()                                  // node_streams.go read loop
-		_ = obfuscate.KeyFingerprint(key)               // node_crypto.go obfDecryptCipherForPeer
-		_ = p.String()                                  // node_crypto.go obfDecryptCipherForPeer
-		_ = obfuscate.NonceHex(frame)                   // node_crypto.go decryptPeerFrame success
-		_ = p.String()                                  // node_crypto.go decryptPeerFrame success
+		_ = p.String()                                    // node_streams.go read loop
+		_ = obfuscate.KeyFingerprint(key)                 // node_crypto.go obfDecryptCipherForPeer
+		_ = p.String()                                    // node_crypto.go obfDecryptCipherForPeer
+		_ = obfuscate.NonceHex(frame)                     // node_crypto.go decryptPeerFrame success
+		_ = p.String()                                    // node_crypto.go decryptPeerFrame success
 		_ = obfuscate.AlgoName(obfuscate.ObfAlgoChaCha20) // node_crypto.go
 	}
 }

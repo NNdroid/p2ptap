@@ -18,16 +18,16 @@ type mockBootDataProvider struct {
 	alerts     *AlertBuffer
 }
 
-func (m *mockBootDataProvider) GetHost() host.Host                                { return nil }
-func (m *mockBootDataProvider) GetNodeName() string                               { return m.nodeName }
-func (m *mockBootDataProvider) GetStartTime() time.Time                           { return time.Now().Add(-10 * time.Minute) }
-func (m *mockBootDataProvider) IsPSKEnabled() bool                                { return m.pskEnabled }
-func (m *mockBootDataProvider) GetPSKCount() int                                  { return 2 }
-func (m *mockBootDataProvider) IsPeerAuthenticated(p peer.ID) bool                { return true }
-func (m *mockBootDataProvider) GetPeerNetworkID(p peer.ID) string                 { return "6b87ce74b335cc1a" }
-func (m *mockBootDataProvider) HasPeekMapListener(p peer.ID) bool                 { return true }
-func (m *mockBootDataProvider) GetPeekMapListenerCount() int                      { return 3 }
-func (m *mockBootDataProvider) HasBootRelayClient(p peer.ID) bool                 { return true }
+func (m *mockBootDataProvider) GetHost() host.Host                 { return nil }
+func (m *mockBootDataProvider) GetNodeName() string                { return m.nodeName }
+func (m *mockBootDataProvider) GetStartTime() time.Time            { return time.Now().Add(-10 * time.Minute) }
+func (m *mockBootDataProvider) IsPSKEnabled() bool                 { return m.pskEnabled }
+func (m *mockBootDataProvider) GetPSKCount() int                   { return 2 }
+func (m *mockBootDataProvider) IsPeerAuthenticated(p peer.ID) bool { return true }
+func (m *mockBootDataProvider) GetPeerNetworkID(p peer.ID) string  { return "6b87ce74b335cc1a" }
+func (m *mockBootDataProvider) HasPeekMapListener(p peer.ID) bool  { return true }
+func (m *mockBootDataProvider) GetPeekMapListenerCount() int       { return 3 }
+func (m *mockBootDataProvider) HasBootRelayClient(p peer.ID) bool  { return true }
 func (m *mockBootDataProvider) GetPeerNodeInfo(p peer.ID) (string, string, string, string, string, string, string, []string, bool, string, string) {
 	return "TestNode", "10.0.0.5", "", "aa:bb:cc:dd:ee:ff", "linux", "amd64", "v0.1.0", []string{"192.168.1.0/24"}, false, "aes-gcm", "fixed"
 }
@@ -38,10 +38,10 @@ func (m *mockBootDataProvider) GetRecentAlerts() []AlertEventDTO {
 	}
 	return nil
 }
-func (m *mockBootDataProvider) GetRelaySessions() []RelaySessionDTO   { return nil }
-func (m *mockBootDataProvider) GetGeoNodes() []GeoNodeDTO             { return nil }
-func (m *mockBootDataProvider) GetGeoArcs() []GeoArcDTO               { return nil }
-func (m *mockBootDataProvider) GetTrafficHistory() []TrafficPoint     { return nil }
+func (m *mockBootDataProvider) GetRelaySessions() []RelaySessionDTO { return nil }
+func (m *mockBootDataProvider) GetGeoNodes() []GeoNodeDTO           { return nil }
+func (m *mockBootDataProvider) GetGeoArcs() []GeoArcDTO             { return nil }
+func (m *mockBootDataProvider) GetTrafficHistory() []TrafficPoint   { return nil }
 func (m *mockBootDataProvider) GetHealth(peers []PeerItemDTO) HealthCheckDTO {
 	return HealthCheckDTO{Healthy: true}
 }

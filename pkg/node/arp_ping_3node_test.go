@@ -121,29 +121,29 @@ func TestARPPingThreeNode(t *testing.T) {
 			d := time.After(1500 * time.Millisecond)
 			answered := false
 			for !answered {
-			wantIP := net.ParseIP(dstIP).To4()
-			select {
-			case f := <-fromReader.frames:
-				if len(f) >= 42 && binary.BigEndian.Uint16(f[12:14]) == 0x0806 &&
-					binary.BigEndian.Uint16(f[20:22]) == 2 {
-					// CRITICAL: the reply must come from the IP we actually
-					// asked about (ARP sender protocol address lives at
-					// f[28:32]). fromReader is a long-lived shared reader, so
-					// it can still hold ARP replies left over from an earlier
-					// retry or from a PREVIOUS ping in this test. Accepting any
-					// opcode-2 frame binds the WRONG MAC: the ICMP is then
-					// forwarded to the wrong peer and the ping reports "no
-					// delivery" even though the data path worked perfectly —
-					// which is exactly what made A->C and B->C look broken.
-					if !net.IP(f[28:32]).Equal(wantIP) {
-						continue // stale reply for a different target
+				wantIP := net.ParseIP(dstIP).To4()
+				select {
+				case f := <-fromReader.frames:
+					if len(f) >= 42 && binary.BigEndian.Uint16(f[12:14]) == 0x0806 &&
+						binary.BigEndian.Uint16(f[20:22]) == 2 {
+						// CRITICAL: the reply must come from the IP we actually
+						// asked about (ARP sender protocol address lives at
+						// f[28:32]). fromReader is a long-lived shared reader, so
+						// it can still hold ARP replies left over from an earlier
+						// retry or from a PREVIOUS ping in this test. Accepting any
+						// opcode-2 frame binds the WRONG MAC: the ICMP is then
+						// forwarded to the wrong peer and the ping reports "no
+						// delivery" even though the data path worked perfectly —
+						// which is exactly what made A->C and B->C look broken.
+						if !net.IP(f[28:32]).Equal(wantIP) {
+							continue // stale reply for a different target
+						}
+						bMac = net.HardwareAddr(append([]byte(nil), f[22:28]...))
+						answered = true
 					}
-					bMac = net.HardwareAddr(append([]byte(nil), f[22:28]...))
+				case <-d:
 					answered = true
 				}
-			case <-d:
-				answered = true
-			}
 			}
 			if len(bMac) == 6 {
 				break

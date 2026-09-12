@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"syscall"
 
-
 	"github.com/libp2p/go-libp2p/core/crypto"
 
 	"p2ptap/cmd/internal/bootstrap"
@@ -82,7 +81,6 @@ func printUsage() {
 	fmt.Println("  version    Display version information")
 	fmt.Println()
 }
-
 
 func generateConfigFile(outPath string) {
 	absOutPath, err := filepath.Abs(outPath)
@@ -160,7 +158,6 @@ func startNode(cfg *config.Config) {
 	// Initialize global log level from config
 	logger.SetGlobalLevel(logger.ParseLevel(cfg.LogLevel))
 
-
 	log := logger.New("Main")
 	log.Info("Log level set to: %s", cfg.LogLevel)
 
@@ -185,4 +182,3 @@ func startNode(cfg *config.Config) {
 	_ = n.Close()
 	log.Info("Node stopped cleanly.")
 }
-

@@ -54,10 +54,16 @@
 ## 7. `p2p/security/tls/sni.go`（新文件）+ `crypto.go` + `transport.go` + `p2p/transport/quic/transport.go` — 统一 SNI
 
 - 新增 `p2ptls.SetDialServerName(name)` / `DialServerName()`（RWMutex 守卫）；
-  `Identity.ConfigForPeer` 末尾 `applyDialServerName(conf)` —— 一处同时覆盖
+  `Identity.ConfigForPeer` 末尾 `applyDialServerName(conf, remote)` —— 一处同时覆盖
   **TLS-over-TCP**（`SecureOutbound` 也从同一 Identity 取 client 配置）与 **QUIC**
   拨号，`transports.tls_server_name` 一份配置两路共用（对齐”TLS 和 QUIC 同一配置”的直觉）。
   ServerName 是 client-only 字段，误挂到 server 侧配置会被 crypto/tls 忽略，无害。
+- **per-peer 派生模式**：`SetDialSNISuffix(s)` 启用后，`resolveDialServerName(remote)`
+  把 SNI 计算为 `<peerSNILabel(remote)>.<s>`,label = 对端 PeerID 的
+  `SHA-256("p2ptap-sni:"+peerID)` 前 16 位小写 hex（单条 DNS 安全标签）。同一 peer 稳定、
+  不同 peer 唯一，避免”全网同一 SNI”的全局关联特征。suffix 优先于静态名；由
+  `transports.tls_sni_suffix` 注入。回归测试 `sni_test.go::TestSniResolution` 锁
+  优先级 + 唯一性 + 标签字符集。
 - 入站观察（WebUI 显示用）：`ObserveInboundServerName`/`InboundServerNames`——TCP-TLS 的
   `SecureInbound` 与 QUIC listener 的 `GetConfigForClient` 都把对端 ClientHello 的
   server_name 按 remote host 记入带 TTL/上限的 map（连接洪泛不会变成内存 DoS）。节点

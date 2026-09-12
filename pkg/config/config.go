@@ -80,6 +80,17 @@ type TransportsConfig struct {
 	// never affects authentication: libp2p verifies peers via the signed
 	// certificate extension, not the SNI.
 	TLSServerName string `json:"tls_server_name"`
+	// TLSSNISuffix enables a per-peer derived SNI: the outgoing server_name
+	// becomes "<label(remote PeerID)>.<suffix>" instead of the static
+	// TLSServerName. The label is a lowercase, DNS-safe short hash of the peer
+	// we are dialing, so every mesh link presents a distinct, stable SNI while
+	// all still resolving under one operator-controlled base domain — avoiding
+	// the "every p2ptap node sends the identical SNI" global-correlation tell.
+	// Takes precedence over TLSServerName when non-empty. Requires restart.
+	// NOTE: a high-entropy random subdomain under a single base is itself a
+	// known tunnel/exfil shape; prefer a domain you actually own, and weigh
+	// against the static TLSServerName option.
+	TLSSNISuffix string `json:"tls_sni_suffix"`
 }
 
 // ExitNodeConfig defines options for node acting as an Exit Node gateway

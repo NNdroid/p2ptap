@@ -12,12 +12,12 @@ import (
 // gateway (IPv4 TapIP for IPv4 subnets, IPv6 TapIPv6 for IPv6 subnets).
 func TestGatewayIPSelection(t *testing.T) {
 	tests := []struct {
-		name      string
-		subnet    string
-		tapIPv4   string
-		tapIPv6   string
-		expectV4  bool   // expect IPv4 gateway?
-		expectGW  string // expected gateway IP (without prefix)
+		name     string
+		subnet   string
+		tapIPv4  string
+		tapIPv6  string
+		expectV4 bool   // expect IPv4 gateway?
+		expectGW string // expected gateway IP (without prefix)
 	}{
 		{
 			name:     "IPv4 subnet /24",

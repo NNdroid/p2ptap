@@ -38,9 +38,9 @@ func TestE2EPingPacketFlow(t *testing.T) {
 // received successfully, otherwise the test fails.
 func TestE2ETapThroughput(t *testing.T) {
 	const (
-		rounds         = 3
+		rounds          = 3
 		packetsPerRound = 100
-		payloadLen     = 64
+		payloadLen      = 64
 	)
 
 	for round := 1; round <= rounds; round++ {
@@ -49,8 +49,8 @@ func TestE2ETapThroughput(t *testing.T) {
 			tapA, tapA_pipe := tap.NewMemTAPPair("tapA", "pipeA")
 			tapB, tapB_pipe := tap.NewMemTAPPair("tapB", "pipeB")
 
-	cfgA := createTestNodeConfig("10.0.0.1/24", "fd00::1/64", "best_path")
-	cfgB := createTestNodeConfig("10.0.0.2/24", "fd00::2/64", "best_path")
+			cfgA := createTestNodeConfig("10.0.0.1/24", "fd00::1/64", "best_path")
+			cfgB := createTestNodeConfig("10.0.0.2/24", "fd00::2/64", "best_path")
 
 			nodeA, err := NewNodeWithTAP(cfgA, tapA, nil)
 			if err != nil {
@@ -171,18 +171,18 @@ func TestE2ETapThroughput(t *testing.T) {
 				t.Logf("Round %d: all %d %s TAP frames sent and received successfully", round, packetsPerRound, spec.name)
 			}
 
-				// Explicitly tear down before the next round. Relying on `defer` here
-				// would let the previous round's node Close() race the next round's
-				// NewNodeWithTAP(), exhausting local sockets and corrupting the overlay
-				// setup of subsequent rounds (and of sibling e2e tests in the same
-				// package). Close() is bounded by an internal timeout, so this blocks
-				// at most a few seconds per node.
-				readerB.Close()
-				nodeB.Close()
-				nodeA.Close()
-				time.Sleep(300 * time.Millisecond)
-				})
-				}
+			// Explicitly tear down before the next round. Relying on `defer` here
+			// would let the previous round's node Close() race the next round's
+			// NewNodeWithTAP(), exhausting local sockets and corrupting the overlay
+			// setup of subsequent rounds (and of sibling e2e tests in the same
+			// package). Close() is bounded by an internal timeout, so this blocks
+			// at most a few seconds per node.
+			readerB.Close()
+			nodeB.Close()
+			nodeA.Close()
+			time.Sleep(300 * time.Millisecond)
+		})
+	}
 }
 
 // buildEthFrame assembles a minimal Ethernet frame carrying a raw IPv4 or IPv6
@@ -236,16 +236,17 @@ func buildEthFrame(dstMAC, srcMAC net.HardwareAddr, etherType []byte, srcIP, dst
 // here" in an earlier revision — the A<->B link appeared to drop as soon as a
 // 2nd peer was present. Follow-up investigation showed the root cause was two
 // now-fixed issues, NOT a live product defect in the data path:
-//   1. a TEST-HARNESS artifact — the old multi-peer ping built a fresh
-//      frameReader per ping, leaving "zombie" readers that raced the next
-//      pipe's reader and silently swallowed frames (see the long comment in
-//      arp_ping_3node_test.go); the single-reader-per-pipe pattern used below
-//      removes it.
-//   2. genuine handshake-race bugs (crossed-handshake divergence, long-lived-key
-//      fallback downgrade, missing per-peer handshake lock) that manifested
-//      most with 3+ concurrent connections. These were closed by the SeqSync
-//      hardening (isResyncLeader single-round rule, rekeyPeers single-flight,
-//      acquireHandshakeLock, refuse-fallback-downgrade guard, RX grace ring).
+//  1. a TEST-HARNESS artifact — the old multi-peer ping built a fresh
+//     frameReader per ping, leaving "zombie" readers that raced the next
+//     pipe's reader and silently swallowed frames (see the long comment in
+//     arp_ping_3node_test.go); the single-reader-per-pipe pattern used below
+//     removes it.
+//  2. genuine handshake-race bugs (crossed-handshake divergence, long-lived-key
+//     fallback downgrade, missing per-peer handshake lock) that manifested
+//     most with 3+ concurrent connections. These were closed by the SeqSync
+//     hardening (isResyncLeader single-round rule, rekeyPeers single-flight,
+//     acquireHandshakeLock, refuse-fallback-downgrade guard, RX grace ring).
+//
 // The sustained 3-node case is now covered directly by
 // TestE2EConcurrentBidirectional3Node (full A-B-C mesh, concurrent bidirectional
 // on all six directed links, PLUS a forced key-rotation phase on every pair

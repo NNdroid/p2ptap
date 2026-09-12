@@ -13,11 +13,11 @@ import (
 func newGzipTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	fsys := fstest.MapFS{
-		"app.js":        &fstest.MapFile{Data: []byte(strings.Repeat("console.log('p2ptap');\n", 1000))},
-		"styles.css":    &fstest.MapFile{Data: []byte(strings.Repeat("body{margin:0}\n", 500))},
-		"index.html":    &fstest.MapFile{Data: []byte("<html><body>p2ptap</body></html>")},
-		"icon.bin":      &fstest.MapFile{Data: []byte{0x00, 0x01, 0x02, 0x03}},
-		"favicon.svg":   &fstest.MapFile{Data: []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`)},
+		"app.js":      &fstest.MapFile{Data: []byte(strings.Repeat("console.log('p2ptap');\n", 1000))},
+		"styles.css":  &fstest.MapFile{Data: []byte(strings.Repeat("body{margin:0}\n", 500))},
+		"index.html":  &fstest.MapFile{Data: []byte("<html><body>p2ptap</body></html>")},
+		"icon.bin":    &fstest.MapFile{Data: []byte{0x00, 0x01, 0x02, 0x03}},
+		"favicon.svg": &fstest.MapFile{Data: []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`)},
 	}
 	return httptest.NewServer(gzipStaticMiddleware(http.FileServer(http.FS(fsys))))
 }

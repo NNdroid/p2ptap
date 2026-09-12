@@ -49,10 +49,10 @@ func TestShouldProtectSkipsOverlayAndLoopback(t *testing.T) {
 // supported (Windows has no SO_BINDTODEVICE, so the bug is invisible there).
 func TestListenerInterfaceForAddressSkipsLoopback(t *testing.T) {
 	noBind := []string{
-		"127.0.0.1:49183",   // IPv4 loopback
-		"[::1]:49183",       // IPv6 loopback
-		"169.254.1.1:1234",  // IPv4 link-local
-		"[fe80::1]:1234",    // IPv6 link-local
+		"127.0.0.1:49183",  // IPv4 loopback
+		"[::1]:49183",      // IPv6 loopback
+		"169.254.1.1:1234", // IPv4 link-local
+		"[fe80::1]:1234",   // IPv6 link-local
 	}
 	for _, a := range noBind {
 		if got := listenerInterfaceForAddress(a); got != "" {

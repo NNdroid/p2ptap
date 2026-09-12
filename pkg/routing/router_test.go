@@ -68,7 +68,7 @@ func TestDijkstraShortestPathRouting(t *testing.T) {
 	if !ok {
 		t.Fatalf("Expected route to nodeC")
 	}
-		t.Logf("[dijkstra] route to C: isDirect=%v nextHop=%s totalRTT=%dms directRTT=%dms",
+	t.Logf("[dijkstra] route to C: isDirect=%v nextHop=%s totalRTT=%dms directRTT=%dms",
 		routeC.IsDirect, routeC.NextHop.ShortString(), routeC.TotalRTTMs, routeC.DirectRTTMs)
 	if routeC.IsDirect {
 		t.Errorf("Expected nodeC route to be relayed via nodeB, got direct")
@@ -253,5 +253,3 @@ func TestCandidatePathsEvaluation(t *testing.T) {
 		t.Errorf("Expected exactly 1 optimal candidate, got %d", optCount)
 	}
 }
-
-

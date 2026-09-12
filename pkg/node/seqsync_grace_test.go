@@ -41,9 +41,9 @@ func TestRxKeyGraceAbsorbsLingeringOldConnectionFrame(t *testing.T) {
 	}
 
 	n := &Node{
-		peerReady:              sync.Map{},
+		peerReady:               sync.Map{},
 		peerRxDecryptRecentErrs: sync.Map{},
-		handshakeFingerprint:   atomic.Pointer[string]{},
+		handshakeFingerprint:    atomic.Pointer[string]{},
 	}
 	tbl := make(map[peer.ID]*PeerObf)
 	n.perPeerObf.Store(&tbl)

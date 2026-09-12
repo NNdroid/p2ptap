@@ -24,6 +24,7 @@ import (
 
 const certValidityPeriod = 100 * 365 * 24 * time.Hour // ~100 years
 const certificatePrefix = "libp2p-tls-handshake:"
+
 // alpn is the fallback ALPN advertised on the QUIC ClientHello when no muxer is
 // negotiated via ALPN. Upstream uses "libp2p"; because QUIC Initial packets are
 // encrypted only with the PUBLIC Initial salt, any DPI reads this ALPN and a
@@ -157,10 +158,11 @@ func (i *Identity) ConfigForPeer(remote peer.ID) (*tls.Config, <-chan ic.PubKey)
 		keyCh <- pubKey
 		return nil
 	}
-	// p2ptap LOCAL PATCH: apply the shared outgoing SNI to this per-peer clone so
-	// BOTH TLS-over-TCP (SecureOutbound) and QUIC dials present the same
-	// server_name from one setting. Server-side handshakes ignore it. (sni.go)
-	applyDialServerName(conf)
+	// p2ptap LOCAL PATCH: apply the resolved SNI (per-peer suffix or static name)
+	// to this per-peer clone so BOTH TLS-over-TCP (SecureOutbound) and QUIC dials
+	// present the same server_name from one setting. remote drives the per-peer
+	// label when a suffix is configured. Server-side handshakes ignore it. (sni.go)
+	applyDialServerName(conf, remote.String())
 	return conf, keyCh
 }
 

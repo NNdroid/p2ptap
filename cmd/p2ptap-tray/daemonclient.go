@@ -16,15 +16,14 @@ import (
 	"p2ptap/pkg/config"
 )
 
-
 // --- Daemon /api/* DTOs (minimal shapes the tray client needs) ---
 
 type peerInfoDTO struct {
-	PeerID    string `json:"peer_id"`
-	NodeName  string `json:"node_name"`
-	TapIP     string `json:"tap_ip"`
-	TapIPv6   string `json:"tap_ipv6"`
-	IsExitNode bool `json:"is_exit_node"`
+	PeerID     string `json:"peer_id"`
+	NodeName   string `json:"node_name"`
+	TapIP      string `json:"tap_ip"`
+	TapIPv6    string `json:"tap_ipv6"`
+	IsExitNode bool   `json:"is_exit_node"`
 }
 
 type exitNodeInfoDTO struct {
@@ -122,7 +121,6 @@ func resolveDaemonBaseURL(cfg *config.Config, configPath string) string {
 	return fallback
 }
 
-
 // NewDaemonClient builds a client for the WebUI of the local daemon.
 // The auth token is read from the sidecar the daemon persists next to the
 // config; if absent we fall back to any token embedded in the config file.
@@ -183,7 +181,6 @@ func (c *DaemonClient) refreshTarget(configPath string) {
 	}
 	c.token = token
 }
-
 
 // Reachable reports whether the daemon's API is up and we can authenticate.
 func (c *DaemonClient) Reachable() bool {

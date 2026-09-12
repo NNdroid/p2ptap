@@ -45,11 +45,11 @@ var gwLog = logger.New("Gateway")
 
 // GatewayManager manages Exit Node default routes and socket bypass (protect socket)
 type GatewayManager struct {
-	mu                 sync.Mutex
-	tapName            string
-	activeExitPeerID   string
-	activeExitPID      peer.ID
-	activeExitIP       string
+	mu               sync.Mutex
+	tapName          string
+	activeExitPeerID string
+	activeExitPID    peer.ID
+	activeExitIP     string
 	// activeExitIP6 is the IPv6 TAP gateway of the currently active Exit Node
 	// (empty when the active exit only advertised an IPv4 gateway). Both
 	// activeExitIP and activeExitIP6 are tracked so ClearExitNode removes the

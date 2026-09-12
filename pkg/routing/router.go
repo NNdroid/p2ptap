@@ -21,12 +21,12 @@ import (
 const DefaultLSATTL = 5
 
 type LinkStatePayload struct {
-	Origin      string           `json:"origin"`
-	Seq         uint64           `json:"seq"`
-	TTL         int              `json:"ttl"`
-	Neighbors      map[string]int64 `json:"neighbors"`                   // peerID string -> RTT ms
-	NeighborClasses map[string]int  `json:"neighbor_classes,omitempty"` // peerID string -> LinkClass (0=direct,1=circuit)
-	Timestamp   int64            `json:"timestamp"`
+	Origin          string           `json:"origin"`
+	Seq             uint64           `json:"seq"`
+	TTL             int              `json:"ttl"`
+	Neighbors       map[string]int64 `json:"neighbors"`                  // peerID string -> RTT ms
+	NeighborClasses map[string]int   `json:"neighbor_classes,omitempty"` // peerID string -> LinkClass (0=direct,1=circuit)
+	Timestamp       int64            `json:"timestamp"`
 
 	// Node identity piggybacked on every LSA so peers learn name/IP/MAC even when
 	// the dedicated meta stream (per-peer NewStream) cannot be established — e.g.
@@ -69,7 +69,7 @@ const (
 // observed latency and its transport class so the router can prefer
 // high-quality paths without losing reachability through lower-quality ones.
 type LinkEdge struct {
-	Weight int64     // observed RTT (ms) — base routing cost
+	Weight int64 // observed RTT (ms) — base routing cost
 	Class  LinkClass
 }
 
@@ -103,7 +103,7 @@ type Router struct {
 	mu          sync.RWMutex
 	localPeerID peer.ID
 	graph       map[peer.ID]map[peer.ID]LinkEdge // nodeA -> nodeB -> {RTT ms, class}
-	seqMap      map[peer.ID]uint64            // origin -> max seq seen
+	seqMap      map[peer.ID]uint64               // origin -> max seq seen
 	lastUpdated map[peer.ID]time.Time
 }
 
@@ -123,9 +123,9 @@ func NewRouter(localPeerID peer.ID) *Router {
 // relayed nodes as children). The graph is populated by LSA flooding, so it may
 // contain nodes that are not directly connected to this peer.
 type TopologySnapshot struct {
-	LocalPeerID peer.ID                       `json:"local_peer_id"`
-	Nodes       []peer.ID                     `json:"nodes"`  // every node known to the graph
-	Edges       []TopologyEdge                `json:"edges"`  // undirected latency edges (each pair once)
+	LocalPeerID peer.ID        `json:"local_peer_id"`
+	Nodes       []peer.ID      `json:"nodes"` // every node known to the graph
+	Edges       []TopologyEdge `json:"edges"` // undirected latency edges (each pair once)
 }
 
 // TopologyEdge is one latency edge between two mesh nodes.
@@ -416,20 +416,20 @@ func (r *Router) BuildLSA(seq uint64, id NodeIdentity) *LinkStatePayload {
 	}
 
 	return &LinkStatePayload{
-		Origin:          r.localPeerID.String(),
-		Seq:             seq,
-		TTL:             DefaultLSATTL,
-		Neighbors:       nbrs,
-		NeighborClasses: nbrClasses,
-		Timestamp:       time.Now().Unix(),
-		NodeName:    id.NodeName,
-		TapIP:       id.TapIP,
-		TapIPv6:     id.TapIPv6,
-		TapMAC:      id.TapMAC,
-		OS:          id.OS,
-		Arch:        id.Arch,
-		Version:     id.Version,
-		IsExitNode:  id.IsExitNode,
+		Origin:            r.localPeerID.String(),
+		Seq:               seq,
+		TTL:               DefaultLSATTL,
+		Neighbors:         nbrs,
+		NeighborClasses:   nbrClasses,
+		Timestamp:         time.Now().Unix(),
+		NodeName:          id.NodeName,
+		TapIP:             id.TapIP,
+		TapIPv6:           id.TapIPv6,
+		TapMAC:            id.TapMAC,
+		OS:                id.OS,
+		Arch:              id.Arch,
+		Version:           id.Version,
+		IsExitNode:        id.IsExitNode,
 		AdvertisedSubnets: id.AdvertisedSubnets,
 	}
 }
@@ -952,4 +952,3 @@ func (r *Router) GetRouteInfoDTOs(lookup func(pID peer.ID) (nodeName string, tap
 
 	return dtos
 }
-

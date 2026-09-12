@@ -89,7 +89,6 @@ func UnpackBootRelayFrame(data []byte) (netID string, kind byte, proto protocol.
 	return
 }
 
-
 func appendBootRelayPrefix(netID string, kind byte, proto protocol.ID, env []byte) []byte {
 	nb := []byte(netID)
 	pb := []byte(proto)
@@ -128,9 +127,6 @@ func stripKindProtoPrefix(data []byte) (kind byte, proto protocol.ID, rest []byt
 	rest = data[n:]
 	return kind, proto, rest, nil
 }
-
-
-
 
 func appendNetIDPrefix(netID string, env []byte) []byte {
 	nb := []byte(netID)

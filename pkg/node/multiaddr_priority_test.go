@@ -10,13 +10,13 @@ import (
 
 func TestPrioritizeMultiaddrs(t *testing.T) {
 	raw := []string{
-		"/ip4/192.168.1.100/tcp/4001",                   // Private RFC1918 TCP
-		"/ip4/192.168.1.100/udp/4001/quic-v1",           // Private RFC1918 QUIC
-		"/ip4/1.2.3.4/tcp/45123",                        // Public IPv4 TCP
-		"/ip4/1.2.3.4/udp/45123/quic-v1",                // Public IPv4 QUIC
-		"/ip6/2408:8000::1/udp/4001/quic-v1",            // Public IPv6 QUIC
-		"/ip6/2408:8000::1/tcp/4001",                    // Public IPv6 TCP
-		"/ip4/127.0.0.1/tcp/4001",                       // Loopback (should be filtered out)
+		"/ip4/192.168.1.100/tcp/4001",         // Private RFC1918 TCP
+		"/ip4/192.168.1.100/udp/4001/quic-v1", // Private RFC1918 QUIC
+		"/ip4/1.2.3.4/tcp/45123",              // Public IPv4 TCP
+		"/ip4/1.2.3.4/udp/45123/quic-v1",      // Public IPv4 QUIC
+		"/ip6/2408:8000::1/udp/4001/quic-v1",  // Public IPv6 QUIC
+		"/ip6/2408:8000::1/tcp/4001",          // Public IPv6 TCP
+		"/ip4/127.0.0.1/tcp/4001",             // Loopback (should be filtered out)
 	}
 
 	var addrs []multiaddr.Multiaddr

@@ -42,9 +42,9 @@ func TestDecryptPeerFrameMultiConnectionRing(t *testing.T) {
 
 	// Minimal Node carrying only the fields decryptPeerFrame touches.
 	n := &Node{
-		peerReady:              sync.Map{},
+		peerReady:               sync.Map{},
 		peerRxDecryptRecentErrs: sync.Map{},
-		handshakeFingerprint:   atomic.Pointer[string]{},
+		handshakeFingerprint:    atomic.Pointer[string]{},
 	}
 	tbl := make(map[peer.ID]*PeerObf)
 	n.perPeerObf.Store(&tbl)

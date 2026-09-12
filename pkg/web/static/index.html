@@ -1112,6 +1112,20 @@
                         <span id="cfgDisableRelayLabel" class="toggle-label">Off</span>
                     </div>
                 </div>
+                <div class="config-row">
+                    <div>
+                        <div class="config-row-label" data-i18n="cfg_tls_sni_lbl">TLS/QUIC SNI (outgoing)</div>
+                        <div class="config-row-desc" data-i18n="cfg_tls_sni_desc">Static server_name sent on every outbound TLS/QUIC handshake so the mesh resembles ordinary HTTP/3 to a DPI. Empty = no SNI (upstream default). Cosmetic only — peers are authenticated via the signed certificate, never the SNI. Requires restart.</div>
+                    </div>
+                    <input type="text" id="cfgTlsServerName" class="form-input ext145" placeholder="www.example.com" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="config-row">
+                    <div>
+                        <div class="config-row-label" data-i18n="cfg_tls_sni_suffix_lbl">TLS SNI suffix (per-peer)</div>
+                        <div class="config-row-desc" data-i18n="cfg_tls_sni_suffix_desc">When set, overrides the static SNI: each link presents "&lt;hash-of-peer-id&gt;.&lt;suffix&gt;" — a distinct, stable SNI per peer under one base domain, avoiding a shared global constant. Use a domain you control. Requires restart.</div>
+                    </div>
+                    <input type="text" id="cfgTlsSniSuffix" class="form-input ext145" placeholder="example.com" autocomplete="off" spellcheck="false">
+                </div>
             </div>
 
             <!-- ── Obfuscation Section ── -->

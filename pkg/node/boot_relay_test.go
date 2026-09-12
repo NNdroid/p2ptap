@@ -9,8 +9,8 @@ import (
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/multiformats/go-multiaddr"
 	relayClient "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
+	"github.com/multiformats/go-multiaddr"
 
 	"p2ptap/pkg/tap"
 )
@@ -179,7 +179,7 @@ func (n *relayConnectedNotifee) Connected(_ network.Network, c network.Conn) {
 		}
 	}
 }
-func (n *relayConnectedNotifee) Disconnected(network.Network, network.Conn)      {}
+func (n *relayConnectedNotifee) Disconnected(network.Network, network.Conn)       {}
 func (n *relayConnectedNotifee) OpenedStream(network.Network, network.Stream)     {}
 func (n *relayConnectedNotifee) ClosedStream(network.Network, network.Stream)     {}
 func (n *relayConnectedNotifee) Listen(network.Network, multiaddr.Multiaddr)      {}

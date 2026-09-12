@@ -42,9 +42,9 @@ func TestDecryptPeerFrameRolloverFallback(t *testing.T) {
 
 	// Minimal Node carrying only the fields decryptPeerFrame touches.
 	n := &Node{
-		peerReady:             sync.Map{},
+		peerReady:               sync.Map{},
 		peerRxDecryptRecentErrs: sync.Map{},
-		handshakeFingerprint:  atomic.Pointer[string]{},
+		handshakeFingerprint:    atomic.Pointer[string]{},
 	}
 	tbl := make(map[peer.ID]*PeerObf)
 	n.perPeerObf.Store(&tbl)
@@ -53,23 +53,23 @@ func TestDecryptPeerFrameRolloverFallback(t *testing.T) {
 
 	// Step 1: peer negotiated with OLD key (rxCipher = cOld).
 	n.storePeerObf(p, &PeerObf{
-		algo:     algo,
-		txCipher: cOld,
-		rxCipher: cOld,
+		algo:       algo,
+		txCipher:   cOld,
+		rxCipher:   cOld,
 		negotiated: true,
-		txKey:    append([]byte(nil), keyOld...),
-		rxKey:    append([]byte(nil), keyOld...),
+		txKey:      append([]byte(nil), keyOld...),
+		rxKey:      append([]byte(nil), keyOld...),
 	})
 
 	// Step 2: we rotate to NEW key; the previous RX cipher is carried forward
 	// as the fallback (exactly what negotiateObfWithPeer does on a key change).
 	n.storePeerObf(p, &PeerObf{
-		algo:       algo,
-		txCipher:   cNew,
-		rxCipher:   cNew,
-		negotiated: true,
-		txKey:      append([]byte(nil), keyNew...),
-		rxKey:      append([]byte(nil), keyNew...),
+		algo:         algo,
+		txCipher:     cNew,
+		rxCipher:     cNew,
+		negotiated:   true,
+		txKey:        append([]byte(nil), keyNew...),
+		rxKey:        append([]byte(nil), keyNew...),
 		prevRxCipher: cOld,
 		prevRxKey:    append([]byte(nil), keyOld...),
 	})
