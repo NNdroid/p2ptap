@@ -23,6 +23,40 @@ func (n *Node) peerObf(p peer.ID) *PeerObf {
 	return (*tbl)[p]
 }
 
+// pskRequired reports whether this node belongs to a PSK-private network. When
+// true, the PSK is folded into every per-peer key schedule (see
+// obfuscate.DeriveKeysPSK) AND mesh traffic is fail-closed: a peer that has not
+// negotiated an ENCRYPTED cipher with us is neither sent plaintext frames nor
+// allowed to inject them. A party that completes the identity-only libp2p
+// handshake but lacks the PSK therefore cannot read, forge, or covert-channel
+// frames — it is isolated on the DIRECT data path, not just at the
+// relay/peek-map boundary that PSK gated before.
+func (n *Node) pskRequired() bool {
+	c := n.config()
+	return c != nil && c.PSK != ""
+}
+
+// pskSaltBytes returns the PSK bytes mixed into the per-peer KDF salt (nil for a
+// PSK-less deployment, which keeps the pre-binding key schedule byte-for-byte
+// compatible with older builds).
+func pskSaltBytes(n *Node) []byte {
+	c := n.config()
+	if c == nil || c.PSK == "" {
+		return nil
+	}
+	return []byte(c.PSK)
+}
+
+// hasNegotiatedCipher reports whether an encrypted per-peer cipher has been
+// established with p. In a PSK-required network it is the membership proof:
+// only a peer holding the same PSK derives matching keys (see
+// obfuscate.DeriveKeysPSK), so "cipher negotiated" ⇔ "peer knows the PSK".
+// Peers without one must never exchange plaintext mesh frames.
+func (n *Node) hasNegotiatedCipher(p peer.ID) bool {
+	po := n.peerObf(p)
+	return po != nil && po.negotiated && po.txCipher != nil
+}
+
 // obfRekeyFrameThreshold is the number of frames a single negotiated key may
 // protect before we proactively rotate it. It is kept comfortably below the
 // 2^32 size of the structured nonce counter field so a (key, nonce) pair can

@@ -2,9 +2,38 @@ package node
 
 import (
 	"fmt"
+	"io"
 	"sync/atomic"
 	"time"
 )
+
+// countingReader / countingWriter wrap an io.Reader / io.Writer and tally bytes
+// passed through them. Used to attribute real byte counts to protocol channels
+// (peek-map, auth, relay-ctrl) whose handlers drive framing via json.Encoder /
+// io.Copy on the raw stream, so the WebUI traffic cards show actual bytes rather
+// than a hardcoded 0. Callers snapshot .n before/after a unit of work to get a
+// per-message byte count.
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+type countingWriter struct {
+	w io.Writer
+	n int
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += n
+	return n, err
+}
 
 // ChannelTrafficCounter holds lock-free atomic counters for TX/RX frames, bytes,
 // sync/handshake events, and error counts on a specific protocol channel.
@@ -67,11 +96,9 @@ type ProtocolTrafficTracker struct {
 	SeqSync   ChannelTrafficCounter // Sequence Sync & Key Exchange (/p2ptap/seqsync/1.0.0)
 	LSA       ChannelTrafficCounter // LSA Mesh Routing (/p2ptap/lsa/1.0.0)
 	PeekMap   ChannelTrafficCounter // Peek-Map & Meta (/p2ptap/peek-map/1.0.0, /p2ptap/meta/1.0.0)
-	Auth      ChannelTrafficCounter // Mesh Authentication (/p2ptap/relay-auth/1.0.0)
-	RelayCtrl ChannelTrafficCounter // Relay Control Tunnel (/p2ptap/relay-ctrl/1.0.0)
+	Auth      ChannelTrafficCounter // Mesh Authentication (/p2ptap/auth/1.0.0)
 	Echo      ChannelTrafficCounter // Diagnostic Echo & Speedtest (/p2ptap/echo/1.0.0)
-	Ping      ChannelTrafficCounter // libp2p Ping (/ipfs/ping/1.0.0)
-	DCUtR     ChannelTrafficCounter // DCUtR & Circuit Relay (/libp2p/dcutr)
+	DCUtR     ChannelTrafficCounter // DCUtR & Circuit Relay & Relay-Ctrl tunnel (/libp2p/dcutr)
 }
 
 // NewProtocolTrafficTracker creates an initialized ProtocolTrafficTracker.

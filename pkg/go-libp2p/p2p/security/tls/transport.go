@@ -72,6 +72,18 @@ func (t *Transport) SecureInbound(ctx context.Context, insecure net.Conn, p peer
 	// We want to prefer the client's preference though.
 	getConfigForClient := config.GetConfigForClient
 	config.GetConfigForClient = func(info *tls.ClientHelloInfo) (*tls.Config, error) {
+		// p2ptap LOCAL PATCH: record the server_name the peer presented so the
+		// WebUI can show, per connected peer, what SNI it actually advertised
+		// (lets an operator confirm a tls_server_name rollout reached every node).
+		// Best-effort and non-authoritative — never blocks the handshake.
+		if info != nil && info.ServerName != "" && info.Conn != nil && info.Conn.RemoteAddr() != nil {
+			ra := info.Conn.RemoteAddr().String()
+			if host, _, err := net.SplitHostPort(ra); err == nil {
+				observeInboundServerName(host, info.ServerName)
+			} else {
+				observeInboundServerName(ra, info.ServerName)
+			}
+		}
 	alpnLoop:
 		for _, proto := range info.SupportedProtos {
 			for _, m := range muxers {

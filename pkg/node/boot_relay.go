@@ -302,6 +302,11 @@ func (n *Node) bootRelayWriteLoop(rc *bootRelayConn) {
 				rc.cancel()
 				return
 			}
+			// Attribute the relay-over-backbone bytes to the BootRelay channel so
+			// the unified Datapath card's "Relayed" split is honest.
+			if n.protoTracker != nil {
+				n.protoTracker.BootRelay.RecordTx(1, uint64(len(job.data)))
+			}
 			if job.onSent != nil {
 				job.onSent()
 			}
@@ -334,6 +339,11 @@ func (n *Node) handleBootRelayDownlink(s network.Stream, boot peer.ID) {
 		readN, err := ReadFrame(s, buf)
 		if err != nil || readN == 0 {
 			return
+		}
+		// Boot-relay downlink bytes count toward the BootRelay channel (folded
+		// into the unified Datapath card's "Relayed" split).
+		if n.protoTracker != nil {
+			n.protoTracker.BootRelay.RecordRx(1, uint64(readN))
 		}
 		data := buf[:readN]
 		netID, kind, proto, finalDst, srcPeer, _, innerPayload, uerr := routing.UnpackBootRelayFrame(data)

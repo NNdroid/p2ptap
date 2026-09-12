@@ -466,6 +466,7 @@
                     <div class="ext77"><span data-i18n="lbl_traffic_obfs" class="ext73">Traffic Obfuscation:</span><strong id="secObfs" class="ext34">Enabled</strong></div>
                     <div class="ext77"><span data-i18n="lbl_id_fingerprint" class="ext73">Identity Fingerprint:</span><span class="sec-fp-group"><code id="secFingerprint" class="ext78 sec-fp">a1b2c3d4</code><button class="btn-copy sec-copy" id="secCopyFpBtn" data-onclick="copySecFingerprint()" title="Copy full fingerprint" aria-label="Copy fingerprint"><svg class="ico" aria-hidden="true"><use href="#ic-copy"/></svg></button></span></div>
                     <div class="ext77"><span data-i18n="lbl_autonat_reach" class="ext73">AutoNAT Reachability:</span><strong id="secNAT" class="ext33">Public</strong></div>
+                    <div class="ext77"><span data-i18n="lbl_tls_sni" class="ext73">TLS/QUIC SNI (outgoing):</span><strong id="secSNI" class="ext32">—</strong></div>
                 </div>
                 <div class="ext79">
                     <div class="ext80">
@@ -531,7 +532,6 @@
                 <button class="proto-tab" data-cat="routing" onclick="filterProtoChannels('routing')">🛣️ <span data-i18n="cat_tab_routing">拓扑路由 (Routing)</span></button>
                 <button class="proto-tab" data-cat="transport" onclick="filterProtoChannels('transport')">🕳️ <span data-i18n="cat_tab_transport">传输与打洞 (Transport)</span></button>
                 <button class="proto-tab" data-cat="pubsub" onclick="filterProtoChannels('pubsub')">📡 <span data-i18n="cat_tab_pubsub">发布订阅 (PubSub)</span></button>
-                <button class="proto-tab" data-cat="diagnostics" onclick="filterProtoChannels('diagnostics')">🩺 <span data-i18n="cat_tab_diagnostics">诊断回显 (Diagnostics)</span></button>
             </div>
 
             <!-- Protocol Traffic Distribution Bar -->

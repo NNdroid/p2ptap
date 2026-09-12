@@ -119,7 +119,7 @@ type Collector interface {
 	FrameSink
 
 	SetNodeInfo(nodeName, peerID, tapIP, tapIPv6, transportStrategy string)
-	SetSecurity(pskStatus, obfuscation, keyFingerprint string)
+	SetSecurity(pskStatus, obfuscation, keyFingerprint, tlsServerName string)
 	SetPeerEncryption(enc []PeerObfInfoDTO)
 	SetTAPState(state *TAPStateDTO)
 	SetTAPSelfTest(fn func() map[string]interface{})
@@ -661,6 +661,10 @@ type SecurityStatusDTO struct {
 	PSKStatus      string `json:"psk_status"`
 	Obfuscation    string `json:"obfuscation"`
 	KeyFingerprint string `json:"key_fingerprint"` // local ECDH pubkey fingerprint
+	// TLSServerName is the SNI this node places on OUTGOING TLS/QUIC handshakes
+	// (config transports.tls_server_name — one setting covers both transports).
+	// Empty = we advertise no server_name (upstream default).
+	TLSServerName string `json:"tls_server_name,omitempty"`
 	// Encryption lists per-peer negotiated state so the WebUI can show, for
 	// every connected client, which algorithm is actually in use (or "none"
 	// if encryption was not negotiated).
@@ -692,6 +696,12 @@ type PeerObfInfoDTO struct {
 	// PFSPubKeyFP is the fingerprint of the peer's ephemeral ECDH public key;
 	// empty when PFS is false / plaintext.
 	PFSPubKeyFP string `json:"pfs_pubkey_fp,omitempty"`
+	// HandshakeServerName is the TLS SNI this peer presented when it connected to
+	// us (observed from the ClientHello, attributed via the connection's remote
+	// host). Empty when the peer sent no SNI or the transport/security path did
+	// not observe one (e.g. a Noise-negotiated TCP link). Lets an operator confirm
+	// a tls_server_name rollout actually reached every node.
+	HandshakeServerName string `json:"handshake_server_name,omitempty"`
 }
 
 type SystemHealthDTO struct {

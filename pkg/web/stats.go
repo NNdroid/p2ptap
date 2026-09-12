@@ -184,13 +184,15 @@ func (s *StatsCollector) SetTAPSelfTest(fn func() map[string]interface{}) {
 // state into the WebUI. The node depends only on the observer.Collector
 // interface, never on the concrete StatsCollector.
 
-// SetSecurity pushes the encryption/obfuscation status.
-func (s *StatsCollector) SetSecurity(pskStatus, obfuscation, keyFingerprint string) {
+// SetSecurity pushes the encryption/obfuscation status. tlsServerName is the SNI
+// this node places on outgoing TLS/QUIC handshakes ("" = none sent).
+func (s *StatsCollector) SetSecurity(pskStatus, obfuscation, keyFingerprint, tlsServerName string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Security.PSKStatus = pskStatus
 	s.Security.Obfuscation = obfuscation
 	s.Security.KeyFingerprint = keyFingerprint
+	s.Security.TLSServerName = tlsServerName
 }
 
 // SetPeerEncryption pushes the per-peer negotiated encryption snapshot so the

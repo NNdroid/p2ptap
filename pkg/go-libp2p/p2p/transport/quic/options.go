@@ -17,3 +17,9 @@ func WithTLSIdentityOption(opt ...p2ptls.IdentityOption) Option {
 		return nil
 	}
 }
+
+// NOTE (p2ptap): outgoing QUIC ClientHello SNI is configured centrally in the
+// p2ptls identity (see p2p/security/tls SetDialServerName + ConfigForPeer), NOT
+// here — so TLS-over-TCP and QUIC dials share ONE server_name setting, matching
+// how both transports obtain their tls.Config from the same Identity. See
+// pkg/go-libp2p/LOCAL_PATCHES.md.

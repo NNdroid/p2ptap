@@ -94,7 +94,7 @@
                 channel_lsa_desc: "Dijkstra Shortest Path",
                 channel_peekmap_name: "Peek-Map Broadcast",
                 channel_peekmap_desc: "Bootstrap Topology Sync",
-                channel_data_name: "Virtual TAP Datapath",
+                channel_data_name: "Datapath (Direct + Relay)",
                 channel_data_proto: "Layer-2 Ethernet Overlay",
                 channel_auth_name: "Mesh Authentication",
                 channel_auth_desc: "PSK Mesh Network Isolation",
@@ -389,6 +389,7 @@
                 lbl_traffic_obfs: "Traffic Obfuscation:",
                 lbl_id_fingerprint: "Identity Fingerprint:",
                 lbl_autonat_reach: "AutoNAT Reachability:",
+                lbl_tls_sni: "TLS/QUIC SNI (outgoing):",
                 lbl_per_peer_enc: "Per-Peer Encryption:",
                 sec_copy: "Copy",
                 sec_copied: "Copied",
@@ -964,7 +965,7 @@
                 channel_lsa_desc: "Dijkstra 最短路径选路",
                 channel_peekmap_name: "Peek-Map 全网拓扑广播",
                 channel_peekmap_desc: "引导拓扑发现与同步",
-                channel_data_name: "虚拟 TAP 数据通路",
+                channel_data_name: "数据通路（直连 + 中继）",
                 channel_data_proto: "二层以太网数据链路",
                 channel_auth_name: "PSK Mesh 身份认证",
                 channel_auth_desc: "PSK Mesh 网络安全隔离",
@@ -1258,6 +1259,7 @@
                 lbl_traffic_obfs: "数据包流量混淆:",
                 lbl_id_fingerprint: "节点身份密钥指纹:",
                 lbl_autonat_reach: "AutoNAT 网络可达性:",
+                lbl_tls_sni: "TLS/QUIC SNI（出站）:",
                 lbl_per_peer_enc: "逐节点加密状态:",
                 sec_copy: "复制",
                 sec_copied: "已复制",
@@ -2004,6 +2006,7 @@
                 lbl_traffic_obfs: "封包流量混淆:",
                 lbl_id_fingerprint: "節點身份金鑰指紋:",
                 lbl_autonat_reach: "AutoNAT 網路可達性:",
+                lbl_tls_sni: "TLS/QUIC SNI（出站）:",
                 lbl_per_peer_enc: "逐節點加密狀態:",
                 sec_copy: "複製",
                 sec_copied: "已複製",
@@ -2460,7 +2463,7 @@
                 channel_lsa_desc: "Dijkstra 最短路徑選路",
                 channel_peekmap_name: "Peek-Map 全網拓撲廣播",
                 channel_peekmap_desc: "引導拓撲發現與同步",
-                channel_data_name: "虛擬 TAP 數據通路",
+                channel_data_name: "資料通路（直連 + 中繼）",
                 channel_data_proto: "二層乙太網數據鏈路",
                 channel_auth_name: "PSK Mesh 身分認證",
                 channel_auth_desc: "PSK Mesh 網絡安全隔離",
@@ -2821,6 +2824,7 @@
                 lbl_traffic_obfs: "トラフィック難読化:",
                 lbl_id_fingerprint: "アイデンティティ指紋:",
                 lbl_autonat_reach: "AutoNAT 到達可能性:",
+                lbl_tls_sni: "TLS/QUIC SNI（送信時）:",
                 lbl_per_peer_enc: "ピアごとの暗号化:",
                 sec_copy: "コピー",
                 sec_copied: "コピーしました",
@@ -3212,7 +3216,7 @@
                 channel_lsa_desc: "Dijkstra 最短パス選路",
                 channel_peekmap_name: "Peek-Map トポロジブロードキャスト",
                 channel_peekmap_desc: "ブートストラップトポロジ同期",
-                channel_data_name: "仮想 TAP データパス",
+                channel_data_name: "データパス（直結＋リレー）",
                 channel_data_proto: "レイヤ 2 イーサネットオーバーレイ",
                 channel_auth_name: "PSK メッシュ認証",
                 channel_auth_desc: "PSK メッシュネットワーク分離",
@@ -3639,6 +3643,7 @@
                 lbl_traffic_obfs: "Datenverkehrs-Verschleierung:",
                 lbl_id_fingerprint: "Identitäts-Fingerabdruck:",
                 lbl_autonat_reach: "AutoNAT-Erreichbarkeit:",
+                lbl_tls_sni: "TLS/QUIC-SNI (ausgehend):",
                 lbl_per_peer_enc: "Verschlüsselung pro Peer:",
                 sec_copy: "Kopieren",
                 sec_copied: "Kopiert",
@@ -4030,7 +4035,7 @@
                 channel_lsa_desc: "Dijkstra-Kürzester-Pfad-Routing",
                 channel_peekmap_name: "Peek-Map Topologie-Broadcast",
                 channel_peekmap_desc: "Bootstrap-Topologie-Synchronisation",
-                channel_data_name: "Virtueller TAP-Datenpfad",
+                channel_data_name: "Datenpfad (Direkt + Relay)",
                 channel_data_proto: "Layer-2-Ethernet-Overlay",
                 channel_auth_name: "PSK-Mesh-Authentifizierung",
                 channel_auth_desc: "PSK-Mesh-Netzwerkisolation",
@@ -4457,6 +4462,7 @@
                 lbl_traffic_obfs: "Ofuscación de Tráfico:",
                 lbl_id_fingerprint: "Huella de Identidad:",
                 lbl_autonat_reach: "Alcance AutoNAT:",
+                lbl_tls_sni: "SNI TLS/QUIC (saliente):",
                 lbl_per_peer_enc: "Cifrado por Peer:",
                 sec_copy: "Copiar",
                 sec_copied: "Copiado",
@@ -4848,7 +4854,7 @@
                 channel_lsa_desc: "Ruta más corta de Dijkstra",
                 channel_peekmap_name: "Difusión de topología Peek-Map",
                 channel_peekmap_desc: "Sincronización de topología Bootstrap",
-                channel_data_name: "Ruta de datos TAP virtual",
+                channel_data_name: "Ruta de datos (directo + relay)",
                 channel_data_proto: "Superposición Ethernet de capa 2",
                 channel_auth_name: "Autenticación de malla PSK",
                 channel_auth_desc: "Aislamiento de red de malla PSK",
@@ -5275,6 +5281,7 @@
                 lbl_traffic_obfs: "Obfuscation de Trafic:",
                 lbl_id_fingerprint: "Empreinte d'Identité:",
                 lbl_autonat_reach: "Accessibilité AutoNAT:",
+                lbl_tls_sni: "SNI TLS/QUIC (sortant) :",
                 lbl_per_peer_enc: "Chiffrement par Pair:",
                 sec_copy: "Copier",
                 sec_copied: "Copié",
@@ -5730,7 +5737,7 @@
                 channel_lsa_desc: "Chemin le plus court Dijkstra",
                 channel_peekmap_name: "Diffusion de topologie Peek-Map",
                 channel_peekmap_desc: "Synchronisation topologique Bootstrap",
-                channel_data_name: "Chemin de données TAP virtuel",
+                channel_data_name: "Canal de données (direct + relais)",
                 channel_data_proto: "Superposition Ethernet couche 2",
                 channel_auth_name: "Authentification de maillage PSK",
                 channel_auth_desc: "Isolation réseau maillé PSK",
@@ -10334,6 +10341,14 @@
                 a.textContent = '🔒 ' + (e.algo || '');
                 badges.appendChild(a);
             }
+            // SNI the peer presented when connecting to us (TLS/QUIC ClientHello).
+            if (e.handshake_server_name) {
+                const sni = document.createElement('span');
+                sni.className = 'enc-algo-chacha';
+                sni.textContent = '🏷 ' + e.handshake_server_name;
+                sni.title = 'Peer presented server_name "' + e.handshake_server_name + '" in its TLS handshake';
+                badges.appendChild(sni);
+            }
             head.appendChild(badges);
             row.appendChild(head);
 
@@ -10592,6 +10607,14 @@
                     
                     let natText = data.nat_status || '⚪ Unknown (AutoNAT not verified yet)';
                     document.getElementById('secNAT').innerText = natText;
+
+                    const sniEl = document.getElementById('secSNI');
+                    if (sniEl) {
+                        sniEl.textContent = sec.tls_server_name || '—';
+                        sniEl.title = sec.tls_server_name
+                            ? 'server_name sent in our TLS/QUIC ClientHellos (both transports share transports.tls_server_name)'
+                            : 'No SNI configured (upstream default): outgoing ClientHellos carry no server_name';
+                    }
                 }
 
                 // Per-peer encryption breakdown (sorted: PFS → encrypted → plaintext).

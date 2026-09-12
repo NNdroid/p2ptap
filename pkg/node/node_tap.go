@@ -371,6 +371,12 @@ func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, pack
 // A peer with neither a usable direct link nor any relay route is genuinely
 // unreachable, so we report false (caller drops the frame).
 func (n *Node) canEgressToPeer(p peer.ID) bool {
+	// PSK-required fail-closed: without a negotiated cipher we have no proof the
+	// peer knows the PSK, so sending would either leak plaintext or be dropped by
+	// the peer anyway. Never egress to an unverified direct peer in a PSK network.
+	if n.pskRequired() && !n.hasNegotiatedCipher(p) {
+		return false
+	}
 	if n.isPeerReady(p) || n.obfCipherForPeer(p) != nil || n.isDirectlyConnected(p) {
 		return true
 	}

@@ -243,6 +243,18 @@ func (n *Node) handleStream(s network.Stream) {
 			decScratch = dec
 		}
 
+		// PSK-required fail-closed (RX twin of canEgressToPeer): a plaintext frame
+		// from a peer we have not negotiated an encrypted cipher with carries no
+		// proof the sender knows the PSK, so it must never reach the TAP device.
+		// (A wrong-PSK peer's ENCRYPTED frames already fail AEAD-open above and
+		// drop as garbage; this closes the plaintext-covert-channel hole.)
+		if !decOK && n.pskRequired() && !n.hasNegotiatedCipher(remotePeer) {
+			if log.IsDebug() {
+				log.Debug("Rx: dropping plaintext frame from %s — PSK network requires a negotiated cipher", remotePeer.String())
+			}
+			continue
+		}
+
 		// ── Deobfuscation (parse header, extract payload) ──
 		seqID, payload, err := obfuscate.Unpack(frameData)
 		if err != nil {
@@ -576,18 +588,22 @@ func (n *Node) buildLocalARPEntries(nodeName string) []observer.ARPInfoDTO {
 
 func (n *Node) lsaLoop() {
 	defer n.wg.Done()
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
+	const period = 15 * time.Second
+	// Jittered so the LSA flood does not present a fixed 15s timing signature
+	// to a passive DPI observer (see jitter.go).
+	timer := newJitterTimer(period)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-n.ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			// Use the shared monotonic counter — a local counter starting at 1
 			// would be permanently rejected as stale by peers that already saw
 			// a (much larger) force-push sequence. See Node.lsaSeq.
 			n.broadcastLSA(n.nextLSASeq())
+			timer.Reset(jitterInterval(period))
 		}
 	}
 }

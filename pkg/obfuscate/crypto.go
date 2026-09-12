@@ -168,17 +168,26 @@ func (k *ObfKeyPair) Fingerprint() string {
 // secrecy) instead of a long-lived node key — the caller simply discards the
 // temporary private key after the handshake.
 //
-// The two keys let traffic in each direction use a distinct key. Both sides derive
-// the same keyA/keyB from the identical shared secret, but assign them to
-// directions by PeerID ordering (see negotiateObfWithPeer): the side with the
-// smaller PeerID sends with keyA / receives with keyB, the other side the reverse.
-// This guarantees the sender's encrypt key always equals the receiver's decrypt
-// key, AND that A→B and B→A never share a (key, nonce) pair — closing the
-// cross-direction AEAD nonce-reuse hole that a single shared key allowed.
-// Returns (nil,nil,nil) if priv/peerPub is empty/invalid (caller falls back to
-// plaintext). The raw ECDH shared secret is wiped from memory as soon as the two
-// keys are derived, so key material does not linger.
+// This overload derives with NO PSK binding (HKDF salt = nil), preserving the
+// exact key schedule of PSK-less deployments. PSK-configured nodes must call
+// DeriveKeysPSK so the shared network secret is cryptographically mixed into the
+// mesh key schedule — see that function.
 func DeriveKeys(priv *ecdh.PrivateKey, peerPub []byte) (keyA, keyB []byte, err error) {
+	return DeriveKeysPSK(priv, peerPub, nil)
+}
+
+// DeriveKeysPSK is DeriveKeys with an additional PSK network binding: when psk is
+// non-empty it is folded (via a domain-separated SHA-256) into the HKDF salt, so
+// the per-peer AEAD keys are only reproducible by a peer that knows the SAME
+// PSK. Two nodes that completed the (identity-only) libp2p transport handshake
+// but disagree on the PSK derive mutually unintelligible keys: every frame from
+// one fails AEAD-open at the other and is dropped as garbage, and neither can
+// forge an acceptable frame for the other. This is what makes PSK a real
+// membership boundary for the DIRECT data path, not just a relay/peek-map gate.
+//
+// When psk is empty the salt is nil, i.e. byte-for-byte the pre-PSK-binding key
+// schedule, so existing PSK-less meshes are completely unaffected.
+func DeriveKeysPSK(priv *ecdh.PrivateKey, peerPub, psk []byte) (keyA, keyB []byte, err error) {
 	if priv == nil || len(peerPub) == 0 {
 		return nil, nil, nil
 	}
@@ -194,13 +203,21 @@ func DeriveKeys(priv *ecdh.PrivateKey, peerPub []byte) (keyA, keyB []byte, err e
 	// and must not persist in memory alongside the derived keys.
 	defer func() { for i := range shared { shared[i] = 0 } }()
 
+	// Domain-separated PSK → HKDF salt. Empty PSK yields a nil salt so the
+	// derivation is identical to DeriveKeys for PSK-less deployments.
+	var salt []byte
+	if len(psk) > 0 {
+		h := sha256.Sum256(append([]byte("p2ptap-obf-psk-salt\x00"), psk...))
+		salt = h[:]
+	}
+
 	keyA = make([]byte, 32)
 	keyB = make([]byte, 32)
-	rA := hkdf.New(sha256.New, shared, nil, []byte("p2ptap-obf-key-a"))
+	rA := hkdf.New(sha256.New, shared, salt, []byte("p2ptap-obf-key-a"))
 	if _, err = io.ReadFull(rA, keyA); err != nil {
 		return nil, nil, err
 	}
-	rB := hkdf.New(sha256.New, shared, nil, []byte("p2ptap-obf-key-b"))
+	rB := hkdf.New(sha256.New, shared, salt, []byte("p2ptap-obf-key-b"))
 	if _, err = io.ReadFull(rB, keyB); err != nil {
 		return nil, nil, err
 	}

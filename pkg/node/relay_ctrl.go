@@ -128,6 +128,13 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 		log.Warn("RelayCtrl: header missing origin/target from %s", remotePeer)
 		return
 	}
+	// The relay-ctrl tunnel is what the WebUI "DCUtR 自动打洞与中继" card counts
+	// (its stream total folds in RelayCtrlProtocolID). Record the header RX and a
+	// sync event per established tunnel so the card is not stuck at 0.
+	if n.protoTracker != nil {
+		n.protoTracker.DCUtR.RecordRx(1, uint64(n0))
+		n.protoTracker.DCUtR.RecordSyncEvent()
+	}
 
 	// ---- FINAL HOP: deliver the inner control protocol locally ----
 	if hdr.Target == n.Host.ID() {
@@ -165,7 +172,11 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 	// uses newline-delimited JSON), so we copy bytes verbatim rather than
 	// frame-by-frame. CloseWrite on each side signals EOF to the peer once the
 	// opposite direction hits EOF, letting both ends tear the tunnel down.
-	proxyStreams(s, sub)
+	var ctr *ChannelTrafficCounter
+	if n.protoTracker != nil {
+		ctr = &n.protoTracker.DCUtR
+	}
+	proxyStreams(s, sub, ctr)
 }
 
 // openRelayCtrlNextHop resolves the next leg of a transit tunnel and returns an
@@ -255,17 +266,27 @@ func (n *Node) dispatchRelayCtrlInner(s network.Stream, origin peer.ID, proto pr
 // both hit EOF (or error). It is intentionally agnostic to any framing on the
 // inner protocol: bytes are moved verbatim. CloseWrite on each direction lets
 // the peer learn the tunnel is half-closed so it can tear down cleanly.
-func proxyStreams(a, b network.Stream) {
+//
+// When ctr is non-nil it tallies bytes moved in each direction onto the given
+// channel counter (the DCUtR card) so the WebUI reflects real relay-tunnel
+// traffic instead of a hardcoded 0.
+func proxyStreams(a, b network.Stream, ctr *ChannelTrafficCounter) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(b, a)
+		n, _ := io.Copy(b, a)
+		if ctr != nil {
+			ctr.RecordTx(1, uint64(n))
+		}
 		_ = b.CloseWrite()
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(a, b)
+		n, _ := io.Copy(a, b)
+		if ctr != nil {
+			ctr.RecordRx(1, uint64(n))
+		}
 		_ = a.CloseWrite()
 	}()
 	wg.Wait()

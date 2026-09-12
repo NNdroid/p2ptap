@@ -140,6 +140,9 @@ func (t *transport) dialWithScope(ctx context.Context, raddr ma.Multiaddr, p pee
 	}
 
 	tlsConf, keyCh := t.identity.ConfigForPeer(p)
+	// ServerName (SNI) is applied inside p2ptls.ConfigForPeer for BOTH the TCP-TLS
+	// and QUIC client paths from one shared setting — see p2p/security/tls. Nothing
+	// to do here.
 	ctx = quicreuse.WithAssociation(ctx, t)
 	pconn, err := t.connManager.DialQUIC(ctx, raddr, tlsConf, t.allowWindowIncrease)
 	if err != nil {
@@ -289,7 +292,18 @@ func (t *transport) CanDial(addr ma.Multiaddr) bool {
 // Listen listens for new QUIC connections on the passed multiaddr.
 func (t *transport) Listen(addr ma.Multiaddr) (tpt.Listener, error) {
 	var tlsConf tls.Config
-	tlsConf.GetConfigForClient = func(_ *tls.ClientHelloInfo) (*tls.Config, error) {
+	tlsConf.GetConfigForClient = func(info *tls.ClientHelloInfo) (*tls.Config, error) {
+		// p2ptap LOCAL PATCH: record the peer's presented SNI (keyed by remote
+		// host) so the WebUI can show it per connected peer — same observability
+		// the TCP-TLS path has. Non-blocking, never affects the handshake.
+		if info != nil && info.ServerName != "" && info.Conn != nil && info.Conn.RemoteAddr() != nil {
+			ra := info.Conn.RemoteAddr().String()
+			if host, _, herr := net.SplitHostPort(ra); herr == nil {
+				p2ptls.ObserveInboundServerName(host, info.ServerName)
+			} else {
+				p2ptls.ObserveInboundServerName(ra, info.ServerName)
+			}
+		}
 		// return a tls.Config that verifies the peer's certificate chain.
 		// Note that since we have no way of associating an incoming QUIC connection with
 		// the peer ID calculated here, we don't actually receive the peer's public key
@@ -297,7 +311,7 @@ func (t *transport) Listen(addr ma.Multiaddr) (tpt.Listener, error) {
 		conf, _ := t.identity.ConfigForPeer("")
 		return conf, nil
 	}
-	tlsConf.NextProtos = []string{"libp2p"}
+	tlsConf.NextProtos = []string{"h3"} // LOCAL PATCH: must match the `alpn` const in p2p/security/tls/crypto.go (see LOCAL_PATCHES.md). Upstream "libp2p" is DPI-visible in the QUIC Initial ClientHello. QUIC carries its muxer in-band, so this ALPN string is not used for muxer selection — it only needs to agree between our own listen/dial sides.
 	udpAddr, version, err := quicreuse.FromQuicMultiaddr(addr)
 	if err != nil {
 		return nil, err

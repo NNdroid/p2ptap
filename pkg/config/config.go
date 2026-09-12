@@ -72,6 +72,14 @@ type TransportsConfig struct {
 	// own overlay relay (OverlayRelayProtocolID) — that path is still visible
 	// in the WebUI routes table.
 	DisableRelay bool `json:"disable_relay"`
+	// TLSServerName sets the TLS server_name (SNI) placed on OUTGOING handshakes —
+	// both TLS-over-TCP (the default security module) and QUIC. Empty (default)
+	// sends no server_name, matching upstream libp2p. Set it to a plausible
+	// hostname to make the mesh resemble ordinary HTTP/3 to a DPI that inspects
+	// the (public-salt-encrypted QUIC Initial / cleartext TCP) ClientHello. It
+	// never affects authentication: libp2p verifies peers via the signed
+	// certificate extension, not the SNI.
+	TLSServerName string `json:"tls_server_name"`
 }
 
 // ExitNodeConfig defines options for node acting as an Exit Node gateway

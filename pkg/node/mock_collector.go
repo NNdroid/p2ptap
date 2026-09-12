@@ -25,7 +25,7 @@ func (noopCollector) RecordProtocol(uint16)                                     
 func (noopCollector) CaptureFrame(observer.FrameDirection, []byte)                          {}
 func (noopCollector) CaptureFrameWithPeers(observer.FrameDirection, []byte, string, string) {}
 func (noopCollector) SetNodeInfo(string, string, string, string, string)                    {}
-func (noopCollector) SetSecurity(string, string, string)                                    {}
+func (noopCollector) SetSecurity(string, string, string, string)                            {}
 func (noopCollector) SetPeerEncryption([]observer.PeerObfInfoDTO)                           {}
 func (noopCollector) SetTAPState(*observer.TAPStateDTO)                                     {}
 func (noopCollector) SetTAPSelfTest(func() map[string]interface{})                          {}
@@ -40,8 +40,8 @@ func (noopCollector) UpdateRoutes([]observer.RouteInfoDTO)                      
 func (noopCollector) UpdateSubnetRoutes([]observer.SubnetRouteDTO)                          {}
 func (noopCollector) UpdatePeerMetas([]observer.PeerMetaDTO)                                {}
 func (noopCollector) UpdateMeshMatrix([]observer.MeshMatrixCellDTO)                         {}
-func (noopCollector) UpdateProtocolChannels([]observer.ProtocolChannelDTO)                 {}
-func (noopCollector) UpdateActiveStreams([]observer.ProtocolStreamDTO)                     {}
+func (noopCollector) UpdateProtocolChannels([]observer.ProtocolChannelDTO)                  {}
+func (noopCollector) UpdateActiveStreams([]observer.ProtocolStreamDTO)                      {}
 func (noopCollector) UpdateDuplicateIPConflicts([]observer.DuplicateIPConflictDTO)          {}
 func (noopCollector) UpdateListenAddrs([]string)                                            {}
 func (noopCollector) UpdateNATStatus(string)                                                {}

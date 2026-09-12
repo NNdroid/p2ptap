@@ -826,7 +826,7 @@ func (n *Node) negotiateObfWithPeer(p peer.ID, peerPub []byte, peerAlgos []byte,
 		fp = myEphemeral.Fingerprint()
 		log.Debug("SeqSync: handshake key state for %s: forward-secret (one-shot ECDH) → negotiating via %s", p.String(), fp)
 	}
-	keyA, keyB, err := obfuscate.DeriveKeys(priv, peerPub)
+	keyA, keyB, err := obfuscate.DeriveKeysPSK(priv, peerPub, pskSaltBytes(n))
 	if err != nil {
 		log.Warn("SeqSync: ECDH derive with %s failed: %v", p.String(), err)
 		return

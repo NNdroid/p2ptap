@@ -54,6 +54,12 @@ func (n *Node) handleMetaStream(s network.Stream) {
 		if rn == 0 {
 			continue
 		}
+		// Meta rides the same "Peek-Map 全网拓扑广播" card as peek-map, so its
+		// traffic is attributed to the PeekMap channel (node_stats folds
+		// MetaProtocolID stream counts into the same card).
+		if n.protoTracker != nil {
+			n.protoTracker.PeekMap.RecordRx(1, uint64(rn))
+		}
 		data := buf[:rn]
 
 		var payload meta.NodeMetaPayload
@@ -131,15 +137,20 @@ func (n *Node) handleMetaStream(s network.Stream) {
 			AdvertisedSubnets: n.Config.AdvertisedSubnets,
 		}
 		if respBytes, err := json.Marshal(respPayload); err == nil {
-			_ = WriteFrame(s, respBytes)
+			if werr := WriteFrame(s, respBytes); werr == nil && n.protoTracker != nil {
+				n.protoTracker.PeekMap.RecordTx(1, uint64(len(respBytes)))
+				n.protoTracker.PeekMap.RecordSyncEvent()
+			}
 		}
 	}
 }
 
 func (n *Node) metaSyncLoop() {
 	defer n.wg.Done()
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
+	const period = 15 * time.Second
+	// Jittered to remove the fixed-cadence metadata-sync timing signature (jitter.go).
+	timer := newJitterTimer(period)
+	defer timer.Stop()
 
 	// Initial sync immediately after startup
 	time.Sleep(2 * time.Second)
@@ -149,8 +160,9 @@ func (n *Node) metaSyncLoop() {
 		select {
 		case <-n.ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			n.broadcastMetadata()
+			timer.Reset(jitterInterval(period))
 		}
 	}
 }
@@ -638,14 +650,21 @@ func (n *Node) registerPeekMapHandler() {
 		// coalesced read and drop split/concatenated values, silently losing
 		// peer-discovery updates. json.NewDecoder reads one value at a time
 		// correctly across read and value boundaries.
-		dec := json.NewDecoder(s)
+		cr := &countingReader{r: s}
+		dec := json.NewDecoder(cr)
 		for {
+			before := cr.n
 			var msg PeekMapMessage
 			if err := dec.Decode(&msg); err != nil {
 				if err != io.EOF {
 					log.Debug("Peek-map listener from %s closed: %v", remotePeer.ShortString(), err)
 				}
 				return
+			}
+			// Attribute the bytes this Decode consumed to the peek-map channel so
+			// the WebUI traffic card reflects real topology-broadcast RX.
+			if n.protoTracker != nil {
+				n.protoTracker.PeekMap.RecordRx(1, uint64(cr.n-before))
 			}
 			if msg.Type != PeekMapUpdate {
 				continue
@@ -654,6 +673,9 @@ func (n *Node) registerPeekMapHandler() {
 			if err := json.Unmarshal(msg.Payload, &info); err != nil {
 				log.Debug("Peek-map listener could not parse payload from %s: %v", remotePeer.ShortString(), err)
 				continue
+			}
+			if n.protoTracker != nil {
+				n.protoTracker.PeekMap.RecordSyncEvent()
 			}
 			// Was this peer previously unknown? Reply once to announce ourselves.
 			isNew := !n.peerKnownPeer(info.PeerID)
@@ -1114,7 +1136,13 @@ func (n *Node) publishPeekMapNodeInfo(s network.Stream) error {
 		Payload: payload,
 	}
 	_ = s.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	return json.NewEncoder(s).Encode(msg)
+	cw := &countingWriter{w: s}
+	err = json.NewEncoder(cw).Encode(msg)
+	if err == nil && n.protoTracker != nil {
+		n.protoTracker.PeekMap.RecordTx(1, uint64(cw.n))
+		n.protoTracker.PeekMap.RecordSyncEvent()
+	}
+	return err
 }
 
 // publishPeekMapSelf broadcasts our node info to ALL open peek-map listeners.

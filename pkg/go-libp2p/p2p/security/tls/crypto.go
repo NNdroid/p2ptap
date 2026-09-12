@@ -24,7 +24,14 @@ import (
 
 const certValidityPeriod = 100 * 365 * 24 * time.Hour // ~100 years
 const certificatePrefix = "libp2p-tls-handshake:"
-const alpn string = "libp2p"
+// alpn is the fallback ALPN advertised on the QUIC ClientHello when no muxer is
+// negotiated via ALPN. Upstream uses "libp2p"; because QUIC Initial packets are
+// encrypted only with the PUBLIC Initial salt, any DPI reads this ALPN and a
+// single "libp2p" match classifies the flow as libp2p. "h3" makes that field
+// indistinguishable from ordinary HTTP/3 at the same layer. LOCAL PATCH —
+// see pkg/go-libp2p/LOCAL_PATCHES.md (must stay in sync with the QUIC listener's
+// NextProtos in p2p/transport/quic/transport.go).
+const alpn string = "h3"
 
 var extensionID = getPrefixedExtensionID([]int{1, 1})
 var extensionCritical bool // so we can mark the extension critical in tests
@@ -150,6 +157,10 @@ func (i *Identity) ConfigForPeer(remote peer.ID) (*tls.Config, <-chan ic.PubKey)
 		keyCh <- pubKey
 		return nil
 	}
+	// p2ptap LOCAL PATCH: apply the shared outgoing SNI to this per-peer clone so
+	// BOTH TLS-over-TCP (SecureOutbound) and QUIC dials present the same
+	// server_name from one setting. Server-side handshakes ignore it. (sni.go)
+	applyDialServerName(conf)
 	return conf, keyCh
 }
 

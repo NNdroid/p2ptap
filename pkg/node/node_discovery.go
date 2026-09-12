@@ -67,16 +67,19 @@ func (n *Node) discoveryLoop() {
 		}
 	}
 
-	// Regular background discovery loop (every 20 seconds)
-	ticker := time.NewTicker(20 * time.Second)
-	defer ticker.Stop()
+	// Regular background discovery loop (every ~20s, jittered so the DHT/mDNS
+	// re-query cadence does not present a fixed timing signature — jitter.go).
+	const period = 20 * time.Second
+	timer := newJitterTimer(period)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-n.ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			runFind()
+			timer.Reset(jitterInterval(period))
 		}
 	}
 }

@@ -40,6 +40,41 @@
   10 消息注释基于消息级依赖场景，未考虑 VPN 饱和转发。
 - 若未来向上游提 PR：这是一个独立的、带基准数据的性能补丁，适合单独提交。
 
+## 6. `p2p/security/tls/crypto.go` + `p2p/transport/quic/transport.go` — QUIC ALPN `libp2p` → `h3`
+
+- 把 TLS 身份 `alpn` 常量与 QUIC listener 的 `NextProtos` 从上游的 `"libp2p"` 改为
+  `"h3"`（两处必须同步）。
+- 动机（抗 DPI）：QUIC Initial 包只用**公开的 Initial salt** 加密，任何 DPI 都能解出
+  ClientHello 里的 ALPN；一个 `"libp2p"` 字符串即可把流量归类为 libp2p。改 `"h3"` 后
+  该字段与普通 HTTP/3 无从区分。
+- 安全性：QUIC 的 muxer 走带内协商，**不依赖 ALPN 选 muxer**（`conn.ConnState()` 只带
+  `Transport` 字段），故 ALPN 值纯外观。p2ptap 是与标准 libp2p 节点互通的私网，无需保留
+  `"libp2p"`；混版（新↔旧）时 Go TLS ALPN 无交集只会协商为空协议、不致命，QUIC 握手照旧完成。
+
+## 7. `p2p/security/tls/sni.go`（新文件）+ `crypto.go` + `transport.go` + `p2p/transport/quic/transport.go` — 统一 SNI
+
+- 新增 `p2ptls.SetDialServerName(name)` / `DialServerName()`（RWMutex 守卫）；
+  `Identity.ConfigForPeer` 末尾 `applyDialServerName(conf)` —— 一处同时覆盖
+  **TLS-over-TCP**（`SecureOutbound` 也从同一 Identity 取 client 配置）与 **QUIC**
+  拨号，`transports.tls_server_name` 一份配置两路共用（对齐”TLS 和 QUIC 同一配置”的直觉）。
+  ServerName 是 client-only 字段，误挂到 server 侧配置会被 crypto/tls 忽略，无害。
+- 入站观察（WebUI 显示用）：`ObserveInboundServerName`/`InboundServerNames`——TCP-TLS 的
+  `SecureInbound` 与 QUIC listener 的 `GetConfigForClient` 都把对端 ClientHello 的
+  server_name 按 remote host 记入带 TTL/上限的 map（连接洪泛不会变成内存 DoS）。节点
+  按连接 remote IP 归属到 peer，WebUI 在”本机信息”显示自身出站 SNI、在”每对等加密”
+  显示对端实际带来的 SNI，用于验证 `tls_server_name` 灰度是否到位。
+- 动机：上游按 IP 拨号、ClientHello 不带 server_name,而真实 h3 客户端总带 SNI——
+  “无 SNI”本身即特征。
+- 安全性：libp2p 认证走证书内自签 peer 扩展（`InsecureSkipVerify` +
+  `VerifyPeerCertificate`），**不校验 hostname**,SNI 纯外观、不削弱认证。
+- 默认空 = 不带 SNI，保持上游行为与完全互通。
+
+## 7b. 说明：QUIC-only 的旧写法已废弃
+
+早期本补丁曾把 `SetDialServerName` 放在 `p2p/transport/quic` 包内、只在
+`dialWithScope` 注入——那会让 TCP-TLS 拨号漏掉 SNI,与”TLS/QUIC 同一配置”的意图不符。
+现统一收口到 `p2ptls.ConfigForPeer`,quic 侧不再持有 SNI 全局。
+
 ## 非代码附加目录
 
 `examples/`、`test-plans/`、`scripts/test_analysis`（上游示例/测试计划的本地副本，不影响构建）。

@@ -1254,13 +1254,11 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 		dataTxF, dataRxF, dataTxB, dataRxB, dataSyncs, dataErrs       uint64
 		dataAgo                                                       string
 		relayTxF, relayRxF, relayTxB, relayRxB, relaySyncs, relayErrs uint64
-		relayAgo                                                      string
+		bootTxF, bootRxF, bootTxB, bootRxB                            uint64
 		authTxF, authRxF, authTxB, authRxB, authSyncs, authErrs       uint64
 		authAgo                                                       string
 		dcutrTxF, dcutrRxF, dcutrTxB, dcutrRxB, dcutrSyncs, dcutrErrs uint64
 		dcutrAgo                                                      string
-		echoTxF, echoRxF, echoTxB, echoRxB, echoSyncs, echoErrs       uint64
-		echoAgo                                                       string
 	)
 
 	if n.protoTracker != nil {
@@ -1268,10 +1266,10 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 		lsaTxF, lsaRxF, lsaTxB, lsaRxB, lsaSyncs, lsaErrs, lsaAgo = trackerSnap(&n.protoTracker.LSA)
 		peekTxF, peekRxF, peekTxB, peekRxB, peekSyncs, peekErrs, peekAgo = trackerSnap(&n.protoTracker.PeekMap)
 		dataTxF, dataRxF, dataTxB, dataRxB, dataSyncs, dataErrs, dataAgo = trackerSnap(&n.protoTracker.Data)
-		relayTxF, relayRxF, relayTxB, relayRxB, relaySyncs, relayErrs, relayAgo = trackerSnap(&n.protoTracker.RelayData)
+		relayTxF, relayRxF, relayTxB, relayRxB, relaySyncs, relayErrs, _ = trackerSnap(&n.protoTracker.RelayData)
+		bootTxF, bootRxF, bootTxB, bootRxB, _, _, _ = trackerSnap(&n.protoTracker.BootRelay)
 		authTxF, authRxF, authTxB, authRxB, authSyncs, authErrs, authAgo = trackerSnap(&n.protoTracker.Auth)
 		dcutrTxF, dcutrRxF, dcutrTxB, dcutrRxB, dcutrSyncs, dcutrErrs, dcutrAgo = trackerSnap(&n.protoTracker.DCUtR)
-		echoTxF, echoRxF, echoTxB, echoRxB, echoSyncs, echoErrs, echoAgo = trackerSnap(&n.protoTracker.Echo)
 	}
 
 	// 1. SeqSync Channel
@@ -1319,7 +1317,10 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 		peekStatus = "running"
 	}
 
-	// 4. Virtual TAP Datapath
+	// 4. Datapath (direct + overlay-relay + boot-relay unified). The three data
+	// paths share one card so an operator sees total TAP throughput AND, in the
+	// details line, how much of it is riding a relay — the key direct-first
+	// health signal. Streams already folded overlay-relay + boot-relay counts.
 	obfsAlgo := n.Config.Obfuscation.Algorithm
 	if obfsAlgo == "" {
 		obfsAlgo = "auto"
@@ -1337,6 +1338,14 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	} else if n.TAP != nil {
 		dataStatus = "running"
 	}
+	// Unified byte/frame totals across the three data paths.
+	dpTxF := dataTxF + relayTxF + bootTxF
+	dpRxF := dataRxF + relayRxF + bootRxF
+	dpTxB := dataTxB + relayTxB + bootTxB
+	dpRxB := dataRxB + relayRxB + bootRxB
+	// Relayed = overlay-relay + boot-relay; direct = the plain TAP datapath.
+	relayFrames := relayTxF + relayRxF + bootTxF + bootRxF
+	directFrames := dataTxF + dataRxF
 
 	// 5. Mesh Auth
 	authIn := inboundCounts[relayAuthProtocol]
@@ -1356,15 +1365,6 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	dcutrStatus := "ready"
 	if dcutrTotal > 0 {
 		dcutrStatus = "active"
-	}
-
-	// 7. Echo / Speedtest Diagnostics
-	echoIn := inboundCounts[string(EchoProtocolID)]
-	echoOut := outboundCounts[string(EchoProtocolID)]
-	echoTotal := echoIn + echoOut
-	echoStatus := "ready"
-	if echoTotal > 0 {
-		echoStatus = "active"
 	}
 
 	channels := []observer.ProtocolChannelDTO{
@@ -1407,39 +1407,22 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 		},
 		{
 			ID:              "data",
-			Name:            "Virtual TAP Datapath",
+			Name:            "Datapath (Direct + Relay)",
 			Protocol:        string(ProtocolID),
 			Category:        "data",
 			Status:          dataStatus,
 			ActiveStreams:   dataTotal,
 			InboundStreams:  dataIn,
 			OutboundStreams: dataOut,
-			TxFrames:        dataTxF,
-			RxFrames:        dataRxF,
-			TxBytes:         dataTxB,
-			RxBytes:         dataRxB,
-			SyncEvents:      dataSyncs,
-			ErrorCount:      dataErrs,
+			TxFrames:        dpTxF,
+			RxFrames:        dpRxF,
+			TxBytes:         dpTxB,
+			RxBytes:         dpRxB,
+			SyncEvents:      dataSyncs + relaySyncs,
+			ErrorCount:      dataErrs + relayErrs,
 			LastActiveAgo:   dataAgo,
-			Details:         fmt.Sprintf("Cipher: %s · Mode: %s", obfsAlgo, obfsMode),
-		},
-		{
-			ID:              "relay-data",
-			Name:            "Overlay L2 Relay Data",
-			Protocol:        string(OverlayRelayProtocolID),
-			Category:        "data",
-			Status:          dataStatus,
-			ActiveStreams:   inboundCounts[string(OverlayRelayProtocolID)] + outboundCounts[string(OverlayRelayProtocolID)],
-			InboundStreams:  inboundCounts[string(OverlayRelayProtocolID)],
-			OutboundStreams: outboundCounts[string(OverlayRelayProtocolID)],
-			TxFrames:        relayTxF,
-			RxFrames:        relayRxF,
-			TxBytes:         relayTxB,
-			RxBytes:         relayRxB,
-			SyncEvents:      relaySyncs,
-			ErrorCount:      relayErrs,
-			LastActiveAgo:   relayAgo,
-			Details:         "Multi-hop P2P Ethernet Frame Forwarding",
+			Details: fmt.Sprintf("Cipher: %s · Mode: %s · Direct %d f · Relayed %d f",
+				obfsAlgo, obfsMode, directFrames, relayFrames),
 		},
 		{
 			ID:              "peekmap",
@@ -1494,24 +1477,6 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 			ErrorCount:      dcutrErrs,
 			LastActiveAgo:   dcutrAgo,
 			Details:         fmt.Sprintf("Direct Connection Upgrade · Streams: %d", dcutrTotal),
-		},
-		{
-			ID:              "echo",
-			Name:            "Diagnostic Echo & Speedtest",
-			Protocol:        string(EchoProtocolID),
-			Category:        "diagnostics",
-			Status:          echoStatus,
-			ActiveStreams:   echoTotal,
-			InboundStreams:  echoIn,
-			OutboundStreams: echoOut,
-			TxFrames:        echoTxF,
-			RxFrames:        echoRxF,
-			TxBytes:         echoTxB,
-			RxBytes:         echoRxB,
-			SyncEvents:      echoSyncs,
-			ErrorCount:      echoErrs,
-			LastActiveAgo:   echoAgo,
-			Details:         "Low-overhead Microsecond Stream Benchmark",
 		},
 	}
 

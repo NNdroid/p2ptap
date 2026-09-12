@@ -217,6 +217,11 @@ func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 		log.Debug("Relay auth version write failed for peer %s: %v", peerID.String(), err)
 		return false
 	}
+	// 32-byte token (+ a small version record). Attribute to the Auth channel so
+	// the WebUI "PSK Mesh 身份认证" card reflects the real handshake bytes.
+	if n.protoTracker != nil {
+		n.protoTracker.Auth.RecordTx(1, uint64(len(token)))
+	}
 
 	// Read 1-byte response
 	var resp [1]byte
@@ -227,6 +232,9 @@ func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 		}
 		log.Debug("Relay auth response read info for peer %s: %v", peerID.String(), err)
 		return false
+	}
+	if n.protoTracker != nil {
+		n.protoTracker.Auth.RecordRx(1, 1)
 	}
 
 	if resp[0] != 0x01 {
@@ -267,20 +275,26 @@ func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 	} else {
 		log.Info("Relay auth SUCCESS with peer %s — relay access granted", peerID.String())
 	}
+	if n.protoTracker != nil {
+		n.protoTracker.Auth.RecordSyncEvent()
+	}
 	return true
 }
 
 // bootstrapKeepAliveLoop periodically reconnects to bootstrap/static peers that have disconnected
 func (n *Node) bootstrapKeepAliveLoop() {
 	defer n.wg.Done()
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
+	const period = 15 * time.Second
+	// Jittered so bootstrap/relay reconnect probing has no fixed cadence tell.
+	timer := newJitterTimer(period)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-n.ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
+			timer.Reset(jitterInterval(period))
 			// Check if physical egress gateway IP changed (Wi-Fi <-> Ethernet switch)
 			if n.Gateway != nil {
 				n.Gateway.CheckAndUpdatePhysicalGateway()
@@ -629,14 +643,17 @@ func (n *Node) assertBootRelayUplinkHealth() {
 // positive failures on subsequent peers.
 func (n *Node) peerPingPongLoop() {
 	defer n.wg.Done()
-	ticker := time.NewTicker(PingPongKeepaliveInterval)
-	defer ticker.Stop()
+	// Jittered echo-keepalive cadence: a fixed 10s probe beat is a passive DPI
+	// timing signature. ±20% stays well inside the failure-detection budget.
+	timer := newJitterTimer(PingPongKeepaliveInterval)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-n.ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
+			timer.Reset(jitterInterval(PingPongKeepaliveInterval))
 			peers := n.Host.Network().Peers()
 			connected := make(map[peer.ID]bool, len(peers))
 			var probePeers []peer.ID

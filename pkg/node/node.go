@@ -31,6 +31,7 @@ import (
 	tpt "github.com/libp2p/go-libp2p/core/transport"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	yamux "github.com/libp2p/go-libp2p/p2p/muxer/yamux"
+	p2ptls "github.com/libp2p/go-libp2p/p2p/security/tls"
 	quict "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	quicreuse "github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	tcpt "github.com/libp2p/go-libp2p/p2p/transport/tcp"
@@ -1164,6 +1165,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		tcpt.WithListenControl(listenerProtectControl),
 	))
 
+	// TLS ClientHello SNI: one setting covers BOTH security paths — TLS-over-TCP
+	// (DefaultSecurity negotiates /tls/1.0.0 first) and QUIC — because both build
+	// their client tls.Config from the shared p2ptls Identity.ConfigForPeer. Empty
+	// (default) sends no server_name, matching upstream. Cosmetic only: peer identity
+	// is verified from the signed cert extension, never the SNI.
+	p2ptls.SetDialServerName(cfg.Transports.TLSServerName)
+
 	// Socket protection for QUIC (UDP): libp2p's QUIC transport routes every UDP
 	// socket — both listening and dialing — through a single ConnManager factory
 	// (quicreuse). By overriding that factory with OverrideListenUDP we bind all
@@ -1295,7 +1303,10 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 
 	pskStatus := "🌐 Public (Unencrypted)"
 	if cfg.PSK != "" {
-		pskStatus = "🔐 Encrypted Overlay (Noise/PSK)"
+		// Accurate wording: the PSK is now folded into the per-peer mesh key
+		// schedule (SeqSync HKDF salt), so membership is cryptographically
+		// enforced on the direct data path, not just at the relay/peek-map edge.
+		pskStatus = "🔐 Encrypted Overlay (PSK-bound mesh)"
 	}
 
 	obfsMode := "Disabled"
@@ -1303,7 +1314,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		obfsMode = fmt.Sprintf("🛡️ Active (%s mode, %dB)", cfg.Obfuscation.Mode, cfg.Obfuscation.FixedSize)
 	}
 
-	collector.SetSecurity(pskStatus, obfsMode, computeKeyFingerprint(cfg.NodeKeyFile))
+	collector.SetSecurity(pskStatus, obfsMode, computeKeyFingerprint(cfg.NodeKeyFile), cfg.Transports.TLSServerName)
 
 	node := &Node{
 		Host:                h,
@@ -3277,20 +3288,60 @@ func (n *Node) pushPeerEncryption() {
 	}
 
 	seen := make(map[peer.ID]struct{}, len(negotiated))
+	// Map each connected peer to the remote host(s) it reached us from, so the
+	// SNI observed in its ClientHello (keyed by host, see p2ptls sni.go) can be
+	// attributed back to it for display. Peers dialing from multiple IPs match on
+	// any one.
+	hostByPeer := make(map[peer.ID][]string)
+	if n.Host != nil && n.Host.Network() != nil {
+		for _, c := range n.Host.Network().Conns() {
+			if ra := c.RemoteMultiaddr(); ra != nil {
+				if ip, err := manet.ToIP(ra); err == nil {
+					host := ip.String()
+					p := c.RemotePeer()
+					// De-dup host per peer.
+					dup := false
+					for _, h := range hostByPeer[p] {
+						if h == host {
+							dup = true
+							break
+						}
+					}
+					if !dup {
+						hostByPeer[p] = append(hostByPeer[p], host)
+					}
+				}
+			}
+		}
+	}
+	var observedSNIs map[string]string
+	if len(hostByPeer) > 0 {
+		observedSNIs = p2ptls.InboundServerNames()
+	}
+	peerSNI := func(p peer.ID) string {
+		for _, h := range hostByPeer[p] {
+			if s, ok := observedSNIs[h]; ok && s != "" {
+				return s
+			}
+		}
+		return ""
+	}
+
 	snapshot := make([]observer.PeerObfInfoDTO, 0, len(negotiated))
 	for p, po := range negotiated {
 		seen[p] = struct{}{}
 		snapshot = append(snapshot, observer.PeerObfInfoDTO{
-			PeerID:      p.String(),
-			Negotiated:  po.negotiated,
-			Algo:        obfuscate.AlgoName(po.algo),
-			Encrypted:   po.algo != obfuscate.ObfAlgoNone,
-			TxKeyFP:     keyFingerprint(po.txKey),
-			RxKeyFP:     keyFingerprint(po.rxKey),
-			ConnEpoch:   po.peerEpoch,
-			LocalEpoch:  po.localEpoch,
-			PFS:         len(po.pfsPubKey) > 0,
-			PFSPubKeyFP: keyFingerprint(po.pfsPubKey),
+			PeerID:              p.String(),
+			Negotiated:          po.negotiated,
+			Algo:                obfuscate.AlgoName(po.algo),
+			Encrypted:           po.algo != obfuscate.ObfAlgoNone,
+			TxKeyFP:             keyFingerprint(po.txKey),
+			RxKeyFP:             keyFingerprint(po.rxKey),
+			ConnEpoch:           po.peerEpoch,
+			LocalEpoch:          po.localEpoch,
+			PFS:                 len(po.pfsPubKey) > 0,
+			PFSPubKeyFP:         keyFingerprint(po.pfsPubKey),
+			HandshakeServerName: peerSNI(p),
 		})
 	}
 	// Also surface connected peers that never negotiated (unencrypted).
@@ -3304,10 +3355,11 @@ func (n *Node) pushPeerEncryption() {
 			}
 			seen[p] = struct{}{}
 			snapshot = append(snapshot, observer.PeerObfInfoDTO{
-				PeerID:     p.String(),
-				Negotiated: false,
-				Algo:       "none",
-				Encrypted:  false,
+				PeerID:              p.String(),
+				Negotiated:          false,
+				Algo:                "none",
+				Encrypted:           false,
+				HandshakeServerName: peerSNI(p),
 			})
 		}
 	}
