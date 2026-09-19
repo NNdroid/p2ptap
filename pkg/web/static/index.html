@@ -920,7 +920,7 @@
                     <button class="btn-glass" id="pcapToggleBtn" data-onclick="pcapToggle()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-play"/></svg><span data-i18n="pcap_start">开始</span></button>
                     <button class="btn-glass" data-onclick="pcapClear()" ><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-trash"/></svg><span data-i18n="pcap_clear">清除</span></button>
                     <label class="ext121">
-                        <input type="checkbox" id="pcapAutoScroll" checked> <span data-i18n="pcap_autoscroll">自动滚动</span>
+                        <input type="checkbox" id="pcapAutoScroll" class="p2p-switch p2p-switch--sm" checked> <span data-i18n="pcap_autoscroll">自动滚动</span>
                     </label>
                     <input type="text" class="module-search" data-search-target="pcapBody" data-i18n-ph="search_placeholder" placeholder="Search…">
                 </div>
@@ -1105,11 +1105,7 @@
                         <div class="config-row-desc" data-i18n="cfg_disable_relay_desc">Turn OFF libp2p circuit-relay client/service, AutoRelay &amp; DCUtR hole-punching. Requires restart. If a slow peer becomes unreachable with this ON, it was being auto-relayed through a static relay. Does NOT touch p2ptap's own overlay relay.</div>
                     </div>
                     <div class="ext157">
-                        <label class="toggle ext158">
-                            <input type="checkbox" id="cfgDisableRelay" data-onchange="updateToggleLabel(this,'cfgDisableRelayLabel','Off','On')">
-                            <span class="slider"></span>
-                        </label>
-                        <span id="cfgDisableRelayLabel" class="toggle-label">Off</span>
+                        <input type="checkbox" id="cfgDisableRelay" class="p2p-switch ext158">
                     </div>
                 </div>
                 <div class="config-row">
@@ -1211,11 +1207,7 @@
                 <div class="config-row" data-obfs-field="auto-fields">
                     <div class="ext157">
                         <span class="config-row-label" data-i18n="obfs_allow_switch_lbl">Allow Automatic Mode Switching</span>
-                        <label class="toggle ext158">
-                            <input type="checkbox" id="cfgAllowModeSwitch" data-onchange="updateToggleLabel(this,'cfgAllowModeSwitchLabel','Off','On')">
-                            <span class="slider"></span>
-                        </label>
-                        <span id="cfgAllowModeSwitchLabel" class="toggle-label">Off</span>
+                        <input type="checkbox" id="cfgAllowModeSwitch" class="p2p-switch ext158">
                     </div>
                 </div>
                 <!-- Strict Key Negotiation -->
@@ -1225,11 +1217,7 @@
                         <div class="config-row-desc" data-i18n="obfs_strict_key_desc">Forbid falling back to the long-lived node key. Each peer pair must derive its own cipher from a one-shot ECDH ephemeral key; otherwise that peer stays plaintext. Hardens per-pair key isolation.</div>
                     </div>
                     <div class="ext157">
-                        <label class="toggle ext158">
-                            <input type="checkbox" id="cfgStrictKeyNegotiation" data-onchange="updateToggleLabel(this,'cfgStrictKeyNegotiationLabel','Off','On')">
-                            <span class="slider"></span>
-                        </label>
-                        <span id="cfgStrictKeyNegotiationLabel" class="toggle-label">Off</span>
+                        <input type="checkbox" id="cfgStrictKeyNegotiation" class="p2p-switch ext158">
                     </div>
                 </div>
             </div>
@@ -1253,11 +1241,7 @@
                         <div class="config-row-desc" data-i18n="enable_mdns_desc">Auto-discover peers on the same LAN via mDNS (local network only)</div>
                     </div>
                     <div class="ext157">
-                        <label class="toggle ext158">
-                            <input type="checkbox" id="cfgEnableMDNS" data-onchange="updateToggleLabel(this,'cfgEnableMDNSLabel','Off','On')">
-                            <span class="slider"></span>
-                        </label>
-                        <span id="cfgEnableMDNSLabel" class="toggle-label">Off</span>
+                        <input type="checkbox" id="cfgEnableMDNS" class="p2p-switch ext158">
                     </div>
                 </div>
                 <div class="config-full-row">
@@ -1281,20 +1265,14 @@
                         <label data-i18n="exit_enable_lbl" class="ext170">Enable Exit Node Gateway Mode</label>
                         <div data-i18n="exit_enable_desc" class="ext171">Route internet traffic through this peer</div>
                     </div>
-                    <label class="toggle-switch ext172">
-                        <input type="checkbox" id="cfgExitEnable">
-                        <span class="toggle-slider"></span>
-                    </label>
+                    <input type="checkbox" id="cfgExitEnable" class="p2p-switch ext172">
                 </div>
                 <div class="ext173">
                     <div>
                         <label data-i18n="exit_nat_lbl" class="ext170">Enable SNAT / Masquerade</label>
                         <div data-i18n="exit_nat_desc" class="ext171">Source address translation for outbound traffic</div>
                     </div>
-                    <label class="toggle-switch ext172">
-                        <input type="checkbox" id="cfgExitNAT" checked>
-                        <span class="toggle-slider"></span>
-                    </label>
+                    <input type="checkbox" id="cfgExitNAT" checked class="p2p-switch ext172">
                 </div>
                 <div class="ext174">
                     <label data-i18n="exit_wan_lbl" class="ext175">WAN Egress Interface</label>
@@ -1330,7 +1308,7 @@
                 </div>
                 <label for="cfgAcceptSubnets" class="config-row ext182">
                     <span class="config-row-label" data-i18n="accept_subnets_lbl">Accept Advertised Subnets from Remote Peers</span>
-                    <input type="checkbox" id="cfgAcceptSubnets" class="ext183">
+                    <input type="checkbox" id="cfgAcceptSubnets" class="p2p-switch">
                 </label>
                 <div class="config-full-row">
                     <div class="cfg-list-section">
@@ -1359,7 +1337,7 @@
                 </div>
                 <label for="cfgACLEnable" class="config-row ext182">
                     <span class="config-row-label" data-i18n="enable_acl_lbl">Enable ACL Firewall Engine</span>
-                    <input type="checkbox" id="cfgACLEnable" class="ext183">
+                    <input type="checkbox" id="cfgACLEnable" class="p2p-switch">
                 </label>
                 <div class="config-full-row">
                     <label class="form-label" data-i18n="acl_default_action_lbl">Default Policy for Unmatched Traffic</label>
@@ -1392,7 +1370,7 @@
             </div>
             <div class="ext193">
                 <label class="ext194">
-                    <input type="checkbox" id="aclEdEnable" class="ext195"> <span data-i18n="enable_acl_lbl">Enable ACL Firewall Engine</span>
+                    <input type="checkbox" id="aclEdEnable" class="p2p-switch"> <span data-i18n="enable_acl_lbl">Enable ACL Firewall Engine</span>
                 </label>
                 <label class="ext196">
                     <span data-i18n="acl_default_action_lbl">Default Policy</span>

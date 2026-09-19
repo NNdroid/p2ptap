@@ -288,6 +288,18 @@ func (n *Node) tapWriteUrgentLoop() {
 }
 
 func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, packedCopy []byte, rawPayload []byte, readN int, tag string) {
+	// PSK-required fail-closed (TX): the exit tunnel was the ONLY data-path
+	// egress that skipped canEgressToPeer, so an exit peer with no negotiated
+	// cipher (PSK mismatch, pre-handshake, or attacker-influenced selection)
+	// would ship the client's entire default route — and with
+	// obfCipherForPeer==nil the seal is skipped below, i.e. PLAINTEXT. Drop
+	// the frame and ask the reconciler to converge the link, exactly like the
+	// unicast gate does (triggerOnDemandConnect is cooldown-bounded).
+	if !n.canEgressToPeer(exitPID) {
+		releaseFrameBuf(packedCopy)
+		n.triggerOnDemandConnect(exitPID)
+		return
+	}
 	if n.Collector != nil {
 		n.Collector.CaptureFrameWithPeers(observer.DirTx, rawPayload, "self", exitPeerID)
 	}

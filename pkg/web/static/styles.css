@@ -348,47 +348,71 @@
             color: #fecaca;
         }
 
-        /* ── Toggle Switch (iOS-style) ── */
-        .toggle-switch {
+        /* ── iOS-style toggle as a SINGLE element (appearance:none checkbox) ──
+           Lets every boolean config row share one idiom: the row's existing
+           <label for=...> still toggles it on text click, and no
+           label/span/sibling markup can drift. The knob uses the app's spring
+           cubic-bezier and the ON state the cyan→indigo accent gradient. */
+        .p2p-switch {
+            appearance: none;
+            -webkit-appearance: none;
             position: relative;
             display: inline-block;
+            flex-shrink: 0;
             width: 48px;
             height: 26px;
-        }
-        .toggle-switch input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
-        .toggle-slider {
-            position: absolute;
-            inset: 0;
-            background: rgba(255,255,255,0.12);
             border-radius: 26px;
-            cursor: pointer;
-            transition: all 0.3s ease;
+            background: rgba(255,255,255,0.12);
             border: 1.5px solid rgba(255,255,255,0.15);
+            cursor: pointer;
+            transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+            vertical-align: middle;
         }
-        .toggle-slider::before {
+        .p2p-switch::before {
             content: '';
             position: absolute;
             height: 20px;
             width: 20px;
             left: 2px;
-            bottom: 2px;
+            top: 50%;
+            margin-top: -10px;
             background: #94a3b8;
             border-radius: 50%;
-            transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+            transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.3s ease;
         }
-        .toggle-switch input:checked + .toggle-slider {
+        .p2p-switch:checked {
             background: linear-gradient(135deg, rgba(6, 182, 212, 0.6), rgba(99, 102, 241, 0.5));
             border-color: rgba(56, 189, 248, 0.5);
             box-shadow: 0 0 12px rgba(6, 182, 212, 0.2);
         }
-        .toggle-switch input:checked + .toggle-slider::before {
+        .p2p-switch:checked::before {
             transform: translateX(22px);
             background: #f8fafc;
         }
+        .p2p-switch:focus-visible {
+            outline: 2px solid rgba(56, 189, 248, 0.7);
+            outline-offset: 2px;
+        }
+        /* compact variant for dense utility rows (e.g. the pcap panel) */
+        .p2p-switch--sm {
+            width: 38px;
+            height: 22px;
+            border-radius: 22px;
+        }
+        .p2p-switch--sm::before {
+            height: 16px;
+            width: 16px;
+            margin-top: -8px;
+        }
+        .p2p-switch--sm:checked::before {
+            transform: translateX(16px);
+        }
+        html[data-theme="light"] .p2p-switch {
+            background: rgba(100, 116, 139, 0.25);
+            border-color: rgba(100, 116, 139, 0.35);
+        }
+        html[data-theme="light"] .p2p-switch::before { background: #64748b; }
+        html[data-theme="light"] .p2p-switch:checked::before { background: #ffffff; }
 
         .lang-select {
             background: rgba(255, 255, 255, 0.08);
@@ -3312,12 +3336,6 @@ html[data-theme="light"] [style*="rgba(15,23,42,0.7)"] {
 }
 
 /* ---- Class-level light fixes not yet covered ---- */
-html[data-theme="light"] .toggle-slider {
-    background: rgba(15, 23, 42, 0.12) !important;
-    border-color: rgba(15, 23, 42, 0.20) !important;
-}
-html[data-theme="light"] .toggle-slider::before { background:#64748b; }
-html[data-theme="light"] .toggle-switch input:checked + .toggle-slider::before { background:#0f172a; }
 
 html[data-theme="light"] .pill-badge {
     background: rgba(99, 102, 241, 0.12) !important;
@@ -3954,6 +3972,12 @@ html[data-theme="light"] {
     .enc-pfs     { color: var(--success); font-size: 0.66rem; }
     .enc-no-pfs  { color: var(--warn); font-size: 0.66rem; }
     .enc-plain   { color: var(--text-secondary); }
+    /* Security handshake actually negotiated on the peer's connections */
+    .enc-sec-chip {
+        color: var(--info); font-size: 0.66rem; font-weight: 600;
+        border: 1px solid rgba(56,189,248,0.35); border-radius: 8px;
+        padding: 0 6px; line-height: 1.5;
+    }
 
     /* ===== Peer encryption detail modal ===== */
     .peer-enc-detail { padding: 4px 6px 6px; }
@@ -3976,6 +4000,17 @@ html[data-theme="light"] {
     .peer-enc-detail .ped-val.ped-rx    { color: var(--danger); }
     .peer-enc-detail .ped-val.ped-yes   { color: var(--success); }
     .peer-enc-detail .ped-val.ped-no    { color: var(--warn); }
+    /* Negotiated-connections row: one line per live transport connection */
+    .peer-enc-detail .ped-conns { display: flex; flex-direction: column; gap: 3px; }
+    .peer-enc-detail .enc-conn-line {
+        font-size: 0.72rem; padding: 2px 8px; border-radius: 6px;
+        background: rgba(148,163,184,0.08); border-left: 2px solid var(--border-subtle);
+    }
+    .peer-enc-detail .enc-conn-in  { border-left-color: var(--success); }
+    .peer-enc-detail .enc-conn-out { border-left-color: var(--info); }
+    .peer-enc-detail .enc-conn-hint {
+        font-size: 0.68rem; color: var(--warn); font-style: italic; margin-top: 2px;
+    }
     html[data-theme="light"] .enc-peer-row { border-color: rgba(15,23,42,0.06); }
     html[data-theme="light"] .peer-enc-detail .ped-row { border-bottom-color: rgba(15,23,42,0.08); }
     .ext85 { padding: 16px; margin-bottom: 20px; }

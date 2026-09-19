@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/go-ole/go-ole"
@@ -53,13 +54,28 @@ func tapCtlCode(request uint32, method uint32) uint32 {
 }
 
 type WindowsTAPDevice struct {
-	// mu serialises Read, Write and any concurrent Write callers against
-	// each other. The single device-wide mutex is what makes the reusable
-	// read/write Overlapped+event pairs safe (overlapped I/O on the same
-	// kernel handle from two callers without serialisation is the classic
-	// "STATUS_INVALID_PARAMETER" footgun on Windows). It is also the lever
-	// the urgent / probe / normal-forwarding write paths use to coordinate.
-	mu       sync.Mutex
+	// One mutex PER DIRECTION. What must be serialized is a given
+	// OVERLAPPED+event pair (a caller may not re-arm an OVERLAPPED with a
+	// second I/O before its first completes) — NOT the two directions
+	// against each other. Concurrent ReadFile + WriteFile on the same
+	// handle are fully supported precisely because they carry distinct
+	// OVERLAPPED structures. A single shared mutex used to make every Write
+	// queue behind a blocked Read (up to the 1 s read wait), throttling
+	// peer→OS delivery to ~1 frame/s whenever the local OS side was idle.
+	readMu  sync.Mutex // guards readOverlapped + readEvent use
+	writeMu sync.Mutex // guards writeOverlapped + writeEvent use (all write paths)
+	// closed is set by Close before CloseHandle(handle). Read/Write refuse
+	// new I/O once set (their lock is held, so no OVERLAPPED is re-armed
+	// after close starts). The narrow check-then-syscall window is covered
+	// by the kernel: an in-flight IRP keeps the file object alive until it
+	// completes, and the reader/writer loops exit on the already-cancelled
+	// node context.
+	closed atomic.Bool
+	// configMu serialises device (re)configuration against itself. It is
+	// deliberately NOT one of the IO mutexes: ConfigureIP shells out to
+	// netsh/route (multi-hundred-ms), and holding an IO lock across that
+	// would re-introduce a write stall.
+	configMu sync.Mutex
 	name     string
 	handle   windows.Handle
 	ipCIDR   string
@@ -70,14 +86,13 @@ type WindowsTAPDevice struct {
 	localIP  net.IP
 	localNet *net.IPNet
 
-	// Reusable overlapped I/O resources. Both Read and Write loop through
-	// the same kernel handle, so a single Overlapped+event pair per direction
-	// can be reused across every I/O call instead of allocating/freeing a
-	// fresh kernel event+Overlapped per frame. The historical behaviour
-	// paid ~1 µs each in cgo + a kernel object allocation per frame, which
-	// capped TAP throughput well below the underlying driver capability at
-	// sustained rates. The struct mutex above is what guarantees that a
-	// pending Read and a pending Write can never share an Overlapped/event.
+	// Reusable overlapped I/O resources. One Overlapped+event pair per
+	// direction, reused across every I/O call instead of allocating a fresh
+	// kernel event+Overlapped per frame (the historical behaviour paid ~1 µs
+	// + a kernel object allocation per frame, capping TAP throughput well
+	// below the driver's capability). Ownership: readMu protects
+	// readEvent/readOverlapped, writeMu protects writeEvent/writeOverlapped,
+	// Close takes both (writeMu then readMu).
 	readEvent       windows.Handle
 	readOverlapped  windows.Overlapped
 	writeEvent      windows.Handle
@@ -362,12 +377,13 @@ func (w *WindowsTAPDevice) configureMTU() error {
 }
 
 func (w *WindowsTAPDevice) Read(b []byte) (int, error) {
-	// Hold the device mutex across Read so a concurrent Write (urgent / probe)
-	// cannot submit a WriteFile against the same kernel handle while we are
-	// mid-ReadFile; overlapping overlapped I/O on the same handle is the classic
-	// "STATUS_INVALID_PARAMETER" footgun on Windows.
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	// readMu serializes readers (and Close) but NOT the write side: the read
+	// and write OVERLAPPED/event pairs are independent (see struct comment).
+	w.readMu.Lock()
+	defer w.readMu.Unlock()
+	if w.closed.Load() {
+		return 0, errors.New("TAP device closed")
+	}
 
 	var readN uint32
 
@@ -432,13 +448,17 @@ func (w *WindowsTAPDevice) Write(b []byte) (int, error) {
 	// was flushed by disabling/re-enabling the adapter. Letting ARP frames flow
 	// through to the node layer fixes that.
 
-	// Serialise against Read and any concurrent Write: the device-level mutex
-	// ensures we never have a ReadFile and a WriteFile pending on the SAME
-	// reusable Overlapped/event pair at the same time. The event is stored
-	// inside the device struct and reused across every Write call, eliminating
-	// the per-frame CreateEvent+CloseHandle churn that capped TAP throughput.
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	// Serialise against other writers and Close: the device-level writeMu
+	// ensures no two writers re-arm the SAME reusable write Overlapped/event
+	// pair concurrently. The event is stored inside the device struct and
+	// reused across every Write call, eliminating the per-frame
+	// CreateEvent+CloseHandle churn that capped TAP throughput. Writers no
+	// longer wait for a blocked Read — that was the ~1 s per-frame stall.
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+	if w.closed.Load() {
+		return 0, errors.New("TAP device closed")
+	}
 
 	w.writeOverlapped.Internal = 0
 	w.writeOverlapped.InternalHigh = 0
@@ -487,15 +507,19 @@ func (w *WindowsTAPDevice) Write(b []byte) (int, error) {
 
 func (w *WindowsTAPDevice) Close() error {
 	winTapLog.Info("Closing Windows TAP device '%s'", w.name)
-	if w.readEvent != 0 {
-		_ = windows.CloseHandle(w.readEvent)
-		w.readEvent = 0
-	}
-	if w.writeEvent != 0 {
-		_ = windows.CloseHandle(w.writeEvent)
-		w.writeEvent = 0
-	}
-	return windows.CloseHandle(w.handle)
+	// Deliberately NOT taking readMu/writeMu here: a pending Read can occupy
+	// readMu for up to 1 s (and a Write up to 2 s), and Close runs inside the
+	// bounded shutdown sequence — lock-waiting here bought nothing since the
+	// in-flight call would keep touching its OVERLAPPED after we release the
+	// lock anyway. The real teardown lever is CloseHandle(w.handle): the TAP
+	// driver fails all pending IRPs on handle close, so a blocked
+	// WaitForSingleObject(readEvent) wakes with completion/error and the
+	// loop's ERROR_INVALID_HANDLE path handles it. The event handles are
+	// left open (the OS reclaims them with the process) to avoid
+	// use-after-close races with concurrent waiters.
+	w.closed.Store(true)
+	_ = windows.CloseHandle(w.handle)
+	return nil
 }
 
 // SelfTest verifies the Windows TAP write/read path (see runRealDeviceSelfTest).
@@ -504,8 +528,8 @@ func (w *WindowsTAPDevice) SelfTest() map[string]interface{} {
 }
 
 func (w *WindowsTAPDevice) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	w.configMu.Lock()
+	defer w.configMu.Unlock()
 
 	w.ipCIDR = ipCIDR
 	w.ipv6 = ipv6CIDR

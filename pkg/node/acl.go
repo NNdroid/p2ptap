@@ -10,6 +10,67 @@ import (
 	"p2ptap/pkg/packet"
 )
 
+// parseIPv6Transport walks the IPv6 extension-header chain (bounded at 8
+// headers — the chain is attacker-sized input) starting at firstHeader and
+// returns (protocolLabel, dstPort, portsAvailable). Opaque or un-walkable
+// chains (AH/ESP, truncation, hop overflow) report "any" with no ports, so
+// only port-less / any-proto rules can match them; fragment chains without a
+// transport header likewise never satisfy a port rule.
+func parseIPv6Transport(firstHeader byte, payload []byte) (string, int, bool) {
+	next := firstHeader
+	for i := 0; i < 8; i++ {
+		switch next {
+		case 6, 17:
+			label := "tcp"
+			if next == 17 {
+				label = "udp"
+			}
+			if len(payload) >= 4 {
+				return label, int(binary.BigEndian.Uint16(payload[2:4])), true
+			}
+			return label, 0, false
+		case 58:
+			return "icmp", 0, false
+		case 44: // Fragment
+			if len(payload) < 8 {
+				return "any", 0, false
+			}
+			inner := payload[0]
+			offset := binary.BigEndian.Uint16(payload[2:4]) & 0xFFF8
+			if offset == 0 {
+				// First fragment carries the transport header at its start.
+				next = inner
+				payload = payload[8:]
+				continue
+			}
+			switch inner {
+			case 6:
+				return "tcp", 0, false
+			case 17:
+				return "udp", 0, false
+			case 58:
+				return "icmp", 0, false
+			default:
+				return "any", 0, false
+			}
+		case 0, 43, 60: // Hop-by-Hop, Routing, Destination Options
+			if len(payload) < 8 {
+				return "any", 0, false
+			}
+			hdrEnd := (int(payload[1]) + 1) * 8
+			if len(payload) < hdrEnd {
+				return "any", 0, false
+			}
+			next = payload[0]
+			payload = payload[hdrEnd:]
+		default:
+			// AH/ESP/other protocol numbers: opaque or unhandled.
+			return "any", 0, false
+		}
+	}
+	return "any", 0, false
+}
+
 // MatchACL evaluates an incoming or outgoing Layer-2 Ethernet frame against the node's ACL rules (ZeroTier-style engine).
 // Returns (allowed, matchedRuleID) — matchedRuleID is the RuleID of the first rule that matched, or "" if the
 // default action was applied. Callers can use the second return value to attribute the decision to a specific
@@ -27,6 +88,10 @@ func MatchACL(aclCfg *config.ACLConfig, frame []byte, peerID string, isTx bool) 
 	var dstIP net.IP
 	var protoStr string
 	var dstPort int
+	// portsAvailable: the transport header was ACTUALLY parsed from the IP
+	// payload (not hidden behind continuation fragments, extension chains, or
+	// opaque AH/ESP). Port-bearing rules only ever match when this is true.
+	var portsAvailable bool
 
 	if etherType == packet.EtherTypeIPv4 { // IPv4
 		if len(frame) < 34 {
@@ -41,18 +106,27 @@ func MatchACL(aclCfg *config.ACLConfig, frame []byte, peerID string, isTx bool) 
 		dstIP = net.IP(ipHeader[16:20])
 
 		payload := ipHeader[ihl:]
+		// Fragments beyond the FIRST carry no transport header: reading
+		// "ports" from continuation bytes is attacker-chosen garbage, which
+		// let a hostile peer evade port-specific drop rules by fragmenting
+		// (the chain never reassembles at the victim without the offset-0
+		// fragment, which IS fully matched). Ports are therefore only
+		// available when the fragment offset is zero.
+		fragOff := int(binary.BigEndian.Uint16(ipHeader[6:8]) & 0x1FFF)
 		switch protocol {
 		case 1: // ICMP
 			protoStr = "icmp"
 		case 6: // TCP
 			protoStr = "tcp"
-			if len(payload) >= 4 {
+			if fragOff == 0 && len(payload) >= 4 {
 				dstPort = int(binary.BigEndian.Uint16(payload[2:4]))
+				portsAvailable = true
 			}
 		case 17: // UDP
 			protoStr = "udp"
-			if len(payload) >= 4 {
+			if fragOff == 0 && len(payload) >= 4 {
 				dstPort = int(binary.BigEndian.Uint16(payload[2:4]))
+				portsAvailable = true
 			}
 		default:
 			protoStr = "any"
@@ -62,26 +136,11 @@ func MatchACL(aclCfg *config.ACLConfig, frame []byte, peerID string, isTx bool) 
 			return true, ""
 		}
 		ipHeader := frame[14:]
-		nextHeader := ipHeader[6]
 		dstIP = net.IP(ipHeader[24:40])
-
-		payload := ipHeader[40:]
-		switch nextHeader {
-		case 58: // ICMPv6
-			protoStr = "icmp"
-		case 6: // TCP
-			protoStr = "tcp"
-			if len(payload) >= 4 {
-				dstPort = int(binary.BigEndian.Uint16(payload[2:4]))
-			}
-		case 17: // UDP
-			protoStr = "udp"
-			if len(payload) >= 4 {
-				dstPort = int(binary.BigEndian.Uint16(payload[2:4]))
-			}
-		default:
-			protoStr = "any"
-		}
+		// Walk the extension-header chain — reading only byte 6 let a peer
+		// hide TCP/UDP behind a Hop-by-Hop/Routing header (protoStr="any")
+		// and skip port rules entirely.
+		protoStr, dstPort, portsAvailable = parseIPv6Transport(ipHeader[6], ipHeader[40:])
 	} else {
 		// Non-IP frame (e.g. ARP/NDP), allow by default
 		return true, ""
@@ -109,16 +168,23 @@ func MatchACL(aclCfg *config.ACLConfig, frame []byte, peerID string, isTx bool) 
 			continue
 		}
 
-		// Match Destination Port / Port Range
-		if rule.Port != "" && rule.Port != "0" && dstPort > 0 {
+		// Match Destination Port / Port Range.
+		if rule.Port != "" && rule.Port != "0" {
+			// An unevaluable packet must not match a port rule at all — not
+			// as DROP (garbage-port evasion) nor as ACCEPT (over-matching
+			// fragments that carry no ports).
+			if !portsAvailable {
+				continue
+			}
 			if strings.Contains(rule.Port, "-") {
 				parts := strings.Split(rule.Port, "-")
-				if len(parts) == 2 {
-					minP, _ := strconv.Atoi(parts[0])
-					maxP, _ := strconv.Atoi(parts[1])
-					if dstPort < minP || dstPort > maxP {
-						continue
-					}
+				if len(parts) != 2 {
+					continue // malformed range never matches by accident
+				}
+				minP, _ := strconv.Atoi(parts[0])
+				maxP, _ := strconv.Atoi(parts[1])
+				if dstPort < minP || dstPort > maxP {
+					continue
 				}
 			} else {
 				pVal, _ := strconv.Atoi(rule.Port)

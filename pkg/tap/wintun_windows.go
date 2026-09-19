@@ -39,11 +39,15 @@ type WintunAdapterHandle uintptr
 type WintunSessionHandle uintptr
 
 type WintunTAPDevice struct {
-	mu            sync.Mutex
-	writeMu       sync.Mutex
-	name          string
-	adapter       WintunAdapterHandle
-	session       WintunSessionHandle
+	mu      sync.Mutex
+	writeMu sync.Mutex
+	name    string
+	adapter WintunAdapterHandle
+	session WintunSessionHandle
+	// closed is set by Close under mu before EndSession. Every I/O path must
+	// obtain the session via deviceState() and refuse to operate when it
+	// reports !ok — see deviceState.
+	closed        bool
 	readWaitEvent windows.Handle
 	localMAC      net.HardwareAddr
 	localIP       net.IP
@@ -55,6 +59,28 @@ type WintunTAPDevice struct {
 	ipMapMu       sync.RWMutex
 	ipToMacMap    map[string]net.HardwareAddr
 	macLookupFunc func(ip net.IP) net.HardwareAddr
+}
+
+// deviceState returns a coherent snapshot of the live session handle plus the
+// adapter MAC and IP. All I/O and reply-synthesis paths MUST use this instead
+// of touching w.session / w.localMAC / w.localIP directly: Close zeroes the
+// session under the same lock (so an unsynchronised read is a data race, and
+// issuing Wintun* calls with a stale/zeroed handle is undefined behaviour at
+// the driver layer), while ConfigureIP mutates localMAC IN PLACE and SetMAC
+// replaces the slice. ok=false means the device is closed (or not yet ready)
+// and the caller must abort the operation.
+func (w *WintunTAPDevice) deviceState() (sess WintunSessionHandle, mac [6]byte, ip net.IP, ok bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed || w.session == 0 || len(w.localMAC) < 6 {
+		return 0, mac, nil, false
+	}
+	copy(mac[:], w.localMAC)
+	if w.localIP != nil {
+		ip = make(net.IP, len(w.localIP))
+		copy(ip, w.localIP)
+	}
+	return w.session, mac, ip, true
 }
 
 func isWintunAvailable() bool {
@@ -180,12 +206,18 @@ func (w *WintunTAPDevice) Name() string {
 }
 
 func (w *WintunTAPDevice) MAC() string {
-	return w.localMAC.String()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	m := make(net.HardwareAddr, len(w.localMAC))
+	copy(m, w.localMAC)
+	return m.String()
 }
 
 func (w *WintunTAPDevice) SetMAC(mac string) error {
 	if hw, err := net.ParseMAC(mac); err == nil {
+		w.mu.Lock()
 		w.localMAC = hw
+		w.mu.Unlock()
 	}
 	return nil
 }
@@ -305,9 +337,18 @@ func (w *WintunTAPDevice) Read(b []byte) (int, error) {
 		default:
 		}
 
+		// Every driver call runs against the snapshot; Close may zero the
+		// session between iterations, in which case deviceState reports !ok
+		// and we abort (the reader loop exits via the already-cancelled node
+		// context anyway — this guard covers the force-shutdown window).
+		sess, macSnap, _, devOK := w.deviceState()
+		if !devOK {
+			return 0, fmt.Errorf("wintun device closed")
+		}
+
 		var packetSize uint32
 		retPtr, _, _ := procWintunReceivePacket.Call(
-			uintptr(w.session),
+			uintptr(sess),
 			uintptr(unsafe.Pointer(&packetSize)),
 		)
 
@@ -321,7 +362,7 @@ func (w *WintunTAPDevice) Read(b []byte) (int, error) {
 			// Prepend 14-byte Ethernet Header (Destination MAC, Source MAC, EtherType)
 			const ethHdrLen = 14
 			if len(b) < ethHdrLen+int(packetSize) {
-				procWintunReleaseReceivePacket.Call(uintptr(w.session), retPtr)
+				procWintunReleaseReceivePacket.Call(uintptr(sess), retPtr)
 				return 0, fmt.Errorf("read buffer too small (%d < %d)", len(b), ethHdrLen+packetSize)
 			}
 
@@ -342,18 +383,18 @@ func (w *WintunTAPDevice) Read(b []byte) (int, error) {
 			// the overlay is peer-switched, not host-switched, and unicast
 			// forwarding is decided by IP/route lookup, not by these synthetic
 			// source MACs.
-			copy(b[6:12], w.localMAC)
+			copy(b[6:12], macSnap[:])
 
 			version := packetData[0] >> 4
 
 			if isARPPayload(packetData) {
-				frame := buildARPFrame(w.localMAC, nil, packetData)
+				frame := buildARPFrame(net.HardwareAddr(macSnap[:]), nil, packetData)
 				if len(b) < len(frame) {
-					procWintunReleaseReceivePacket.Call(uintptr(w.session), retPtr)
+					procWintunReleaseReceivePacket.Call(uintptr(sess), retPtr)
 					return 0, fmt.Errorf("read buffer too small for ARP frame (%d < %d)", len(b), len(frame))
 				}
 				copy(b, frame)
-				procWintunReleaseReceivePacket.Call(uintptr(w.session), retPtr)
+				procWintunReleaseReceivePacket.Call(uintptr(sess), retPtr)
 				return len(frame), nil
 			}
 
@@ -401,7 +442,7 @@ func (w *WintunTAPDevice) Read(b []byte) (int, error) {
 
 			// Copy IP payload
 			copy(b[14:], packetData)
-			procWintunReleaseReceivePacket.Call(uintptr(w.session), retPtr)
+			procWintunReleaseReceivePacket.Call(uintptr(sess), retPtr)
 
 			return ethHdrLen + int(packetSize), nil
 		}
@@ -425,6 +466,13 @@ func (w *WintunTAPDevice) Read(b []byte) (int, error) {
 func (w *WintunTAPDevice) Write(b []byte) (int, error) {
 	if len(b) < 14 {
 		return len(b), nil
+	}
+
+	// Session snapshot + closed guard (see deviceState). The ARP/NA branches
+	// below delegate to helpers that take their own snapshot.
+	sess, _, _, devOK := w.deviceState()
+	if !devOK {
+		return 0, fmt.Errorf("wintun device closed")
 	}
 
 	srcMAC := net.HardwareAddr(b[6:12])
@@ -477,7 +525,7 @@ func (w *WintunTAPDevice) Write(b []byte) (int, error) {
 		// Frames-per-drop is then bounded by (4 MB / MTU) ~ 2700 in the ring, far
 		// more than the kernel needs to burst at line rate.
 		retAlloc, _, errAlloc := procWintunAllocateSendPacket.Call(
-			uintptr(w.session),
+			uintptr(sess),
 			uintptr(packetLen),
 		)
 		if retAlloc == 0 {
@@ -497,7 +545,7 @@ func (w *WintunTAPDevice) Write(b []byte) (int, error) {
 		// allocated by WintunAllocateSendPacket and releases it internally. There is
 		// no failure path and no separate release call. We must call it exactly once
 		// for every successful allocation, otherwise the send-ring slot leaks.
-		procWintunSendPacket.Call(uintptr(w.session), retAlloc)
+		procWintunSendPacket.Call(uintptr(sess), retAlloc)
 		w.writeMu.Unlock()
 		return len(b), nil
 	}
@@ -527,6 +575,10 @@ func (w *WintunTAPDevice) handleProxyARP(frame []byte) {
 	if len(frame) < 42 {
 		return
 	}
+	_, macSnap, localIP, devOK := w.deviceState()
+	if !devOK {
+		return
+	}
 
 	op := arpOpcode(frame)
 	if op == 2 {
@@ -550,13 +602,13 @@ func (w *WintunTAPDevice) handleProxyARP(frame []byte) {
 	w.recordMAC(senderIP.String(), senderMAC)
 
 	isWebUITarget := (len(w.webUIIP) == 4 && targetIP.Equal(w.webUIIP)) || (len(targetIP) == 4 && targetIP[3] == 254)
-	isLocalTarget := targetIP.Equal(w.localIP)
-	isFromLocalOS := senderMAC.String() == w.localMAC.String() || senderIP.Equal(w.localIP)
+	isLocalTarget := localIP != nil && targetIP.Equal(localIP)
+	isFromLocalOS := senderMAC.String() == net.HardwareAddr(macSnap[:]).String() || (localIP != nil && senderIP.Equal(localIP))
 
 	// Determine MAC to return in ARP Reply
 	var replyMAC net.HardwareAddr
 	if isLocalTarget {
-		replyMAC = w.localMAC
+		replyMAC = net.HardwareAddr(macSnap[:])
 	} else if isWebUITarget {
 		replyMAC = net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x02, 0x54}
 	} else {
@@ -602,8 +654,8 @@ func (w *WintunTAPDevice) handleProxyARP(frame []byte) {
 
 	// If ARP Request came from remote peer for local IP or WebUI virtual IP, reply with local MAC
 	if isLocalTarget || isWebUITarget {
-		copy(reply[6:12], w.localMAC)
-		copy(reply[22:28], w.localMAC)
+		copy(reply[6:12], macSnap[:])
+		copy(reply[22:28], macSnap[:])
 		select {
 		case w.replyQueue <- reply:
 			wintunLog.Debug("Replied to remote ARP Request for %s from %s (%s)", targetIP, senderIP, senderMAC)
@@ -629,10 +681,14 @@ func (w *WintunTAPDevice) injectARPPayloadToWintun(arpPayload []byte) {
 	}
 
 	packetLen := uint32(len(arpPayload))
+	injSess, _, _, injOK := w.deviceState()
+	if !injOK {
+		return
+	}
 	w.writeMu.Lock()
 	defer w.writeMu.Unlock()
 
-	retAlloc, _, _ := procWintunAllocateSendPacket.Call(uintptr(w.session), uintptr(packetLen))
+	retAlloc, _, _ := procWintunAllocateSendPacket.Call(uintptr(injSess), uintptr(packetLen))
 	if retAlloc == 0 {
 		wintunLog.Warn("WintunAllocateSendPacket failed for ARP injection (%d bytes) – send ring buffer full?", packetLen)
 		return
@@ -645,11 +701,15 @@ func (w *WintunTAPDevice) injectARPPayloadToWintun(arpPayload []byte) {
 
 	// WintunSendPacket returns void and always takes ownership of the buffer.
 	// Call it exactly once to release the slot allocated above.
-	procWintunSendPacket.Call(uintptr(w.session), retAlloc)
+	procWintunSendPacket.Call(uintptr(injSess), retAlloc)
 }
 
 func (w *WintunTAPDevice) handleIPv6NDP(packetData []byte) {
 	if len(packetData) < 64 {
+		return
+	}
+	_, macSnap, localIP, devOK := w.deviceState()
+	if !devOK {
 		return
 	}
 	if packetData[6] != 58 || packetData[40] != 135 { // Next Header == ICMPv6, Type == Neighbor Solicitation
@@ -662,8 +722,8 @@ func (w *WintunTAPDevice) handleIPv6NDP(packetData []byte) {
 	var replyMAC net.HardwareAddr
 	if len(w.webUIIP) == 16 && targetIPv6.Equal(w.webUIIP) {
 		replyMAC = net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x02, 0x54}
-	} else if targetIPv6.Equal(w.localIP) {
-		replyMAC = w.localMAC
+	} else if localIP != nil && targetIPv6.Equal(localIP) {
+		replyMAC = net.HardwareAddr(macSnap[:])
 	} else {
 		learnedMAC := w.lookupMAC(targetIPv6.String())
 		if learnedMAC != nil {
@@ -688,6 +748,11 @@ func (w *WintunTAPDevice) handleIPv6NDP(packetData []byte) {
 func (w *WintunTAPDevice) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	if w.closed {
+		return nil
+	}
+	w.closed = true
 
 	if w.session != 0 {
 		procWintunEndSession.Call(uintptr(w.session))

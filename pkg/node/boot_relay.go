@@ -452,6 +452,7 @@ func (sd *StrategyDispatcher) sendToPeerViaBootRelay(target, bootHop peer.ID, pa
 			log.Debug("[boot-relay] send to peer %s via %s permanently failed", target.String(), bootHop.String())
 		},
 	) {
+		n.relayDiag.uplinkGone()
 		return fmt.Errorf("boot-relay send to %s via %s: uplink unavailable", target.String(), bootHop.String())
 	}
 	return nil
@@ -476,6 +477,7 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 		if log.IsDebug() {
 			log.Debug("Rx: dropping relayed frame from origin %s — PSK network requires a negotiated cipher", srcPeer.String())
 		}
+		n.relayDiag.originPsk()
 		return
 	}
 	// Valid end-to-end frame: record return-path liveness and success
@@ -597,6 +599,7 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 			n.Collector.CaptureFrameWithPeers(observer.DirRx, tapPayload, n.peerIDString(srcPeer), "self")
 		}
 		_, _ = n.tapWrite(tapPayload)
+		n.relayDiag.delivered()
 		// Probe acks are delivered ONLY on write success (see deferredProbeAck).
 		if deferred := n.takeDeferredProbeAcks(); len(deferred) > 0 {
 			for _, d := range deferred {

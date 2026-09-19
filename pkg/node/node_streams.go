@@ -300,7 +300,7 @@ func (n *Node) handleStream(s network.Stream) {
 		// frame to obtain the real TAP payload + seqID. Non-fragment frames use
 		// the payload/seqID from the first Unpack directly.
 		if n.fragRX != nil && isFragPayload(payload) {
-			finalPacked, complete := n.fragRX.reassemble(remotePeer, payload)
+			finalPacked, complete := n.fragRX.reassemble(remotePeer, payload, reasmChannelDirect)
 			if !complete {
 				continue // more fragments pending
 			}
@@ -518,6 +518,11 @@ func (n *Node) handleStream(s network.Stream) {
 		// Write unpadded payload Ethernet frame to TAP
 		if n.TAP == nil {
 			log.Warn("TAP device is nil, cannot write frame")
+			// Discard pending probe acks: with no device to write into, the
+			// truthful outcome for every pending probe is "no ack". Leaving
+			// them queued lets a much later, unrelated successful write
+			// deliver stale acks for frames that never reached the kernel.
+			n.takeDeferredProbeAcks()
 			continue
 		}
 		// PERF: per-frame path — MAC .String() allocs on every call. Keep guarded.
@@ -527,6 +532,11 @@ func (n *Node) handleStream(s network.Stream) {
 		wn, werr := n.tapWrite(payload)
 		if werr != nil {
 			log.Warn("TAP write error: %v", werr)
+			// Same honesty rule as the nil-TAP branch: a failed write means the
+			// frame (and any probe acks queued with it) never reached the
+			// kernel — drop the pending acks instead of deferring them onto a
+			// future unrelated frame's success drain.
+			n.takeDeferredProbeAcks()
 		} else {
 			log.Debug("TAP write ok: %d bytes to %s", wn, n.TAP.Name())
 			// Deliver the deferred probe ack(s) for THIS frame only after the
@@ -889,6 +899,7 @@ func (n *Node) handleRelayStream(s network.Stream) {
 		// rather than letting it reach UnpackRelayFrame as garbage.
 		if rdec, rdecOK, rgarbage := n.decryptPeerFrame(relayDecScratch, data, remotePeer); rgarbage {
 			log.Debug("Rx: dropping undecryptable relay envelope from %s", remotePeer.String())
+			n.relayDiag.hopGarbage()
 			n.recordPeerRxDecrypt(remotePeer, false)
 			n.maybeResyncOnDecryptFail(remotePeer)
 			continue
@@ -913,7 +924,7 @@ func (n *Node) handleRelayStream(s network.Stream) {
 		envelope := data
 		if _, outer, uerr := obfuscate.Unpack(data); uerr == nil {
 			if n.fragRX != nil && isFragPayload(outer) {
-				finalPacked, complete := n.fragRX.reassemble(remotePeer, outer)
+				finalPacked, complete := n.fragRX.reassemble(remotePeer, outer, reasmChannelRelay)
 				if !complete {
 					continue // more fragments pending
 				}
@@ -947,8 +958,10 @@ func (n *Node) handleRelayStream(s network.Stream) {
 		finalDst, srcPeer, ttl, innerPayload, err := routing.UnpackRelayFrame(envelope)
 		if err != nil {
 			log.Debug("Relay stream unpack error from %s: %v", remotePeer.String(), err)
+			n.relayDiag.envBad()
 			continue
 		}
+		n.relayDiag.recv()
 		// Return-path liveness signal: we just received a frame ORIGINATING at
 		// srcPeer (even if we are merely forwarding it), so its return path to
 		// us is currently alive. Recorded for the ping-pong probe's outbound-vs-
@@ -975,7 +988,15 @@ func (n *Node) handleRelayStream(s network.Stream) {
 				if derr != nil {
 					log.Debug("Relayed frame decrypt error from origin %s (via %s): %v",
 						srcPeer.String(), remotePeer.String(), derr)
+					n.relayDiag.finalDecFail()
 					n.recordPeerRxDecrypt(srcPeer, false)
+					// Self-heal parity with the direct-RX path: a persistent
+					// inner-open failure here means srcPeer↔us keys diverged
+					// (e.g. one side restarted). Without the throttled resync
+					// nudge, relay-only peers had to wait for the reconciler's
+					// next full round — minutes of one-way blackhole that
+					// looked exactly like "connects but no data".
+					n.maybeResyncOnDecryptFail(srcPeer)
 					continue
 				}
 				n.recordPeerRxDecrypt(srcPeer, true)
@@ -994,6 +1015,7 @@ func (n *Node) handleRelayStream(s network.Stream) {
 				// it. (Previously this fell through and wrote `innerPayload` raw.)
 				log.Debug("Relay Unpack: err=%v, dropping undecodable inner payload len=%d from origin=%s (via %s)",
 					uerr, len(innerPayload), srcPeer.String(), remotePeer.String())
+				n.relayDiag.finalUnpack()
 				n.recordPeerRxDecrypt(srcPeer, false)
 				continue
 			}
@@ -1022,6 +1044,7 @@ func (n *Node) handleRelayStream(s network.Stream) {
 			// sender), so this guard cannot suppress a correct forward.
 			if nextHop == remotePeer {
 				log.Debug("Relay forward to %s looped back to sender %s; dropping (ttl=%d)", finalDst.String(), remotePeer.String(), ttl)
+				n.relayDiag.loopGuard()
 				continue
 			}
 
@@ -1071,18 +1094,26 @@ func (n *Node) handleRelayStream(s network.Stream) {
 				if serr != nil {
 					log.Warn("Relay forward to %s via %s aborted: %v",
 						finalDst.String(), nextHop.String(), serr)
+					n.relayDiag.sealFail()
 					continue
 				}
 				// Use persistent relay pool instead of per-frame NewStream.
 				// onSent=nil: forwarding does not double-count RecordSent (origin already counted).
 				// onFail: silently drop; source will retransmit.
-				n.relayPool.Submit(nextHop, sealed,
+				if !n.relayPool.Submit(nextHop, sealed,
 					nil, // onSent — no double-counting
 					func() {
 						log.Debug("Relay forward to %s via %s permanently failed",
 							finalDst.String(), nextHop.String())
 					},
-				)
+				) {
+					n.relayDiag.fwdPoolFull()
+				}
+			} else {
+				// ttl<=1 and we are not the destination: the envelope dies
+				// here (the origin's MaxRelayTTL budget was spent — usually a
+				// stale route table pointing hops at each other).
+				n.relayDiag.ttlExpired()
 			}
 		}
 	}
@@ -1218,10 +1249,19 @@ func (n *Node) sendTapProbeAck(prober peer.ID, tok uint64, flag uint8) {
 }
 
 // queueDeferredProbeAck parks a pending probe ack until the frame's TAP write
-// succeeds. The queue is tiny and consumed by the same receive-loop iteration
-// that wrote the frame, so it never grows beyond one entry per in-flight probe.
+// succeeds. The queue is drained ONLY on a successful write, so a peer flooding
+// probe requests while our TAP is down (n.TAP==nil, or persistent write errors)
+// would otherwise grow it without bound — every entry also holds the state that
+// later spawns one ack goroutine. Cap it and evict oldest: at most
+// maxDeferredProbeAcks pending acks, which is far more than the handful of
+// simultaneous probes the diagnostics/speedtest paths issue.
+const maxDeferredProbeAcks = 32
+
 func (n *Node) queueDeferredProbeAck(d deferredProbeAck) {
 	n.deferredProbeAcksMu.Lock()
+	if len(n.deferredProbeAcks) >= maxDeferredProbeAcks {
+		n.deferredProbeAcks = n.deferredProbeAcks[1:] // evict oldest pending ack
+	}
 	n.deferredProbeAcks = append(n.deferredProbeAcks, d)
 	n.deferredProbeAcksMu.Unlock()
 }

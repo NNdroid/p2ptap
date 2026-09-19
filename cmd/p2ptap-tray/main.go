@@ -1489,15 +1489,32 @@ func openConfigInEditor(configPath string) {
 }
 
 func ensureSingleInstance(mutexName string) (syscall.Handle, bool) {
-	namePtr, _ := syscall.UTF16PtrFromString("Global\\" + mutexName)
-	h, _, err := procCreateMutexW.Call(0, 1, uintptr(unsafe.Pointer(namePtr)))
-	if h == 0 {
-		return 0, false
+	// Creating an object in the Global\ namespace requires
+	// SeCreateGlobalPrivilege, which a STANDARD (unelevated) user token does
+	// not have — and that is exactly the normal tray case when the service is
+	// installed. A raw h==0 must not be misread as "already running" (the
+	// old fail-closed behaviour made the tray quit with a bogus "已在运行"
+	// dialog for every non-admin). Only ERROR_ALREADY_EXISTS means another
+	// instance actually holds it; any other failure falls back to the
+	// session-local namespace (the tray is a per-logon-UI singleton anyway),
+	// and if even that fails, proceed rather than refuse to run.
+	for _, name := range []string{"Global\\" + mutexName, mutexName} {
+		namePtr, err := syscall.UTF16PtrFromString(name)
+		if err != nil {
+			continue
+		}
+		h, _, err := procCreateMutexW.Call(0, 1, uintptr(unsafe.Pointer(namePtr)))
+		if err == syscall.Errno(183) { // ERROR_ALREADY_EXISTS — real second instance
+			if h != 0 {
+				_ = syscall.CloseHandle(syscall.Handle(h))
+			}
+			return 0, false
+		}
+		if h != 0 {
+			return syscall.Handle(h), true
+		}
 	}
-	if err == syscall.Errno(183) { // ERROR_ALREADY_EXISTS
-		return syscall.Handle(h), false
-	}
-	return syscall.Handle(h), true
+	return 0, true
 }
 
 func isAdministrator() bool {

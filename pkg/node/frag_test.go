@@ -37,7 +37,7 @@ func TestFragReassemblePassthroughNonFragment(t *testing.T) {
 	f := newFragReassembler()
 	p := newTestPeerID(t)
 	raw := []byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05}
-	out, complete := f.reassemble(p, raw)
+	out, complete := f.reassemble(p, raw, reasmChannelDirect)
 	if !complete {
 		t.Fatalf("non-fragment payload must be reported complete")
 	}
@@ -53,7 +53,7 @@ func TestFragReassembleSingleFragment(t *testing.T) {
 	p := newTestPeerID(t)
 	chunk := []byte("single-chunk-frame-payload")
 	env := appendFragHeader(nil, 1, 0, 1, chunk)
-	out, complete := f.reassemble(p, env)
+	out, complete := f.reassemble(p, env, reasmChannelDirect)
 	if !complete {
 		t.Fatalf("single-fragment envelope must be complete")
 	}
@@ -72,7 +72,7 @@ func TestFragReassembleMultiInOrder(t *testing.T) {
 	var got []byte
 	complete := false
 	for i, c := range chunks {
-		out, done := f.reassemble(p, appendFragHeader(nil, 7, uint16(i), total, c))
+		out, done := f.reassemble(p, appendFragHeader(nil, 7, uint16(i), total, c), reasmChannelDirect)
 		if i < len(chunks)-1 {
 			if done {
 				t.Fatalf("fragment %d should NOT be complete yet", i)
@@ -101,7 +101,7 @@ func TestFragReassembleMultiOutOfOrder(t *testing.T) {
 	complete := false
 	// Feed in reverse order: 2, 1, 0.
 	for k := len(chunks) - 1; k >= 0; k-- {
-		out, done := f.reassemble(p, appendFragHeader(nil, 99, uint16(k), total, chunks[k]))
+		out, done := f.reassemble(p, appendFragHeader(nil, 99, uint16(k), total, chunks[k]), reasmChannelDirect)
 		if k == 0 {
 			got, complete = out, done
 		} else if done {
@@ -129,7 +129,7 @@ func TestFragReassembleDuplicateFragmentIgnored(t *testing.T) {
 	var got []byte
 	complete := false
 	for _, idx := range order {
-		out, done := f.reassemble(p, appendFragHeader(nil, 5, uint16(idx), total, chunks[idx]))
+		out, done := f.reassemble(p, appendFragHeader(nil, 5, uint16(idx), total, chunks[idx]), reasmChannelDirect)
 		if idx == 2 {
 			got, complete = out, done
 		} else if done {
@@ -150,7 +150,7 @@ func TestFragReassembleExcessiveFragTotalDropped(t *testing.T) {
 	f := newFragReassembler()
 	p := newTestPeerID(t)
 	env := appendFragHeader(nil, 1, 0, 300, []byte("x")) // maxFragTotal = 256
-	out, complete := f.reassemble(p, env)
+	out, complete := f.reassemble(p, env, reasmChannelDirect)
 	if complete || out != nil {
 		t.Fatalf("excessive fragTotal must be dropped (complete=%v out=%v)", complete, out)
 	}
@@ -168,7 +168,7 @@ func TestFragReassembleOversizedBytesAborted(t *testing.T) {
 	}
 	// fragTotal=2, first chunk already exceeds the cap -> must abort on insert.
 	env0 := appendFragHeader(nil, 1, 0, 2, big)
-	out, complete := f.reassemble(p, env0)
+	out, complete := f.reassemble(p, env0, reasmChannelDirect)
 	if complete || out != nil {
 		t.Fatalf("oversized fragment group must abort (complete=%v out=%v)", complete, out)
 	}
@@ -185,10 +185,10 @@ func TestFragReassemblePerPeerIsolation(t *testing.T) {
 	ca := splitIntoChunks(origA, 2)
 	cb := splitIntoChunks(origB, 2)
 	// Interleave: A part0, B part0 (same origSeq=42, total=2), then A part1, B part1.
-	f.reassemble(pa, appendFragHeader(nil, 42, 0, 2, ca[0]))
-	f.reassemble(pb, appendFragHeader(nil, 42, 0, 2, cb[0]))
-	outA, doneA := f.reassemble(pa, appendFragHeader(nil, 42, 1, 2, ca[1]))
-	outB, doneB := f.reassemble(pb, appendFragHeader(nil, 42, 1, 2, cb[1]))
+	f.reassemble(pa, appendFragHeader(nil, 42, 0, 2, ca[0]), reasmChannelDirect)
+	f.reassemble(pb, appendFragHeader(nil, 42, 0, 2, cb[0]), reasmChannelDirect)
+	outA, doneA := f.reassemble(pa, appendFragHeader(nil, 42, 1, 2, ca[1]), reasmChannelDirect)
+	outB, doneB := f.reassemble(pb, appendFragHeader(nil, 42, 1, 2, cb[1]), reasmChannelDirect)
 	if !doneA || !bytes.Equal(outA, origA) {
 		t.Fatalf("peerA reassembly wrong (done=%v)", doneA)
 	}
@@ -203,7 +203,7 @@ func TestFragReassemblerReapExpired(t *testing.T) {
 	f := newFragReassembler()
 	p := newTestPeerID(t)
 	// Open an incomplete group.
-	f.reassemble(p, appendFragHeader(nil, 1, 0, 3, []byte("partial")))
+	f.reassemble(p, appendFragHeader(nil, 1, 0, 3, []byte("partial")), reasmChannelDirect)
 	// Backdate its deadline and reap.
 	for k := range f.bufs {
 		f.bufs[k].deadline = time.Now().Add(-time.Hour)
@@ -214,7 +214,7 @@ func TestFragReassemblerReapExpired(t *testing.T) {
 	}
 	// A fresh single-fragment group after reap must still work.
 	env := appendFragHeader(nil, 1, 0, 1, []byte("fresh"))
-	out, complete := f.reassemble(p, env)
+	out, complete := f.reassemble(p, env, reasmChannelDirect)
 	if !complete || !bytes.Equal(out, []byte("fresh")) {
 		t.Fatalf("fresh group after reap failed (complete=%v)", complete)
 	}
@@ -271,7 +271,7 @@ func TestFragReassembleConcurrentPeers(t *testing.T) {
 			// Feed the fragments with small jitter so goroutines interleave on
 			// the shared map rather than serializing by construction.
 			for idx := 0; idx < len(chunks); idx++ {
-				out, done := f.reassemble(p, appendFragHeader(nil, uint32(id+1), uint16(idx), total, chunks[idx]))
+				out, done := f.reassemble(p, appendFragHeader(nil, uint32(id+1), uint16(idx), total, chunks[idx]), reasmChannelDirect)
 				if idx == len(chunks)-1 {
 					got, complete = out, done
 				}

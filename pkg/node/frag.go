@@ -50,7 +50,19 @@ const (
 type reasmKey struct {
 	peerID  peer.ID
 	origSeq uint32
+	// channel namespaces the two reassembly streams a single peer link can
+	// interleave: DIRECT data frames (reasmChannelDirect) and RELAY envelope
+	// frames (reasmChannelRelay). Both are fragmented with the SAME per-sender
+	// origSeq counter, and a restart resets that counter — without the
+	// namespace, a direct group could collide with (and corrupt) a relay
+	// group of the same peer within the group-expiry window.
+	channel uint8
 }
+
+const (
+	reasmChannelDirect uint8 = 0
+	reasmChannelRelay  uint8 = 1
+)
 
 // fragReassembler buffers incoming fragments and emits complete obfuscated
 // frames once every fragment of a group has arrived.
@@ -171,7 +183,7 @@ func isFragPayload(payload []byte) bool {
 //   - if the group is now complete -> returns (reassembledPacked, true),
 //     where reassembledPacked is the ORIGINAL obfuscated frame; the caller
 //     deobfuscates it (a second Unpack) to obtain the TAP frame.
-func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte) (finalPacked []byte, complete bool) {
+func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte, channel uint8) (finalPacked []byte, complete bool) {
 	if !isFragPayload(payload) {
 		// Not a fragment: the caller already has the finished TAP frame.
 		return nil, true
@@ -198,7 +210,7 @@ func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte) (finalP
 		return nil, false
 	}
 
-	key := reasmKey{peerID: remotePeer, origSeq: origSeq}
+	key := reasmKey{peerID: remotePeer, origSeq: origSeq, channel: channel}
 	rb, ok := f.bufs[key]
 	if !ok || rb.deadline.Before(time.Now()) {
 		// Bound concurrent groups: if we are at capacity, evict the oldest

@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -56,22 +57,36 @@ func newHTTPWorkerPool(size int) *httpWorkerPool {
 	return &httpWorkerPool{sem: make(chan struct{}, size)}
 }
 
-// Submit enqueues fn to run in the pool. If the pool is full, Submit blocks until
-// a slot becomes available, preventing unbounded goroutine creation.
-func (p *httpWorkerPool) Submit(fn func()) {
-	p.sem <- struct{}{} // acquire slot
-	go func() {
-		defer func() { <-p.sem }() // release slot
-		// These goroutines are not covered by net/http's per-connection
-		// recover, so a panic here would take down the whole daemon.
-		defer func() {
-			if r := recover(); r != nil {
-				interceptLog.Error("panic in HTTP worker: %v\n%s", r, debug.Stack())
-			}
+// TrySubmit enqueues fn on the bounded worker pool, acquiring a slot only if
+// one is free right now and reporting false otherwise. Called inline from the
+// TCP frame handlers, it must never park — a blocking acquire here would stall
+// the shared TAP/stream read loop (a request flood was a data-plane DoS). The
+// caller answers a false return with the bounded inline 503 (rejectBusy).
+func (p *httpWorkerPool) TrySubmit(fn func()) bool {
+	select {
+	case p.sem <- struct{}{}:
+		go func() {
+			defer func() { <-p.sem }() // release slot
+			// These goroutines are not covered by net/http's per-connection
+			// recover, so a panic here would take down the whole daemon.
+			defer func() {
+				if r := recover(); r != nil {
+					interceptLog.Error("panic in HTTP worker: %v\n%s", r, debug.Stack())
+				}
+			}()
+			fn()
 		}()
-		fn()
-	}()
+		return true
+	default:
+		return false
+	}
 }
+
+// maxHTTPRequestBytes caps the per-session reassembled request. Legitimate
+// /api/* calls (JSON bodies, query strings) stay far below this; anything
+// larger is protocol abuse or a slow-loris style memory probe, and is dropped
+// instead of growing without bound until the 30s session sweep.
+const maxHTTPRequestBytes = 64 * 1024
 
 type TAPInterceptor struct {
 	enableV4      bool
@@ -138,6 +153,65 @@ func NewTAPInterceptor(virtualIP4Str string, virtualIP6Str string, port int, col
 // loadCfg returns the current configuration snapshot this interceptor serves,
 // or nil when none was supplied at construction.
 func (it *TAPInterceptor) loadCfg() *config.Config { return it.cfg.Load() }
+
+// sendTCPResponse dispatches one frame through the right address family for
+// the session (sess.isIPv6 was fixed at creation time).
+func (it *TAPInterceptor) sendTCPResponse(writer PacketWriter, sess *tcpSession, flags byte, data []byte) {
+	if sess.isIPv6 {
+		it.sendIPv6TCPFrame(writer, sess, flags, data)
+	} else {
+		it.sendIPv4TCPFrame(writer, sess, flags, data)
+	}
+}
+
+// rejectBusy answers a request with a tiny 503 in one PSH-ACK + FIN when the
+// worker pool is saturated. It runs inline on the reader goroutine but sends
+// only two small frames (no chunk sleeps), so it cannot stall the data path.
+func (it *TAPInterceptor) rejectBusy(writer PacketWriter, sess *tcpSession, key string) {
+	resp := it.buildHTTPResponse(http.StatusServiceUnavailable, "application/json", []byte(`{"error":"interceptor busy, retry"}`))
+	it.sendTCPResponse(writer, sess, 0x18, resp)
+	atomic.AddUint32(&sess.serverSeq, uint32(len(resp)))
+	it.sendTCPResponse(writer, sess, 0x11, nil)
+	it.sessions.Delete(key)
+}
+
+// effectiveToken returns the bearer token currently guarding /api/*: the
+// sidecar the Web server persisted at startup (reflecting the resolved token,
+// including the generated-token case) first, falling back to the snapshot
+// config (pre-startup or no configPath). Mirrors Server.authRequired.
+func (it *TAPInterceptor) effectiveToken() string {
+	if t := config.LoadWebUIToken(it.configPath); t != "" {
+		return t
+	}
+	if c := it.loadCfg(); c != nil {
+		return c.WebUI.AuthToken
+	}
+	return ""
+}
+
+// requestAuthorized mirrors extractToken + ConstantTimeCompare for a raw
+// userspace request: Authorization header (with or without the "Bearer "
+// prefix) first, then the ?token= query parameter on the request line.
+func (it *TAPInterceptor) requestAuthorized(lines [][]byte, want string) bool {
+	for _, ln := range lines[1:] {
+		t := bytes.TrimRight(ln, " \t\r")
+		if len(t) == 0 {
+			break // end of headers
+		}
+		i := bytes.IndexByte(t, ':')
+		if i <= 0 || !bytes.EqualFold(t[:i], []byte("Authorization")) {
+			continue
+		}
+		val := strings.TrimSpace(string(t[i+1:]))
+		const prefix = "Bearer "
+		if len(val) > len(prefix) && strings.EqualFold(val[:len(prefix)], prefix) {
+			val = strings.TrimSpace(val[len(prefix):])
+		}
+		return subtle.ConstantTimeCompare([]byte(val), []byte(want)) == 1
+	}
+	q := extractHTTPQueryParam(lines[0], "token")
+	return q != "" && subtle.ConstantTimeCompare([]byte(q), []byte(want)) == 1
+}
 
 // MatchAndHandle is the ultra-fast inline fast-path filter.
 // For non-target packets, it exits in < 1ns with 0 heap allocations.
@@ -334,6 +408,11 @@ func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, write
 	if len(payload) > 0 {
 		sess.clientSeq = seqN + uint32(len(payload))
 		sess.requestBuf = append(sess.requestBuf, payload...)
+		if len(sess.requestBuf) > maxHTTPRequestBytes {
+			// Never-completing request flood — drop the session outright.
+			it.sessions.Delete(sessionKey)
+			return true
+		}
 
 		if isHTTPRequestComplete(sess.requestBuf) {
 			// Acquire session processing token — prevents concurrent handling
@@ -354,8 +433,9 @@ func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, write
 			}
 
 			// Offload HTTP processing (JSON marshal, disk I/O via UpdateConfigFileDelta)
-			// to bounded worker pool so the TAP read loop never blocks.
-			it.workerPool.Submit(func() {
+			// to bounded worker pool so the TAP read loop never blocks. On saturation
+			// answer 503 inline (single segment) instead of parking the reader.
+			if !it.workerPool.TrySubmit(func() {
 				defer atomic.StoreInt32(&sess.processing, 0)
 
 				httpResp := it.processHTTP(httpReq)
@@ -372,7 +452,10 @@ func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, write
 				time.Sleep(10 * time.Millisecond)
 				it.sendIPv4TCPFrame(writer, sess, 0x11, nil) // FIN-ACK
 				it.sessions.Delete(sessionKey)
-			})
+			}) {
+				atomic.StoreInt32(&sess.processing, 0)
+				it.rejectBusy(writer, sess, sessionKey)
+			}
 		}
 		return true
 	}
@@ -434,6 +517,10 @@ func (it *TAPInterceptor) handleIPv6TCP(frame []byte, writer PacketWriter) bool 
 	if len(payload) > 0 {
 		sess.clientSeq = seqN + uint32(len(payload))
 		sess.requestBuf = append(sess.requestBuf, payload...)
+		if len(sess.requestBuf) > maxHTTPRequestBytes {
+			it.sessions.Delete(sessionKey)
+			return true
+		}
 
 		if isHTTPRequestComplete(sess.requestBuf) {
 			if !atomic.CompareAndSwapInt32(&sess.processing, 0, 1) {
@@ -451,7 +538,7 @@ func (it *TAPInterceptor) handleIPv6TCP(frame []byte, writer PacketWriter) bool 
 				mss = 512
 			}
 
-			it.workerPool.Submit(func() {
+			if !it.workerPool.TrySubmit(func() {
 				defer atomic.StoreInt32(&sess.processing, 0)
 
 				httpResp := it.processHTTP(httpReq)
@@ -468,7 +555,10 @@ func (it *TAPInterceptor) handleIPv6TCP(frame []byte, writer PacketWriter) bool 
 				time.Sleep(10 * time.Millisecond)
 				it.sendIPv6TCPFrame(writer, sess, 0x11, nil)
 				it.sessions.Delete(sessionKey)
-			})
+			}) {
+				atomic.StoreInt32(&sess.processing, 0)
+				it.rejectBusy(writer, sess, sessionKey)
+			}
 		}
 		return true
 	}
@@ -484,6 +574,18 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 
 	reqLine := string(lines[0])
 	interceptLog.Debug("Userspace HTTP Request: %s", reqLine)
+
+	// SECURITY: the userspace stack historically served /api/* (config writes,
+	// exit-node changes, probes) with NO bearer token — authRequired lives only
+	// in the net/http path, and mesh peers' frames never touch it. Gate /api/*
+	// identically here: same resolved token, constant-time compare, header or
+	// ?token=. Non-/api paths (dashboard HTML) stay open, matching the Server.
+	if bytes.Contains(lines[0], []byte(" /api/")) {
+		if want := it.effectiveToken(); want != "" && !it.requestAuthorized(lines, want) {
+			return it.buildHTTPResponse(http.StatusUnauthorized, "application/json",
+				[]byte(`{"status":"error","error":"unauthorized: missing or invalid token","tokenRequired":true}`))
+		}
+	}
 
 	if bytes.HasPrefix(lines[0], []byte("GET /api/stats")) {
 		resp := it.collector.GetResponse()

@@ -295,7 +295,14 @@ func (n *Node) UpdateWebCollectorState() {
 }
 
 func (n *Node) updateWebCollectorState() {
-	nodeName := n.Config.NodeName
+	// Read from the LIVE snapshot, not the boot-time Config field: the WebUI
+	// save path sets collector.NodeName from the new config, and this 10s
+	// refresh used to undo it with the stale baseline every cycle.
+	src := n.config()
+	if src == nil {
+		src = n.Config
+	}
+	nodeName := src.NodeName
 	if nodeName == "" || nodeName == "auto" {
 		if hostName, err := os.Hostname(); err == nil && hostName != "" {
 			nodeName = hostName
@@ -303,7 +310,7 @@ func (n *Node) updateWebCollectorState() {
 			nodeName = "p2ptap-node"
 		}
 	}
-	n.Collector.SetNodeInfo(nodeName, n.Host.ID().String(), n.Config.TapIP, n.Config.TapIPv6, n.Config.TransportStrategy)
+	n.Collector.SetNodeInfo(nodeName, n.Host.ID().String(), src.TapIP, src.TapIPv6, src.TransportStrategy)
 	n.Collector.SetTAPSelfTest(func() map[string]interface{} {
 		if n.TAP == nil {
 			return map[string]interface{}{"available": false, "detail": "TAP device is nil"}
@@ -537,14 +544,12 @@ func (n *Node) updateWebCollectorState() {
 		// positive edge cost is deliberately kept separate so an unknown link can
 		// never appear as a fabricated 10ms measurement again.
 		rtt := n.peerRTTMeasurement(pID, nowCalc)
-		if sig.connCount > 0 && rtt.rttMeasured && rtt.rttMs > 0 {
+		if sig.connCount > 0 {
 			// UpdateLinkRTT preserves the edge class (direct/circuit) instead of
 			// overwriting it as direct.
-			routingRTT := int64(math.Round(rtt.rttMs))
-			if routingRTT < 1 {
-				routingRTT = 1
+			if routingRTT, ok := routingRTTMsFromSnapshot(rtt); ok {
+				n.Router.UpdateLinkRTT(pID, routingRTT)
 			}
-			n.Router.UpdateLinkRTT(pID, routingRTT)
 		}
 
 		geoLoc := "❔ No live transport address"
@@ -1042,13 +1047,22 @@ func (n *Node) updateWebCollectorState() {
 	ipDTO := n.IPTracker.GetDTOs(&n.peerMeta, n.Config.NodeName, n.Config.TapIP, n.Config.TapIPv6, n.Host.ID().String(), subnetDTOs, localExitPeerID)
 	n.Collector.UpdateIPTable(ipDTO)
 
-	// Ensure all connected peers are present in the Router link-state graph
+	// Ensure all connected peers are present in the Router link-state graph.
+	//
+	// PRECEDENCE MATTERS HERE: a completed probe (written earlier in this same
+	// snapshot) is the authoritative link weight; the peerstore EWMA is only a
+	// provisional fallback for a peer that has no completed probe yet. This loop
+	// used to overwrite unconditionally, so every tick the EWMA clobbered the
+	// real measurement that had just been written — the Mesh Quality matrix
+	// (fed by this graph) then showed the EWMA estimate while the topology chart
+	// (fed by PeerInfoDTO) showed the measurement, and the two panels disagreed
+	// by up to an order of magnitude.
 	for _, pID := range n.Host.Network().Peers() {
-		// ConnectedF installs a provisional internal edge. Only overwrite it
-		// here when peerstore contains a real completed measurement.
-		if rttMs := n.getPeerLatency(pID); rttMs > 0 {
-			n.Router.UpdateLinkRTT(pID, rttMs)
+		rttMs, ok := preferredLinkRTTMs(n.peerRTTMeasurement(pID, nowCalc), n.getPeerLatency(pID))
+		if !ok {
+			continue
 		}
+		n.Router.UpdateLinkRTT(pID, rttMs)
 	}
 
 	routesDTO := n.Router.GetRouteInfoDTOs(func(pID peer.ID) (string, string, string) {
@@ -1065,21 +1079,32 @@ func (n *Node) updateWebCollectorState() {
 	//   overlay-relay → NextHop != dest (p2ptap's own overlay relay)
 	//   circuit-relay → IsDirect but the peer's libp2p conn is /p2p-circuit
 	//   direct        → a genuine direct transport connection
-	transportPaths := make(map[string]string, len(routesDTO))
+	// The matrix DTO below reuses rd.TransportPath directly, so no separate
+	// path map is kept here any more.
 	for i := range routesDTO {
 		rd := &routesDTO[i]
-		if pid, err := peer.Decode(rd.DestPeer); err == nil {
-			if hop := n.relayHopForTarget(pid); hop != "" {
+		pid, err := peer.Decode(rd.DestPeer)
+		if err != nil {
+			if !rd.IsDirect {
 				rd.TransportPath = "overlay-relay"
 			} else {
-				rd.TransportPath = routeTransportPath(rd.IsDirect, n.deriveConnSignals(pid))
+				rd.TransportPath = "unknown"
 			}
-		} else if !rd.IsDirect {
+			continue
+		}
+		if hop := n.relayHopForTarget(pid); hop != "" {
 			rd.TransportPath = "overlay-relay"
 		} else {
-			rd.TransportPath = "unknown"
+			rd.TransportPath = routeTransportPath(rd.IsDirect, n.deriveConnSignals(pid))
 		}
-		transportPaths[rd.DestPeer] = rd.TransportPath
+		// The routing layer only knows graph weights; attach the probe result so
+		// the route table can tell a measurement from an estimate instead of
+		// printing "≈N ms" for both.
+		if snap := n.peerRTTMeasurement(pid, nowCalc); snap.rttMeasured && snap.rttMs > 0 {
+			rd.MeasuredRTTMs = snap.rttMs
+			rd.RTTMeasured = true
+			rd.RTTSource = snap.source
+		}
 	}
 	n.Collector.UpdateRoutes(routesDTO)
 
@@ -1120,32 +1145,39 @@ func (n *Node) updateWebCollectorState() {
 	})
 	n.Collector.UpdatePeerMetas(metaDTOs)
 
-	// Build MeshMatrix DTOs
-	matrixDTOs := make([]observer.MeshMatrixCellDTO, 0)
-	routesMap := n.getCachedRoutes()
-	for destPeer, r := range routesMap {
-		destName := destPeer.String()
-		if val, ok := n.peerMeta.Load(destPeer); ok {
-			if metaName := val.(PeerMeta).NodeName; metaName != "" {
-				destName = metaName
-			}
-		}
-		// Hops = number of links = number of nodes in path minus 1 (path
-		// includes both the local node and the destination). A direct link is 1
-		// hop; one relay is 2 hops, etc. Guard against an empty path.
-		hops := len(r.Path) - 1
+	// Build MeshMatrix DTOs from the SAME freshly computed route set as the route
+	// table above, rather than from getCachedRoutes().
+	//
+	// getCachedRoutes() serves the per-frame TAP fast path a copy that may be up
+	// to 2s old and is NOT invalidated by an UpdateLinkRTT weight refresh, so the
+	// matrix could still show a link weight the routing graph had already
+	// replaced — while the topology chart, which reads the live graph, showed the
+	// new one. Reusing routesDTO removes that lag and one redundant Dijkstra pass
+	// per stats tick.
+	//
+	// Hops = number of links = number of nodes in path minus 1 (path includes
+	// both the local node and the destination). A direct link is 1 hop; one
+	// relay is 2 hops, etc. Guard against an empty path.
+	matrixDTOs := make([]observer.MeshMatrixCellDTO, 0, len(routesDTO))
+	srcPeerID := n.Host.ID().String()
+	for i := range routesDTO {
+		rd := &routesDTO[i]
+		hops := len(rd.Path) - 1
 		if hops < 0 {
 			hops = 0
 		}
 		matrixDTOs = append(matrixDTOs, observer.MeshMatrixCellDTO{
-			SrcPeerID:     n.Host.ID().String(),
+			SrcPeerID:     srcPeerID,
 			SrcName:       n.nodeName,
-			DstPeerID:     destPeer.String(),
-			DstName:       destName,
-			RTTMs:         r.TotalRTTMs,
+			DstPeerID:     rd.DestPeer,
+			DstName:       rd.DestName,
+			RTTMs:         rd.TotalRTTMs,
+			MeasuredRTTMs: rd.MeasuredRTTMs,
+			RTTMeasured:   rd.RTTMeasured,
+			RTTSource:     rd.RTTSource,
 			Hops:          hops,
-			IsDirect:      r.IsDirect,
-			TransportPath: transportPaths[destPeer.String()],
+			IsDirect:      rd.IsDirect,
+			TransportPath: rd.TransportPath,
 		})
 	}
 	n.Collector.UpdateMeshMatrix(matrixDTOs)

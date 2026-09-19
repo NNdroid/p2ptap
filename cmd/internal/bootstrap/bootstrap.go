@@ -54,6 +54,9 @@ func Node(cfg *config.Config) (*node.Node, observer.Collector, error) {
 		// path with per-leg transport class / latency.
 		srv.SetHostProvider(func() host.Host { return n.Host })
 		srv.SetRouterProvider(func() *routing.Router { return n.Router })
+		// Inject the relay drop snapshot so /api/relay/diag can name the exact
+		// transit-stage choke point eating frames during field diagnosis.
+		srv.SetRelayDiagProvider(func() any { return n.GetRelayDiag() })
 		return srv, nil
 	}
 

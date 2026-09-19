@@ -118,23 +118,31 @@ func (n *Node) handleMetaStream(s network.Stream) {
 		if n.Collector != nil {
 			localTxRx = n.Collector.GetTxRxStats()
 		}
+		// Identity must be built from the LIVE snapshot (same source as the
+		// push path, buildLocalMetaPayload): after a hot reload the responder
+		// otherwise answers with boot-time values while pushes carry fresh
+		// ones, and the peer's view flaps every sync cycle.
+		src := n.config()
+		if src == nil {
+			src = n.Config
+		}
 		respPayload := meta.NodeMetaPayload{
-			NodeName:          n.Config.NodeName,
-			TapIP:             n.Config.TapIP,
-			TapIPv6:           n.Config.TapIPv6,
-			TapMAC:            n.Config.TapMAC,
+			NodeName:          src.NodeName,
+			TapIP:             src.TapIP,
+			TapIPv6:           src.TapIPv6,
+			TapMAC:            src.TapMAC,
 			OS:                runtime.GOOS,
 			Arch:              runtime.GOARCH,
 			Version:           version.Version,
 			UptimeSec:         int64(time.Since(startTime).Seconds()),
 			Reachability:      "P2P Node",
-			IsExitNode:        n.Config.ExitNode.Enable,
-			ExitNAT:           n.Config.ExitNode.NATMasquerade,
+			IsExitNode:        src.ExitNode.Enable,
+			ExitNAT:           src.ExitNode.NATMasquerade,
 			TxSpeed:           localTxRx.TxSpeed,
 			RxSpeed:           localTxRx.RxSpeed,
 			TotalTx:           localTxRx.TotalTx,
 			TotalRx:           localTxRx.TotalRx,
-			AdvertisedSubnets: n.Config.AdvertisedSubnets,
+			AdvertisedSubnets: src.AdvertisedSubnets,
 		}
 		if respBytes, err := json.Marshal(respPayload); err == nil {
 			if werr := WriteFrame(s, respBytes); werr == nil && n.protoTracker != nil {

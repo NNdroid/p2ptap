@@ -34,6 +34,13 @@ func acquireDaemonMutex(mutexName string) (uintptr, bool) {
 	}
 	h, _, err := procCreateMutexW.Call(0, 1, uintptr(unsafe.Pointer(namePtr)))
 	if h == 0 {
+		// FAIL-OPEN by deliberate trade-off: creating a Global\ object needs
+		// SeCreateGlobalPrivilege, which an unelevated foreground `p2ptap run`
+		// lacks (ERROR_ACCESS_DENIED). Refusing to start would break the
+		// documented CLI; the secondary guard is the TAP/Wintun driver itself
+		// (the adapter can only be opened once), so a duplicate daemon still
+		// fails cleanly. Surface the degraded state so it is diagnosable.
+		logger.New("Service").Warn("daemon single-instance mutex unavailable (%v); relying on TAP-device exclusivity", err)
 		return 0, true
 	}
 	if err == syscall.Errno(183) { // ERROR_ALREADY_EXISTS

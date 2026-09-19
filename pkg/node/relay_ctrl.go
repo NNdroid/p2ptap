@@ -34,11 +34,16 @@ const relayCtrlMaxHops = 8
 //	Proto   — the inner control protocol ID (SeqSync / LSA / Meta) to run once
 //	          the tunnel reaches the final peer.
 //	Hops    — relay-hop counter, incremented per transit hop (loop guard).
+//	Stamp   — OPTIONAL PSK-keyed origin endorsement (see relay_ctrl_attest.go).
+//	          Minted by the first relay that verified Origin == transport peer
+//	          and required thereafter whenever Origin != the presenting peer.
+//	          Empty in PSK-less meshes and from legacy (pre-attestation) nodes.
 type RelayCtrlHeader struct {
 	Origin peer.ID `json:"o"`
 	Target peer.ID `json:"t"`
 	Proto  string  `json:"p"`
 	Hops   uint8   `json:"h"`
+	Stamp  string  `json:"s,omitempty"`
 }
 
 // openControlStream is the unified control-stream opener used by EVERY control
@@ -65,7 +70,7 @@ func (n *Node) openControlStream(ctx context.Context, target peer.ID, proto prot
 			// boot-relay uplink as kind=Control frames instead.
 			return n.openBootRelayControlStream(hop, target, proto)
 		}
-		return n.openRelayCtrlStream(ctx, hop, n.Host.ID(), target, proto, 1)
+		return n.openRelayCtrlStream(ctx, hop, n.Host.ID(), target, proto, 1, "")
 	}
 	// No overlay hop available: fall back to the boot circuit relay (Circuit
 	// Relay v2). This is the classic path for a peer reachable only through a
@@ -77,13 +82,15 @@ func (n *Node) openControlStream(ctx context.Context, target peer.ID, proto prot
 // tunnel header. The caller then writes the inner control-protocol bytes on the
 // returned stream; hop proxies them toward Target. hops is the relay-hop count
 // to stamp into the header (initiator passes 1; a transit hop passes its own
-// Hops+1 so the loop guard stays accurate across multi-hop tunnels).
-func (n *Node) openRelayCtrlStream(ctx context.Context, hop, origin, target peer.ID, proto protocol.ID, hops uint8) (network.Stream, error) {
+// Hops+1 so the loop guard stays accurate across multi-hop tunnels). stamp is
+// the carried origin endorsement ("" from the initiator and in PSK-less
+// meshes; see relay_ctrl_attest.go).
+func (n *Node) openRelayCtrlStream(ctx context.Context, hop, origin, target peer.ID, proto protocol.ID, hops uint8, stamp string) (network.Stream, error) {
 	s, err := n.Host.NewStream(ctx, hop, RelayCtrlProtocolID)
 	if err != nil {
 		return nil, fmt.Errorf("relay-ctrl: open stream to hop %s: %w", hop, err)
 	}
-	hdr := RelayCtrlHeader{Origin: origin, Target: target, Proto: string(proto), Hops: hops}
+	hdr := RelayCtrlHeader{Origin: origin, Target: target, Proto: string(proto), Hops: hops, Stamp: stamp}
 	hb, err := json.Marshal(hdr)
 	if err != nil {
 		s.Close()
@@ -139,6 +146,17 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 	// ---- FINAL HOP: deliver the inner control protocol locally ----
 	if hdr.Target == n.Host.ID() {
 		origPID := peer.ID(hdr.Origin)
+		// ANTI-SPOOF GATE: the retarget below binds per-peer state of (a)
+		// origin (cipher slot, dedup anchor, meta, MAC learning) — that may
+		// only happen for a claim made directly (origin == transport peer,
+		// authenticated by libp2p) or a claim endorsed by a PSK-holding first
+		// relay (see relay_ctrl_attest.go). Without this, any identity-only
+		// dial could run the inner handshake "as" a legitimate peer.
+		if hdr.Origin != remotePeer && !n.verifyRelayCtrlStamp(origPID, hdr.Target, protocol.ID(hdr.Proto), hdr.Stamp) {
+			log.Warn("RelayCtrl: unverified origin claim %s from %s (proto %s) — dropping tunnel",
+				hdr.Origin, remotePeer, protocol.ID(hdr.Proto))
+			return
+		}
 		n.notePeerRx(origPID)
 		if remotePeer != "" && remotePeer != origPID {
 			n.recordPeekMapOrigin(origPID, remotePeer, int(hdr.Hops), false)
@@ -156,7 +174,25 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 		return
 	}
 
-	sub, ferr := n.openRelayCtrlNextHop(hdr, remotePeer)
+	// Transit anti-spoof: forward only a directly-made claim (which we can
+	// endorse) or an already-endorsed tunnel — otherwise this node is an open
+	// relay for origin-forgery against downstream victims.
+	if hdr.Origin != remotePeer && !n.verifyRelayCtrlStamp(hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), hdr.Stamp) {
+		log.Warn("RelayCtrl: transit refused — unverified origin claim %s from %s (target %s)",
+			hdr.Origin, remotePeer, hdr.Target)
+		return
+	}
+
+	// Endorsement point: a claim made directly by its origin (verified via
+	// the libp2p-authenticated transport peer) gets stamped so downstream
+	// hops need not re-trust us. PSK-less nodes mint empty stamps, which
+	// verification treats as "not applicable" (see relay_ctrl_attest.go).
+	forward := hdr
+	if forward.Origin == remotePeer {
+		forward.Stamp = n.stampRelayCtrlOrigin(forward.Origin, forward.Target, protocol.ID(forward.Proto))
+	}
+
+	sub, ferr := n.openRelayCtrlNextHop(forward, remotePeer)
 	if ferr != nil || sub == nil {
 		if ferr != nil {
 			n.recordRelayControlFailure(hdr.Target, ferr)
@@ -197,7 +233,7 @@ func (n *Node) openRelayCtrlNextHop(hdr RelayCtrlHeader, fromPeer peer.ID) (netw
 		if err != nil {
 			return nil, err
 		}
-		final := RelayCtrlHeader{Origin: hdr.Origin, Target: hdr.Target, Proto: hdr.Proto, Hops: nextHops}
+		final := RelayCtrlHeader{Origin: hdr.Origin, Target: hdr.Target, Proto: hdr.Proto, Hops: nextHops, Stamp: hdr.Stamp}
 		fb, _ := json.Marshal(final)
 		if werr := WriteFrame(sub, fb); werr != nil {
 			sub.Close()
@@ -210,12 +246,12 @@ func (n *Node) openRelayCtrlNextHop(hdr RelayCtrlHeader, fromPeer peer.ID) (netw
 		ctx, cancel := context.WithTimeout(n.ctx, 15*time.Second)
 		defer cancel()
 		if n.isBootstrapPeer(hop) {
-			if sub, err := n.openRelayCtrlStream(ctx, hop, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), nextHops); err == nil {
+			if sub, err := n.openRelayCtrlStream(ctx, hop, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), nextHops, hdr.Stamp); err == nil {
 				return sub, nil
 			}
 			return n.openBootRelayControlStream(hop, hdr.Target, protocol.ID(hdr.Proto))
 		}
-		return n.openRelayCtrlStream(ctx, hop, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), nextHops)
+		return n.openRelayCtrlStream(ctx, hop, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), nextHops, hdr.Stamp)
 	}
 
 	// Boot circuit relay fall-back: dial Target through the circuit on the
@@ -224,7 +260,7 @@ func (n *Node) openRelayCtrlNextHop(hdr RelayCtrlHeader, fromPeer peer.ID) (netw
 	if err != nil {
 		return nil, err
 	}
-	final := RelayCtrlHeader{Origin: hdr.Origin, Target: hdr.Target, Proto: hdr.Proto, Hops: nextHops}
+	final := RelayCtrlHeader{Origin: hdr.Origin, Target: hdr.Target, Proto: hdr.Proto, Hops: nextHops, Stamp: hdr.Stamp}
 	fb, _ := json.Marshal(final)
 	if werr := WriteFrame(sub, fb); werr != nil {
 		sub.Close()

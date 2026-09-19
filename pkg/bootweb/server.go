@@ -31,6 +31,52 @@ type Server struct {
 	httpServer *http.Server
 	listener   net.Listener
 	mu         sync.Mutex
+
+	// /api/auth/verify throttle: the verify endpoint is the only way to
+	// check a token guess, so per-source attempts are rate-limited (a
+	// fixed ~1/minute window per IP). Without it any web page could drive
+	// the operator's browser against a LAN-reachable boot dashboard
+	// (brute-force + ok:true/false oracle).
+	verifyMu       sync.Mutex
+	verifyAttempts map[string]verifyWindow
+}
+
+type verifyWindow struct {
+	count int
+	start time.Time
+}
+
+const (
+	verifyMaxPerWindow  = 10
+	verifyWindowSeconds = 60
+)
+
+// allowVerifyAttempt consumes one attempt for ip and reports whether the
+// request may proceed. Stale entries are swept opportunistically so the map
+// stays bounded by active sources.
+func (s *Server) allowVerifyAttempt(ip string) bool {
+	s.verifyMu.Lock()
+	defer s.verifyMu.Unlock()
+	if s.verifyAttempts == nil {
+		s.verifyAttempts = make(map[string]verifyWindow)
+	}
+	now := time.Now()
+	for k, v := range s.verifyAttempts {
+		if now.Sub(v.start) > verifyWindowSeconds*time.Second {
+			delete(s.verifyAttempts, k)
+		}
+	}
+	w := s.verifyAttempts[ip]
+	if now.Sub(w.start) > verifyWindowSeconds*time.Second {
+		w = verifyWindow{count: 0, start: now}
+	}
+	if w.count >= verifyMaxPerWindow {
+		s.verifyAttempts[ip] = w
+		return false
+	}
+	w.count++
+	s.verifyAttempts[ip] = w
+	return true
 }
 
 // NewServer creates a new boot WebUI server.
@@ -38,9 +84,11 @@ func NewServer(provider BootDataProvider, listenAddr, authToken string) *Server 
 	if listenAddr == "" {
 		listenAddr = ":8080"
 	}
-	// If authToken is empty, generate a random 16-character secure token
+	// If authToken is empty, generate a random 48-hex-char (192-bit) secure
+	// token. Entropy matches the main WebUI's generateToken: this token gates
+	// live topology/log views and is checkable via /api/auth/verify.
 	if authToken == "" {
-		b := make([]byte, 8)
+		b := make([]byte, 24)
 		_, _ = rand.Read(b)
 		authToken = hex.EncodeToString(b)
 	}
@@ -166,9 +214,10 @@ func setSecurityHeaders(w http.ResponseWriter) {
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setSecurityHeaders(w)
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Auth-Token")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		// No CORS here or on /api/auth/verify: the ONLY consumers are the
+		// dashboard's own same-origin fetches (static/index.html). Widening
+		// to "*" made every endpoint (and the token oracle) reachable from
+		// any web page the operator's browser visits.
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -193,15 +242,24 @@ type authVerifyResp struct {
 
 func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Auth-Token")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Rate-limit the verify oracle before touching the token.
+	ip := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
+	if !s.allowVerifyAttempt(ip) {
+		w.Header().Set("Retry-After", "60")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(authVerifyResp{OK: false})
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1024))

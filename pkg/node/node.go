@@ -284,6 +284,10 @@ type Node struct {
 	// stream per relay hop, eliminating per-frame stream open handshakes.
 	relayPool *relayStreamPool
 
+	// relayDiag counts frames dropped at each TAP-frame transit choke point
+	// (see relay_diag.go). Always non-nil once the node is built.
+	relayDiag *RelayDiag
+
 	// bootRelayConns holds the persistent boot-relay uplink to each connected
 	// boot (relay-over-backbone). Frames addressed to a peer that is not
 	// directly connected and has no overlay-relay hop are wrapped in a
@@ -1335,6 +1339,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		Packer:              packer,
 		dedupPeers:          make(map[peer.ID]*obfuscate.Deduplicator),
 		fragRX:              newFragReassembler(),
+		relayDiag:           new(RelayDiag),
 		perPeerObf:          *newPeerObfTable(),
 		Dispatcher:          dispatcher,
 		Collector:           collector,
@@ -2290,6 +2295,8 @@ func (n *Node) Start() {
 	n.wg.Add(1)
 	go n.relayControlReconciler()
 	log.Debug("Relay-control reconciler started")
+	n.wg.Add(1)
+	go n.relayDiagSummaryLoop()
 	log.Debug("Metadata synchronization loop started")
 
 	// Start Link-State Advertisement loop
@@ -2519,6 +2526,18 @@ func (n *Node) captureRxKeyGrace(p peer.ID) {
 			n.rxKeyGrace.Store(p, gk)
 		}
 	}
+	// Sweep expired grace entries on every capture: the map holds RAW AEAD
+	// key material for departed peers, and before this the TTL was only ever
+	// checked on read — entries (and their keys) lived for the whole process
+	// lifetime across churn. Sweeping here (bounded work, runs on disconnect
+	// events) keeps the map proportional to recently-disconnected peers.
+	now := time.Now()
+	n.rxKeyGrace.Range(func(k, v any) bool {
+		if gk, ok := v.(*rxGraceKey); ok && !now.Before(gk.expires) {
+			n.rxKeyGrace.Delete(k)
+		}
+		return true
+	})
 }
 
 // seedPrevRxFromGrace carries the just-cleared RX cipher (if any, and still
@@ -2533,6 +2552,7 @@ func (n *Node) seedPrevRxFromGrace(p peer.ID, po *PeerObf) bool {
 	}
 	gk := g.(*rxGraceKey)
 	if !time.Now().Before(gk.expires) {
+		n.rxKeyGrace.Delete(p) // drop the expired key material we just touched
 		return false
 	}
 	// Seed the whole retained ring (dedup handled by pushRxRing) plus the
@@ -2595,6 +2615,18 @@ func (n *Node) removePeerObf(p peer.ID) {
 	delete(n.peerObservedTapMAC, p)
 	delete(n.peerTapProbe, p)
 	n.peerProbeMu.Unlock()
+	// Churn cleanup (security-review round): the per-peer dedup window (a few
+	// KB each), handshake mutex, anti-replay epoch, and recent-decrypt-error
+	// record were never removed on disconnect — a churn loop of fresh
+	// keypairs (which the unauthenticated SeqSync/relay-ctrl ingress lets
+	// anyone create) grew them unboundedly. All are re-anchored/created
+	// lazily on the next handshake, so dropping them here is safe.
+	n.dedupPeersMu.Lock()
+	delete(n.dedupPeers, p)
+	n.dedupPeersMu.Unlock()
+	n.handshakeMu.Delete(p)
+	n.peerLocalEpochs.Delete(p)
+	n.peerRxDecryptRecentErrs.Delete(p)
 }
 
 // ObfFingerprint returns a short fingerprint of the most recent ephemeral ECDH
@@ -3284,6 +3316,16 @@ func keyFingerprint(raw []byte) string {
 	return hex.EncodeToString(sum[:])[:8]
 }
 
+// shortProtoID renders a libp2p protocol ID for the WebUI: "/tls/1.0.0" →
+// "tls", "/yamux/1.0.0" → "yamux". Empty stays empty.
+func shortProtoID(id string) string {
+	s := strings.Trim(id, "/")
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		s = s[:i]
+	}
+	return s
+}
+
 // pushPeerEncryption publishes a snapshot of every connected peer's
 // encryption/obfuscation state to the WebUI collector. Peers with no negotiated
 // cipher are reported as "none" (plaintext obfuscation). Cheap: called only
@@ -3304,6 +3346,12 @@ func (n *Node) pushPeerEncryption() {
 	// IP:port, not just IP, avoids misattributing two distinct peers that share
 	// one NAT egress address (their ephemeral source ports differ per link).
 	hostByPeer := make(map[peer.ID][]string)
+	// Per-peer live connections with what was ACTUALLY negotiated on each
+	// (security handshake / muxer / transport / dial direction). The WebUI
+	// renders this so "why is the SNI empty" answers itself: Noise has no
+	// ClientHello, and an outbound-only peer never got a chance to present its
+	// SNI to us.
+	connsByPeer := make(map[peer.ID][]observer.PeerConnStateDTO)
 	if n.Host != nil && n.Host.Network() != nil {
 		for _, c := range n.Host.Network().Conns() {
 			if ra := c.RemoteMultiaddr(); ra != nil {
@@ -3312,6 +3360,16 @@ func (n *Node) pushPeerEncryption() {
 				if na, err := manet.ToNetAddr(ra); err == nil {
 					host := na.String()
 					p := c.RemotePeer()
+					cst := c.ConnState()
+					st := c.Stat()
+					connsByPeer[p] = append(connsByPeer[p], observer.PeerConnStateDTO{
+						Transport:  cst.Transport,
+						Security:   shortProtoID(string(cst.Security)),
+						Muxer:      shortProtoID(string(cst.StreamMultiplexer)),
+						Inbound:    st.Direction == network.DirInbound,
+						Limited:    st.Limited,
+						RemoteAddr: host,
+					})
 					// De-dup host per peer.
 					dup := false
 					for _, h := range hostByPeer[p] {
@@ -3358,6 +3416,7 @@ func (n *Node) pushPeerEncryption() {
 			HandshakeServerName: peerSNI(p),
 			PSKRequired:         pskReq,
 			PSKVerified:         po.negotiated && po.txCipher != nil,
+			Conns:               connsByPeer[p],
 		})
 	}
 	// Also surface connected peers that never negotiated (unencrypted).
@@ -3378,6 +3437,7 @@ func (n *Node) pushPeerEncryption() {
 				HandshakeServerName: peerSNI(p),
 				PSKRequired:         pskReq,
 				PSKVerified:         false,
+				Conns:               connsByPeer[p],
 			})
 		}
 	}
@@ -3436,14 +3496,32 @@ func (n *Node) Close() error {
 	if n.WebSrv != nil {
 		closeWithTimeout("web", n.WebSrv.Close)
 	}
+	// TAP is closed FIRST — deliberately, and now safely: closing the device
+	// is what unblocks the tap read loop (MemTAP/utun-style readers block in
+	// Read with no deadline until the device closes; waiting for them via
+	// wg.Wait instead would burn the full force-shutdown timeout on every
+	// test Close). The write-into-a-destroyed-device races this ordering used
+	// to create (NULL Wintun session → native crash; handle-reuse on the
+	// TAP-Win32 driver) are eliminated at the device layer itself: Wintun and
+	// WindowsTAP now carry a closed flag and every I/O path refuses once it is
+	// set (deviceState / closed), so a late tapWrite from a stream handler
+	// still draining after this point simply returns an error — the pre-fix
+	// behaviour on every other platform, minus the undefined driver calls.
 	if n.TAP != nil {
 		closeWithTimeout("tap", n.TAP.Close)
 	}
 	closeWithTimeout("host", n.Host.Close)
-	n.relayPool.shutdown()
-	n.lsaPool.InvalidateAll() // close all cached control streams
-	n.metaPool.InvalidateAll()
-	n.echoPool.InvalidateAll()
+	// These teardown steps close cached control streams (relay pool + the
+	// lsa/meta/echo pools). Invalidate now self-heals a parked stream owner
+	// (bounded peer-mutex wait + force close — the deadlock that hung Android
+	// stop on "STOPPING"), but keep the same 8s cap discipline as the other
+	// steps so a future blocking primitive can never resurrect an unbounded
+	// Close: a hung Stop() on Android wedges the whole lifecycle executor and
+	// every Go mutex caller (Start/IsRunning/metrics) behind it.
+	closeWithTimeout("relaypool", func() error { n.relayPool.shutdown(); return nil })
+	closeWithTimeout("lsapool", func() error { n.lsaPool.InvalidateAll(); return nil })
+	closeWithTimeout("metapool", func() error { n.metaPool.InvalidateAll(); return nil })
+	closeWithTimeout("echopool", func() error { n.echoPool.InvalidateAll(); return nil })
 	// Wait for all worker goroutines (stream readers, dispatch loops, etc.) to
 	// exit. Bound it with a timeout: if a stream reader is stuck in ReadFrame
 	// after the host was force-closed, we must not block shutdown forever.

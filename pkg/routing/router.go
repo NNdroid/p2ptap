@@ -20,6 +20,20 @@ import (
 // far an LSA travels across the mesh.
 const DefaultLSATTL = 5
 
+const (
+	// maxGraphOrigins caps distinct link-state origins kept in the graph:
+	// flooding LSAs from fresh keypairs must not grow memory or the O(V²)
+	// Dijkstra cost without bound (enforced in ProcessLSA).
+	maxGraphOrigins = 2048
+	// maxLSANeighbors caps the neighbours ingested for ONE origin — a single
+	// ~64 KiB LSA frame could otherwise assert thousands of fake IDs.
+	maxLSANeighbors = 1024
+	// lsaStaleAge mirrors the node's periodic CleanStaleNodes(60s) window so
+	// the opportunistic flood-sweep drops exactly the entries the regular
+	// sweep would consider dead.
+	lsaStaleAge = 60 * time.Second
+)
+
 type LinkStatePayload struct {
 	Origin          string           `json:"origin"`
 	Seq             uint64           `json:"seq"`
@@ -353,11 +367,39 @@ func (r *Router) ProcessLSA(lsa *LinkStatePayload) bool {
 	if lastSeq, ok := r.seqMap[originID]; ok && lsa.Seq <= lastSeq {
 		return false
 	}
+
+	// Hostile-flood caps: LSAs arrive from any authenticated mesh member and
+	// insert graph/seqMap/lastUpdated rows per claimed origin, while every
+	// ComputeRoutes is O(V²). Without a ceiling, flooding fresh keypairs grows
+	// the graph and Dijkstra cost without bound. An origin that is ALREADY
+	// known is always refreshed (legitimate churn is fine); past the ceiling a
+	// brand-new origin triggers one opportunistic stale sweep (same 60s age
+	// as the periodic CleanStaleNodes) and is rejected only if still full.
+	if _, known := r.graph[originID]; !known && len(r.graph) >= maxGraphOrigins {
+		now := time.Now()
+		for pid, t := range r.lastUpdated {
+			if pid == r.localPeerID {
+				continue
+			}
+			if now.Sub(t) > lsaStaleAge {
+				delete(r.graph, pid)
+				delete(r.seqMap, pid)
+				delete(r.lastUpdated, pid)
+			}
+		}
+		if _, known = r.graph[originID]; !known && len(r.graph) >= maxGraphOrigins {
+			return false
+		}
+	}
+
 	r.seqMap[originID] = lsa.Seq
 	r.lastUpdated[originID] = time.Now()
 
 	nbrMap := make(map[peer.ID]LinkEdge)
 	for nbrStr, rtt := range lsa.Neighbors {
+		if len(nbrMap) >= maxLSANeighbors {
+			break // hostile neighbour count; keep the first maxLSANeighbors
+		}
 		if nbrID, err := peer.Decode(nbrStr); err == nil {
 			// A node is never its own direct neighbour. A self-entry in an LSA
 			// would create a graph self-edge (r.graph[originID][originID]) that,
@@ -467,11 +509,21 @@ func (pq *priorityQueue) Pop() interface{} {
 	return item
 }
 
-// ComputeRoutes runs Dijkstra's algorithm to calculate shortest latency paths to all reachable nodes
+// ComputeRoutes runs Dijkstra's algorithm to calculate shortest latency paths
+// to all reachable nodes. Locking wrapper around computeRoutesLocked.
 func (r *Router) ComputeRoutes() map[peer.ID]RouteInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.computeRoutesLocked()
+}
 
+// computeRoutesLocked performs the actual computation. The caller must hold at
+// least r.mu.RLock(). Never call the exported ComputeRoutes while a lock is
+// already held: RWMutex read locks are NOT recursively safe — a writer that
+// queues between the outer and inner RLock deadlocks the inner one (which used
+// to hang GetRouteInfoDTOs whenever an LSA landed mid-call, wedging all route
+// writers and the WebUI stats path).
+func (r *Router) computeRoutesLocked() map[peer.ID]RouteInfo {
 	dist := make(map[peer.ID]int64)    // penalised cost — drives path selection
 	rttDist := make(map[peer.ID]int64) // observed RTT sum — drives display only
 	prev := make(map[peer.ID]peer.ID)
@@ -736,7 +788,7 @@ func (r *Router) GetRouteInfoDTOs(lookup func(pID peer.ID) (nodeName string, tap
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	routes := r.ComputeRoutes()
+	routes := r.computeRoutesLocked()
 	dtos := make([]observer.RouteInfoDTO, 0, len(routes))
 
 	getName := func(pID peer.ID) string {

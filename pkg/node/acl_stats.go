@@ -81,7 +81,13 @@ type ACLDropRecordDTO struct {
 // lets the engine evolve without breaking the JSON contract.
 func (n *Node) GetACLStats() ACLStatsSnapshotDTO {
 	dto := ACLStatsSnapshotDTO{}
-	if n.Config != nil {
+	// The enforcement path (checkACL) reads config(); the card must show the
+	// SAME snapshot or a hot-reloaded ACL policy is displayed stale.
+	if c := n.config(); c != nil {
+		dto.Enabled = c.ACL.Enable
+		dto.RuleCount = len(c.ACL.Rules)
+		dto.DefaultAct = c.ACL.DefaultAction
+	} else if n.Config != nil {
 		dto.Enabled = n.Config.ACL.Enable
 		dto.RuleCount = len(n.Config.ACL.Rules)
 		dto.DefaultAct = n.Config.ACL.DefaultAction

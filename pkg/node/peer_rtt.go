@@ -151,6 +151,47 @@ func summarizePeerRTTSamples(source string, samples []peerRTTProbeSample) peerRT
 	return snap
 }
 
+// routingRTTMsFromSnapshot converts a COMPLETED probe into the integral
+// millisecond edge weight the link-state graph stores. It returns ok=false when
+// no probe has completed, so the caller can install a provisional estimate
+// instead of a fabricated measurement.
+//
+// The weight is clamped to >=1ms because the graph encodes "no edge" as an
+// absent entry and 0 as a meaningless cost: a genuine sub-millisecond LAN RTT
+// must not collapse into the "unknown" zero.
+func routingRTTMsFromSnapshot(snap peerRTTSnapshot) (int64, bool) {
+	if !snap.rttMeasured || snap.rttMs <= 0 {
+		return 0, false
+	}
+	ms := int64(math.Round(snap.rttMs))
+	if ms < 1 {
+		ms = 1
+	}
+	return ms, true
+}
+
+// preferredLinkRTTMs picks the authoritative link weight for one peer.
+//
+// A completed probe outranks the peerstore EWMA: the EWMA is a smoothed
+// control-plane figure that libp2p only updates on its own schedule, while the
+// probe is a real round trip over the path the operator is looking at. The EWMA
+// is therefore a provisional fallback, used only until the first probe returns
+// so a freshly connected peer is not stuck on the synthetic edge cost.
+//
+// This precedence is the single source of truth for the routing graph's view of
+// a link: inverting it made the Mesh Quality matrix (fed by the graph) and the
+// topology chart (fed by PeerInfoDTO) report different latencies for the same
+// link in the same stats tick.
+func preferredLinkRTTMs(snap peerRTTSnapshot, peerstoreEWMAMs int64) (int64, bool) {
+	if ms, ok := routingRTTMsFromSnapshot(snap); ok {
+		return ms, true
+	}
+	if peerstoreEWMAMs > 0 {
+		return peerstoreEWMAMs, true
+	}
+	return 0, false
+}
+
 // routingPeerLatencyMs is intentionally separate from displayed telemetry.
 // Dijkstra needs a positive provisional edge cost before the first probe, but
 // that cost is an internal estimate and must never be presented as measured

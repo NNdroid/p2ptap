@@ -22,18 +22,13 @@ import (
 // closes it (dropping the flock). Holding it open for the process lifetime is
 // what keeps the lock held.
 
-// daemonLockPath is where the single-instance lock file lives. We use the
-// user's runtime dir when available (systemd private tmp, etc.) and fall back
-// to the OS temp dir; both are guaranteed writable by the daemon user and do
-// not require the config dir to exist yet (startNode can run before any config
-// is laid down). The path must be identical across all instances so the flock
-// actually serialises them.
-var daemonLockPath = func() string {
-	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
-		return filepath.Join(d, "p2ptap-daemon.lock")
-	}
-	return filepath.Join(os.TempDir(), "p2ptap-daemon.lock")
-}()
+// daemonLockPath is where the single-instance lock file lives. It MUST be
+// identical across all instances for the flock to serialise them — that is
+// why XDG_RUNTIME_DIR is deliberately not consulted here: a systemd system
+// daemon (no XDG_RUNTIME_DIR) and an interactive `p2ptap run` from a desktop
+// login (XDG_RUNTIME_DIR=/run/user/UID) would otherwise pick two different
+// files and both start. os.TempDir() resolves to /tmp for both.
+var daemonLockPath = filepath.Join(os.TempDir(), "p2ptap-daemon.lock")
 
 func acquireDaemonMutex(_ string) (uintptr, bool) {
 	f, err := os.OpenFile(daemonLockPath, os.O_CREATE|os.O_RDWR, 0644)

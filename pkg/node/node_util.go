@@ -129,12 +129,11 @@ func (n *Node) rebuildARPIndex() {
 		meta := value.(PeerMeta)
 		effectiveMAC := parseHWMac(meta.TapMAC)
 		if obs := n.observedTapMACFrom(pID); len(obs) == 6 {
-			// TEMP-DIAG: only fires when the observed wire MAC disagrees with
-			// the advertised metadata MAC (the suspected three-node bug).
-			if log.IsDebug() && string(obs) != string(effectiveMAC) {
-				log.Debug("ARP-DIAG: peer=%s ip=%s overriding metadata MAC %s with OBSERVED wire MAC %s",
-					pID.String(), meta.TapIP, effectiveMAC.String(), obs.String())
-			}
+			// The MAC actually seen on the wire wins over the advertised one:
+			// a peer that rewrote its TAP MAC without re-advertising would
+			// otherwise be unreachable. node_streams.go rejects payloads shorter
+			// than a full Ethernet header before recording an observed MAC, so a
+			// short control probe can never poison this index again.
 			effectiveMAC = obs
 		}
 		if len(effectiveMAC) != 6 {

@@ -191,9 +191,48 @@ func (p *lsaStreamPool) Invalidate(target peer.ID) {
 	if !ok {
 		return
 	}
-	m.Lock()
+	if !tryLockTimeout(m, peerInvalidateWaitTimeout) {
+		// The lock owner is parked inside a stream operation (WriteFrame /
+		// WithStream fn → ReadFrame) that never returns — on shutdown this is
+		// the documented case where host.Close timed out and left the cached
+		// stream (often a relay-ctrl tunnel) alive. Taking m.Lock() would
+		// block InvalidateAll — and thus Node.Close — FOREVER (Android's stop
+		// button hanging on "STOPPING" was this exact deadlock). Close the
+		// cached stream from under the owner instead: stream Close is safe
+		// cross-goroutine and turns the parked read/write into an error, so
+		// the owner returns and releases m on its own.
+		//
+		// Nothing further is needed here: closeLocked already removed the map
+		// entry, and the owner's own error path re-runs closeLocked (a no-op).
+		// A stream opened LATER by another caller must hold m, so it can only
+		// appear after this point — and must NOT be closed by us.
+		p.closeLocked(target)
+		return
+	}
 	defer m.Unlock()
 	p.closeLocked(target)
+}
+
+const (
+	// peerInvalidateWaitTimeout bounds how long Invalidate waits for a busy
+	// peer mutex before force-closing the stream underneath its owner. It
+	// only elapses on the pathological parked-stream path.
+	peerInvalidateWaitTimeout = 2 * time.Second
+)
+
+// tryLockTimeout spins (20ms) acquiring m with an upper bound.
+func tryLockTimeout(m *sync.Mutex, d time.Duration) bool {
+	if m.TryLock() {
+		return true
+	}
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		if m.TryLock() {
+			return true
+		}
+	}
+	return false
 }
 
 // InvalidateAll closes every cached stream (used on node shutdown).

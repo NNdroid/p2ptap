@@ -82,11 +82,17 @@ type (
 )
 
 type Server struct {
-	collector  *StatsCollector
-	cfg        atomic.Pointer[config.Config]
-	authToken  string
-	configPath string
-	listeners  []net.Listener
+	collector *StatsCollector
+	cfg       atomic.Pointer[config.Config]
+	authToken string
+	// authTokenAuto records that the effective token was GENERATED at startup
+	// (the operator config had none). Such a token must never be written back
+	// into config.json (0644 world-readable): the 0600 sidecar is its only
+	// durable home. An operator-authored token in the config is theirs and is
+	// persisted normally.
+	authTokenAuto bool
+	configPath    string
+	listeners     []net.Listener
 	// boundAddrs records the actual "http://ip:port" URLs the server is
 	// listening on, refreshed on every (re)bind. It is persisted to a sidecar
 	// next to config.json so the Windows tray can open the dashboard at the
@@ -114,6 +120,10 @@ type Server struct {
 	// those endpoints fall back to the cached collector data.
 	hostProvider   atomic.Pointer[func() host.Host]
 	routerProvider atomic.Pointer[func() *routing.Router]
+	// relayDiagProvider exposes the node's per-stage relay drop counters
+	// (see node/relay_diag.go) to /api/relay/diag. Typed as any so web does
+	// not import node.
+	relayDiagProvider atomic.Pointer[func() any]
 }
 
 // SetHostProvider injects the callback returning the live libp2p host (used by
@@ -133,6 +143,12 @@ func (s *Server) SetRouterProvider(f func() *routing.Router) {
 // import the node package.
 func (s *Server) SetTopologyProvider(f func() any) {
 	s.topologyProvider.Store(&f)
+}
+
+// SetRelayDiagProvider injects the callback returning the node's relay drop
+// snapshot (node.RelayDiagSnapshot). Used by /api/relay/diag.
+func (s *Server) SetRelayDiagProvider(f func() any) {
+	s.relayDiagProvider.Store(&f)
 }
 
 var webLog = logger.New("WebUI")
@@ -211,6 +227,14 @@ func extractToken(r *http.Request) string {
 	return r.URL.Query().Get("token")
 }
 
+// tokenValid reports whether r carries the live bearer token, in constant
+// time. authRequired's main gate already does this; the CORS branches below
+// used plain ==, which is an avoidable timing side-channel on the same
+// secret.
+func (s *Server) tokenValid(r *http.Request) bool {
+	return s.authToken != "" && subtle.ConstantTimeCompare([]byte(extractToken(r)), []byte(s.authToken)) == 1
+}
+
 // authRequired wraps an /api handler, enforcing the bearer token and applying
 // safe headers. It also answers CORS preflight (OPTIONS) only for requests
 // that carry a valid token, and echoes the Origin only then — never "*".
@@ -218,7 +242,7 @@ func (s *Server) authRequired(next func(http.ResponseWriter, *http.Request)) fun
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
 			origin := r.Header.Get("Origin")
-			if origin != "" && s.authToken != "" && extractToken(r) == s.authToken {
+			if origin != "" && s.tokenValid(r) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
 				w.Header().Set("Vary", "Origin")
@@ -244,7 +268,7 @@ func (s *Server) authRequired(next func(http.ResponseWriter, *http.Request)) fun
 		}
 
 		// For authenticated cross-origin requests, reflect the Origin (no "*").
-		if origin := r.Header.Get("Origin"); origin != "" && s.authToken != "" && extractToken(r) == s.authToken {
+		if origin := r.Header.Get("Origin"); origin != "" && s.tokenValid(r) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Vary", "Origin")
@@ -272,8 +296,10 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	if cfg != nil {
 		authToken = cfg.WebUI.AuthToken
 	}
+	authTokenAuto := false
 	if authToken == "" {
 		authToken = generateToken()
+		authTokenAuto = true
 		// Do NOT log the full token in cleartext (it would leak into log files
 		// and process listings). The full token is persisted to a sidecar file
 		// next to the config (PersistWebUIToken) for local control clients and
@@ -297,6 +323,7 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	s := &Server{
 		collector:         collector,
 		authToken:         authToken,
+		authTokenAuto:     authTokenAuto,
 		configPath:        configPath,
 		listenIP:          listenIP,
 		listenIPv6:        listenIPv6,
@@ -383,6 +410,18 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	mux.HandleFunc("/api/stats", s.authRequired(func(w http.ResponseWriter, r *http.Request) {
 		resp := collector.GetResponse()
 		writeJSON(w, resp)
+	}))
+
+	// API Endpoint: /api/relay/diag — per-stage drop counters for the TAP-frame
+	// transit chain (overlay relay RX/forward, boot backbone, final delivery).
+	// Turns "peers look connected but data never crosses" into a one-call
+	// diagnosis: each counter names the choke point that ate the frames.
+	mux.HandleFunc("/api/relay/diag", s.authRequired(func(w http.ResponseWriter, r *http.Request) {
+		if p := s.relayDiagProvider.Load(); p != nil && *p != nil {
+			writeJSON(w, (*p)())
+			return
+		}
+		writeJSON(w, map[string]any{"available": false, "note": "relay diagnostics not wired (node not running)"})
 	}))
 
 	// API Endpoint: /api/diag/snapshot — OpenTelemetry-compliant system diagnostic snapshot.
@@ -1259,7 +1298,17 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 				effectivePath = c.ConfigPath
 			}
 			if effectivePath != "" {
-				config.UpdateConfigFileDelta(effectivePath, &incoming)
+				// SECURITY: an auto-generated token must never land in the
+				// 0644 config.json (any local user could read it and gain
+				// full /api admin). The runtime copy keeps the live token;
+				// the disk copy blanks it — its durable home is the 0600
+				// sidecar written at startup. Operator-authored tokens
+				// (authTokenAuto=false) persist untouched, as configured.
+				persist := incoming
+				if s.authTokenAuto {
+					persist.WebUI.AuthToken = ""
+				}
+				config.UpdateConfigFileDelta(effectivePath, &persist)
 			}
 
 			// Hot-reload mutable fields. Replace the whole config pointer
@@ -2201,12 +2250,24 @@ func restartRequiredFields(old, new *config.Config) []string {
 	// startup (transport pnet + SeqSync salt), so it needs a restart.
 	add("psk", old.PSK != new.PSK)
 	add("transport_strategy", old.TransportStrategy != new.TransportStrategy)
-	// Only the WebUI bind/port/enable need a restart; auth_token and
-	// pcap_sample_every are read live, so exclude them from the comparison.
+	// Only the WebUI bind/port/enable/token need a restart: the running Server
+	// resolves its bearer token once at startup; pcap_sample_every is read
+	// live and stays excluded.
 	add("web_ui", old.WebUI.Enable != new.WebUI.Enable ||
 		old.WebUI.ListenIP != new.WebUI.ListenIP ||
 		old.WebUI.ListenIPv6 != new.WebUI.ListenIPv6 ||
-		old.WebUI.Port != new.WebUI.Port)
+		old.WebUI.Port != new.WebUI.Port ||
+		old.WebUI.AuthToken != new.WebUI.AuthToken)
+	// The fields below are enforced from the construction-time Config baseline
+	// (their consumers read n.Config, which never moves during the process),
+	// so a hot save silently changes NOTHING until restart — the UI must say
+	// so (node_name still updates the local display live via the collector,
+	// but peer-anchored identity — meta/peek-map/LSA — keeps the boot value).
+	add("node_name", old.NodeName != new.NodeName)
+	add("accept_advertised_subnets", old.AcceptAdvertisedSubnets != new.AcceptAdvertisedSubnets)
+	add("allowed_subnet_peers", !stringSliceEqual(old.AllowedSubnetPeers, new.AllowedSubnetPeers))
+	add("discover_boot_mesh", old.DiscoverBootMesh != new.DiscoverBootMesh)
+	add("hole_punch_timeout", old.HolePunchTimeout != new.HolePunchTimeout)
 	return out
 }
 

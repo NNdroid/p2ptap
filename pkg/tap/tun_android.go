@@ -17,6 +17,7 @@ import (
 	"os"
 	"sync"
 	"syscall"
+	"time"
 
 	"p2ptap/pkg/tuntap"
 )
@@ -154,9 +155,29 @@ func (d *TunTAPDevice) Read(b []byte) (int, error) {
 	}
 
 	for {
+		// Deadline-bounded park: a bare f.Read on the tunnel fd sits in the
+		// kernel until a packet arrives, and Go does NOT reliably wake a
+		// pending read when Close/UpdateFd closes the file (the fd may keep
+		// the reader parked while the process lives). 2s caps the park so the
+		// closed/fd-swap checks below are reachable and stop never burns the
+		// node's 8s read-loop force-timeout on an idle link.
+		_ = f.SetReadDeadline(time.Now().Add(2 * time.Second))
 		// Zero-copy kernel read: read the IP packet directly into b[14:], leaving 14 bytes headroom for L2 Ethernet header
 		n, err := f.Read(b[14:])
 		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				d.mu.RLock()
+				closedNow := d.closed
+				cur := d.file
+				d.mu.RUnlock()
+				if closedNow {
+					return 0, errors.New("tun: device closed")
+				}
+				if cur != nil && cur != f {
+					f = cur // UpdateFd swapped the fd — pick up the new file
+				}
+				continue
+			}
 			return 0, err
 		}
 		if n == 0 {

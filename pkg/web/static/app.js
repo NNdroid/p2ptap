@@ -404,6 +404,11 @@
                 sec_peer_pfs_eph: "Ephemeral ECDH Public-Key Fingerprint",
                 sec_peer_sni: "Handshake SNI (peer presented)",
                 sec_peer_psk: "PSK verified",
+                sec_peer_conns: "Negotiated connections",
+                sec_conn_in: "inbound (peer dialed us)",
+                sec_conn_out: "outbound (we dialed)",
+                sec_conn_noise_hint: "Noise handshake — no TLS ClientHello, so no SNI can be shown.",
+                sec_conn_out_only: "Only outbound connections to this peer — its SNI can only be observed when the peer dials us.",
                 sec_peer_epoch_local: "Local Handshake Epoch",
                 sec_peer_epoch_peer: "Peer Handshake Epoch",
                 sec_peer_copy: "Copy",
@@ -1281,6 +1286,11 @@
                 sec_peer_pfs_eph: "临时 ECDH 公钥指纹",
                 sec_peer_sni: "握手 SNI（对端出示）",
                 sec_peer_psk: "PSK 已验证",
+                sec_peer_conns: "协商连接",
+                sec_conn_in: "入站（对端拨入）",
+                sec_conn_out: "出站（本机拨出）",
+                sec_conn_noise_hint: "该链路协商为 Noise —— 没有 TLS ClientHello，无法显示 SNI。",
+                sec_conn_out_only: "当前仅有本节点拨出的连接 —— 对端作为 TLS 服务器不出示 SNI，仅当它拨入本节点时可观测。",
                 sec_peer_epoch_local: "本端握手 epoch",
                 sec_peer_epoch_peer: "对端握手 epoch",
                 sec_peer_copy: "复制",
@@ -2035,6 +2045,11 @@
                 sec_peer_pfs_eph: "臨時 ECDH 公鑰指紋",
                 sec_peer_sni: "握手 SNI（對端出示）",
                 sec_peer_psk: "PSK 已驗證",
+                sec_peer_conns: "協商連線",
+                sec_conn_in: "入站（對端撥入）",
+                sec_conn_out: "出站（本機撥出）",
+                sec_conn_noise_hint: "該鏈路協商為 Noise —— 沒有 TLS ClientHello，無法顯示 SNI。",
+                sec_conn_out_only: "目前僅有本節點撥出的連線 —— 對端作為 TLS 伺服器不出示 SNI，僅當它撥入本節點時可觀測。",
                 sec_peer_epoch_local: "本端握手 epoch",
                 sec_peer_epoch_peer: "對端握手 epoch",
                 sec_peer_copy: "複製",
@@ -2860,6 +2875,11 @@
                 sec_peer_pfs_eph: "一時 ECDH 公開鍵フィンガープリント",
                 sec_peer_sni: "ハンドシェーク SNI（ピア提示）",
                 sec_peer_psk: "PSK 検証済み",
+                sec_peer_conns: "ネゴシエートされた接続",
+                sec_conn_in: "インバウンド（ピア発信）",
+                sec_conn_out: "アウトバウンド（本ノード発信）",
+                sec_conn_noise_hint: "このリンクは Noise でネゴシエートされました — TLS ClientHello がなく、SNI は表示できません。",
+                sec_conn_out_only: "本ノードからの発信接続のみ — ピアの SNI はピアが本ノードへ接続した時のみ観測できます。",
                 sec_peer_epoch_local: "ローカル ハンドシェイク epoch",
                 sec_peer_epoch_peer: "ピア ハンドシェイク epoch",
                 sec_peer_copy: "コピー",
@@ -3686,6 +3706,11 @@
                 sec_peer_pfs_eph: "Ephemeraler ECDH-Public-Key-Fingerabdruck",
                 sec_peer_sni: "Handshake-SNI (Gegenüber präsentiert)",
                 sec_peer_psk: "PSK verifiziert",
+                sec_peer_conns: "Ausgehandelte Verbindungen",
+                sec_conn_in: "eingehend (Gegenstelle wählt uns)",
+                sec_conn_out: "ausgehend (wir wählen)",
+                sec_conn_noise_hint: "Noise-Handshake — kein TLS-ClientHello, daher kein SNI anzeigbar.",
+                sec_conn_out_only: "Nur ausgehende Verbindungen zu diesem Peer — dessen SNI ist nur beobachtbar, wenn der Peer uns anwählt.",
                 sec_peer_epoch_local: "Lokale Handshake-Epoche",
                 sec_peer_epoch_peer: "Peer-Handshake-Epoche",
                 sec_peer_copy: "Kopieren",
@@ -4512,6 +4537,11 @@
                 sec_peer_pfs_eph: "Huella de Clave Pública ECDH Efímera",
                 sec_peer_sni: "SNI del handshake (presentado por el par)",
                 sec_peer_psk: "PSK verificado",
+                sec_peer_conns: "Conexiones negociadas",
+                sec_conn_in: "entrante (el par marca a nosotros)",
+                sec_conn_out: "saliente (nosotros marcamos)",
+                sec_conn_noise_hint: "Handshake Noise — sin ClientHello TLS, no se puede mostrar SNI.",
+                sec_conn_out_only: "Solo conexiones salientes a este par — su SNI solo se observa cuando el par nos marca.",
                 sec_peer_epoch_local: "Época de Handshake Local",
                 sec_peer_epoch_peer: "Época de Handshake del Peer",
                 sec_peer_copy: "Copiar",
@@ -5338,6 +5368,11 @@
                 sec_peer_pfs_eph: "Empreinte de Clé Publique ECDH Éphémère",
                 sec_peer_sni: "SNI de handshake (présenté par le pair)",
                 sec_peer_psk: "PSK vérifié",
+                sec_peer_conns: "Connexions négociées",
+                sec_conn_in: "entrant (le pair nous appelle)",
+                sec_conn_out: "sortant (nous appelons)",
+                sec_conn_noise_hint: "Handshake Noise — pas de ClientHello TLS, SNI non affichable.",
+                sec_conn_out_only: "Uniquement des connexions sortantes vers ce pair — son SNI n'est observable que lorsque le pair nous appelle.",
                 sec_peer_epoch_local: "Époque de Handshake Locale",
                 sec_peer_epoch_peer: "Époque de Handshake du Pair",
                 sec_peer_copy: "Copier",
@@ -5966,11 +6001,6 @@
             });
         }
 
-        function updateToggleLabel(chk, labelId, offText, onText) {
-            const lbl = document.getElementById(labelId);
-            if (lbl) lbl.textContent = chk.checked ? onText : offText;
-        }
-
         function showToast(msg, isError, isWarn) {
             const tEl = document.getElementById('toast');
             tEl.innerText = msg;
@@ -6014,14 +6044,12 @@
                 const disableRelayEl = document.getElementById('cfgDisableRelay');
                 if (disableRelayEl) {
                     disableRelayEl.checked = !!transports.disable_relay;
-                    updateToggleLabel(disableRelayEl, 'cfgDisableRelayLabel', 'Off', 'On');
                 }
                 const sniEl = document.getElementById('cfgTlsServerName');
                 if (sniEl) sniEl.value = transports.tls_server_name || '';
                 const sniSuffixEl = document.getElementById('cfgTlsSniSuffix');
                 if (sniSuffixEl) sniSuffixEl.value = transports.tls_sni_suffix || '';
                 document.getElementById('cfgEnableMDNS').checked = !!currentFullConfig.enable_mdns;
-                updateToggleLabel(document.getElementById('cfgEnableMDNS'), 'cfgEnableMDNSLabel', 'Off', 'On');
 
                 const obfs = currentFullConfig.obfuscation || {};
                 document.getElementById('cfgObfsMode').value = obfs.mode || 'random';
@@ -6035,9 +6063,7 @@
                 document.getElementById('cfgAutoDetectInterval').value = obfs.auto_detect_interval || 30;
                 document.getElementById('cfgAutoThresholdBytes').value = obfs.auto_threshold_bytes || 65536;
                 document.getElementById('cfgAllowModeSwitch').checked = !!obfs.allow_mode_switch;
-                updateToggleLabel(document.getElementById('cfgAllowModeSwitch'), 'cfgAllowModeSwitchLabel', 'Off', 'On');
                 document.getElementById('cfgStrictKeyNegotiation').checked = !!obfs.strict_key_negotiation;
-                updateToggleLabel(document.getElementById('cfgStrictKeyNegotiation'), 'cfgStrictKeyNegotiationLabel', 'Off', 'On');
                 onObfsModeChange(); // show/hide mode-specific fields
                 // Paint the filled portion of any range slider (Jitter, Fixed Size)
                 // so the initial state isn't a blank track. updateRangeProgress is
@@ -10402,6 +10428,19 @@
                 a.textContent = '🔒 ' + (e.algo || '');
                 badges.appendChild(a);
             }
+            // Security handshake actually negotiated on this peer's connections
+            // (TLS vs Noise). Noise links have no ClientHello → no observable SNI.
+            if (e.conns && e.conns.length) {
+                const secSet = [];
+                e.conns.forEach(function (c) { if (c.security && secSet.indexOf(c.security) < 0) secSet.push(c.security); });
+                if (secSet.length) {
+                    const sc = document.createElement('span');
+                    sc.className = 'enc-sec-chip';
+                    sc.textContent = '🛡 ' + secSet.join('/').toUpperCase();
+                    sc.title = t('sec_peer_conns');
+                    badges.appendChild(sc);
+                }
+            }
             // SNI the peer presented when connecting to us (TLS/QUIC ClientHello).
             if (e.handshake_server_name) {
                 const sni = document.createElement('span');
@@ -10514,6 +10553,44 @@
             // Empty when the peer sent no SNI (tls_server_name unset) or the
             // connection is one WE dialed (a TLS server presents no SNI).
             addTextRow('sec_peer_sni', e.handshake_server_name || '—');
+            // ── Negotiated connections ──
+            // What each live connection ACTUALLY negotiated (transport · security
+            // · muxer · who dialed). This is what answers "why is the SNI empty":
+            // Noise has no ClientHello, and an outbound-only peer never got a
+            // chance to present its SNI to us.
+            if (e.conns && e.conns.length) {
+                const row = document.createElement('div');
+                row.className = 'ped-row';
+                const k = document.createElement('div');
+                k.className = 'ped-key';
+                k.textContent = t('sec_peer_conns');
+                const v = document.createElement('div');
+                v.className = 'ped-val ped-conns';
+                e.conns.forEach(function (cn) {
+                    const line = document.createElement('div');
+                    line.className = 'enc-conn-line' + (cn.inbound ? ' enc-conn-in' : ' enc-conn-out');
+                    const parts = [
+                        (cn.transport || '?').toUpperCase(),
+                        (cn.security || '?').toUpperCase(),
+                        cn.muxer ? cn.muxer : '—',
+                        cn.inbound ? t('sec_conn_in') : t('sec_conn_out'),
+                    ];
+                    if (cn.limited) parts.push('RELAY');
+                    if (cn.remote_addr) parts.push(cn.remote_addr);
+                    line.textContent = parts.join(' · ');
+                    v.appendChild(line);
+                });
+                if (!e.handshake_server_name) {
+                    const hasNoise = e.conns.some(function (c) { return c.security === 'noise'; });
+                    const allOut = e.conns.every(function (c) { return !c.inbound; });
+                    const hint = document.createElement('div');
+                    hint.className = 'enc-conn-hint';
+                    hint.textContent = hasNoise ? t('sec_conn_noise_hint') : (allOut ? t('sec_conn_out_only') : '');
+                    if (hint.textContent) v.appendChild(hint);
+                }
+                row.appendChild(k); row.appendChild(v);
+                wrap.appendChild(row);
+            }
             if (e.psk_required) {
                 addTextRow('sec_peer_psk', e.psk_verified ? '✓' : '✗',
                     { valCls: e.psk_verified ? 'ped-yes' : 'ped-no' });
@@ -11099,7 +11176,16 @@
                         } else {
                             statusBadge = `<span class="pill-badge" style="padding:3px 9px; font-size:0.75rem;">❔ Unverified</span>`;
                         }
-                        const directText = r.direct_rtt_ms > 0 ? `≈${r.direct_rtt_ms} ms` : '-';
+                        const routeRTTMeasured = r.rtt_measured === true && Number(r.measured_rtt_ms) > 0;
+                        const totalRttText = routeRTTMeasured
+                            ? `${Number(r.measured_rtt_ms).toFixed(1)} ms`
+                            : (r.total_rtt_ms > 0 ? `≈${r.total_rtt_ms} ms route est.` : '—');
+                        const totalRttTitle = routeRTTMeasured
+                            ? `Measured probe · ${peerRTTSourceLabel(r)}`
+                            : 'Dijkstra routing estimate, not an end-to-end probe';
+                        const directText = routeRTTMeasured
+                            ? `${Number(r.measured_rtt_ms).toFixed(1)} ms`
+                            : (r.direct_rtt_ms > 0 ? `≈${r.direct_rtt_ms} ms est.` : '-');
                         const hopBadge = `<span style="white-space:nowrap; background:var(--glass-fill); border:1px solid var(--glass-fill-strong); color:var(--text-dim); padding:2px 8px; border-radius:12px; font-size:0.75rem;">${hopCount} ${hopCount === 1 ? 'Hop' : 'Hops'}</span>`;
 
                         let ipHtml = '';
@@ -11119,7 +11205,7 @@
                                 <td>${ipHtml}</td>
                                 <td>${hopBadge}</td>
                                 <td><div style="display:flex; align-items:center; flex-wrap:wrap;">${visualPath}</div></td>
-                                <td><strong style="color:${r.total_rtt_ms > 0 && r.total_rtt_ms < 50 ? 'var(--success)' : (r.total_rtt_ms > 0 ? 'var(--warn)' : 'var(--text-muted)')}" title="Dijkstra routing estimate, not an end-to-end probe">${r.total_rtt_ms > 0 ? '≈' + r.total_rtt_ms + ' ms' : '—'}</strong></td>
+                                <td><strong style="color:${r.total_rtt_ms > 0 && r.total_rtt_ms < 50 ? 'var(--success)' : (r.total_rtt_ms > 0 ? 'var(--warn)' : 'var(--text-muted)')}" title="${escapeHTML(totalRttTitle)}">${totalRttText}</strong></td>
                                 <td style="color:var(--text-secondary)">${directText}</td>
                                 <td>${optHtml}</td>
                                 <td>${statusBadge}</td>
@@ -11148,7 +11234,22 @@
                     const matrix = data.mesh_matrix || [];
                     if (matrix.length > 0) {
                         matrixBody.innerHTML = matrix.map(m => {
-                            const rttColor = m.rtt_ms > 0 && m.rtt_ms < 50 ? '#34d399' : (m.rtt_ms > 0 && m.rtt_ms < 150 ? '#fbbf24' : (m.rtt_ms > 0 ? '#f87171' : '#94a3b8'));
+                            // Prefer the completed probe over the Dijkstra path cost
+                            // and label whichever value is shown. The topology chart
+                            // renders the same probe (both sides come from
+                            // peerRTTMeasurement), so the two panels can no longer
+                            // disagree — the matrix used to print the raw routing
+                            // estimate as if it were a measurement.
+                            const rttMeasured = m.rtt_measured === true && Number(m.measured_rtt_ms) > 0;
+                            const rttValue = rttMeasured ? Number(m.measured_rtt_ms) : m.rtt_ms;
+                            const rttKnown = rttMeasured || m.rtt_ms > 0;
+                            const rttColor = !rttKnown ? '#94a3b8' : (rttValue < 50 ? '#34d399' : (rttValue < 150 ? '#fbbf24' : '#f87171'));
+                            const rttText = rttMeasured
+                                ? `${Number(m.measured_rtt_ms).toFixed(1)} ms`
+                                : (m.rtt_ms > 0 ? `≈${m.rtt_ms} ms route est.` : '—');
+                            const rttTitle = rttMeasured
+                                ? `Measured probe · ${peerRTTSourceLabel(m)}`
+                                : 'Dijkstra routing estimate, not an end-to-end probe';
                             const path = routeTransportPath(m);
                             const typeBadge = path === 'direct'
                                 ? `<span style="color:var(--accent-cyan); font-weight:bold;">⚡ ${transportPathLabel(path)}</span>`
@@ -11159,7 +11260,7 @@
                                 <tr>
                                     <td><strong style="color:var(--text-primary);">💻 ${escapeHTML(m.src_name)}</strong></td>
                                     <td><strong style="color:var(--accent-cyan); cursor:pointer;" data-onclick="setPingTarget(${attrStr(m.dst_peer_id)})">🎯 ${escapeHTML(m.dst_name)}</strong></td>
-                                    <td><strong style="color:${rttColor}" title="Routing-table path estimate">${m.rtt_ms > 0 ? '≈' + m.rtt_ms + ' ms' : '—'}</strong></td>
+                                    <td><strong style="color:${rttColor}" title="${escapeHTML(rttTitle)}">${rttText}</strong></td>
                                     <td><span class="pill-badge role-static" style="font-size:0.75rem;">${m.hops} Hops</span></td>
                                     <td>${typeBadge}</td>
                                 </tr>
@@ -14493,7 +14594,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             inspectRoute, closeRouteInspector,
             openShareModal, closeShareModal, copyConfigJSON, downloadConfigJSON,
             // Obfuscation / form helpers
-            onObfsModeChange, updateToggleLabel,
+            onObfsModeChange,
             addCfgListItem, delCfgListItem, moveCfgListItem,
             // Stats / logs / topology toolbar
             fetchStats, setLanguage,

@@ -258,6 +258,9 @@ func Start(cfgJSON string, tunFd int) error {
 		srv.SetTopologyProvider(func() any { return n.GetTopology() })
 		srv.SetHostProvider(func() host.Host { return n.Host })
 		srv.SetRouterProvider(func() *routing.Router { return n.Router })
+		// /api/relay/diag — per-stage relay drop counters, wired from the AAR
+		// so a phone build can be diagnosed from its own WebUI too.
+		srv.SetRelayDiagProvider(func() any { return n.GetRelayDiag() })
 		return srv, nil
 	}
 

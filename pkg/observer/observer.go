@@ -623,9 +623,17 @@ type RouteInfoDTO struct {
 	// through a libp2p relay — so without this field the WebUI would wrongly
 	// show "Direct" for a 500ms+ relayed peer. Values: "direct" | "circuit-relay"
 	// | "overlay-relay" | "unknown" (no current transport evidence).
-	TransportPath string             `json:"transport_path"`
-	TotalRTTMs    int64              `json:"total_rtt_ms"`
-	DirectRTTMs   int64              `json:"direct_rtt_ms"`
+	TransportPath string `json:"transport_path"`
+	TotalRTTMs    int64  `json:"total_rtt_ms"`
+	DirectRTTMs   int64  `json:"direct_rtt_ms"`
+	// MeasuredRTTMs / RTTMeasured / RTTSource mirror PeerInfoDTO: the real probe
+	// result for this destination, filled in by the node (the routing layer only
+	// knows graph weights). They let the WebUI label TotalRTTMs as a measurement
+	// when a probe actually completed and as an estimate when it did not, so the
+	// route table can never claim "≈N ms" for a value that is a graph weight.
+	MeasuredRTTMs float64            `json:"measured_rtt_ms"`
+	RTTMeasured   bool               `json:"rtt_measured"`
+	RTTSource     string             `json:"rtt_source,omitempty"`
 	SavedRTTMs    int64              `json:"saved_rtt_ms"`
 	Candidates    []CandidatePathDTO `json:"candidates"`
 }
@@ -710,6 +718,24 @@ type PeerObfInfoDTO struct {
 	// not observe one (e.g. a Noise-negotiated TCP link). Lets an operator confirm
 	// a tls_server_name rollout actually reached every node.
 	HandshakeServerName string `json:"handshake_server_name,omitempty"`
+	// Conns lists every live transport connection to this peer with what was
+	// ACTUALLY negotiated on it (security handshake, muxer, transport, dial
+	// direction). This is what answers "why is the SNI empty": a Noise connection
+	// has no ClientHello, and an outbound-only connection never gave the peer a
+	// chance to present an SNI to us.
+	Conns []PeerConnStateDTO `json:"conns,omitempty"`
+}
+
+// PeerConnStateDTO is one connection's negotiated reality, straight from
+// libp2p's ConnectionState/ConnStats. Security is "tls" or "noise" (QUIC is
+// always tls — TLS runs inside QUIC); Muxer is empty for QUIC (in-band).
+type PeerConnStateDTO struct {
+	Transport  string `json:"transport"`             // tcp / quic / webtransport / webrtc / circuit
+	Security   string `json:"security"`              // tls / noise
+	Muxer      string `json:"muxer,omitempty"`       // yamux / mpqc / … ("" = in-band on QUIC)
+	Inbound    bool   `json:"inbound"`               // peer dialed us (only then can we observe its SNI)
+	Limited    bool   `json:"limited,omitempty"`     // circuit-v2 relayed connection
+	RemoteAddr string `json:"remote_addr,omitempty"` // peer-side IP:port of this connection
 }
 
 type SystemHealthDTO struct {
@@ -787,14 +813,29 @@ type SubnetRouteDTO struct {
 }
 
 type MeshMatrixCellDTO struct {
-	SrcPeerID     string `json:"src_peer_id"`
-	SrcName       string `json:"src_name"`
-	DstPeerID     string `json:"dst_peer_id"`
-	DstName       string `json:"dst_name"`
-	RTTMs         int64  `json:"rtt_ms"`
-	Hops          int    `json:"hops"`
-	IsDirect      bool   `json:"is_direct"`      // overlay routing: next hop is destination
-	TransportPath string `json:"transport_path"` // actual: direct | circuit-relay | overlay-relay | unknown
+	SrcPeerID string `json:"src_peer_id"`
+	SrcName   string `json:"src_name"`
+	DstPeerID string `json:"dst_peer_id"`
+	DstName   string `json:"dst_name"`
+	// RTTMs is the routing-table path cost to DstPeerID: the sum of the
+	// link-state edge weights along the chosen overlay path. For a direct peer
+	// that is the same edge weight a completed probe writes back into the graph,
+	// but for a multi-hop peer it is a Dijkstra ESTIMATE, not an end-to-end
+	// probe — the WebUI must not present it as a measurement.
+	RTTMs int64 `json:"rtt_ms"`
+	// MeasuredRTTMs / RTTMeasured / RTTSource carry the real probe result
+	// (TAP ICMP data path, live libp2p ping, or P2P echo control stream) for
+	// this destination. They exist so the matrix renders the SAME number and the
+	// same "measured vs estimate" wording as the topology chart, which reads
+	// PeerInfoDTO. Without them the matrix showed the raw routing estimate
+	// labelled as a measurement and the two panels disagreed by up to an order
+	// of magnitude.
+	MeasuredRTTMs float64 `json:"measured_rtt_ms"`
+	RTTMeasured   bool    `json:"rtt_measured"`
+	RTTSource     string  `json:"rtt_source,omitempty"`
+	Hops          int     `json:"hops"`
+	IsDirect      bool    `json:"is_direct"`      // overlay routing: next hop is destination
+	TransportPath string  `json:"transport_path"` // actual: direct | circuit-relay | overlay-relay | unknown
 }
 
 // DuplicateIPConflictDTO is the WebUI-facing snapshot of a duplicate-IP or
