@@ -90,6 +90,44 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      # wintun.dll is deliberately NOT committed (.gitignore excludes *.dll),
+      # so a fresh checkout has none — and the release zip would then ship
+      # without the driver, leaving users unable to create the virtual adapter
+      # on a clean Windows machine (driver_type defaults to "auto" = TAP first,
+      # Wintun fallback, and neither ships today).
+      # scripts/build.sh and build.ps1 auto-download it; this job did not, so
+      # published packages silently differed from local ones.
+      # Pinned to the same upstream release the local scripts use, with a
+      # SHA-256 check so a compromised/behind-the-network response cannot
+      # inject a DLL into every published Windows artifact.
+      - name: Fetch wintun.dll (pinned, SHA-256 verified)
+        env:
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          if [ -f "scripts/wintun/${GOARCH}/wintun.dll" ]; then
+            echo "[i] scripts/wintun/${GOARCH}/wintun.dll already present, skipping download"
+            exit 0
+          fi
+
+          WINTUN_URL="https://www.wintun.net/builds/wintun-0.14.1.zip"
+          WINTUN_SHA256="07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
+
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "$WORK"' EXIT
+
+          curl -sSL --retry 3 --retry-delay 2 "$WINTUN_URL" -o "$WORK/wintun.zip"
+          echo "${WINTUN_SHA256}  ${WORK}/wintun.zip" | sha256sum -c -
+
+          unzip -q "$WORK/wintun.zip" -d "$WORK/x"
+          mkdir -p scripts/wintun/amd64 scripts/wintun/386 scripts/wintun/arm64
+          cp "$WORK/x/wintun/bin/amd64/wintun.dll" scripts/wintun/amd64/
+          cp "$WORK/x/wintun/bin/x86/wintun.dll"   scripts/wintun/386/
+          cp "$WORK/x/wintun/bin/arm64/wintun.dll" scripts/wintun/arm64/
+
+          echo "[+] wintun.dll staged for ${GOARCH}:"
+          ls -la "scripts/wintun/${GOARCH}/"
+
       - name: Build Windows Binaries
         env:
           GOOS: windows
@@ -105,10 +143,20 @@ jobs:
           go build -ldflags="${LDFLAGS}" -o "dist/${STAGE}/p2ptap-boot.exe" ./cmd/p2ptap-boot
           go build -ldflags="${LDFLAGS} -H windowsgui" -o "dist/${STAGE}/p2ptap-tray.exe" ./cmd/p2ptap-tray
           cp scripts/start.bat "dist/${STAGE}/"
+          cp scripts/launcher.vbs "dist/${STAGE}/"
+          # TAP-Windows driver installer, tracked in-repo (force-added past the
+          # repo-wide *.exe ignore). Guarded exactly like scripts/build.sh and
+          # build.ps1 so a checkout without it still builds — Wintun stays the
+          # fallback driver that driver_type=auto falls back to.
+          if [ -f "scripts/tap-windows-9.21.2.exe" ]; then
+            cp "scripts/tap-windows-9.21.2.exe" "dist/${STAGE}/"
+          fi
           if [ -f "scripts/wintun/${GOARCH}/wintun.dll" ]; then
             cp "scripts/wintun/${GOARCH}/wintun.dll" "dist/${STAGE}/"
           else
-            echo "[DEBUG] wintun.dll not found for ${GOARCH}"
+            # Fail loudly instead of publishing a package whose driver is missing.
+            echo "::error::wintun.dll missing for ${GOARCH} — refusing to ship a Windows package without the network driver"
+            exit 1
           fi
           cd dist && zip -r "${STAGE}.zip" "${STAGE}" && cd ..
 
