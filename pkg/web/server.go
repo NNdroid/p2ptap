@@ -98,7 +98,7 @@ type Server struct {
 	// next to config.json so the Windows tray can open the dashboard at the
 	// address it REALLY listens on — not a hardcoded 127.0.0.1:configPort that
 	// may be wrong when the WebUI is bound to a specific interface IP (not
-	// 127.0.0.1/0.0.0.0) or fell back to an alt-port after a bind collision.
+	// 127.0.0.1/0.0.0.0) or fell back to loopback after a bind collision.
 	boundAddrs []string
 	httpServer *http.Server
 	// Bound addresses + socket-protect hook, captured at StartServer time so
@@ -398,7 +398,7 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	// API Endpoint: /api/self — reports the addresses the WebUI is ACTUALLY
 	// listening on, so a local client can open the dashboard at the real URL
 	// instead of a hardcoded 127.0.0.1:configPort (which is wrong when the WebUI
-	// binds to a specific interface IP or fell back to an alt-port).
+	// binds to a specific interface IP or falls back to loopback).
 	mux.HandleFunc("/api/self", s.authRequired(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]interface{}{
 			"webui_urls": s.BoundWebUIURLs(),
@@ -1568,10 +1568,8 @@ func (s *Server) listenAll() ([]net.Listener, error) {
 //
 // The old listeners are CLOSED FIRST, then the new ones are bound. A wildcard
 // (0.0.0.0 / ::) listener cannot coexist with a fresh bind on the same port, so
-// the previous "bind new before closing old" order hit EADDRINUSE and fell
-// through to listenAll's smart-fallback, which silently moved the dashboard to
-// a WRONG alt-port (5857/8888) and made it unreachable. Closing first lets the
-// same port be re-acquired cleanly. The only cost is a sub-second gap during
+// binding the new set before closing the old one hits EADDRINUSE. Closing first
+// lets the same port be re-acquired cleanly. The only cost is a sub-second gap during
 // which a brand-new connection may be refused; the browser's stats poller
 // simply retries. listenTCPWithRetry retries internally to ride out any
 // TIME_WAIT on the just-closed port.

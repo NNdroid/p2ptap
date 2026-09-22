@@ -156,6 +156,16 @@ func pcapWsHandlerWith(collector *StatsCollector, opts pcapWSOptions) http.Handl
 		var batch []CapturedFrame
 		var batchTimer *time.Timer
 		flushCh := make(chan struct{}, 1)
+		// The loop below has several `return`s that do not go through flushBatch
+		// (peer closed, ping write failed, subscriber channel closed). Stop the
+		// batch timer on ALL exit paths — otherwise the pending AfterFunc keeps
+		// holding conn and flushCh alive for up to pcapStreamBatchFlush after the
+		// session is already gone.
+		defer func() {
+			if batchTimer != nil {
+				batchTimer.Stop()
+			}
+		}()
 		flushBatch := func() bool {
 			if batchTimer != nil {
 				batchTimer.Stop()

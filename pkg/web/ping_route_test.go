@@ -37,10 +37,7 @@ func TestPingTracerouteRoutesExist(t *testing.T) {
 	}}
 	collector.mu.Unlock()
 
-	srv, err := StartServer(collector, "127.0.0.1", "", 18099, nil, "", nil)
-	if err != nil {
-		t.Fatalf("StartServer: %v", err)
-	}
+	srv, host := startTestServerOnFreePort(t, collector)
 	defer srv.Close()
 
 	token := srv.AuthToken()
@@ -49,7 +46,7 @@ func TestPingTracerouteRoutesExist(t *testing.T) {
 	}
 
 	for _, ep := range []string{"/api/ping", "/api/traceroute"} {
-		url := "http://127.0.0.1:18099" + ep + "?peer_id=10.0.0.99"
+		url := "http://" + host + ep + "?peer_id=10.0.0.99"
 		req, _ := http.NewRequest(http.MethodGet, url, nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		client := &http.Client{Timeout: 5 * time.Second}

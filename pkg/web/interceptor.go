@@ -37,8 +37,12 @@ type tcpSession struct {
 	clientPort uint16
 	serverIP   net.IP
 	serverPort uint16
+	// clientSeq is written by the TAP/stream reader goroutine and read by the
+	// worker pool when it builds response frames — so, like serverSeq, it is
+	// touched only through sync/atomic. (It used to be a bare uint32, which
+	// -race reports as a data race.)
 	clientSeq  uint32
-	serverSeq  uint32 // accessed via sync/atomic (racy: read by sendFrame, written by response goroutine)
+	serverSeq  uint32 // accessed via sync/atomic (read by sendFrame, written by response goroutine)
 	requestBuf []byte
 	lastActive int64 // unix timestamp in seconds (atomic)
 	isIPv6     bool
@@ -438,7 +442,7 @@ func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, write
 
 	// SYN -> SYN-ACK
 	if flags&0x02 != 0 {
-		sess.clientSeq = seqN + 1
+		atomic.StoreUint32(&sess.clientSeq, seqN+1)
 		interceptLog.Debug("TCP SYN intercepted from %s:%d", srcIP.String(), srcPort)
 		it.sendIPv4TCPFrame(writer, sess, 0x12, nil) // SYN-ACK
 		atomic.AddUint32(&sess.serverSeq, 1)
@@ -453,7 +457,7 @@ func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, write
 
 	// PSH / ACK with Data -> HTTP Request (offloaded to worker pool)
 	if len(payload) > 0 {
-		sess.clientSeq = seqN + uint32(len(payload))
+		atomic.StoreUint32(&sess.clientSeq, seqN+uint32(len(payload)))
 		sess.requestBuf = append(sess.requestBuf, payload...)
 		if len(sess.requestBuf) > maxHTTPRequestBytes {
 			// Never-completing request flood — drop the session outright.
@@ -556,7 +560,7 @@ func (it *TAPInterceptor) handleIPv6TCP(frame []byte, writer PacketWriter) bool 
 	}
 
 	if flags&0x02 != 0 {
-		sess.clientSeq = seqN + 1
+		atomic.StoreUint32(&sess.clientSeq, seqN+1)
 		it.sendIPv6TCPFrame(writer, sess, 0x12, nil)
 		atomic.AddUint32(&sess.serverSeq, 1)
 		return true
@@ -568,7 +572,7 @@ func (it *TAPInterceptor) handleIPv6TCP(frame []byte, writer PacketWriter) bool 
 	}
 
 	if len(payload) > 0 {
-		sess.clientSeq = seqN + uint32(len(payload))
+		atomic.StoreUint32(&sess.clientSeq, seqN+uint32(len(payload)))
 		sess.requestBuf = append(sess.requestBuf, payload...)
 		if len(sess.requestBuf) > maxHTTPRequestBytes {
 			it.dropSession(sessionKey)
@@ -1194,7 +1198,7 @@ func (it *TAPInterceptor) sendIPv4TCPFrame(writer PacketWriter, sess *tcpSession
 	binary.BigEndian.PutUint16(frame[34:36], sess.serverPort)
 	binary.BigEndian.PutUint16(frame[36:38], sess.clientPort)
 	binary.BigEndian.PutUint32(frame[38:42], atomic.LoadUint32(&sess.serverSeq))
-	binary.BigEndian.PutUint32(frame[42:46], sess.clientSeq)
+	binary.BigEndian.PutUint32(frame[42:46], atomic.LoadUint32(&sess.clientSeq))
 	frame[46] = 0x50
 	frame[47] = flags
 	binary.BigEndian.PutUint16(frame[48:50], 64240)
@@ -1242,7 +1246,7 @@ func (it *TAPInterceptor) sendIPv6TCPFrame(writer PacketWriter, sess *tcpSession
 	binary.BigEndian.PutUint16(frame[tcpHeaderOffset:tcpHeaderOffset+2], sess.serverPort)
 	binary.BigEndian.PutUint16(frame[tcpHeaderOffset+2:tcpHeaderOffset+4], sess.clientPort)
 	binary.BigEndian.PutUint32(frame[tcpHeaderOffset+4:tcpHeaderOffset+8], atomic.LoadUint32(&sess.serverSeq))
-	binary.BigEndian.PutUint32(frame[tcpHeaderOffset+8:tcpHeaderOffset+12], sess.clientSeq)
+	binary.BigEndian.PutUint32(frame[tcpHeaderOffset+8:tcpHeaderOffset+12], atomic.LoadUint32(&sess.clientSeq))
 	frame[tcpHeaderOffset+12] = 0x50
 	frame[tcpHeaderOffset+13] = flags
 	binary.BigEndian.PutUint16(frame[tcpHeaderOffset+14:tcpHeaderOffset+16], 64240)

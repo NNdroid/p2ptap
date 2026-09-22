@@ -15,7 +15,6 @@ import (
 )
 
 func TestWebServerEndpoints(t *testing.T) {
-	t.Log("[web] starting test WebUI server on 127.0.0.1:18080")
 	collector := NewStatsCollector()
 	collector.PeerID = "12D3KooWTestPeer"
 	collector.TapIP = "127.0.0.1/24"
@@ -23,13 +22,10 @@ func TestWebServerEndpoints(t *testing.T) {
 	collector.RecordRecv(2048)
 	collector.RecordDedup()
 
-	// Listen on 127.0.0.1 on a high port for testing
-	srv, err := StartServer(collector, "127.0.0.1", "", 18080, nil, "", nil)
-	if err != nil {
-		t.Fatalf("StartServer failed: %v", err)
-	}
+	// Listen on 127.0.0.1 on an OS-assigned port (never a fixed one).
+	srv, host := startTestServerOnFreePort(t, collector)
 	defer srv.Close()
-	t.Log("[web] ✓ server started")
+	t.Logf("[web] ✓ server started on %s", host)
 
 	// Auth token is generated at startup; all /api/* requests must carry it.
 	token := srv.AuthToken()
@@ -42,11 +38,11 @@ func TestWebServerEndpoints(t *testing.T) {
 		if strings.Contains(path, "?") {
 			sep = "&"
 		}
-		return "http://127.0.0.1:18080" + path + sep + "token=" + token
+		return "http://" + host + path + sep + "token=" + token
 	}
 
 	// Test GET /
-	resp, err := http.Get("http://127.0.0.1:18080/")
+	resp, err := http.Get("http://" + host + "/")
 	if err != nil {
 		t.Fatalf("GET / failed: %v", err)
 	}
@@ -183,7 +179,7 @@ func TestWebServerEndpoints(t *testing.T) {
 	}
 
 	// Positive check: a request WITHOUT the token must be rejected.
-	noToken, err := http.Get("http://127.0.0.1:18080/api/stats")
+	noToken, err := http.Get("http://" + host + "/api/stats")
 	if err != nil {
 		t.Fatalf("GET /api/stats without token failed: %v", err)
 	}
@@ -207,14 +203,11 @@ func TestPcapWebSocketStream(t *testing.T) {
 	collector := NewStatsCollector()
 	collector.Pcap = NewPacketCapture(64, "") // in-memory only
 
-	srv, err := StartServer(collector, "127.0.0.1", "", 18081, nil, "", nil)
-	if err != nil {
-		t.Fatalf("StartServer failed: %v", err)
-	}
+	srv, host := startTestServerOnFreePort(t, collector)
 	defer srv.Close()
 	token := srv.AuthToken()
 
-	wsURL := "ws://127.0.0.1:18081/api/pcap/stream?backlog=10&token=" + token
+	wsURL := "ws://" + host + "/api/pcap/stream?backlog=10&token=" + token
 	header := http.Header{}
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
 	if err != nil {
@@ -319,7 +312,7 @@ func TestPcapWebSocketStream(t *testing.T) {
 
 	// 5. The HTTP fallback /api/pcap/packets must still work for clients
 	//    that haven't switched to the WebSocket yet.
-	fbURL := "http://127.0.0.1:18081/api/pcap/packets?limit=10&token=" + token
+	fbURL := "http://" + host + "/api/pcap/packets?limit=10&token=" + token
 	fbResp, err := http.Get(fbURL)
 	if err != nil {
 		t.Fatalf("fallback GET failed: %v", err)
@@ -386,10 +379,7 @@ func TestPcapPubSubNoBlock(t *testing.T) {
 func TestLogWebSocketStream(t *testing.T) {
 	collector := NewStatsCollector()
 
-	srv, err := StartServer(collector, "127.0.0.1", "", 18082, nil, "", nil)
-	if err != nil {
-		t.Fatalf("StartServer failed: %v", err)
-	}
+	srv, host := startTestServerOnFreePort(t, collector)
 	defer srv.Close()
 	token := srv.AuthToken()
 
@@ -400,7 +390,7 @@ func TestLogWebSocketStream(t *testing.T) {
 		logger.New("test").Info("seed-%d", i)
 	}
 
-	wsURL := "ws://127.0.0.1:18082/api/logs/stream?backlog=100&token=" + token
+	wsURL := "ws://" + host + "/api/logs/stream?backlog=100&token=" + token
 	header := http.Header{}
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
 	if err != nil {
@@ -480,7 +470,7 @@ func TestLogWebSocketStream(t *testing.T) {
 	}
 
 	// 4. HTTP fallback /api/logs still returns the recent ring (empty after clear).
-	fbURL := "http://127.0.0.1:18082/api/logs?token=" + token
+	fbURL := "http://" + host + "/api/logs?token=" + token
 	fbResp, err := http.Get(fbURL)
 	if err != nil {
 		t.Fatalf("fallback GET failed: %v", err)
