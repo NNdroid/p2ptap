@@ -365,11 +365,22 @@ jobs:
           java-version: '21'
 
       - name: Set up Android SDK (cmdline-tools)
-        uses: android-actions/setup-android@v3
+        # v4 dropped the removed 'tools' package from its default -- v3 still
+        # asked for it, so sdkmanager died with "Failed to find package 'tools'"
+        # and the whole job aborted. v4 also ships a newer cmdline-tools
+        # (22.0 vs 16.0), which resolves recent NDK/build-tools revisions.
+        uses: android-actions/setup-android@v4
+        with:
+          # Pinned explicitly so a future change to the action's default cannot
+          # break this again. Nothing else is needed here: cmdline-tools
+          # (sdkmanager, avdmanager, ...) is installed regardless of this list,
+          # and platforms / build-tools / ndk come from the next step.
+          packages: 'platform-tools'
 
       - name: Install Android SDK packages + latest NDK (r29)
         run: |
-          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          # sdkmanager is already on PATH: setup-android appends
+          # cmdline-tools/<version>/bin for us (there is no cmdline-tools/latest).
           yes | sdkmanager --licenses
           sdkmanager --install \
             "platforms;android-35" \
