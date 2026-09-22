@@ -88,6 +88,41 @@ func (p *httpWorkerPool) TrySubmit(fn func()) bool {
 // instead of growing without bound until the 30s session sweep.
 const maxHTTPRequestBytes = 64 * 1024
 
+// maxTrackedSessions caps how many TCP sessions the interceptor will keep
+// state for. Session keys come straight off the wire: the source IP and port
+// are attacker-chosen in any frame a peer forwards, so without a ceiling a
+// stream of 60-byte frames mints one map entry per spoofed address — a memory
+// growth primitive with no legitimate upper bound. 4096 comfortably covers
+// every real client that could be talking to the dashboard concurrently.
+const maxTrackedSessions = 4096
+
+// trackSession registers a new session under key, refusing to grow past
+// maxTrackedSessions. It reports whether the caller may use sess — when false
+// the session was not retained and must be dropped along with the frame that
+// created it. A count is maintained alongside the map because sync.Map offers
+// no O(1) length.
+func (it *TAPInterceptor) trackSession(key string, sess *tcpSession) bool {
+	if _, loaded := it.sessions.LoadOrStore(key, sess); loaded {
+		return true // already tracked under this key
+	}
+	if it.sessionCount.Add(1) > maxTrackedSessions {
+		it.dropSession(key)
+		return false
+	}
+	return true
+}
+
+// dropSession removes key and keeps sessionCount in step. Every call site must
+// go through here rather than touching sessions.Delete directly, or the count
+// drifts upward and the ceiling stops being enforced.
+func (it *TAPInterceptor) dropSession(key string) {
+	if _, ok := it.sessions.Load(key); !ok {
+		return
+	}
+	it.sessions.Delete(key)
+	it.sessionCount.Add(-1)
+}
+
 type TAPInterceptor struct {
 	enableV4      bool
 	enableV6      bool
@@ -99,6 +134,7 @@ type TAPInterceptor struct {
 	cfg           atomic.Pointer[config.Config]
 	configPath    string
 	sessions      sync.Map // key: string -> *tcpSession
+	sessionCount  atomic.Int64
 	htmlDashboard []byte
 	bufferPool    sync.Pool
 	workerPool    *httpWorkerPool // bounded goroutine pool for HTTP request processing
@@ -172,7 +208,7 @@ func (it *TAPInterceptor) rejectBusy(writer PacketWriter, sess *tcpSession, key 
 	it.sendTCPResponse(writer, sess, 0x18, resp)
 	atomic.AddUint32(&sess.serverSeq, uint32(len(resp)))
 	it.sendTCPResponse(writer, sess, 0x11, nil)
-	it.sessions.Delete(key)
+	it.dropSession(key)
 }
 
 // effectiveToken returns the bearer token currently guarding /api/*: the
@@ -376,6 +412,15 @@ func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, write
 		sess = val.(*tcpSession)
 		atomic.StoreInt64(&sess.lastActive, nowSec)
 	} else {
+		// Only a SYN may open a session. Every other flag combination carries
+		// no handshake state, and admitting them would let a peer allocate one
+		// map entry per spoofed source address using frames too small to be
+		// useful traffic. Frames belonging to no tracked flow are dropped as
+		// before (this interceptor already consumes everything addressed to
+		// it), they just no longer leave anything behind.
+		if flags&0x02 == 0 {
+			return true
+		}
 		sess = &tcpSession{
 			clientMAC:  srcMAC,
 			clientIP:   srcIP,
@@ -386,7 +431,9 @@ func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, write
 			lastActive: nowSec,
 			isIPv6:     false,
 		}
-		it.sessions.Store(sessionKey, sess)
+		if !it.trackSession(sessionKey, sess) {
+			return true
+		}
 	}
 
 	// SYN -> SYN-ACK
@@ -400,7 +447,7 @@ func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, write
 
 	// RST / FIN -> Delete
 	if flags&0x04 != 0 || flags&0x01 != 0 {
-		it.sessions.Delete(sessionKey)
+		it.dropSession(sessionKey)
 		return true
 	}
 
@@ -410,7 +457,7 @@ func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, write
 		sess.requestBuf = append(sess.requestBuf, payload...)
 		if len(sess.requestBuf) > maxHTTPRequestBytes {
 			// Never-completing request flood — drop the session outright.
-			it.sessions.Delete(sessionKey)
+			it.dropSession(sessionKey)
 			return true
 		}
 
@@ -451,7 +498,7 @@ func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, write
 				}
 				time.Sleep(10 * time.Millisecond)
 				it.sendIPv4TCPFrame(writer, sess, 0x11, nil) // FIN-ACK
-				it.sessions.Delete(sessionKey)
+				it.dropSession(sessionKey)
 			}) {
 				atomic.StoreInt32(&sess.processing, 0)
 				it.rejectBusy(writer, sess, sessionKey)
@@ -489,6 +536,10 @@ func (it *TAPInterceptor) handleIPv6TCP(frame []byte, writer PacketWriter) bool 
 		sess = val.(*tcpSession)
 		atomic.StoreInt64(&sess.lastActive, nowSec)
 	} else {
+		// Same rule as IPv4: a flow only comes into existence on SYN.
+		if flags&0x02 == 0 {
+			return true
+		}
 		sess = &tcpSession{
 			clientMAC:  srcMAC,
 			clientIP:   srcIP,
@@ -499,7 +550,9 @@ func (it *TAPInterceptor) handleIPv6TCP(frame []byte, writer PacketWriter) bool 
 			lastActive: nowSec,
 			isIPv6:     true,
 		}
-		it.sessions.Store(sessionKey, sess)
+		if !it.trackSession(sessionKey, sess) {
+			return true
+		}
 	}
 
 	if flags&0x02 != 0 {
@@ -510,7 +563,7 @@ func (it *TAPInterceptor) handleIPv6TCP(frame []byte, writer PacketWriter) bool 
 	}
 
 	if flags&0x04 != 0 || flags&0x01 != 0 {
-		it.sessions.Delete(sessionKey)
+		it.dropSession(sessionKey)
 		return true
 	}
 
@@ -518,7 +571,7 @@ func (it *TAPInterceptor) handleIPv6TCP(frame []byte, writer PacketWriter) bool 
 		sess.clientSeq = seqN + uint32(len(payload))
 		sess.requestBuf = append(sess.requestBuf, payload...)
 		if len(sess.requestBuf) > maxHTTPRequestBytes {
-			it.sessions.Delete(sessionKey)
+			it.dropSession(sessionKey)
 			return true
 		}
 
@@ -554,7 +607,7 @@ func (it *TAPInterceptor) handleIPv6TCP(frame []byte, writer PacketWriter) bool 
 				}
 				time.Sleep(10 * time.Millisecond)
 				it.sendIPv6TCPFrame(writer, sess, 0x11, nil)
-				it.sessions.Delete(sessionKey)
+				it.dropSession(sessionKey)
 			}) {
 				atomic.StoreInt32(&sess.processing, 0)
 				it.rejectBusy(writer, sess, sessionKey)
@@ -1265,7 +1318,7 @@ func (it *TAPInterceptor) cleanStaleSessionsLoop() {
 		it.sessions.Range(func(key, value interface{}) bool {
 			sess := value.(*tcpSession)
 			if nowSec-atomic.LoadInt64(&sess.lastActive) > 30 {
-				it.sessions.Delete(key)
+				it.dropSession(key.(string))
 			}
 			return true
 		})

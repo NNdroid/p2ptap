@@ -92,8 +92,15 @@ func (n *Node) sealPeerFrame(p peer.ID, cipher obfuscate.ObfCipher, data []byte)
 func (n *Node) obfCipherForPeer(p peer.ID) obfuscate.ObfCipher {
 	po := n.peerObf(p)
 	if po == nil || !po.negotiated {
-		log.Debug("Tx: NO negotiated cipher for %s (po=%v) — sending payload in PLAINTEXT (obfuscation only, NOT encrypted)",
-			p.String(), po != nil)
+		// PERF: per-frame path. p.String() is a base58 encode plus allocations
+		// and Go evaluates the arguments at the CALL SITE regardless of level,
+		// so an unguarded log.Debug costs that on every frame even at info.
+		// This branch is hit for every frame sent to a peer whose crypto has
+		// not completed negotiation (and forever in plaintext mode).
+		if log.IsDebug() {
+			log.Debug("Tx: NO negotiated cipher for %s (po=%v) — sending payload in PLAINTEXT (obfuscation only, NOT encrypted)",
+				p.String(), po != nil)
+		}
 		return nil
 	}
 	// Proactively rotate the per-peer key before a nonce could be reused under

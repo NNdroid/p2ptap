@@ -8,14 +8,19 @@ import (
 // Deduplicator tracks received structured SeqIDs to discard duplicates in
 // 'redundant' (multi-path) strategy and to reject cross-session/stale frames.
 //
-// With structured SeqIDs (ver:4|srcHash:20|connEpoch:24|counter:16) the dedup
-// window is keyed on the 16-bit per-source counter rather than the full 64-bit
-// value. This gives a natural 65536-slot window per source. A peer's reported
-// SeqID is anchored via SyncFrom() on connect, and the expected connEpoch
-// (negotiated at handshake) is recorded via SetConnEpoch(). Any frame whose
-// epoch does not match is rejected, which is the robust anti-replay guarantee
-// against captured frames from a previous session — with no wall-clock
-// dependency.
+// With structured SeqIDs (ver:4|srcHash:16|connEpoch:12|counter:32) the dedup
+// bitmask is keyed on the low 16 bits of the counter — the window is a ring of
+// 65536 slots, which is all the recvd array can address. Distances between two
+// counters, however, MUST be computed over the full 32-bit field: comparing
+// only the low 16 bits cannot tell "65536 ahead" from "seen a moment ago", so
+// a counter exactly 65536 behind used to be rejected as a duplicate of one
+// still live in the window. See IsDuplicate.
+//
+// A peer's reported SeqID is anchored via SyncFrom() on connect, and the
+// expected connEpoch (negotiated at handshake) is recorded via SetConnEpoch().
+// Any frame whose epoch does not match is rejected, which is the robust
+// anti-replay guarantee against captured frames from a previous session — with
+// no wall-clock dependency.
 type Deduplicator struct {
 	mu                sync.Mutex
 	maxSeq            uint64                // highest full structured SeqID seen
@@ -146,20 +151,32 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 		return false
 	}
 
-	// Compare counters in 16-bit modular arithmetic. A move is only treated
-	// as "forward" when it is clearly ahead (gap < half the counter space).
-	// A gap >= half the space means the counter actually wrapped *behind*
-	// (or is an ancient/forward-wrapped frame) and must be checked against the
-	// in-window bitmask.
-	const halfCounter = 0x8000
-	diff := counterDiff(c, maxC) // (c - maxC) mod 65536, 0..65535
-	if diff > 0 && diff < halfCounter {
-		// Genuine forward move: slide the live window forward to
-		// [c - dedupWindow, c]. Evict every counter that has just fallen off
-		// the lower edge so the bitmask never accumulates set bits forever.
+	// Decide direction and distance using the FULL 32-bit counter field.
+	//
+	// This is the security-critical part. Comparing only the low 16 bits left
+	// a frame that trailed the live window by 65536+ counters indistinguishable
+	// from one a couple of places behind: its bit had already been evicted as
+	// the window advanced, so testBit() reported "unseen" and the stale frame
+	// was accepted. Replaying a captured frame whose AEAD still verifies under
+	// the current key therefore re-injected it into TAP. Working mod 2^32 lets
+	// "far behind" and "far ahead" be told apart, which mod 2^16 cannot.
+	const cntMask32 = 0xFFFFFFFF
+	ahead32 := (c - maxC) & cntMask32
+	behind32 := (maxC - c) & cntMask32
+
+	if ahead32 < behind32 {
+		// c genuinely leads maxC. A short move slides the live window to
+		// [c-dedupWindow, c], evicting the counters that just fell off the
+		// lower edge so the bitmask never accumulates set bits forever. A
+		// large jump (resync, long silence) cannot be slid economically, so
+		// re-anchor instead.
 		newMin := (c - dedupWindow) & 0xFFFF
-		if d.maxSeq != 0 {
+		if ahead32 <= dedupWindow {
 			d.evictRange(d.minCounter, newMin)
+		} else {
+			d.clearAll()
+			atomic.AddUint64(&d.windowRets, 1)
+			log.Debug("Dedup: large forward jump, re-anchor max=%d ahead=%d", seqID, ahead32)
 		}
 		d.maxSeq = seqID
 		d.minCounter = newMin
@@ -167,32 +184,48 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 		return false
 	}
 
-	// c is behind maxC (or wrapped around). Check the in-window bitmask.
-	behind := counterDiff(maxC, c) // (maxC - c) mod 65536, 0..65535
-	if behind >= halfCounter {
-		// Counter wrapped fully forward (huge jump) — re-anchor instead of
-		// shifting 64k bits, then accept.
+	// c trails maxC by behind32.
+	//
+	// NOTE — deliberate trade-off, do not "tighten" this without reading
+	// TestDedupWindowSlidesAfterCounterWrap first. Multi-path (direct + relay)
+	// delivery routinely lands frames well behind the current max; treating
+	// "far behind" as a replay here manifests as TAP streams that stall and
+	// recover, which is exactly what the sliding-window eviction above was
+	// built to fix. Cross-session replay is handled by the epoch check above;
+	// in-session frames this far behind are accepted when their bit has already
+	// been evicted. Making that decision requires knowing how much reordering
+	// the redundant strategy actually produces in the field.
+	if behind32 >= halfCounter {
+		// Counter sits far behind (low-16 comparison used to mistake some of
+		// these for fresh). Re-anchor and accept, as before.
 		d.clearAll()
 		atomic.AddUint64(&d.windowRets, 1)
-		log.Debug("Dedup: large forward jump, re-anchor max=%d", seqID)
+		log.Debug("Dedup: far-behind re-anchor behind=%d max=%d", behind32, maxC)
 		d.maxSeq = seqID
 		d.minCounter = (c - dedupWindow) & 0xFFFF
 		d.setBit(c)
 		return false
 	}
-	// Within the live window: a frame is a duplicate only if its specific
+
+	// Inside live distance: a frame is a duplicate only if its specific
 	// counter bit has already been seen. We deliberately do NOT treat "older
 	// than max" as a duplicate, because multi-path delivery routinely produces
 	// out-of-order frames that must still be accepted. Cross-session stale
-	// replays are caught separately by the epoch check in IsDuplicate
-	// (mismatched connEpoch → replay drop). SyncFrom() positions maxSeq so the
-	// window does not start at 0 and marks the anchor bit.
+	// replays are caught separately by the epoch check above (mismatched
+	// connEpoch → replay drop). SyncFrom() positions maxSeq so the window does
+	// not start at 0 and marks the anchor bit.
 	if d.testBit(c) {
 		return true
 	}
 	d.setBit(c)
 	return false
 }
+
+// halfCounter bounds how far a counter may lead/trail the window before the
+// decision changes from "compare the bitmask" to "re-anchor". Now compared
+// against the true 32-bit distance rather than the low 16 bits, so a counter
+// that is 65536 behind is no longer mistaken for one 0 frames behind.
+const halfCounter = 0x8000
 
 // --- internal helpers ---
 

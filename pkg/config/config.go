@@ -320,6 +320,11 @@ func LoadConfigFromFile(path string) (*Config, error) {
 	}
 
 	cfg.ConfigPath = path
+
+	// Repair permissions on configs persisted by older builds, which wrote
+	// 0644 unconditionally even when they carried a PSK.
+	tightenExistingPerm(path, cfg)
+
 	return cfg, nil
 }
 
@@ -430,6 +435,43 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// configFilePerm picks the on-disk permission for a config file: configs that
+// carry a secret are written owner-only, everything else stays group/other
+// readable so an operator can inspect a node's settings without sudo.
+//
+// This matters more than it looks. The PSK is simultaneously the libp2p
+// private-network membership key and the HKDF salt that every per-peer session
+// key derives from, so any local user able to read config.json can join the
+// mesh and derive traffic keys. A pinned web_ui.auth_token is the same class of
+// secret — it is a bearer credential for the entire HTTP control plane.
+func configFilePerm(cfg *Config) os.FileMode {
+	if cfg != nil && (cfg.PSK != "" || cfg.WebUI.AuthToken != "") {
+		return 0600
+	}
+	return 0644
+}
+
+// tightenExistingPerm repairs configs written before writes were
+// secret-aware. Best-effort by design: a read-only filesystem, or a file owned
+// by another user, must never stop the node from starting — we only try to
+// remove group/other access when we already own it.
+func tightenExistingPerm(path string, cfg *Config) {
+	want := configFilePerm(cfg)
+	if want != 0600 {
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.Mode().Perm()&0o077 == 0 {
+		return
+	}
+	if err := os.Chmod(path, want); err != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"[config] %s holds secrets (psk/auth_token) — tightened permissions %o -> %o\n",
+		path, fi.Mode().Perm(), want)
+}
+
 // ParseFlagsAndLoadConfig parses -c CLI flag and loads config file
 func ParseFlagsAndLoadConfig(args []string) (*Config, string, error) {
 	fs := flag.NewFlagSet("p2ptap", flag.ContinueOnError)
@@ -448,7 +490,7 @@ func ParseFlagsAndLoadConfig(args []string) (*Config, string, error) {
 			if mErr != nil {
 				return nil, *configPath, fmt.Errorf("failed to marshal default config: %w", mErr)
 			}
-			if wErr := os.WriteFile("config.json", data, 0644); wErr != nil {
+			if wErr := os.WriteFile("config.json", data, configFilePerm(defCfg)); wErr != nil {
 				return nil, *configPath, fmt.Errorf("failed to write default config.json: %w", wErr)
 			}
 			return defCfg, *configPath, nil
@@ -547,7 +589,7 @@ func UpdateConfigFileDelta(configPath string, incoming *Config) error {
 	// Atomic write: marshal to a temp file in the same directory then rename
 	// over the target. A crash or full disk mid-write would otherwise leave
 	// config.json truncated/corrupt, bricking the node's next startup.
-	return atomicWriteFile(configPath, updatedBytes, 0644)
+	return atomicWriteFile(configPath, updatedBytes, configFilePerm(incoming))
 }
 
 // atomicWriteFile writes data to path atomically: it writes to a uniquely-named

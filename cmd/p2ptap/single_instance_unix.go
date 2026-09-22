@@ -31,10 +31,19 @@ import (
 var daemonLockPath = filepath.Join(os.TempDir(), "p2ptap-daemon.lock")
 
 func acquireDaemonMutex(_ string) (uintptr, bool) {
-	f, err := os.OpenFile(daemonLockPath, os.O_CREATE|os.O_RDWR, 0644)
+	f, err := os.OpenFile(daemonLockPath, os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW, 0644)
 	if err != nil {
 		// Cannot even open the lock file — fail closed so two instances never
 		// start concurrently; log is best-effort (stderr already wired by caller).
+		//
+		// O_NOFOLLOW is what makes this safe rather than merely unlikely: the
+		// lock lives in a world-writable directory (/tmp) and this process runs
+		// as root with CAP_NET_ADMIN, and the code below truncates and rewrites
+		// what it just opened. Without O_NOFOLLOW a local user can pre-plant
+		// "p2ptap-daemon.lock" as a symlink to any root-owned file, and the next
+		// service start silently clobbers that target. Refusing to follow the
+		// link fails the daemon instead — the safe direction, since two daemons
+		// racing on one TAP device would corrupt each other's state anyway.
 		return 0, false
 	}
 	// LOCK_EX|LOCK_NB: fail immediately if another instance holds the lock.

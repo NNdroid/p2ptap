@@ -261,17 +261,21 @@ type FramePacker struct {
 	AutoThresholdBytes int  `json:"auto_threshold_bytes"`
 	AllowModeSwitch    bool `json:"allow_mode_switch"`
 
-	seqCounter uint64 // per-source monotonic counter (low 32 bits of structured SeqID)
+	seqCounter uint64 // per-source monotonic counter (low 32 bits of structured SeqID); accessed atomically
 	srcHash    uint64 // 16-bit source hash for this node's PeerID
 	auto       *autoState
-	lastEval   time.Time
-	totalBytes int64
-	mu         sync.Mutex
+	// lastEvalUnixNano is the last auto-mode evaluation time as Unix nanos.
+	// Kept as an int64 rather than time.Time because concurrent Pack() calls
+	// from the dispatch workers write it, and there is no atomic time.Time.
+	lastEvalUnixNano atomic.Int64
+	mu               sync.Mutex
 
 	// algo is the ObfType byte stamped into outgoing frames so the receiver
 	// knows which cipher to use. Per-peer encryption is applied at send time
-	// (see Node.encryptForPeer), so the packer itself holds no cipher.
-	algo byte
+	// (see Node.encryptForPeer), so the packer itself holds no cipher. It is
+	// rewritten by SetSendAlgo from the config hot-reload goroutine while the
+	// data path reads it every frame, hence the atomic.
+	algo atomic.Uint32
 }
 
 // NewFramePackerFull creates a FramePacker from full ObfuscationConfig.
@@ -396,55 +400,98 @@ func fillRandom(buf []byte) {
 // The frame format for standard padding modes (fixed/block/random/dynamic/auto):
 //
 //	[Magic(2) | SeqID(8) | PayloadLen(2) | PaddingLen(2) | payload | random padding]
+//
+// packerParams is one consistent view of the padding parameters.
+//
+// UpdateConfig rewrites these fields from the hot-reload goroutine while the
+// dispatch workers are packing frames, so every read on the per-frame path has
+// to happen inside a single critical section — otherwise Pack mixes values from
+// before and after a reload (and may even observe a torn Mode string). Pack
+// takes the snapshot once and threads it down into packStandard.
+type packerParams struct {
+	enable             bool
+	mode               string
+	fixedSize          int
+	blockSize          int
+	jitterRange        int
+	minSize            int
+	maxSize            int
+	autoDetectInterval int
+	allowModeSwitch    bool
+}
+
+func (fp *FramePacker) snapshotParams() packerParams {
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	return packerParams{
+		enable:             fp.Enable,
+		mode:               fp.Mode,
+		fixedSize:          fp.FixedSize,
+		blockSize:          fp.BlockSize,
+		jitterRange:        fp.JitterRange,
+		minSize:            fp.MinSize,
+		maxSize:            fp.MaxSize,
+		autoDetectInterval: fp.AutoDetectInterval,
+		allowModeSwitch:    fp.AllowModeSwitch,
+	}
+}
+
 func (fp *FramePacker) Pack(seqID uint64, payload []byte, outBuf []byte) (int, error) {
-	if !fp.Enable {
+	p := fp.snapshotParams()
+
+	if !p.enable {
 		// When obfuscation padding is disabled, we still write the standard 15-byte header with PaddingLen=0
 		// so that Magic (0x5054), SeqID (dedup/anti-replay), ObfType (encryption), and PayloadLen are preserved.
-		return fp.packStandard(seqID, payload, outBuf, "none")
+		return fp.packStandard(seqID, payload, outBuf, "none", p)
 	}
 
-	mode := fp.Mode
+	mode := p.mode
 	if mode == "auto" && fp.auto != nil {
 		fp.auto.recordSize(len(payload))
-		fp.totalBytes += int64(len(payload))
-		if fp.AllowModeSwitch && fp.AutoDetectInterval > 0 {
+		if p.allowModeSwitch && p.autoDetectInterval > 0 {
 			now := time.Now()
-			if now.Sub(fp.lastEval) >= time.Duration(fp.AutoDetectInterval)*time.Second {
+			if now.Sub(time.Unix(0, fp.lastEvalUnixNano.Load())) >= time.Duration(p.autoDetectInterval)*time.Second {
 				newMode := fp.auto.evaluate()
-				if newMode != fp.Mode {
+				if newMode != mode {
+					// Publish under the same lock snapshotParams reads with, so
+					// a concurrent reload cannot interleave half-way through.
+					fp.mu.Lock()
 					fp.Mode = newMode
+					fp.mu.Unlock()
 					mode = newMode
 				}
-				fp.lastEval = now
+				fp.lastEvalUnixNano.Store(now.UnixNano())
 			}
-		}
-		if fp.AllowModeSwitch {
-			fp.mu.Lock()
-			mode = fp.Mode
-			fp.mu.Unlock()
 		}
 	}
 
-	return fp.packStandard(seqID, payload, outBuf, mode)
+	return fp.packStandard(seqID, payload, outBuf, mode, p)
 }
 
 // packStandard handles fixed/block/random/dynamic modes with Magic header.
-func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte, mode string) (int, error) {
+//
+// p carries the parameter snapshot taken by Pack. Reading fp.FixedSize &co
+// directly here would race with UpdateConfig exactly as Pack used to.
+func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte, mode string, p packerParams) (int, error) {
 	// Determine target total frame size
 	var targetSize int
 	switch mode {
 	case "none":
 		targetSize = HeaderLen + len(payload)
 	case "fixed":
-		targetSize = fp.FixedSize + randomJitter(fp.JitterRange)
+		targetSize = p.fixedSize + randomJitter(p.jitterRange)
 	case "block":
 
+		blockSize := p.blockSize
+		if blockSize <= 0 {
+			blockSize = 256
+		}
 		overhead := HeaderLen + len(payload)
-		blocks := overhead / fp.BlockSize
-		if overhead%fp.BlockSize != 0 {
+		blocks := overhead / blockSize
+		if overhead%blockSize != 0 {
 			blocks++
 		}
-		targetSize = blocks*fp.BlockSize + randomJitter(fp.JitterRange)
+		targetSize = blocks*blockSize + randomJitter(p.jitterRange)
 	case "dynamic":
 		overhead := HeaderLen + len(payload)
 		// Scale padding proportionally to payload size, capped at 4× overhead.
@@ -452,15 +499,15 @@ func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte,
 		// balloon to 500-1500 bytes (6-17× overhead). Instead it would be
 		// ~100-400 bytes, still providing traffic analysis resistance.
 		idealTarget := overhead * 4
-		if idealTarget < fp.MinSize {
-			idealTarget = fp.MinSize
+		if idealTarget < p.minSize {
+			idealTarget = p.minSize
 		}
-		if idealTarget > fp.MaxSize {
-			idealTarget = fp.MaxSize
+		if idealTarget > p.maxSize {
+			idealTarget = p.maxSize
 		}
 		targetSize = randomBetween(overhead, idealTarget)
 	default: // "random" or auto
-		targetSize = randomBetween(64, fp.FixedSize) + randomJitter(fp.JitterRange)
+		targetSize = randomBetween(64, p.fixedSize) + randomJitter(p.jitterRange)
 	}
 
 	// The payload is written in the CLEAR here. Per-peer encryption is applied
@@ -486,7 +533,7 @@ func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte,
 	// Write header (v2 includes the ObfType byte at offset 10).
 	binary.BigEndian.PutUint16(outBuf[0:2], uint16(FrameMagic))
 	binary.BigEndian.PutUint64(outBuf[2:10], uint64(seqID))
-	outBuf[10] = fp.algo
+	outBuf[10] = byte(fp.algo.Load())
 	binary.BigEndian.PutUint16(outBuf[11:13], uint16(len(sealed)))
 	binary.BigEndian.PutUint16(outBuf[13:15], paddingLen)
 
@@ -509,12 +556,11 @@ func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte,
 // returns; if it ever does, that is a bug in this bound and Pack will return
 // ErrBufferTooSmall (it never truncates) — so the bound is safe by construction.
 func (fp *FramePacker) MaxPackedLen(payloadLen int) int {
-	fp.mu.Lock()
-	mode := fp.Mode
-	enable := fp.Enable
-	fixed, block, jitter := fp.FixedSize, fp.BlockSize, fp.JitterRange
-	minS, maxS := fp.MinSize, fp.MaxSize
-	fp.mu.Unlock()
+	p := fp.snapshotParams()
+	mode := p.mode
+	enable := p.enable
+	fixed, block, jitter := p.fixedSize, p.blockSize, p.jitterRange
+	minS, maxS := p.minSize, p.maxSize
 
 	if !enable {
 		mode = "none"
@@ -646,23 +692,32 @@ func UnpackWith(frame []byte, cipher ObfCipher) (seqID uint64, payload []byte, e
 		}
 		payload = opened
 	} else {
-		log.Debug("UnpackWith: PLAINTEXT branch seqID=%d obfType=%s (cipherPresent=%v) — payload returned as-is", seqID, AlgoName(obfType), cipher != nil)
+		if log.IsDebug() {
+			log.Debug("UnpackWith: PLAINTEXT branch seqID=%d obfType=%s (cipherPresent=%v) — payload returned as-is", seqID, AlgoName(obfType), cipher != nil)
+		}
 		payload = raw
 	}
-	log.Debug("UnpackWith: done seqID=%d payloadLen=%d frameLen=%d", seqID, len(payload), len(frame))
+	// PERF: this one fires on EVERY frame, which is why it must stay guarded:
+	// the arguments are evaluated at the call site whatever the level is.
+	if log.IsDebug() {
+		log.Debug("UnpackWith: done seqID=%d payloadLen=%d frameLen=%d", seqID, len(payload), len(frame))
+	}
 	return seqID, payload, nil
 }
 
 // Algo returns the configured ObfType byte for this packer.
 func (fp *FramePacker) Algo() byte {
-	return fp.algo
+	return byte(fp.algo.Load())
 }
 
 // SetSendAlgo records the ObfType byte written into outgoing frames so the
 // receiver knows which algorithm to use. It does NOT install a cipher; payload
 // encryption is applied per-peer at send time via EncryptPayloadRegion.
 func (fp *FramePacker) SetSendAlgo(algo byte) {
-	fp.algo = algo
+	// Called from the hot-reload goroutine (applyHotReload) while the data path
+	// stamps this byte into every outgoing frame — hence atomic, not a plain
+	// assignment.
+	fp.algo.Store(uint32(algo))
 }
 
 // headerLenOf returns the fixed header length of a v2 frame.
