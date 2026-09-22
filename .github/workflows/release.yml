@@ -348,6 +348,24 @@ jobs:
     name: "Build Android AAR (fat: arm64, arm, amd64, 386)"
     needs: prepare
     runs-on: ubuntu-latest
+    env:
+      # Android SDK component revisions, pinned in ONE place so an upgrade is a
+      # single edit.
+      #
+      # Pinning is deliberate, not laziness: Android keeps every historical
+      # revision published (the repository index still lists NDK r16..r30 and
+      # platforms 7..36), so these do not rot the way the removed 'tools'
+      # package did. Letting CI float to "newest" instead would mean a release
+      # artifact can silently start building against a newer NDK/toolchain --
+      # and a bigger NDK occasionally changes compiler defaults or drops an API.
+      #
+      # Bumping these is safe but not free: watch the first run after a change.
+      # NDK majors are the risky part (r30 is the 2026 LTS and only shipped
+      # 2026-09-08); platform and build-tools are low risk. Rollback is the
+      # one-line edit right here.
+      ANDROID_PLATFORM: 'platforms;android-36'
+      ANDROID_BUILD_TOOLS: 'build-tools;37.0.0'
+      ANDROID_NDK: 'ndk;30.0.16248370'
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -377,17 +395,19 @@ jobs:
           # and platforms / build-tools / ndk come from the next step.
           packages: 'platform-tools'
 
-      - name: Install Android SDK packages + latest NDK (r29)
+      - name: Install Android SDK packages (pinned revisions)
         run: |
           # sdkmanager is already on PATH: setup-android appends
           # cmdline-tools/<version>/bin for us (there is no cmdline-tools/latest).
           yes | sdkmanager --licenses
           sdkmanager --install \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
+            "$ANDROID_PLATFORM" \
+            "$ANDROID_BUILD_TOOLS" \
             "platform-tools" \
-            "ndk;29.0.14206865"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+            "$ANDROID_NDK"
+          # A package path "ndk;<version>" installs into $SDK/ndk/<version>, so
+          # strip the "ndk;" prefix to get the directory.
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${ANDROID_NDK#ndk;}" >> "$GITHUB_ENV"
 
       - name: Install gomobile & gobind (latest)
         run: |
@@ -398,7 +418,8 @@ jobs:
       - name: Build Android AAR
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/29.0.14206865
+          # ANDROID_NDK_HOME comes from $GITHUB_ENV (set by the install step),
+          # so it stays in step with the pinned ANDROID_NDK above.
         run: |
           set -x
           export GOFLAGS="-ldflags=-checklinkname=0"
