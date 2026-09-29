@@ -20,7 +20,8 @@ jobs:
       - name: Restore only dedicated TAP writer files
         shell: bash
         run: |
-          git checkout 35c958d09e1164b8eb3e89b5bc4171319abed0fb -- \
+          git fetch origin 35c958d09e1164b8eb3e89b5bc4171319abed0fb
+          git checkout FETCH_HEAD -- \
             pkg/node/boot_relay.go \
             pkg/node/node.go \
             pkg/node/node_streams.go \
