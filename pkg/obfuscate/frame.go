@@ -803,8 +803,19 @@ func NonceHex(frame []byte) string {
 // Allocation note: AEAD SealTo appends directly into the pre-allocated output
 // buffer, eliminating intermediate slice allocations on the hot TX path.
 func EncryptPayloadRegion(frame []byte, cipher ObfCipher) ([]byte, error) {
+	return EncryptPayloadRegionInto(nil, frame, cipher)
+}
+
+// EncryptPayloadRegionInto is EncryptPayloadRegion with an optional caller-owned
+// destination. Supplying reusable capacity lets the fragmented TX path keep the
+// outer AEAD frame in the same small-buffer pools as its plaintext envelope.
+func EncryptPayloadRegionInto(dst, frame []byte, cipher ObfCipher) ([]byte, error) {
 	if cipher == nil || cipher.Algo() == ObfAlgoNone {
-		return frame, nil
+		if dst == nil {
+			return frame, nil
+		}
+		out := append(dst[:0], frame...)
+		return out, nil
 	}
 	hLen := headerLenOf(frame)
 	if len(frame) < hLen {
@@ -814,23 +825,17 @@ func EncryptPayloadRegion(frame []byte, cipher ObfCipher) ([]byte, error) {
 	if hLen+pLen > len(frame) {
 		return nil, ErrFrameCorrupted
 	}
-	// Nonce derived from the immutable header bytes; see obfNonceFromHeader.
-	// This is the ONLY place the nonce is constructed for the TX path, and it
-	// is shared verbatim by DecryptPayloadRegion and UnpackWith on the RX side.
 	nonce := obfNonceFromHeader(frame)
 	seqID := binary.BigEndian.Uint64(frame[2:10])
 
-	// Reassemble with a single allocation: [header | ct | trailing padding].
-	overhead := cipher.Overhead()
-	totalLen := len(frame) + overhead
-	out := make([]byte, 0, totalLen)
-	out = append(out, frame[:hLen]...)
+	// Assemble [header | ciphertext | trailing padding] directly into dst.
+	// append grows only when the caller did not provide sufficient capacity.
+	out := append(dst[:0], frame[:hLen]...)
 	out = cipher.SealTo(out, nonce[:], frame[hLen:hLen+pLen])
 	ctLen := len(out) - hLen
 	binary.BigEndian.PutUint16(out[11:13], uint16(ctLen))
-	out = append(out, frame[hLen+pLen:]...) // preserve trailing padding
+	out = append(out, frame[hLen+pLen:]...)
 
-	// PERF: per-frame TX path — keep guarded (see UnpackWith note).
 	if log.IsDebug() {
 		log.Debug("ObfEncrypt: seqID=%d algo=%s nonce=%s ptLen=%d ctLen=%d",
 			seqID, AlgoName(cipher.Algo()), NonceHex(frame), pLen, ctLen)

@@ -76,10 +76,17 @@ const obfRekeyFrameThreshold = uint64(0xFFFFFFFF) - (1 << 28)
 // before the 32-bit structured counter (shared node-wide) could wrap and reuse
 // a nonce for a quiet peer, so per-peer counting can never break nonce safety.
 func (n *Node) sealPeerFrame(p peer.ID, cipher obfuscate.ObfCipher, data []byte) ([]byte, error) {
+	return n.sealPeerFrameInto(p, cipher, data, nil)
+}
+
+// sealPeerFrameInto is the pooled-destination form used by fragmentation. The
+// re-key frame counter remains centralized here so allocation strategy never
+// changes nonce/accounting semantics.
+func (n *Node) sealPeerFrameInto(p peer.ID, cipher obfuscate.ObfCipher, data, dst []byte) ([]byte, error) {
 	if cipher == nil {
 		return nil, fmt.Errorf("sealPeerFrame: nil cipher for peer %s — refusing to ship frame unsealed", p.String())
 	}
-	enc, err := obfuscate.EncryptPayloadRegion(data, cipher)
+	enc, err := obfuscate.EncryptPayloadRegionInto(dst, data, cipher)
 	if err != nil {
 		return nil, err
 	}
