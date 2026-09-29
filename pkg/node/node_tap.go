@@ -205,24 +205,36 @@ func (w tapInjectionWriter) Write(payload []byte) (int, error) {
 	return w.node.tapWrite(payload)
 }
 
-func (n *Node) tapWrite(payload []byte) (int, error) {
-	if len(payload) < 14 {
-		return 0, fmt.Errorf("tap write: dropping runt frame (len=%d < %d)", len(payload), ethernetHeaderLen)
+type tapWriteJob struct {
+	data          []byte
+	recordGateway bool
+	relaySrc      peer.ID
+}
+
+func (n *Node) validateTapWrite(payload []byte) error {
+	if len(payload) < ethernetHeaderLen {
+		return fmt.Errorf("tap write: dropping runt frame (len=%d < %d)", len(payload), ethernetHeaderLen)
 	}
 	maxFrameLen := obfuscate.MaxFrameSize
 	// MTU is immutable for the lifetime of the native device. Use the
-	// construction-time configuration rather than the hot-reload snapshot so a
-	// persisted MTU change cannot alter validation before the interface restarts.
+	// construction-time configuration rather than the hot-reload snapshot.
 	if n.Config != nil && n.Config.MTU > 0 {
 		if mtuFrameLen := n.Config.MTU + ethernetHeaderLen; mtuFrameLen < maxFrameLen {
 			maxFrameLen = mtuFrameLen
 		}
 	}
 	if len(payload) > maxFrameLen {
-		return 0, fmt.Errorf("tap write: dropping oversized frame (len=%d > limit=%d)", len(payload), maxFrameLen)
+		return fmt.Errorf("tap write: dropping oversized frame (len=%d > limit=%d)", len(payload), maxFrameLen)
 	}
 	if n.TAP == nil {
-		return 0, errors.New("tap write: no TAP device")
+		return errors.New("tap write: no TAP device")
+	}
+	return nil
+}
+
+func (n *Node) tapWrite(payload []byte) (int, error) {
+	if err := n.validateTapWrite(payload); err != nil {
+		return 0, err
 	}
 
 	n.tapWriteMu.Lock()
@@ -240,6 +252,90 @@ func (n *Node) tapWrite(payload []byte) (int, error) {
 			net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(payload[6:12]).String())
 	}
 	return nn, nil
+}
+
+// enqueueTapWrite transfers an owned copy of payload to the dedicated normal
+// TAP writer. The receive-side stream scratch is reused on the next ReadFrame,
+// so copying is mandatory; acquireFrameBuf keeps the common <=2K case off the
+// heap. A full queue falls back to the synchronous boundary, providing
+// backpressure instead of dropping a valid Ethernet frame.
+func (n *Node) enqueueTapWrite(payload []byte, recordGateway bool, relaySrc peer.ID) error {
+	if err := n.validateTapWrite(payload); err != nil {
+		return err
+	}
+	frame := acquireFrameBuf(len(payload))
+	copy(frame, payload)
+	job := tapWriteJob{data: frame, recordGateway: recordGateway, relaySrc: relaySrc}
+	select {
+	case n.tapWriteCh <- job:
+		return nil
+	default:
+		// Queue saturation: preserve delivery and natural backpressure rather
+		// than turning overload into packet loss.
+		nn, err := n.tapWrite(frame)
+		n.finishTapWriteJob(job, nn, err)
+		return err
+	}
+}
+
+func (n *Node) finishTapWriteJob(job tapWriteJob, wrote int, err error) {
+	defer releaseFrameBuf(job.data)
+	if err != nil || wrote != len(job.data) {
+		return
+	}
+	if job.recordGateway && n.Collector != nil {
+		n.Collector.RecordGatewayPacket()
+	}
+	if job.relaySrc != "" {
+		n.recordRelayedTapDelivery(job.relaySrc, job.data)
+	}
+}
+
+// recordRelayedTapDelivery preserves the relay receive accounting that must
+// happen only after the frame really reached the kernel TAP.
+func (n *Node) recordRelayedTapDelivery(srcPeer peer.ID, payload []byte) {
+	if n.relayDiag != nil {
+		n.relayDiag.delivered()
+	}
+	n.recordPeerRxBytes(srcPeer, len(payload))
+	n.resetPingPongFailCountForPeer(srcPeer)
+	if n.Collector != nil {
+		n.Collector.RecordRecv(len(payload))
+		n.Collector.RecordPacketDir(payload, false)
+	}
+	if n.IPTracker != nil {
+		n.IPTracker.ExtractAndRecord(payload, false)
+	}
+	if len(payload) >= ethernetHeaderLen && n.Collector != nil {
+		ethType := binary.BigEndian.Uint16(payload[12:14])
+		n.Collector.RecordProtocol(ethType)
+	}
+}
+
+// tapWriteLoop is the single normal data-plane writer. Multiple libp2p receive
+// handlers enqueue owned buffers and immediately return to reading streams;
+// only this goroutine waits on the native TAP syscall in steady state.
+func (n *Node) tapWriteLoop() {
+	defer n.wg.Done()
+	for {
+		select {
+		case <-n.ctx.Done():
+			// The queue owns pooled frame buffers. On shutdown, return any
+			// frames that were accepted but not yet written instead of keeping
+			// them referenced until the entire Node becomes unreachable.
+			for {
+				select {
+				case job := <-n.tapWriteCh:
+					releaseFrameBuf(job.data)
+				default:
+					return
+				}
+			}
+		case job := <-n.tapWriteCh:
+			nn, err := n.tapWrite(job.data)
+			n.finishTapWriteJob(job, nn, err)
+		}
+	}
 }
 
 // tapWriteUrgent injects a frame into the TAP device on the priority path.
