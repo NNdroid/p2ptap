@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
@@ -37,24 +38,36 @@ type PeerStreams struct {
 	// releasing the lock. Re-fetch to observe later add/remove.
 	sorted []network.Stream
 
+	// snapshot publishes an immutable read-side topology. Writers rebuild it
+	// under mu; packet-path readers only perform an atomic load.
+	snapshot atomic.Pointer[peerStreamsSnapshot]
+
 	// nextWriteDeadlineRenew tracks when the write deadline must be refreshed.
 	// All writes to this field happen under writeMu, so no atomic is needed.
 	// Zero value means "renew immediately".
 	nextWriteDeadlineRenew time.Time
 }
 
+type peerStreamsSnapshot struct {
+	streams []network.Stream
+	allTCP  bool
+}
+
 func NewPeerStreams(pID peer.ID) *PeerStreams {
-	return &PeerStreams{
-		peerID:  pID,
-		streams: make(map[string]network.Stream),
-	}
+	ps := &PeerStreams{peerID: pID, streams: make(map[string]network.Stream)}
+	ps.snapshot.Store(&peerStreamsSnapshot{})
+	return ps
 }
 
 // rebuildLocked re-sorts the streams snapshot. Caller MUST hold ps.mu (write).
 func (ps *PeerStreams) rebuildLocked() {
 	next := make([]network.Stream, 0, len(ps.streams))
-	for _, s := range ps.streams {
+	allTCP := len(ps.streams) > 0
+	for transportName, s := range ps.streams {
 		next = append(next, s)
+		if !strings.Contains(transportName, "/tcp/") {
+			allTCP = false
+		}
 	}
 	if len(next) > 1 {
 		sort.SliceStable(next, func(i, j int) bool {
@@ -62,6 +75,7 @@ func (ps *PeerStreams) rebuildLocked() {
 		})
 	}
 	ps.sorted = next
+	ps.snapshot.Store(&peerStreamsSnapshot{streams: next, allTCP: allTCP})
 }
 
 func (ps *PeerStreams) AddStream(transportName string, s network.Stream) {
@@ -81,11 +95,12 @@ func (ps *PeerStreams) RemoveStream(transportName string, stream network.Stream)
 	}
 }
 
-// GetAllStreams returns the transport-priority-ordered stream snapshot. Hot
-// path: one RWMutex read-lock and no allocation — the snapshot is prebuilt by
-// AddStream/RemoveStream. Callers may iterate the returned slice freely (it is
-// never mutated after publish) but must re-call to observe later changes.
+// GetAllStreams returns the transport-priority-ordered immutable snapshot.
+// Steady-state packet reads are lock-free; published slices are never mutated.
 func (ps *PeerStreams) GetAllStreams() []network.Stream {
+	if snap := ps.snapshot.Load(); snap != nil {
+		return snap.streams
+	}
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	return ps.sorted
@@ -126,15 +141,15 @@ func scoreStreamTransport(s network.Stream) int {
 // double-AEAD overhead by ~50% for bulk transfers.
 // Returns false when any stream is non-TCP or when no streams are registered.
 func (ps *PeerStreams) prefersTCPFragPayload() bool {
+	if snap := ps.snapshot.Load(); snap != nil {
+		return snap.allTCP
+	}
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	if len(ps.streams) == 0 {
 		return false
 	}
 	for key := range ps.streams {
-		// Transport keys are full multiaddr strings, e.g.
-		// "/ip4/1.2.3.4/tcp/12345" or "/ip6/.../quic-v1/...".
-		// A TCP stream always contains "/tcp/" in its path.
 		if !strings.Contains(key, "/tcp/") {
 			return false
 		}
