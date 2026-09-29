@@ -1,0 +1,56 @@
+name: Apply PeerStreams Performance Patch
+
+on:
+  push:
+    branches: [perf/peerstreams-atomic-snapshot]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[peerstreams-patch-done]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply PeerStreams hot-path patch
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('pkg/node/strategy.go')
+          s = p.read_text()
+          def one(old, new):
+              global s
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f'expected 1 match, got {n}: {old[:100]!r}')
+              s = s.replace(old, new, 1)
+
+          one('"sync"\n\t"time"', '"sync"\n\t"sync/atomic"\n\t"time"')
+          one(
+              '''\tsorted []network.Stream\n\n\t// nextWriteDeadlineRenew tracks when the write deadline must be refreshed.''',
+              '''\tsorted []network.Stream\n\n\t// snapshot publishes an immutable read-side topology. Writers rebuild it\n\t// under mu; packet-path readers only perform an atomic load.\n\tsnapshot atomic.Pointer[peerStreamsSnapshot]\n\n\t// nextWriteDeadlineRenew tracks when the write deadline must be refreshed.''')
+          one(
+              '''}\n\nfunc NewPeerStreams(pID peer.ID) *PeerStreams {\n\treturn &PeerStreams{\n\t\tpeerID:  pID,\n\t\tstreams: make(map[string]network.Stream),\n\t}\n}\n''',
+              '''}\n\ntype peerStreamsSnapshot struct {\n\tstreams []network.Stream\n\tallTCP  bool\n}\n\nfunc NewPeerStreams(pID peer.ID) *PeerStreams {\n\tps := &PeerStreams{peerID: pID, streams: make(map[string]network.Stream)}\n\tps.snapshot.Store(&peerStreamsSnapshot{})\n\treturn ps\n}\n''')
+          one(
+              '''func (ps *PeerStreams) rebuildLocked() {\n\tnext := make([]network.Stream, 0, len(ps.streams))\n\tfor _, s := range ps.streams {\n\t\tnext = append(next, s)\n\t}\n\tif len(next) > 1 {\n\t\tsort.SliceStable(next, func(i, j int) bool {\n\t\t\treturn scoreStreamTransport(next[i]) < scoreStreamTransport(next[j])\n\t\t})\n\t}\n\tps.sorted = next\n}\n''',
+              '''func (ps *PeerStreams) rebuildLocked() {\n\tnext := make([]network.Stream, 0, len(ps.streams))\n\tallTCP := len(ps.streams) > 0\n\tfor transportName, s := range ps.streams {\n\t\tnext = append(next, s)\n\t\tif !strings.Contains(transportName, "/tcp/") {\n\t\t\tallTCP = false\n\t\t}\n\t}\n\tif len(next) > 1 {\n\t\tsort.SliceStable(next, func(i, j int) bool {\n\t\t\treturn scoreStreamTransport(next[i]) < scoreStreamTransport(next[j])\n\t\t})\n\t}\n\tps.sorted = next\n\tps.snapshot.Store(&peerStreamsSnapshot{streams: next, allTCP: allTCP})\n}\n''')
+          one(
+              '''// GetAllStreams returns the transport-priority-ordered stream snapshot. Hot\n// path: one RWMutex read-lock and no allocation — the snapshot is prebuilt by\n// AddStream/RemoveStream. Callers may iterate the returned slice freely (it is\n// never mutated after publish) but must re-call to observe later changes.\nfunc (ps *PeerStreams) GetAllStreams() []network.Stream {\n\tps.mu.RLock()\n\tdefer ps.mu.RUnlock()\n\treturn ps.sorted\n}\n''',
+              '''// GetAllStreams returns the transport-priority-ordered immutable snapshot.\n// Steady-state packet reads are lock-free; published slices are never mutated.\nfunc (ps *PeerStreams) GetAllStreams() []network.Stream {\n\tif snap := ps.snapshot.Load(); snap != nil {\n\t\treturn snap.streams\n\t}\n\tps.mu.RLock()\n\tdefer ps.mu.RUnlock()\n\treturn ps.sorted\n}\n''')
+          one(
+              '''func (ps *PeerStreams) prefersTCPFragPayload() bool {\n\tps.mu.RLock()\n\tdefer ps.mu.RUnlock()\n\tif len(ps.streams) == 0 {\n\t\treturn false\n\t}\n\tfor key := range ps.streams {\n\t\t// Transport keys are full multiaddr strings, e.g.\n\t\t// "/ip4/1.2.3.4/tcp/12345" or "/ip6/.../quic-v1/...".\n\t\t// A TCP stream always contains "/tcp/" in its path.\n\t\tif !strings.Contains(key, "/tcp/") {\n\t\t\treturn false\n\t\t}\n\t}\n\treturn true\n}\n''',
+              '''func (ps *PeerStreams) prefersTCPFragPayload() bool {\n\tif snap := ps.snapshot.Load(); snap != nil {\n\t\treturn snap.allTCP\n\t}\n\tps.mu.RLock()\n\tdefer ps.mu.RUnlock()\n\tif len(ps.streams) == 0 {\n\t\treturn false\n\t}\n\tfor key := range ps.streams {\n\t\tif !strings.Contains(key, "/tcp/") {\n\t\t\treturn false\n\t\t}\n\t}\n\treturn true\n}\n''')
+          p.write_text(s)
+      - name: Commit source and self-delete workflow
+        shell: bash
+        run: |
+          rm .github/workflows/apply-peerstreams-perf.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pkg/node/strategy.go .github/workflows/apply-peerstreams-perf.yml
+          git commit -m "perf(strategy): publish peer stream snapshots atomically [peerstreams-patch-done]"
+          git push origin HEAD:perf/peerstreams-atomic-snapshot
