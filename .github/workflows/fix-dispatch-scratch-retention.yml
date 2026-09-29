@@ -1,0 +1,39 @@
+name: Fix Dispatch Scratch Retention
+
+on:
+  push:
+    branches: [perf/dispatch-scratch]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: ${{ !contains(github.event.head_commit.message, '[scratch-retention-done]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('pkg/node/node_dispatch.go')
+          s=p.read_text()
+          old='''\t\t\t\t\tif n.peerStalled(target) {\n\t\t\t\t\t\tfor i, t := range tasks {\n\t\t\t\t\t\t\tif t.owned {\n\t\t\t\t\t\t\t\treleaseFrameBuf(batch[i])\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t}\n\t\t\t\t\t\tcontinue\n\t\t\t\t\t}\n'''
+          new='''\t\t\t\t\tif n.peerStalled(target) {\n\t\t\t\t\t\tfor i, t := range tasks {\n\t\t\t\t\t\t\tif t.owned {\n\t\t\t\t\t\t\t\treleaseFrameBuf(batch[i])\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\tbatch[i] = nil\n\t\t\t\t\t\t}\n\t\t\t\t\t\tcontinue\n\t\t\t\t\t}\n'''
+          if s.count(old)!=1: raise SystemExit(f'stalled match={s.count(old)}')
+          s=s.replace(old,new,1)
+          old='''\t\t\t\t\t\tif owned {\n\t\t\t\t\t\t\treleaseFrameBuf(data)\n\t\t\t\t\t\t}\n\t\t\t\t\t} else {\n'''
+          new='''\t\t\t\t\t\tif owned {\n\t\t\t\t\t\t\treleaseFrameBuf(data)\n\t\t\t\t\t\t}\n\t\t\t\t\t\tbatch[0] = nil\n\t\t\t\t\t} else {\n'''
+          if s.count(old)!=1: raise SystemExit(f'single match={s.count(old)}')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+      - name: Commit and self-delete
+        run: |
+          gofmt -w pkg/node/node_dispatch.go
+          rm .github/workflows/fix-dispatch-scratch-retention.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pkg/node/node_dispatch.go .github/workflows/fix-dispatch-scratch-retention.yml
+          git commit -m "perf(dispatch): clear worker scratch references [scratch-retention-done]"
+          git push origin HEAD:perf/dispatch-scratch
