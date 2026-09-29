@@ -3,6 +3,7 @@ package node
 import (
 	"encoding/binary"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -67,9 +68,15 @@ const (
 // fragReassembler buffers incoming fragments and emits complete obfuscated
 // frames once every fragment of a group has arrived.
 type fragReassembler struct {
-	mu     sync.Mutex
-	bufs   map[reasmKey]*reasmBuf
-	seqGen uint32
+	mu   sync.Mutex
+	bufs map[reasmKey]*reasmBuf
+
+	// seqGen belongs exclusively to the TX fragmentation path. Keep it atomic
+	// instead of protecting it with mu: mu serializes RX reassembly state, and
+	// sharing that lock made every fragmented TX frame contend with every RX
+	// fragment under bidirectional load. Atomic increment preserves the same
+	// monotonically increasing uint32 sequence without coupling the two paths.
+	seqGen atomic.Uint32
 }
 
 type reasmBuf struct {
@@ -85,13 +92,11 @@ func newFragReassembler() *fragReassembler {
 }
 
 // nextOrigSeq allocates a monotonically increasing sequence for a new frame
-// being fragmented on the TX side.
+// being fragmented on the TX side. It intentionally does not take the RX
+// reassembly mutex: TX sequence allocation and RX fragment bookkeeping are
+// independent and must not serialize each other under full-duplex traffic.
 func (f *fragReassembler) nextOrigSeq() uint32 {
-	f.mu.Lock()
-	f.seqGen++
-	seq := f.seqGen
-	f.mu.Unlock()
-	return seq
+	return f.seqGen.Add(1)
 }
 
 // fragmentFrame splits an already-obfuscated frame (the output of
