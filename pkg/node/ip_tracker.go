@@ -14,10 +14,13 @@ import (
 	"p2ptap/pkg/packet"
 )
 
+type ipStatMAC struct {
+	value string
+}
+
 type ipStatItem struct {
-	mu            sync.RWMutex
 	ip            string
-	mac           string
+	mac           atomic.Pointer[ipStatMAC]
 	txBytes       uint64
 	rxBytes       uint64
 	txPackets     uint64
@@ -150,44 +153,69 @@ func macToString(b []byte) string {
 	return s
 }
 
-func (t *IPTrafficTracker) RecordTx(ipStr string, bytes uint64, mac ...string) {
+func validTrackedMAC(mac string) bool {
+	return mac != "" && mac != "ff:ff:ff:ff:ff:ff" && mac != "00:00:00:00:00:00"
+}
+
+func (item *ipStatItem) updateMAC(mac string) {
+	if !validTrackedMAC(mac) {
+		return
+	}
+	for {
+		cur := item.mac.Load()
+		if cur != nil && cur.value == mac {
+			return
+		}
+		next := &ipStatMAC{value: mac}
+		if item.mac.CompareAndSwap(cur, next) {
+			return
+		}
+	}
+}
+
+func (item *ipStatItem) macString() string {
+	if cur := item.mac.Load(); cur != nil {
+		return cur.value
+	}
+	return ""
+}
+
+func (t *IPTrafficTracker) recordTxAt(ipStr string, bytes uint64, mac string, nowSec int64) {
 	if ipStr == "" || ipStr == "0.0.0.0" || ipStr == "<nil>" || ipStr == "::" {
 		return
 	}
 	item := t.getOrCreate(ipStr)
 	atomic.AddUint64(&item.txBytes, bytes)
 	atomic.AddUint64(&item.txPackets, 1)
-	if len(mac) > 0 && mac[0] != "" && mac[0] != "ff:ff:ff:ff:ff:ff" && mac[0] != "00:00:00:00:00:00" {
-		item.mu.RLock()
-		cur := item.mac
-		item.mu.RUnlock()
-		if cur != mac[0] {
-			item.mu.Lock()
-			item.mac = mac[0]
-			item.mu.Unlock()
-		}
-	}
-	item.lastActive.Store(time.Now().Unix())
+	item.updateMAC(mac)
+	item.lastActive.Store(nowSec)
 }
 
-func (t *IPTrafficTracker) RecordRx(ipStr string, bytes uint64, mac ...string) {
+func (t *IPTrafficTracker) recordRxAt(ipStr string, bytes uint64, mac string, nowSec int64) {
 	if ipStr == "" || ipStr == "0.0.0.0" || ipStr == "<nil>" || ipStr == "::" {
 		return
 	}
 	item := t.getOrCreate(ipStr)
 	atomic.AddUint64(&item.rxBytes, bytes)
 	atomic.AddUint64(&item.rxPackets, 1)
-	if len(mac) > 0 && mac[0] != "" && mac[0] != "ff:ff:ff:ff:ff:ff" && mac[0] != "00:00:00:00:00:00" {
-		item.mu.RLock()
-		cur := item.mac
-		item.mu.RUnlock()
-		if cur != mac[0] {
-			item.mu.Lock()
-			item.mac = mac[0]
-			item.mu.Unlock()
-		}
+	item.updateMAC(mac)
+	item.lastActive.Store(nowSec)
+}
+
+func (t *IPTrafficTracker) RecordTx(ipStr string, bytes uint64, mac ...string) {
+	macStr := ""
+	if len(mac) > 0 {
+		macStr = mac[0]
 	}
-	item.lastActive.Store(time.Now().Unix())
+	t.recordTxAt(ipStr, bytes, macStr, time.Now().Unix())
+}
+
+func (t *IPTrafficTracker) RecordRx(ipStr string, bytes uint64, mac ...string) {
+	macStr := ""
+	if len(mac) > 0 {
+		macStr = mac[0]
+	}
+	t.recordRxAt(ipStr, bytes, macStr, time.Now().Unix())
 }
 
 func (t *IPTrafficTracker) ExtractAndRecord(frame []byte, isTx bool) {
@@ -211,18 +239,16 @@ func (t *IPTrafficTracker) ExtractAndRecord(frame []byte, isTx bool) {
 	srcMAC := macToString(frame[6:12])
 	dstMAC := macToString(frame[0:6])
 
+	nowSec := time.Now().Unix()
 	if isTx {
-		// Outbound frame emitted by local host:
-		// srcIP is local transmitter (Tx)
-		t.RecordTx(srcIP, pktLen, srcMAC)
-		// dstIP is remote destination being transmitted to (Tx to dstIP)
-		t.RecordTx(dstIP, pktLen, dstMAC)
+		// Outbound frame emitted by local host. Reuse one clock read for both
+		// source and destination accounting on this Ethernet frame.
+		t.recordTxAt(srcIP, pktLen, srcMAC, nowSec)
+		t.recordTxAt(dstIP, pktLen, dstMAC, nowSec)
 	} else {
-		// Inbound frame received from overlay / remote:
-		// srcIP is remote transmitter (Rx from srcIP)
-		t.RecordRx(srcIP, pktLen, srcMAC)
-		// dstIP is local receiver (Rx)
-		t.RecordRx(dstIP, pktLen, dstMAC)
+		// Inbound frame received from overlay / remote.
+		t.recordRxAt(srcIP, pktLen, srcMAC, nowSec)
+		t.recordRxAt(dstIP, pktLen, dstMAC, nowSec)
 	}
 }
 
@@ -299,9 +325,7 @@ func (t *IPTrafficTracker) GetDTOs(peerMeta *sync.Map, localNodeName, localTapIP
 
 		txSpd, rxSpd := item.updateSpeed(nowNano)
 
-		item.mu.RLock()
-		macAddr := item.mac
-		item.mu.RUnlock()
+		macAddr := item.macString()
 
 		agoSec := nowSec - lastSec
 		agoStr := "just now"
