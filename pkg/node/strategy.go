@@ -38,8 +38,9 @@ type PeerStreams struct {
 	// releasing the lock. Re-fetch to observe later add/remove.
 	sorted []network.Stream
 
-	// snapshot publishes an immutable read-side topology. Writers rebuild it
-	// under mu; packet-path readers only perform an atomic load.
+	// snapshot publishes the immutable read-side topology. Writers rebuild it
+	// under mu whenever streams changes; packet-path readers only perform one
+	// atomic load and never contend with stream registration/removal.
 	snapshot atomic.Pointer[peerStreamsSnapshot]
 
 	// nextWriteDeadlineRenew tracks when the write deadline must be refreshed.
@@ -54,7 +55,10 @@ type peerStreamsSnapshot struct {
 }
 
 func NewPeerStreams(pID peer.ID) *PeerStreams {
-	ps := &PeerStreams{peerID: pID, streams: make(map[string]network.Stream)}
+	ps := &PeerStreams{
+		peerID:  pID,
+		streams: make(map[string]network.Stream),
+	}
 	ps.snapshot.Store(&peerStreamsSnapshot{})
 	return ps
 }
@@ -96,11 +100,13 @@ func (ps *PeerStreams) RemoveStream(transportName string, stream network.Stream)
 }
 
 // GetAllStreams returns the transport-priority-ordered immutable snapshot.
-// Steady-state packet reads are lock-free; published slices are never mutated.
+// Steady-state packet reads are lock-free: stream mutations publish a fresh
+// slice through snapshot, and published slices are never changed in place.
 func (ps *PeerStreams) GetAllStreams() []network.Stream {
 	if snap := ps.snapshot.Load(); snap != nil {
 		return snap.streams
 	}
+	// Compatibility slow path for a zero-value/struct-literal PeerStreams.
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	return ps.sorted
@@ -144,6 +150,7 @@ func (ps *PeerStreams) prefersTCPFragPayload() bool {
 	if snap := ps.snapshot.Load(); snap != nil {
 		return snap.allTCP
 	}
+	// Compatibility slow path for a zero-value/struct-literal PeerStreams.
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	if len(ps.streams) == 0 {
@@ -389,12 +396,15 @@ func (sd *StrategyDispatcher) SendToPeer(ctx context.Context, targetPeer peer.ID
 	if sd.node != nil {
 		fragMaxPayload = sd.node.maxFragPayloadForPS(ps)
 	}
-	frags, origLen, encErr := sd.encryptAndFragment(targetPeer, cipher, packedData, fragMaxPayload)
+	frags, origLen, releaseFrags, encErr := sd.encryptAndFragment(targetPeer, cipher, packedData, fragMaxPayload)
 	if encErr != nil {
 		// Never fall through to the wire with an unsealed frame: the peer would
 		// drop it and the operator would see only an unexplained packet loss.
 		log.Warn("Tx to peer %s aborted: %v", targetPeer.String(), encErr)
 		return encErr
+	}
+	if releaseFrags {
+		defer releaseFragmentBuffers(frags)
 	}
 
 	switch sd.mode {
@@ -425,50 +435,74 @@ func (sd *StrategyDispatcher) SendToPeer(ctx context.Context, targetPeer peer.ID
 // maxPayload controls the per-fragment inner-payload threshold. Pass 0 to use
 // the node-default (QUIC-safe). Callers with an active TCP PeerStreams should
 // use maxFragPayloadForPS(ps) to avoid needless fragmentation on byte-streams.
-func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, cipher obfuscate.ObfCipher, rawData []byte, maxPayload int) ([][]byte, int, error) {
+func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, cipher obfuscate.ObfCipher, rawData []byte, maxPayload int) ([][]byte, int, bool, error) {
 	if sd.node == nil {
-		return [][]byte{rawData}, len(rawData), nil
+		return [][]byte{rawData}, len(rawData), false, nil
+	}
+	if maxPayload <= 0 {
+		maxPayload = sd.node.maxFragPayload()
 	}
 	tapPayloadLen := tapPayloadLenFromPackedFrame(rawData)
 	data := rawData
+	innerPooled := false
 	if cipher != nil {
-		enc, err := sd.node.sealPeerFrame(targetPeer, cipher, data)
-		if err != nil {
-			// A cipher IS negotiated for this peer, which means its RX path
-			// AEAD-opens every frame it receives. The previous code merely logged
-			// at Debug level and then sent the PLAINTEXT frame anyway — so the
-			// receiver's AEAD gate silently dropped it while the true cause stayed
-			// invisible, and the payload leaked onto the wire unencrypted. Both are
-			// unacceptable: surface the error and let the caller decide.
-			return nil, 0, fmt.Errorf("seal frame for peer %s: %w", targetPeer.String(), err)
+		// Only take a pooled destination when the sealed logical frame will
+		// actually need fragmentation. Non-fragmented callers keep the existing
+		// ownership contract and allocation behaviour.
+		if len(rawData)+cipher.Overhead() > maxPayload {
+			innerBuf := acquireFrameBuf(len(rawData) + cipher.Overhead())
+			enc, err := sd.node.sealPeerFrameInto(targetPeer, cipher, rawData, innerBuf[:0])
+			if err != nil {
+				releaseFrameBuf(innerBuf)
+				return nil, 0, false, fmt.Errorf("seal frame for peer %s: %w", targetPeer.String(), err)
+			}
+			data = enc
+			innerPooled = true
+		} else {
+			enc, err := sd.node.sealPeerFrame(targetPeer, cipher, rawData)
+			if err != nil {
+				return nil, 0, false, fmt.Errorf("seal frame for peer %s: %w", targetPeer.String(), err)
+			}
+			data = enc
 		}
-		data = enc
 	} else {
 		log.Debug("Tx: SENDING FRAME TO %s IN PLAINTEXT — no per-peer cipher negotiated (encryption disabled or handshake incomplete)",
 			targetPeer.String())
 	}
-	// Fragment envelopes are Packed with a FRESH per-fragment seqID (see
-	// fragmentFrame): the AEAD nonce is derived from the frame header, so reusing
-	// one seqID for every fragment would reuse one nonce for every fragment.
-	frags := sd.node.fragmentFrame(data, sd.node.fragRX, sd.node.txEpochForPeer(targetPeer), maxPayload)
-	// When fragmentation occurred, re-encrypt each outer envelope with the SAME
-	// per-peer cipher so the receiver's AEAD open gate accepts the fragments.
-	// Non-fragmented frames are already per-peer encrypted above and must NOT be
-	// double-encrypted.
+
+	frags, pooled := sd.node.fragmentFrame(data, sd.node.fragRX, sd.node.txEpochForPeer(targetPeer), maxPayload)
+	if innerPooled {
+		if pooled {
+			// fragmentFrame has copied every chunk out of the logical sealed frame.
+			releaseFrameBuf(data)
+		} else {
+			// Defensive ownership fallback: if fragmentation did not happen after
+			// all, the single returned frame is the pooled logical frame itself.
+			pooled = true
+		}
+	}
+
 	if len(frags) > 1 && cipher != nil {
 		for i, f := range frags {
-			enc, err := sd.node.sealPeerFrame(targetPeer, cipher, f)
+			encBuf := acquireFrameBuf(len(f) + cipher.Overhead())
+			enc, err := sd.node.sealPeerFrameInto(targetPeer, cipher, f, encBuf[:0])
 			if err != nil {
-				// Skipping a failed fragment (the old `continue`) shipped it
-				// unsealed; the receiver dropped it and the reassembly of the
-				// WHOLE frame failed anyway. Fail fast with a precise error.
-				return nil, 0, fmt.Errorf("seal fragment %d/%d for peer %s: %w",
+				releaseFrameBuf(encBuf)
+				if pooled {
+					releaseFragmentBuffers(frags)
+				}
+				return nil, 0, false, fmt.Errorf("seal fragment %d/%d for peer %s: %w",
 					i+1, len(frags), targetPeer.String(), err)
+			}
+			if pooled {
+				releaseFrameBuf(f)
 			}
 			frags[i] = enc
 		}
+		// Every encrypted outer frame was written into a pooled destination.
+		pooled = true
 	}
-	return frags, tapPayloadLen, nil
+	return frags, tapPayloadLen, pooled, nil
 }
 
 // removeStreamUnderLock drops a stream from ps while the caller holds
@@ -865,9 +899,12 @@ func (sd *StrategyDispatcher) writeFrameLocked(targetPeer peer.ID, ps *PeerStrea
 	if sd.node != nil {
 		fragMaxPayload = sd.node.maxFragPayloadForPS(ps)
 	}
-	frags, origLen, err := sd.encryptAndFragment(targetPeer, cipher, packedData, fragMaxPayload)
+	frags, origLen, releaseFrags, err := sd.encryptAndFragment(targetPeer, cipher, packedData, fragMaxPayload)
 	if err != nil {
 		return err
+	}
+	if releaseFrags {
+		defer releaseFragmentBuffers(frags)
 	}
 	return sd.writeFragsToStreams(ps, targetPeer, streams, origLen, frags, true)
 }

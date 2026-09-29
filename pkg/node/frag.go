@@ -108,23 +108,17 @@ func (f *fragReassembler) nextOrigSeq() uint32 {
 // When maxPayload > 0 it is used as the fragment size limit (allows callers
 // to specify a larger limit for TCP/yamux streams). Otherwise the node-default
 // (derived from Config.MTU / QUIC path-MTU) is used.
-func (n *Node) fragmentFrame(packed []byte, frag *fragReassembler, txEpoch uint64, maxPayload int) [][]byte {
+func (n *Node) fragmentFrame(packed []byte, frag *fragReassembler, txEpoch uint64, maxPayload int) ([][]byte, bool) {
 	if maxPayload <= 0 {
 		maxPayload = n.maxFragPayload()
 	}
 	if len(packed) <= maxPayload {
-		// Common case: no fragmentation needed. Send the frame as-is; the
-		// receiver's tryReassemble sees no frag magic and passes it through.
-		return [][]byte{packed}
+		return [][]byte{packed}, false
 	}
 	if frag == nil {
-		// Fragmentation state is required to allocate the original-frame sequence
-		// that ties the fragments together. Without it we cannot fragment, so send
-		// the frame whole rather than dereferencing a nil pointer and killing the
-		// send goroutine.
 		log.Warn("Frame of %d bytes exceeds the %d-byte fragment payload but fragmentation is disabled; sending unfragmented",
 			len(packed), maxPayload)
-		return [][]byte{packed}
+		return [][]byte{packed}, false
 	}
 
 	seq := frag.nextOrigSeq()
@@ -137,27 +131,40 @@ func (n *Node) fragmentFrame(packed []byte, frag *fragReassembler, txEpoch uint6
 			end = len(packed)
 		}
 		chunk := packed[start:end]
-		hdr := make([]byte, 0, len(chunk)+fragHeaderLen)
-		hdr = appendFragHeader(hdr, seq, uint16(i), uint16(total), chunk)
-		outBuf := make([]byte, n.Packer.MaxPackedLen(len(hdr)))
-		// A FRESH seqID per fragment envelope. The AEAD nonce is derived from the
-		// frame header (magic + seqID + obfType + paddingLen-high), so the previous
-		// hard-coded 0 gave EVERY fragment envelope — across every message ever sent
-		// to that peer — the SAME nonce under the SAME key. For ChaCha20-Poly1305 and
-		// AES-GCM that is catastrophic nonce reuse: it leaks the XOR of the
-		// plaintexts and enables authenticator forgery. Uniqueness is safe here
-		// because the outer seqID is never used for dedup — the RX path dedups on
-		// the reassembled INNER frame's seqID (see handleStream).
-		n2, perr := n.Packer.Pack(n.Packer.NextSeqID(txEpoch), hdr, outBuf)
+		payloadLen := fragHeaderLen + len(chunk)
+
+		// Build the fragmentation payload directly in the final Pack buffer.
+		// Pack writes only outBuf[:HeaderLen] before copying payload into
+		// outBuf[HeaderLen:], so using that exact destination as the source turns
+		// the payload copy into a no-op and removes the old hdr allocation.
+		outBuf := acquireFrameBuf(n.Packer.MaxPackedLen(payloadLen))
+		fragPayload := outBuf[obfuscate.HeaderLen : obfuscate.HeaderLen+payloadLen]
+		binary.BigEndian.PutUint16(fragPayload[0:2], fragMagic)
+		binary.BigEndian.PutUint32(fragPayload[2:6], seq)
+		binary.BigEndian.PutUint16(fragPayload[6:8], uint16(i))
+		binary.BigEndian.PutUint16(fragPayload[8:10], uint16(total))
+		binary.BigEndian.PutUint16(fragPayload[10:12], uint16(len(chunk)))
+		copy(fragPayload[fragHeaderLen:], chunk)
+
+		n2, perr := n.Packer.Pack(n.Packer.NextSeqID(txEpoch), fragPayload, outBuf)
 		if perr != nil {
-			// Fallback: send the chunk without re-obfuscation wrapper so the
-			// frame is not lost (it will simply not be obfuscated per-fragment).
-			out = append(out, hdr)
+			// Historical fallback: send a bare fragment envelope. Move it back to
+			// offset zero so the returned slice retains the pool buffer's full cap.
+			copy(outBuf[:payloadLen], fragPayload)
+			out = append(out, outBuf[:payloadLen])
 			continue
 		}
 		out = append(out, outBuf[:n2])
 	}
-	return out
+	return out, true
+}
+
+// releaseFragmentBuffers returns buffers allocated by the fragmented TX path.
+// Non-fragmented frames remain caller-owned and are never passed here.
+func releaseFragmentBuffers(frags [][]byte) {
+	for _, f := range frags {
+		releaseFrameBuf(f)
+	}
 }
 
 // appendFragHeader appends a fragmentation header (without the magic check on
