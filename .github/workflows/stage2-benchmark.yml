@@ -1,0 +1,96 @@
+name: Stage2 Performance Benchmarks
+
+on:
+  push:
+    branches:
+      - perf/stage2-benchmarks
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-tap-batch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOMAXPROCS: 4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Runner metadata
+        shell: bash
+        run: |
+          uname -a
+          go version
+          lscpu
+
+      - name: Linux epoll batch benchmark
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p perf-results
+          go test ./pkg/tap \
+            -run '^$' \
+            -bench '^BenchmarkLinuxEpollDrainBatch$' \
+            -benchmem \
+            -benchtime=200x \
+            -count=5 \
+            | tee perf-results/linux-tap-batch.txt
+
+      - name: Upload TAP batch results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-tap-batch-results
+          path: perf-results/linux-tap-batch.txt
+
+  transport-baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      GOMAXPROCS: 4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Runner metadata
+        shell: bash
+        run: |
+          uname -a
+          go version
+          lscpu
+
+      - name: Overlay transport throughput baseline
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p perf-results
+          go test ./pkg/node \
+            -run '^$' \
+            -bench '^BenchmarkThroughput_(TCP|UDP)/(TCP|QUIC|WebRTC|WebTransport)$' \
+            -benchmem \
+            -benchtime=1x \
+            -count=3 \
+            -timeout=30m \
+            | tee perf-results/transport-baseline.txt
+
+      - name: Upload transport results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: transport-baseline-results
+          path: perf-results/transport-baseline.txt
