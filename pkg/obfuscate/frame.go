@@ -263,12 +263,18 @@ type FramePacker struct {
 
 	seqCounter uint64 // per-source monotonic counter (low 32 bits of structured SeqID); accessed atomically
 	srcHash    uint64 // 16-bit source hash for this node's PeerID
-	auto       *autoState
+	auto       atomic.Pointer[autoState]
 	// lastEvalUnixNano is the last auto-mode evaluation time as Unix nanos.
 	// Kept as an int64 rather than time.Time because concurrent Pack() calls
 	// from the dispatch workers write it, and there is no atomic time.Time.
 	lastEvalUnixNano atomic.Int64
 	mu               sync.Mutex
+
+	// params is an immutable copy-on-write view of the padding configuration.
+	// UpdateConfig and auto-mode transitions publish a new snapshot while the
+	// packet hot path only performs an atomic pointer load. This removes the
+	// previous global mutex acquisition from every Pack and MaxPackedLen call.
+	params atomic.Pointer[packerParams]
 
 	// algo is the ObfType byte stamped into outgoing frames so the receiver
 	// knows which cipher to use. Per-peer encryption is applied at send time
@@ -280,25 +286,28 @@ type FramePacker struct {
 
 // NewFramePackerFull creates a FramePacker from full ObfuscationConfig.
 func NewFramePackerFull(cfg *config.ObfuscationConfig) *FramePacker {
+	fp := &FramePacker{}
 	if cfg == nil || !cfg.Enable {
-		return &FramePacker{Enable: false}
+		fp.Enable = false
+		fp.applyDefaults()
+		fp.publishParamsLocked()
+		return fp
 	}
-	fp := &FramePacker{
-		Enable:             cfg.Enable,
-		Mode:               cfg.Mode,
-		FixedSize:          cfg.FixedSize,
-		BlockSize:          cfg.BlockSize,
-		JitterRange:        cfg.JitterRange,
-		MinSize:            cfg.MinSize,
-		MaxSize:            cfg.MaxSize,
-		AutoDetectInterval: cfg.AutoDetectInterval,
-		AutoThresholdBytes: cfg.AutoThresholdBytes,
-		AllowModeSwitch:    cfg.AllowModeSwitch,
-	}
+	fp.Enable = cfg.Enable
+	fp.Mode = cfg.Mode
+	fp.FixedSize = cfg.FixedSize
+	fp.BlockSize = cfg.BlockSize
+	fp.JitterRange = cfg.JitterRange
+	fp.MinSize = cfg.MinSize
+	fp.MaxSize = cfg.MaxSize
+	fp.AutoDetectInterval = cfg.AutoDetectInterval
+	fp.AutoThresholdBytes = cfg.AutoThresholdBytes
+	fp.AllowModeSwitch = cfg.AllowModeSwitch
 	fp.applyDefaults()
 	if fp.Mode == "auto" {
-		fp.auto = newAutoState()
+		fp.auto.Store(newAutoState())
 	}
+	fp.publishParamsLocked()
 	return fp
 }
 
@@ -401,13 +410,9 @@ func fillRandom(buf []byte) {
 //
 //	[Magic(2) | SeqID(8) | PayloadLen(2) | PaddingLen(2) | payload | random padding]
 //
-// packerParams is one consistent view of the padding parameters.
-//
-// UpdateConfig rewrites these fields from the hot-reload goroutine while the
-// dispatch workers are packing frames, so every read on the per-frame path has
-// to happen inside a single critical section — otherwise Pack mixes values from
-// before and after a reload (and may even observe a torn Mode string). Pack
-// takes the snapshot once and threads it down into packStandard.
+// packerParams is one immutable, internally consistent view of the padding
+// parameters. Writers publish a complete copy after config changes; readers on
+// the packet hot path load it without taking the global configuration mutex.
 type packerParams struct {
 	enable             bool
 	mode               string
@@ -420,9 +425,9 @@ type packerParams struct {
 	allowModeSwitch    bool
 }
 
-func (fp *FramePacker) snapshotParams() packerParams {
-	fp.mu.Lock()
-	defer fp.mu.Unlock()
+// paramsFromFieldsLocked snapshots the exported compatibility fields. The caller
+// must either hold fp.mu or be in single-threaded construction before publication.
+func (fp *FramePacker) paramsFromFieldsLocked() packerParams {
 	return packerParams{
 		enable:             fp.Enable,
 		mode:               fp.Mode,
@@ -436,6 +441,28 @@ func (fp *FramePacker) snapshotParams() packerParams {
 	}
 }
 
+func (fp *FramePacker) publishParamsLocked() {
+	p := fp.paramsFromFieldsLocked()
+	fp.params.Store(&p)
+}
+
+func (fp *FramePacker) snapshotParams() packerParams {
+	if p := fp.params.Load(); p != nil {
+		return *p
+	}
+
+	// Support zero-value / struct-literal FramePackers used by tests and legacy
+	// callers. This slow path runs once; steady-state reads are atomic-only.
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	if p := fp.params.Load(); p != nil {
+		return *p
+	}
+	fp.applyDefaults()
+	fp.publishParamsLocked()
+	return *fp.params.Load()
+}
+
 func (fp *FramePacker) Pack(seqID uint64, payload []byte, outBuf []byte) (int, error) {
 	p := fp.snapshotParams()
 
@@ -446,17 +473,21 @@ func (fp *FramePacker) Pack(seqID uint64, payload []byte, outBuf []byte) (int, e
 	}
 
 	mode := p.mode
-	if mode == "auto" && fp.auto != nil {
-		fp.auto.recordSize(len(payload))
+	if auto := fp.auto.Load(); mode == "auto" && auto != nil {
+		auto.recordSize(len(payload))
 		if p.allowModeSwitch && p.autoDetectInterval > 0 {
 			now := time.Now()
 			if now.Sub(time.Unix(0, fp.lastEvalUnixNano.Load())) >= time.Duration(p.autoDetectInterval)*time.Second {
-				newMode := fp.auto.evaluate()
+				newMode := auto.evaluate()
 				if newMode != mode {
-					// Publish under the same lock snapshotParams reads with, so
-					// a concurrent reload cannot interleave half-way through.
+					// Preserve the historic auto-mode behaviour (the selected mode
+					// becomes the new current mode) without overwriting a concurrent
+					// explicit hot reload that already moved away from auto.
 					fp.mu.Lock()
-					fp.Mode = newMode
+					if cur := fp.params.Load(); cur != nil && cur.mode == "auto" {
+						fp.Mode = newMode
+						fp.publishParamsLocked()
+					}
 					fp.mu.Unlock()
 					mode = newMode
 				}
@@ -470,8 +501,8 @@ func (fp *FramePacker) Pack(seqID uint64, payload []byte, outBuf []byte) (int, e
 
 // packStandard handles fixed/block/random/dynamic modes with Magic header.
 //
-// p carries the parameter snapshot taken by Pack. Reading fp.FixedSize &co
-// directly here would race with UpdateConfig exactly as Pack used to.
+// p carries the immutable parameter snapshot taken by Pack. Reading the exported
+// fields directly here would race with UpdateConfig and could mix generations.
 func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte, mode string, p packerParams) (int, error) {
 	// Determine target total frame size
 	var targetSize int
@@ -902,7 +933,8 @@ func (fp *FramePacker) UpdateConfig(cfg *config.ObfuscationConfig) {
 	fp.AutoThresholdBytes = cfg.AutoThresholdBytes
 	fp.AllowModeSwitch = cfg.AllowModeSwitch
 	fp.applyDefaults()
-	if fp.Mode == "auto" && fp.auto == nil {
-		fp.auto = newAutoState()
+	if fp.Mode == "auto" && fp.auto.Load() == nil {
+		fp.auto.Store(newAutoState())
 	}
+	fp.publishParamsLocked()
 }
