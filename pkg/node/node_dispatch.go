@@ -230,6 +230,7 @@ func (n *Node) dispatchWorker(id int) {
 							if t.owned {
 								releaseFrameBuf(batch[i])
 							}
+							batch[i] = nil
 						}
 						continue
 					}
@@ -254,6 +255,7 @@ func (n *Node) dispatchWorker(id int) {
 						if owned {
 							releaseFrameBuf(data)
 						}
+						batch[0] = nil
 					} else {
 						if err := n.Dispatcher.SendBatchToPeer(n.ctx, target, batch); err != nil {
 							if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
