@@ -1,0 +1,50 @@
+name: Restack Dedicated TAP Writer
+
+on:
+  push:
+    branches:
+      - perf/dedicated-tap-writer
+
+permissions:
+  contents: write
+
+jobs:
+  restack:
+    if: ${{ !contains(github.event.head_commit.message, '[tap-writer-restack-done]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Restore only dedicated TAP writer files
+        shell: bash
+        run: |
+          git checkout 35c958d09e1164b8eb3e89b5bc4171319abed0fb -- \
+            pkg/node/boot_relay.go \
+            pkg/node/node.go \
+            pkg/node/node_streams.go \
+            pkg/node/node_tap.go \
+            pkg/node/tap_writer_queue_test.go
+          gofmt -w \
+            pkg/node/boot_relay.go \
+            pkg/node/node.go \
+            pkg/node/node_streams.go \
+            pkg/node/node_tap.go \
+            pkg/node/tap_writer_queue_test.go
+
+      - name: Commit clean restack
+        shell: bash
+        run: |
+          rm .github/workflows/restack-dedicated-tap-writer.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            pkg/node/boot_relay.go \
+            pkg/node/node.go \
+            pkg/node/node_streams.go \
+            pkg/node/node_tap.go \
+            pkg/node/tap_writer_queue_test.go \
+            .github/workflows/restack-dedicated-tap-writer.yml
+          git commit -m "perf(tap): restack dedicated pooled TAP writer [tap-writer-restack-done]"
+          git push origin HEAD:perf/dedicated-tap-writer
