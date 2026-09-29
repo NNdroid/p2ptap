@@ -1,0 +1,28 @@
+name: Apply Dispatch Scratch Patch
+
+on:
+  push:
+    branches: [perf/dispatch-scratch]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[dispatch-scratch-done]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .github/apply_dispatch_scratch.py
+      - name: Format and commit
+        run: |
+          gofmt -w pkg/node/node_dispatch.go
+          rm .github/apply_dispatch_scratch.py .github/workflows/apply-dispatch-scratch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pkg/node/node_dispatch.go .github/apply_dispatch_scratch.py .github/workflows/apply-dispatch-scratch.yml
+          git commit -m "perf(dispatch): reuse worker-local batch scratch [dispatch-scratch-done]"
+          git push origin HEAD:perf/dispatch-scratch
