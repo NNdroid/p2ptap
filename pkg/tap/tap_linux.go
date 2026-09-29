@@ -180,42 +180,23 @@ func (l *LinuxTAPDevice) SetMTU(mtu int) error {
 }
 
 func (l *LinuxTAPDevice) Read(b []byte) (int, error) {
-	// Fast path: try a non-blocking read first (fd is O_NONBLOCK).
-	// This avoids an unnecessary 50 ms poll when data is already
-	// queued — e.g. immediately after epoll signals readability.
-	n, err := unix.Read(int(l.file.Fd()), b)
-	if err == nil {
-		return n, nil
-	}
-	if err != unix.EAGAIN && err != unix.EWOULDBLOCK && err != unix.EINTR {
-		return 0, err
-	}
-
-	// Slow path: poll-wait for data.
+	// Linux's main data path is already readiness-driven by EpollPoller. Keep
+	// Read strictly non-blocking so drainTapBatch can consume every queued frame
+	// and stop immediately on EAGAIN. The old implementation entered a 50 ms
+	// poll here after the queue became empty, adding a stall at the end of almost
+	// every epoll drain and severely hurting burst throughput / tail latency.
 	for {
-		pollFD := []unix.PollFd{{
-			Fd:     int32(l.file.Fd()),
-			Events: unix.POLLIN,
-		}}
-		n, err := unix.Poll(pollFD, 50) // 50ms poll for responsive data plane
+		n, err := unix.Read(int(l.file.Fd()), b)
+		if err == nil {
+			return n, nil
+		}
 		if errors.Is(err, unix.EINTR) {
 			continue
 		}
-		if err != nil {
-			return 0, fmt.Errorf("poll TAP device: %w", err)
-		}
-		if n == 0 {
+		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
 			return 0, ErrReadTimeout
 		}
-		if pollFD[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
-			return 0, fmt.Errorf("TAP poll event: %#x", pollFD[0].Revents)
-		}
-
-		n, err = unix.Read(int(l.file.Fd()), b)
-		if errors.Is(err, unix.EINTR) || errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-			continue
-		}
-		return n, err
+		return 0, err
 	}
 }
 
