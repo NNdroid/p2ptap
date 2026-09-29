@@ -137,13 +137,19 @@ func (n *Node) tapReadLoopPoll(buf []byte) {
 	}
 }
 
-// drainTapBatch reads up to 32 frames from TAP in a tight loop, calling
-// processTapFrame for each.  It expects the fd to be readable (non-blocking
-// reads succeed) and stops on the first EAGAIN / timeout.
+// linuxTAPDrainBatchSize is benchmark-selected for the epoll path. A 256-frame
+// burst needs two epoll wake/drain cycles at 128 versus eight at 32; the
+// stage2 benchmark showed ~1.7% lower median drain time while avoiding the
+// higher variance observed at 256. Non-epoll fallback polling stays at 32.
+const linuxTAPDrainBatchSize = 128
+
+// drainTapBatch reads up to linuxTAPDrainBatchSize frames from TAP in a tight
+// loop, calling processTapFrame for each. It expects the fd to be readable
+// (non-blocking reads succeed) and stops on the first EAGAIN / timeout.
 func (n *Node) drainTapBatch(buf []byte) {
 	readErrors := 0
 	totalRead := 0
-	for batchIdx := 0; batchIdx < 32; batchIdx++ {
+	for batchIdx := 0; batchIdx < linuxTAPDrainBatchSize; batchIdx++ {
 		readN, err := n.TAP.Read(buf)
 		if err != nil {
 			if err == io.EOF {
