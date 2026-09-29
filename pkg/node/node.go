@@ -230,12 +230,18 @@ type Node struct {
 	// Reconnect cooldown per peer to prevent rapid-fire reconnect loops on send failures
 	lastReconnectTime map[peer.ID]time.Time
 
+	// Normal overlay->TAP writes are copied into pooled, owned buffers and
+	// drained by one dedicated writer. Receive handlers therefore do not all
+	// block on the native TAP syscall / tapWriteMu under multi-stream load.
+	tapWriteCh chan tapWriteJob
+
 	// Urgent TAP write path: frames flagged urgent (e.g. TAP-probe echo
-	// replies during diagnostics) are injected ahead of normal overlay->TAP
-	// traffic. tapWriteUrgent enqueues; tapWriteUrgentLoop drains with
-	// priority so diagnostics are not starved behind a busy forwarding queue.
+	// replies during diagnostics) stay separate so diagnostics are not starved
+	// behind the normal writer backlog.
 	urgentWriteCh chan []byte
-	// tapWriteMu serializes every kernel TAP injection.  A single device write
+	// tapWriteMu serializes every kernel TAP injection.  The dedicated normal
+	// writer removes hot-path contention; this lock still safely arbitrates its
+	// writes with rare synchronous control / urgent writes.
 	// boundary prevents stream handlers, relay delivery, metadata announcements,
 	// and diagnostics from concurrently writing to the same native TAP fd.
 	tapWriteMu sync.Mutex
@@ -1355,6 +1361,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		directConnected:     make(map[peer.ID]bool),
 		aclStats:            newACLStats(),
 		dispatchCh:          make(chan dispatchTask, 8192), // bounded buffer: 8192 frames for high-throughput scaling
+		tapWriteCh:          make(chan tapWriteJob, 2048),  // pooled overlay->TAP write queue (~4 MiB at 2K/frame)
 		urgentWriteCh:       make(chan []byte, 64),         // urgent TAP-inject queue (diagnostics)
 		urgentDispatchCh:    make(chan dispatchTask, 64),   // urgent SEND queue (symmetric to receive)
 		probeReplyCh:        make(chan []byte, 8),          // TAP-probe echo-reply capture (see probeActive)
@@ -2245,7 +2252,13 @@ func (n *Node) Start() {
 	go n.tapReadLoop()
 	log.Debug("TAP read loop started")
 
-	// Start urgent TAP-write loop (priority injection for diagnostics)
+	// Start the dedicated normal TAP writer before stream receive handlers can
+	// enqueue data-plane frames.
+	n.wg.Add(1)
+	go n.tapWriteLoop()
+	log.Debug("Dedicated TAP write loop started")
+
+	// Start urgent TAP-write loop (priority injection for diagnostics).
 	n.wg.Add(1)
 	go n.tapWriteUrgentLoop()
 	log.Debug("Urgent TAP write loop started")

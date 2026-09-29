@@ -496,71 +496,58 @@ func (n *Node) handleStream(s network.Stream) {
 		n.maybeDeliverProbeReply(payload)
 		n.observeTapICMPEchoReply(remotePeer, payload, time.Now())
 
-		// 方案 B: peer-side probe ack. If this inbound frame is the genuine
-		// TAP-forward probe request (real ICMP echo request with our marker id),
-		// fire an out-of-band control-plane ack to the prober AFTER the frame has
-		// been written into our TAP device — the ack means "physically delivered
-		// to the kernel", not merely "passed our overlay boundary". The ack
-		// carries a dst-IP-match flag: whether the request was addressed to an IP
-		// we currently own on the TAP. A mismatch (stale prober-side metadata)
-		// makes the kernel drop the frame silently, which the prober would
-		// otherwise misreport as "peer firewall blocked ICMP". We still write the
-		// frame to TAP below so the real end-to-end echo reply also flows back.
+		// Peer-side probe ack. Probe frames remain synchronous so the ack still
+		// means the native TAP write has completed, while ordinary bulk traffic
+		// is handed to the dedicated writer below.
+		tapProbeFrame := false
 		if pid, tok, ok := n.isTapProbeRequest(payload); ok {
+			tapProbeFrame = true
 			dstIP := net.IP(payload[14+16 : 14+20])
 			ackFlag := tapProbeAckFlagIPMismatch
 			if n.localV4IP != nil && dstIP.Equal(n.localV4IP) {
 				ackFlag = tapProbeAckFlagIPMatched
 			}
-			go n.sendTapProbeAckAfterTAP(pid, tok, ackFlag)
+			// Queue synchronously before the TAP write; the old goroutine could
+			// race the success drain and leave a stale ack for a later frame.
+			n.sendTapProbeAckAfterTAP(pid, tok, ackFlag)
 		}
 
-		// Write unpadded payload Ethernet frame to TAP
 		if n.TAP == nil {
 			log.Warn("TAP device is nil, cannot write frame")
-			// Discard pending probe acks: with no device to write into, the
-			// truthful outcome for every pending probe is "no ack". Leaving
-			// them queued lets a much later, unrelated successful write
-			// deliver stale acks for frames that never reached the kernel.
-			n.takeDeferredProbeAcks()
+			if tapProbeFrame {
+				n.takeDeferredProbeAcks()
+			}
 			continue
 		}
-		// PERF: per-frame path — MAC .String() allocs on every call. Keep guarded.
+
+		recordGateway := false
+		if cfg := n.config(); cfg != nil && cfg.ExitNode.Enable && !n.isExitNodeActive() && len(payload) >= 6 && payload[0]&1 == 0 {
+			recordGateway = true
+		}
+
+		if !tapProbeFrame {
+			if err := n.enqueueTapWrite(payload, recordGateway, ""); err != nil {
+				log.Warn("TAP write enqueue/fallback error: %v", err)
+			}
+			continue
+		}
+
+		// Diagnostic probe: preserve synchronous completion semantics.
 		if log.IsDebug() {
 			log.Debug("TAP write: seq=%d len=%d dstMAC=%s to %s", seqID, len(payload), net.HardwareAddr(payload[0:6]).String(), n.TAP.Name())
 		}
 		wn, werr := n.tapWrite(payload)
 		if werr != nil {
 			log.Warn("TAP write error: %v", werr)
-			// Same honesty rule as the nil-TAP branch: a failed write means the
-			// frame (and any probe acks queued with it) never reached the
-			// kernel — drop the pending acks instead of deferring them onto a
-			// future unrelated frame's success drain.
 			n.takeDeferredProbeAcks()
 		} else {
 			log.Debug("TAP write ok: %d bytes to %s", wn, n.TAP.Name())
-			// Deliver the deferred probe ack(s) for THIS frame only after the
-			// TAP write succeeded: "reached peer TAP" must mean the kernel got
-			// it, not that we merely passed the frame along. On write failure the
-			// deferred acks are dropped — the probe will report "no ack" which
-			// is the truthful outcome.
 			if deferred := n.takeDeferredProbeAcks(); len(deferred) > 0 {
 				for _, d := range deferred {
 					go n.sendTapProbeAck(d.prober, d.token, d.flag)
 				}
 			}
-			// Gateway packet on the server side: frames received over P2P and
-			// injected into the local TAP by an Exit Node server count as
-			// server→client tunnel traffic. Skip if we are ALSO an Exit Node
-			// client (isExitNodeActive) to avoid double-counting our own tunnel.
-			//
-			// Only count UNICAST frames as genuine egress. Broadcast/multicast
-			// frames (ARP, DHCP, mDNS, …) are local L2 flood traffic that stays
-			// on the LAN and are NOT real upstream egress — counting them here
-			// double-counted them (they are already binned by RecordPacketDir)
-			// and made the gateway counter balloon even when no exit-client was
-			// active. A frame is unicast iff bit 0 of the first dst-MAC byte is 0.
-			if cfg := n.config(); cfg != nil && cfg.ExitNode.Enable && !n.isExitNodeActive() && len(payload) >= 6 && payload[0]&1 == 0 {
+			if recordGateway && n.Collector != nil {
 				n.Collector.RecordGatewayPacket()
 			}
 		}
