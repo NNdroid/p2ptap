@@ -178,6 +178,9 @@ func (n *Node) dispatchWorker(id int) {
 	// pressure on the egress hot path. Keys are bounded by (peer count × kind),
 	// so keeping them and truncating their slices costs nothing.
 	batches := make(map[batchTasksKey][]dispatchTask, 4)
+	// Reuse one worker-local view for the at-most-32 drained tasks.
+	// This removes per-group [][]byte allocations from the hot path.
+	var batchScratch [32][]byte
 	for {
 		select {
 		case <-n.ctx.Done():
@@ -210,11 +213,9 @@ func (n *Node) dispatchWorker(id int) {
 				}
 				switch key.kind {
 				case 0: // unicast — executed synchronously by the worker goroutine
-					batch := make([][]byte, 0, len(tasks))
-					origLens := make([]int, 0, len(tasks))
-					for _, t := range tasks {
-						batch = append(batch, t.data)
-						origLens = append(origLens, t.origLen)
+					batch := batchScratch[:len(tasks)]
+					for i, t := range tasks {
+						batch[i] = t.data
 					}
 					target := key.target
 					dstMAC := tasks[0].dstMAC
@@ -234,7 +235,7 @@ func (n *Node) dispatchWorker(id int) {
 					}
 					if len(batch) == 1 {
 						data := batch[0]
-						origLen := origLens[0]
+						origLen := tasks[0].origLen
 						owned := tasks[0].owned
 						if err := n.Dispatcher.SendToPeer(n.ctx, target, data); err != nil {
 							// A write deadline hit means the link is wedged:
@@ -262,14 +263,15 @@ func (n *Node) dispatchWorker(id int) {
 								target.String(), len(batch), err)
 							n.handleUnicastFailure(target, dstMAC, err)
 						} else {
-							for _, ol := range origLens {
-								n.Collector.RecordSent(ol)
+							for _, t := range tasks {
+								n.Collector.RecordSent(t.origLen)
 							}
 						}
 						for i, t := range tasks {
 							if t.owned {
 								releaseFrameBuf(batch[i])
 							}
+							batch[i] = nil
 						}
 					}
 				case 1: // broadcast — executed directly by worker
@@ -284,20 +286,19 @@ func (n *Node) dispatchWorker(id int) {
 							releaseFrameBuf(data)
 						}
 					} else {
-						batch := make([][]byte, 0, len(tasks))
-						origLens := make([]int, 0, len(tasks))
-						for _, t := range tasks {
-							batch = append(batch, t.data)
-							origLens = append(origLens, t.origLen)
+						batch := batchScratch[:len(tasks)]
+						for i, t := range tasks {
+							batch[i] = t.data
 						}
 						n.Dispatcher.BroadcastBatchToAllPeers(n.ctx, batch)
-						for _, ol := range origLens {
-							n.Collector.RecordSent(ol)
+						for _, t := range tasks {
+							n.Collector.RecordSent(t.origLen)
 						}
 						for i, t := range tasks {
 							if t.owned {
 								releaseFrameBuf(batch[i])
 							}
+							batch[i] = nil
 						}
 					}
 				case 2: // relay — persistent pool per relayHop (eliminates per-frame stream open)
