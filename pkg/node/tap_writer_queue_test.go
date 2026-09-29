@@ -10,6 +10,9 @@ import (
 	"p2ptap/pkg/tap"
 )
 
+// These tests exercise the two ownership/backpressure invariants that let the
+// receive path hand frames to the dedicated writer without aliasing scratch
+// buffers or converting a full queue into packet loss.
 func testEthernetFrame(fill byte) []byte {
 	frame := bytes.Repeat([]byte{fill}, 64)
 	copy(frame[0:6], []byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x02})
