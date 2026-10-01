@@ -27,6 +27,10 @@ GO_PKG_LDFLAGS:=-s -w -X p2ptap/pkg/version.Version=$(PKG_VERSION) -X p2ptap/pkg
 include $(INCLUDE_DIR)/package.mk
 include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
 
+# Match the project's portable release builds; TAP and networking use pure Go.
+GO_PKG_TARGET_VARS += CGO_ENABLED=0
+GO_PKG_DEFAULT_LDFLAGS:=
+
 define Package/p2ptap
   SECTION:=net
   CATEGORY:=Network

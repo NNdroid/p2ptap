@@ -49,6 +49,10 @@ P2PTAP_SOURCE_VERSION="$SOURCE_VERSION" bash scripts/set_openwrt_version.sh "$RE
 sed -i -e "s/^PKG_SOURCE_VERSION:=.*/PKG_SOURCE_VERSION:=$SOURCE_VERSION/" \
   -e 's/^PKG_MIRROR_HASH:=.*/PKG_MIRROR_HASH:=skip/' "$SDK_DIR/package/p2ptap/Makefile"
 # The source is fetched by immutable SHA; no stale hash of the moving main archive.
+# Feed installation populated metadata before our local packages were copied.
+# Invalidate that cache so both local recipes enter the generated build graph.
+rm -rf "$SDK_DIR/tmp/info"
+rm -f "$SDK_DIR/tmp/.packageinfo" "$SDK_DIR/tmp/.packagedeps" "$SDK_DIR/tmp/.config-package.in"
 # SDK defaults may select every package and bootloader variant. Restrict this
 # build to the application and dependencies while retaining target settings.
 touch "$SDK_DIR/.config"
