@@ -1,0 +1,125 @@
+name: OpenWrt 25.12 Signed APK Feed
+on:
+  push:
+    tags: ['v*']
+    branches: [main, 'codex/openwrt-luci-fixes']
+    paths: ['openwrt/**', 'scripts/**', '.github/workflows/openwrt-feed.yml']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version (empty: UTC date version)'
+        default: ''
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+    secrets:
+      OPENWRT_FEED_SIGNING_KEY_B64:
+        required: true
+concurrency:
+  group: openwrt-feed-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_VERSION:-v1.0.$(date -u +%Y%m%d)}"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then VERSION="$GITHUB_REF_NAME"; fi
+          [[ "$VERSION" =~ ^v?[0-9]+(\.[0-9]+)*$ ]] || exit 1
+          printf 'version=v%s\n' "${VERSION#v}" >> "$GITHUB_OUTPUT"
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {target: x86, subtarget: '64'}
+          - {target: armsr, subtarget: armv8}
+          - {target: armsr, subtarget: armv7}
+          - {target: rockchip, subtarget: armv8}
+          - {target: mediatek, subtarget: filogic}
+          - {target: ramips, subtarget: mt7621}
+          - {target: ath79, subtarget: generic}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install SDK dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential bison flex gawk gettext git libncurses-dev libssl-dev python3 python3-pyelftools rsync unzip zlib1g-dev file curl zstd nodejs
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Validate and build signed repository
+        env:
+          OPENWRT_FEED_SIGNING_KEY_B64: ${{ secrets.OPENWRT_FEED_SIGNING_KEY_B64 }}
+          OPENWRT_FEED_PUBLIC_KEY_B64: ${{ vars.OPENWRT_FEED_PUBLIC_KEY_B64 }}
+          INPUT_VERSION: ${{ needs.prepare.outputs.version }}
+          OPENWRT_VERSION: '25.12.5'
+          OPENWRT_TARGET: ${{ matrix.target }}
+          OPENWRT_SUBTARGET: ${{ matrix.subtarget }}
+          OPENWRT_WORK_DIR: ${{ runner.temp }}/p2ptap-feed-${{ matrix.target }}-${{ matrix.subtarget }}
+          OPENWRT_FEED_OUTPUT_DIR: ${{ github.workspace }}/artifact-root
+          P2PTAP_SOURCE_VERSION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/build_openwrt_apk.sh
+          node scripts/test_openwrt_version.cjs
+          node scripts/test_openwrt_status.cjs
+          bash scripts/test_openwrt_feed_keys.sh
+          export P2PTAP_PKG_VERSION="${INPUT_VERSION:-v1.0.$(date -u +%Y%m%d)}"
+          export OPENWRT_GO_BOOTSTRAP_ROOT="$(go env GOROOT)"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then export P2PTAP_PKG_VERSION="$GITHUB_REF_NAME"; fi
+          export OPENWRT_FEED_SIGNING_KEY_FILE="$RUNNER_TEMP/p2ptap-feed-private.pem"
+          export OPENWRT_FEED_PUBLIC_KEY_FILE="$RUNNER_TEMP/p2ptap-feed-public.pem"
+          bash scripts/prepare_openwrt_feed_keys.sh pair "$OPENWRT_FEED_SIGNING_KEY_FILE" "$OPENWRT_FEED_PUBLIC_KEY_FILE"
+          bash scripts/build_openwrt_customfeed.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-feed-${{ matrix.target }}-${{ matrix.subtarget }}
+          path: artifact-root/**
+          if-no-files-found: error
+      - name: Remove private key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/p2ptap-feed-private.pem" "$RUNNER_TEMP/p2ptap-feed-public.pem"
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: openwrt-feed-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: signed-feed-*
+          path: feed-dist
+          merge-multiple: true
+      - name: Publish source and signed repositories
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OPENWRT_FEED_PUBLIC_KEY_B64: ${{ vars.OPENWRT_FEED_PUBLIC_KEY_B64 }}
+          OPENWRT_VERSION: '25.12.5'
+          INPUT_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          export P2PTAP_PKG_VERSION="${INPUT_VERSION:-v1.0.$(date -u +%Y%m%d)}"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then export P2PTAP_PKG_VERSION="$GITHUB_REF_NAME"; fi
+          bash scripts/publish_openwrt_feed.sh feed-dist

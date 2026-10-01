@@ -54,7 +54,7 @@ generate_json_config() {
 	config_get web_auth_token global webui_auth_token ""
 
 	local obfs_enable obfs_mode obfs_algo obfs_fixed obfs_block obfs_jitter obfs_min obfs_max obfs_auto_interval obfs_auto_threshold obfs_allow_switch
-	config_get_bool obfs_enable global obfuscation_enable 1
+	config_get_bool obfs_enable global obfuscation_enable 0
 	config_get obfs_mode global obfuscation_mode "fixed"
 	config_get obfs_algo global obfuscation_algorithm "auto"
 	config_get obfs_fixed global fixed_size 1500
@@ -83,146 +83,97 @@ generate_json_config() {
 	config_get t_tcp_brutal_rate global tcp_brutal_rate "100Mbps"
 	config_get_bool t_disable_relay global disable_relay 0
 
-	# Format JSON config
-	cat <<EOF > "$JSON_CONF"
-{
-  "log_level": "$log_level",
-  "node_name": "$node_name",
-  "tap_name": "$tap_name",
-  "tap_ip": "$tap_ip",
-  "tap_ipv6": "$tap_ipv6",
-  "tap_mac": "$tap_mac",
-  "mtu": $mtu,
-  "driver_type": "$driver_type",
-  "transport_strategy": "$strategy",
-  "enable_mdns": $([ "$enable_mdns" -eq 1 ] && echo true || echo false),
-  "discover_boot_mesh": $([ "$discover_boot_mesh" -eq 1 ] && echo true || echo false),
-  "psk": "$psk",
-  "node_key_file": "$node_key_file",
-  "accept_advertised_subnets": $([ "$accept_subnets" -eq 1 ] && echo true || echo false),
-  "web_ui": {
-    "enable": $([ "$web_enable" -eq 1 ] && echo true || echo false),
-    "listen_ip": "$web_ip",
-    "listen_ipv6": "$web_ipv6",
-    "port": $web_port,
-    "auth_token": "$web_auth_token"
-  },
-  "obfuscation": {
-    "enable": $([ "$obfs_enable" -eq 1 ] && echo true || echo false),
-    "mode": "$obfs_mode",
-    "algorithm": "$obfs_algo",
-    "fixed_size": $obfs_fixed,
-    "block_size": $obfs_block,
-    "jitter_range": $obfs_jitter,
-    "min_size": $obfs_min,
-    "max_size": $obfs_max,
-    "auto_detect_interval": $obfs_auto_interval,
-    "auto_threshold_bytes": $obfs_auto_threshold,
-    "allow_mode_switch": $([ "$obfs_allow_switch" -eq 1 ] && echo true || echo false)
-  },
-  "exit_node": {
-    "enable": $([ "$exit_enable" -eq 1 ] && echo true || echo false),
-    "nat_masquerade": $([ "$exit_nat" -eq 1 ] && echo true || echo false),
-    "wan_interface": "$exit_wan"
-  },
-  "transports": {
-    "enable_quic_reuse": $([ "$t_quic" -eq 1 ] && echo true || echo false),
-    "enable_webrtc": $([ "$t_webrtc" -eq 1 ] && echo true || echo false),
-    "enable_webtransport": $([ "$t_webtransport" -eq 1 ] && echo true || echo false),
-    "enable_tcp_reuse": $([ "$t_tcp" -eq 1 ] && echo true || echo false),
-    "enable_tcp_brutal": $([ "$t_tcp_brutal" -eq 1 ] && echo true || echo false),
-    "tcp_brutal_rate": "$t_tcp_brutal_rate",
-    "disable_relay": $([ "$t_disable_relay" -eq 1 ] && echo true || echo false)
-  },
-  "advertised_subnets": [
-EOF
-
-	local first_subnet=1
-	append_subnet() {
-		if [ "$first_subnet" -eq 1 ]; then
-			echo "    \"$1\"" >> "$JSON_CONF"
-			first_subnet=0
-		else
-			echo "   ,\"$1\"" >> "$JSON_CONF"
-		fi
+	# jshn escapes UCI strings and preserves JSON types.
+	. /usr/share/libubox/jshn.sh
+	json_init
+	json_add_string log_level "$log_level"
+	json_add_string node_name "$node_name"
+	json_add_string tap_name "$tap_name"
+	json_add_string tap_ip "$tap_ip"
+	json_add_string tap_ipv6 "$tap_ipv6"
+	json_add_string tap_mac "$tap_mac"
+	case "$mtu" in ''|*[!0-9]*) logger -t p2ptap "Invalid numeric option: mtu"; return 1 ;; esac
+	json_add_int mtu "$mtu"
+	json_add_string driver_type "$driver_type"
+	json_add_string transport_strategy "$strategy"
+	json_add_boolean enable_mdns "$enable_mdns"
+	json_add_boolean discover_boot_mesh "$discover_boot_mesh"
+	json_add_string psk "$psk"
+	json_add_string node_key_file "$node_key_file"
+	json_add_boolean accept_advertised_subnets "$accept_subnets"
+	json_add_object web_ui
+	json_add_boolean enable "$web_enable"
+	json_add_string listen_ip "$web_ip"
+	json_add_string listen_ipv6 "$web_ipv6"
+	case "$web_port" in ''|*[!0-9]*) logger -t p2ptap "Invalid numeric option: port"; return 1 ;; esac
+	json_add_int port "$web_port"
+	json_add_string auth_token "$web_auth_token"
+	json_close_object
+	json_add_object obfuscation
+	json_add_boolean enable "$obfs_enable"
+	json_add_string mode "$obfs_mode"
+	json_add_string algorithm "$obfs_algo"
+	case "$obfs_fixed" in ''|*[!0-9]*) logger -t p2ptap "Invalid numeric option: fixed_size"; return 1 ;; esac
+	json_add_int fixed_size "$obfs_fixed"
+	case "$obfs_block" in ''|*[!0-9]*) logger -t p2ptap "Invalid numeric option: block_size"; return 1 ;; esac
+	json_add_int block_size "$obfs_block"
+	case "$obfs_jitter" in ''|*[!0-9]*) logger -t p2ptap "Invalid numeric option: jitter_range"; return 1 ;; esac
+	json_add_int jitter_range "$obfs_jitter"
+	case "$obfs_min" in ''|*[!0-9]*) logger -t p2ptap "Invalid numeric option: min_size"; return 1 ;; esac
+	json_add_int min_size "$obfs_min"
+	case "$obfs_max" in ''|*[!0-9]*) logger -t p2ptap "Invalid numeric option: max_size"; return 1 ;; esac
+	json_add_int max_size "$obfs_max"
+	case "$obfs_auto_interval" in ''|*[!0-9]*) logger -t p2ptap "Invalid numeric option: auto_detect_interval"; return 1 ;; esac
+	json_add_int auto_detect_interval "$obfs_auto_interval"
+	case "$obfs_auto_threshold" in ''|*[!0-9]*) logger -t p2ptap "Invalid numeric option: auto_threshold_bytes"; return 1 ;; esac
+	json_add_int auto_threshold_bytes "$obfs_auto_threshold"
+	json_add_boolean allow_mode_switch "$obfs_allow_switch"
+	json_close_object
+	json_add_object exit_node
+	json_add_boolean enable "$exit_enable"
+	json_add_boolean nat_masquerade "$exit_nat"
+	json_add_string wan_interface "$exit_wan"
+	json_close_object
+	json_add_object transports
+	json_add_boolean enable_quic_reuse "$t_quic"
+	json_add_boolean enable_webrtc "$t_webrtc"
+	json_add_boolean enable_webtransport "$t_webtransport"
+	json_add_boolean enable_tcp_reuse "$t_tcp"
+	json_add_boolean enable_tcp_brutal "$t_tcp_brutal"
+	json_add_string tcp_brutal_rate "$t_tcp_brutal_rate"
+	json_add_boolean disable_relay "$t_disable_relay"
+	json_close_object
+	append_json_string() {
+		json_add_string "" "$1"
 	}
-	config_list_foreach global advertised_subnets append_subnet
-
-	cat <<EOF >> "$JSON_CONF"
-  ],
-  "allowed_subnet_peers": [
-EOF
-
-	local first_allowed=1
-	append_allowed() {
-		if [ "$first_allowed" -eq 1 ]; then
-			echo "    \"$1\"" >> "$JSON_CONF"
-			first_allowed=0
-		else
-			echo "   ,\"$1\"" >> "$JSON_CONF"
-		fi
-	}
-	config_list_foreach global allowed_subnet_peers append_allowed
-
-	cat <<EOF >> "$JSON_CONF"
-  ],
-  "listen_addrs": [
-EOF
-
-	# 动态遍历 listen_addrs
-	local first_listen=1
-	append_listen() {
-		if [ "$first_listen" -eq 1 ]; then
-			echo "    \"$1\"" >> "$JSON_CONF"
-			first_listen=0
-		else
-			echo "   ,\"$1\"" >> "$JSON_CONF"
-		fi
-	}
-	config_list_foreach global listen_addrs append_listen
-
-	cat <<EOF >> "$JSON_CONF"
-  ],
-  "bootstrap_peers": [
-EOF
-
-	local first=1
-	append_bootstrap() {
-		if [ "$first" -eq 1 ]; then
-			echo "    \"$1\"" >> "$JSON_CONF"
-			first=0
-		else
-			echo "   ,\"$1\"" >> "$JSON_CONF"
-		fi
-	}
-	config_list_foreach global bootstrap_peers append_bootstrap
-
-	cat <<EOF >> "$JSON_CONF"
-  ],
-  "static_peers": [
-EOF
-
-	first=1
-	append_static() {
-		if [ "$first" -eq 1 ]; then
-			echo "    \"$1\"" >> "$JSON_CONF"
-			first=0
-		else
-			echo "   ,\"$1\"" >> "$JSON_CONF"
-		fi
-	}
-	config_list_foreach global static_peers append_static
-
-	cat <<EOF >> "$JSON_CONF"
-  ]
-}
-EOF
+	json_add_array advertised_subnets
+	config_list_foreach global advertised_subnets append_json_string
+	json_close_array
+	json_add_array allowed_subnet_peers
+	config_list_foreach global allowed_subnet_peers append_json_string
+	json_close_array
+	json_add_array listen_addrs
+	config_list_foreach global listen_addrs append_json_string
+	json_close_array
+	json_add_array bootstrap_peers
+	config_list_foreach global bootstrap_peers append_json_string
+	json_close_array
+	json_add_array static_peers
+	config_list_foreach global static_peers append_json_string
+	json_close_array
+	# Keep credentials private and replace the configuration atomically.
+	(umask 077; json_dump > "${JSON_CONF}.new") || return 1
+	chmod 600 "${JSON_CONF}.new" || return 1
+	mv -f "${JSON_CONF}.new" "$JSON_CONF" || return 1
 	return 0
 }
 
 start_service() {
 	config_load "$CONF"
-	generate_json_config || return 0
+	local enabled
+	config_get_bool enabled global enabled 0
+	[ "$enabled" -eq 1 ] || return 0
+	generate_json_config || return 1
 
 	# 确保 /dev/net/tun 字符设备可用
 	if [ ! -c /dev/net/tun ]; then
