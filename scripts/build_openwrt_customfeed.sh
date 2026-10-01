@@ -177,6 +177,10 @@ cmp -s "$canonical_private_public" "$FEED_DIR/p2ptap-feed.pem" || {
 }
 
 # Packages and repository index use the same stable trust root.
+VERIFY_ROOT="$OPENWRT_WORK_DIR/feed-verify-root"
+rm -rf "$VERIFY_ROOT"
+mkdir -p "$VERIFY_ROOT/etc/apk/keys"
+cp "$FEED_DIR/p2ptap-feed.pem" "$VERIFY_ROOT/etc/apk/keys/p2ptap-feed.pem"
 set_stage sign-packages "apk_count=$package_count"
 "$APK_TOOL" adbsign --sign "$OPENWRT_FEED_SIGNING_KEY_FILE" --reset-signatures "$FEED_DIR"/*.apk
 
@@ -184,8 +188,8 @@ set_stage build-index "apk_count=$package_count"
 (
   cd "$FEED_DIR"
   "$APK_TOOL" mkndx \
-    --root "$SDK_DIR" \
-    --keys-dir "$FEED_DIR" \
+    --root "$VERIFY_ROOT" \
+    --keys-dir etc/apk/keys \
     --sign "$OPENWRT_FEED_SIGNING_KEY_FILE" \
     --output packages.adb \
     ./*.apk
@@ -199,10 +203,6 @@ log_debug "repository_index_bytes=$(wc -c < "$FEED_DIR/packages.adb") diagnostic
 # Verify the signed repository using only the configured public key that clients
 # receive. This catches a wrong Actions Variable before anything can publish.
 set_stage verify-index "verify_root=$OPENWRT_WORK_DIR/feed-verify-root"
-VERIFY_ROOT="$OPENWRT_WORK_DIR/feed-verify-root"
-rm -rf "$VERIFY_ROOT"
-mkdir -p "$VERIFY_ROOT/etc/apk/keys"
-cp "$FEED_DIR/p2ptap-feed.pem" "$VERIFY_ROOT/etc/apk/keys/p2ptap-feed.pem"
 "$APK_TOOL" \
   --root "$VERIFY_ROOT" \
   --keys-dir etc/apk/keys \
