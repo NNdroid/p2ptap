@@ -182,7 +182,13 @@ rm -rf "$VERIFY_ROOT"
 mkdir -p "$VERIFY_ROOT/etc/apk/keys"
 cp "$FEED_DIR/p2ptap-feed.pem" "$VERIFY_ROOT/etc/apk/keys/p2ptap-feed.pem"
 set_stage sign-packages "apk_count=$package_count"
-"$APK_TOOL" adbsign --sign "$OPENWRT_FEED_SIGNING_KEY_FILE" --reset-signatures "$FEED_DIR"/*.apk
+# The locally built inputs carry the SDK's ephemeral key. Permit reading those
+# only while replacing signatures, then verify each result against our key.
+# Invoke separately: this apk version retains signing state between arguments.
+for package in "$FEED_DIR"/*.apk; do
+  "$APK_TOOL" adbsign --allow-untrusted --sign "$OPENWRT_FEED_SIGNING_KEY_FILE" --reset-signatures "$package"
+  "$APK_TOOL" --root "$VERIFY_ROOT" --keys-dir etc/apk/keys verify "$package"
+done
 
 set_stage build-index "apk_count=$package_count"
 (
@@ -196,7 +202,7 @@ set_stage build-index "apk_count=$package_count"
 
   # Ensure apk v3 can decode the generated repository and retain a JSON form
   # for diagnostics without making clients depend on it.
-  "$APK_TOOL" adbdump --format json packages.adb > index.json
+  "$APK_TOOL" --root "$VERIFY_ROOT" --keys-dir etc/apk/keys adbdump --format json packages.adb > index.json
 )
 log_debug "repository_index_bytes=$(wc -c < "$FEED_DIR/packages.adb") diagnostic_index_bytes=$(wc -c < "$FEED_DIR/index.json")"
 
