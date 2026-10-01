@@ -49,7 +49,13 @@ P2PTAP_SOURCE_VERSION="$SOURCE_VERSION" bash scripts/set_openwrt_version.sh "$RE
 sed -i -e "s/^PKG_SOURCE_VERSION:=.*/PKG_SOURCE_VERSION:=$SOURCE_VERSION/" \
   -e 's/^PKG_MIRROR_HASH:=.*/PKG_MIRROR_HASH:=skip/' "$SDK_DIR/package/p2ptap/Makefile"
 # The source is fetched by immutable SHA; no stale hash of the moving main archive.
+# SDK defaults may select every package and bootloader variant. Restrict this
+# build to the application and dependencies while retaining target settings.
+sed -i -e '/^CONFIG_ALL=/d' -e '/^CONFIG_ALL_NONSHARED=/d' -e '/^CONFIG_ALL_KMODS=/d' "$SDK_DIR/.config"
 cat >> "$SDK_DIR/.config" <<'EOF'
+# CONFIG_ALL is not set
+# CONFIG_ALL_NONSHARED is not set
+# CONFIG_ALL_KMODS is not set
 CONFIG_PACKAGE_p2ptap=m
 CONFIG_PACKAGE_luci-app-p2ptap=m
 CONFIG_PACKAGE_luci-i18n-p2ptap-zh-cn=m
