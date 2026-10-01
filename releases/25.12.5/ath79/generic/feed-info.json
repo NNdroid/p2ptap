@@ -3,7 +3,7 @@
   "openwrt_version": "25.12.5",
   "target": "ath79",
   "subtarget": "generic",
-  "source_commit": "9c7988e23d319ed75b49ccdb3c758bb705ba023c",
+  "source_commit": "440d95f03d695f1d3e7b9f097924500b5a48417c",
   "source_version": "v1.0.20261001",
   "package_count": 5
 }
