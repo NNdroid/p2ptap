@@ -178,9 +178,27 @@
 	.p2ptap-webui-btn:hover span.arrow {
 		transform: translate(2px, -2px);
 	}
+	.p2ptap-header { flex-wrap: wrap; gap: 10px; }
+	.p2ptap-item { min-width: 0; }
+	.p2ptap-webui-btn { max-width: 100%; box-sizing: border-box; }
+	.p2ptap-copy-btn:focus-visible, .p2ptap-webui-btn:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
+	@media (max-width: 480px) {
+		.p2ptap-status-card { padding: 14px; }
+		.p2ptap-grid { grid-template-columns: minmax(0, 1fr); }
+		.p2ptap-webui-btn { display: flex; justify-content: center; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.p2ptap-pulse-dot { animation: none; }
+		.p2ptap-status-card * { transition: none; }
+	}
 </style>
 
 <script type="text/javascript">//<![CDATA[
+	function escapeP2ptap(text) {
+		return String(text == null ? '' : text).replace(/[&<>"']/g, function(c) {
+			return {'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c];
+		});
+	}
 	var p2ptapCachedState = {
 		peer_id: '',
 		node_name: '',
@@ -225,7 +243,7 @@
 		document.body.appendChild(ta);
 		ta.select();
 		try {
-			document.execCommand('copy');
+			if (!document.execCommand('copy')) throw new Error('copy failed');
 			if (callback) callback();
 		} catch (e) {
 			prompt('<%:请复制以下 Peer ID：%>', text);
@@ -239,49 +257,43 @@
 			var box = document.getElementById('p2ptap_status_box');
 			if (!box) return;
 
-			if (!st || !st.running) {
+			if (!st || !st.running || !st.stats_available) {
+				p2ptapCachedState = {};
+				var stateLabel = !st ? '<%:状态请求失败，请稍后重试%>' :
+					(st.running ? '<%:服务运行中，统计暂不可用%>' : '<%:未运行 (Stopped)%>');
 				box.innerHTML = '<div class="p2ptap-status-card">' +
 					'<div class="p2ptap-header" style="margin-bottom:0; padding-bottom:0; border-bottom:none;">' +
 						'<span class="p2ptap-status-pill stopped">' +
 							'<span class="p2ptap-pulse-dot"></span>' +
-							'<%:未运行 (Stopped)%>' +
+							stateLabel +
 						'</span>' +
 					'</div>' +
 				'</div>';
 				return;
 			}
 
-			// Merge with cached state to prevent intermittent blank fields during router CPU spikes
-			if (st.peer_id && st.peer_id.length > 0) p2ptapCachedState.peer_id = st.peer_id;
-			if (st.node_name && st.node_name.length > 0) p2ptapCachedState.node_name = st.node_name;
-			if (st.tap_ip && st.tap_ip.length > 0) p2ptapCachedState.tap_ip = st.tap_ip;
-			if (st.tap_ipv6 && st.tap_ipv6.length > 0) p2ptapCachedState.tap_ipv6 = st.tap_ipv6;
-			if (st.tap_mac && st.tap_mac.length > 0) p2ptapCachedState.tap_mac = st.tap_mac;
-			if (typeof st.peer_count === 'number') p2ptapCachedState.peer_count = st.peer_count;
-			if (st.tx_speed) p2ptapCachedState.tx_speed = st.tx_speed;
-			if (st.rx_speed) p2ptapCachedState.rx_speed = st.rx_speed;
-			if (st.active_exit) p2ptapCachedState.active_exit = st.active_exit;
-			if (st.webui_url && st.webui_url.length > 0) p2ptapCachedState.webui_url = st.webui_url;
+			p2ptapCachedState = st;
 
-			var peerShort = p2ptapCachedState.peer_id || '—';
+			var peerShort = escapeP2ptap(p2ptapCachedState.peer_id || '—');
 			var copyBtn = '';
 			if (p2ptapCachedState.peer_id && p2ptapCachedState.peer_id.length > 0) {
-				copyBtn = '<span class="p2ptap-copy-btn" onclick="copyP2pTapPeerID(this, \'' + p2ptapCachedState.peer_id + '\')"><%:复制%></span>';
+				copyBtn = '<button type="button" class="p2ptap-copy-btn" onclick="copyP2pTapPeerID(this, p2ptapCachedState.peer_id)"><%:复制%></button>';
 			}
 
 			var exitNodeHtml = '';
 			if (p2ptapCachedState.active_exit && p2ptapCachedState.active_exit.length > 0) {
-				exitNodeHtml = '<div class="p2ptap-item"><span class="p2ptap-label">🌐 <%:当前出口网关%></span><span class="p2ptap-val" style="color:#d97706;">' + p2ptapCachedState.active_exit + '</span></div>';
+				exitNodeHtml = '<div class="p2ptap-item"><span class="p2ptap-label">🌐 <%:当前出口网关%></span><span class="p2ptap-val" style="color:#d97706;">' + escapeP2ptap(p2ptapCachedState.active_exit) + '</span></div>';
 			}
 
 			var webuiBtn = '';
 			if (p2ptapCachedState.webui_url && p2ptapCachedState.webui_url.length > 0) {
 				var finalUrl = p2ptapCachedState.webui_url;
-				if (finalUrl.indexOf('127.0.0.1') !== -1 || finalUrl.indexOf('0.0.0.0') !== -1 || finalUrl.indexOf('[::]') !== -1) {
+				if (finalUrl.indexOf('127.0.0.1') !== -1 || finalUrl.indexOf('0.0.0.0') !== -1 || finalUrl.indexOf('[::]') !== -1 || finalUrl.indexOf('[::1]') !== -1) {
 					var browserHost = window.location.hostname || '192.168.1.1';
-					finalUrl = finalUrl.replace('127.0.0.1', browserHost).replace('0.0.0.0', browserHost).replace('[::]', browserHost);
+					if (browserHost.indexOf(':') !== -1 && browserHost.charAt(0) !== '[') browserHost = '[' + browserHost + ']';
+					finalUrl = finalUrl.replace('127.0.0.1', browserHost).replace('0.0.0.0', browserHost).replace('[::]', browserHost).replace('[::1]', browserHost);
 				}
-				webuiBtn = '<a class="p2ptap-webui-btn" href="' + finalUrl + '" target="_blank">' +
+				webuiBtn = '<a class="p2ptap-webui-btn" href="' + escapeP2ptap(finalUrl) + '" target="_blank" rel="noopener noreferrer">' +
 					'<span>🌐</span>' +
 					'<span><%:打开完整 WebUI 控制台 (拓扑图/实时监控)%></span>' +
 					'<span class="arrow">↗</span>' +
@@ -289,7 +301,7 @@
 			}
 
 
-			var titleNodeName = p2ptapCachedState.node_name ? ' · <span style="color:#6366f1; font-weight:600;">' + p2ptapCachedState.node_name + '</span>' : '';
+			var titleNodeName = p2ptapCachedState.node_name ? ' · <span style="color:#6366f1; font-weight:600;">' + escapeP2ptap(p2ptapCachedState.node_name) + '</span>' : '';
 
 			var html = '<div class="p2ptap-status-card">' +
 				'<div class="p2ptap-header">' +
@@ -297,14 +309,14 @@
 						'<span class="p2ptap-pulse-dot"></span>' +
 						'<%:运行中 (Running)%>' + titleNodeName +
 					'</span>' +
-					'<span class="p2ptap-badge">' + p2ptapCachedState.peer_count + ' <%:个 Peer 在线%></span>' +
+					'<span class="p2ptap-badge">' + escapeP2ptap(p2ptapCachedState.peer_count) + ' <%:个 Peer 在线%></span>' +
 				'</div>' +
 				'<div class="p2ptap-grid">' +
 					'<div class="p2ptap-item" style="grid-column: 1 / -1;"><span class="p2ptap-label">🆔 <%:自身 Peer ID (Local Peer ID)%></span><span class="p2ptap-val" style="color:#2563eb;">' + peerShort + copyBtn + '</span></div>' +
-					'<div class="p2ptap-item"><span class="p2ptap-label">📌 <%:虚拟 IPv4 (TAP IPv4)%></span><span class="p2ptap-val">' + (p2ptapCachedState.tap_ip || '—') + '</span></div>' +
-					(p2ptapCachedState.tap_ipv6 ? '<div class="p2ptap-item"><span class="p2ptap-label">🌐 <%:虚拟 IPv6 (TAP IPv6)%></span><span class="p2ptap-val">' + p2ptapCachedState.tap_ipv6 + '</span></div>' : '') +
-					'<div class="p2ptap-item"><span class="p2ptap-label">🏷️ <%:虚拟 MAC (TAP MAC)%></span><span class="p2ptap-val">' + (p2ptapCachedState.tap_mac || '—') + '</span></div>' +
-					'<div class="p2ptap-item"><span class="p2ptap-label">🚀 <%:实时网速 (Speed)%></span><span class="p2ptap-val">↑ ' + (p2ptapCachedState.tx_speed || '0 B/s') + ' &nbsp; ↓ ' + (p2ptapCachedState.rx_speed || '0 B/s') + '</span></div>' +
+					'<div class="p2ptap-item"><span class="p2ptap-label">📌 <%:虚拟 IPv4 (TAP IPv4)%></span><span class="p2ptap-val">' + escapeP2ptap(p2ptapCachedState.tap_ip || '—') + '</span></div>' +
+					(p2ptapCachedState.tap_ipv6 ? '<div class="p2ptap-item"><span class="p2ptap-label">🌐 <%:虚拟 IPv6 (TAP IPv6)%></span><span class="p2ptap-val">' + escapeP2ptap(p2ptapCachedState.tap_ipv6) + '</span></div>' : '') +
+					'<div class="p2ptap-item"><span class="p2ptap-label">🏷️ <%:虚拟 MAC (TAP MAC)%></span><span class="p2ptap-val">' + escapeP2ptap(p2ptapCachedState.tap_mac || '—') + '</span></div>' +
+					'<div class="p2ptap-item"><span class="p2ptap-label">🚀 <%:实时网速 (Speed)%></span><span class="p2ptap-val">↑ ' + escapeP2ptap(p2ptapCachedState.tx_speed || '0 B/s') + ' &nbsp; ↓ ' + escapeP2ptap(p2ptapCachedState.rx_speed || '0 B/s') + '</span></div>' +
 					exitNodeHtml +
 				'</div>' +
 				webuiBtn +
@@ -315,5 +327,5 @@
 	);
 //]]></script>
 
-<div id="p2ptap_status_box"><div class="p2ptap-status-card"><em><%:正在获取运行状态...%></em></div></div>
+<div id="p2ptap_status_box" role="status" aria-live="polite"><div class="p2ptap-status-card"><em><%:正在获取运行状态...%></em></div></div>
 

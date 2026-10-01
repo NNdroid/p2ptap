@@ -1,99 +1,65 @@
-# OpenWrt 官方原生构建指南 (Official OpenWrt Package Build Guide)
+# p2ptap OpenWrt 25.12 APK feed
 
-本项目包含符合 OpenWrt 官方规范的标准 Package Makefile：
-- `openwrt/package/p2ptap`：核心 P2P TAP VPN 节点程序与 `procd` 系统服务
-- `openwrt/package/luci-app-p2ptap`：OpenWrt LuCI WebUI 管理界面
+仅支持 OpenWrt 25.12 系列；CI 当前固定使用 25.12.5 官方 SDK，输出签名 APK 包和 `packages.adb`，不构建旧版本 IPK。
 
----
+## 路由器添加自定义源
 
-## 🛠️ 官方推荐构建方法 (Official Recommended Build Methods)
+以 OpenWrt 25.12.5 x86/64 为例，先安装 feed 公钥，然后添加仓库：
 
-### 方法一：使用 GitHub Actions 官方 SDK (`openwrt/gh-action-sdk`)
-OpenWrt 官方团队维护了 GitHub Actions 专用构建 Action [openwrt/gh-action-sdk](https://github.com/openwrt/gh-action-sdk)。
-
-在 workflow `.github/workflows/release.yml` 中使用官方 Action：
-```yaml
-- name: Build OpenWrt Packages via Official OpenWrt SDK
-  uses: openwrt/gh-action-sdk@v1
-  with:
-    archetype: x86/64  # 或 aarch64_cortex-a53, mipsel_24kc 等官方架构名
-    env: |
-      CONFIG_PACKAGE_p2ptap=m
-      CONFIG_PACKAGE_luci-app-p2ptap=m
+```sh
+BASE=https://raw.githubusercontent.com/NNdroid/p2ptap/openwrt-feed
+mkdir -p /etc/apk/keys /etc/apk/repositories.d
+wget -O /etc/apk/keys/p2ptap-feed.pem "$BASE/p2ptap-feed.pem"
+printf '%s\n' "$BASE/releases/25.12.5/x86/64/packages.adb" > /etc/apk/repositories.d/p2ptap.list
+apk update
+apk add p2ptap luci-app-p2ptap luci-i18n-p2ptap-zh-cn
 ```
 
----
+对应自定义源地址：
 
-### 方法二：使用本地 OpenWrt 官方 SDK 原生命令行构建
+`https://raw.githubusercontent.com/NNdroid/p2ptap/openwrt-feed/releases/25.12.5/x86/64/packages.adb`
 
-可以在 Linux / macOS 环境下使用 OpenWrt 官方 SDK 独立编译安装包：
+其他目标使用 `releases/25.12.5/<target>/<subtarget>/packages.adb`；须与固件的 `/etc/openwrt_release` 一致。CI 构建 x86/64、armsr/armv8、armsr/armv7、rockchip/armv8、mediatek/filogic、ramips/mt7621、ath79/generic。签名仓库首次构建并发布成功后这些地址才可使用。客户端无需 `--allow-untrusted`。
 
-```bash
-# 1. 运行一键构建脚本 (自动下载 SDK、配置 feeds 并调用原生 make 编译)
-./scripts/build_openwrt_sdk.sh
+## 自动发布
 
-# 或者手动执行以下标准步骤：
+`OpenWrt 25.12 Signed APK Feed` 支持标签、main 或当前开发分支的代码推送、手动运行以及 Release 工作流调用。各目标共用一次解析的包版本；所有目标成功并通过签名检查后，才更新 `openwrt-feed` 分支。发布保留其他 OpenWrt 版本目录。
 
-# 2. 下载对应架构的 OpenWrt 官方 SDK (以 23.05.5 x86_64 为例)
-wget https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-sdk-23.05.5-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz
-tar -xf openwrt-sdk-*.tar.xz && cd openwrt-sdk-*
+签名配置位于 **NNdroid/p2ptap** 仓库的 Settings → Secrets and variables → Actions：
 
-# 3. 更新并安装依赖 Feeds (包含 golang 和 luci)
-./scripts/feeds update -a
-./scripts/feeds install -a
+- Secret `OPENWRT_FEED_SIGNING_KEY_B64`：Base64 编码的无密码 EC P-256 私钥。
+- Variable `OPENWRT_FEED_PUBLIC_KEY_B64`：匹配的公钥 Base64。
 
-# 4. 将 p2ptap 的 package 拷贝至 SDK 目录
-cp -r /path/to/p2ptap/openwrt/package/* package/
+缺少配置、配对不符、构建或签名校验失败均阻止发布。私钥不会进入提交或上传 artifact。APK 包及索引使用同一稳定密钥签名，客户端仅需安装上述公钥。
 
-# 5. 调用 OpenWrt 官方 Buildroot 进行原生编译
-make package/p2ptap/compile V=s
-make package/luci-app-p2ptap/compile V=s
+`PKG_VERSION` 去掉发布标签前导 `v`；`PKG_RELEASE` 使用源提交的完整 Git 历史累计数，核心、LuCI 和翻译包一致。浅克隆会报错，历史重写可能改变累计数。
+
+## 本地 SDK 构建
+
+Linux 下安装 SDK host 依赖后，在完整历史的项目 checkout 中运行：
+
+```sh
+OPENWRT_TARGET=x86 OPENWRT_SUBTARGET=64 VERSION=v1.0.20261001 bash scripts/build_openwrt_sdk.sh
 ```
 
-编译产物位于 `bin/packages/<arch>/base/` 和 `bin/packages/<arch>/luci/` 中。
+脚本从官方下载 25.12.5 SDK 并检查 SHA256，安装 feeds，构建 APK。项目需要 Go 1.27，包显式依赖 SDK packages feed 的 `golang1.27/host`。源码固定到当前提交，WebUI 嵌入资源会完整保留。
 
----
+## 源码 feed
 
-### 方法三：集成进 OpenWrt 完整源码 (Buildroot) 编译固件
+SDK / Buildroot `feeds.conf.default`：
 
-如果你正在自行编译完整 OpenWrt 路由器固件：
-
-```bash
-cd openwrt
-# 放置 package 源码
-cp -r /path/to/p2ptap/openwrt/package/* package/
-
-# 更新 feeds 并配置
-./scripts/feeds update -a && ./scripts/feeds install -a
-make menuconfig
-# 在 menuconfig 菜单中勾选:
-#   Network -> VPN -> p2ptap
-#   LuCI -> Applications -> luci-app-p2ptap
-
-# 开始编译
-make -j$(nproc)
+```text
+src-git p2ptap https://github.com/NNdroid/p2ptap.git;openwrt-feed
 ```
 
----
+然后运行 `./scripts/feeds update p2ptap` 和 `./scripts/feeds install -a -p p2ptap`。
 
-## 🌐 路由器 LAN 全网互通与防火墙配置 (Site-to-Site LAN Interconnect)
+## 检查
 
-如果将 OpenWrt 作为组网网关，让家中/公司局域网设备互通，可配置防火墙区域放行：
-
-```bash
-# 1. 创建 p2ptap 接口并关联 p2ptap0 设备
-uci set network.p2ptap=interface
-uci set network.p2ptap.proto='none'
-uci set network.p2ptap.device='p2ptap0'
-
-# 2. 将 p2ptap 加入 lan 防火墙区域（或新建 vpn 区域并允许与 lan 双向转发）
-uci add_list firewall.@zone[0].network='p2ptap'
-uci commit network
-uci commit firewall
-/etc/init.d/network restart
-/etc/init.d/firewall restart
+```sh
+node scripts/test_openwrt_version.cjs
+node scripts/test_openwrt_status.cjs
+bash scripts/test_openwrt_feed_keys.sh
 ```
 
-然后在 LuCI 中打开 **内网子网路由 (Site-to-Site)** 标签页：
-- 填入本地局域网段（如 `192.168.1.0/24`）到 **宣告本地内网网段 (Advertised Subnets)**。
-- 勾选 **自动接收并接入对端宣告的子网路由** 即可实现异地局域网双向无缝打通！
+LAN 子网互联仍需配置 TAP 网络接口及对应防火墙转发规则，再在 LuCI 中配置宣告网段与允许接收的节点。

@@ -2,7 +2,9 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=p2ptap
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=1
+# SDKs without a Git checkout receive this value through the build scripts.
+P2PTAP_PKG_RELEASE?=$(shell git rev-list --count HEAD 2>/dev/null)
+PKG_RELEASE:=$(if $(P2PTAP_PKG_RELEASE),$(P2PTAP_PKG_RELEASE),1)
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/NNdroid/p2ptap.git
@@ -12,11 +14,13 @@ PKG_MIRROR_HASH:=519831f130ddb58f234a252c1e5593e308429de9bc2be39f4152342121d95bf
 PKG_MAINTAINER:=p2ptap developers
 PKG_LICENSE:=MIT
 
-PKG_BUILD_DEPENDS:=golang/host
+PKG_BUILD_DEPENDS:=golang1.27/host
 PKG_BUILD_PARALLEL:=1
 PKG_USE_MIPS16:=0
 
 GO_PKG:=p2ptap
+# Preserve embedded WebUI assets and the local libp2p module replacement.
+GO_PKG_INSTALL_ALL:=1
 GO_PKG_BUILD_PKG:=p2ptap/cmd/p2ptap
 GO_PKG_LDFLAGS:=-s -w -X p2ptap/pkg/version.Version=$(PKG_VERSION) -X p2ptap/pkg/version.BuildTime=unknown -X p2ptap/pkg/version.GitCommit=unknown
 
@@ -29,7 +33,7 @@ define Package/p2ptap
   SUBMENU:=VPN
   TITLE:=go-libp2p Layer-2 P2P TAP VPN
   URL:=https://github.com/NNdroid/p2ptap
-  DEPENDS:=$(GO_ARCH_DEPENDS) +kmod-tun +ca-certificates
+  DEPENDS:=$(GO_ARCH_DEPENDS) +kmod-tun +ca-certificates +libubox +jshn
 endef
 
 define Package/p2ptap/description

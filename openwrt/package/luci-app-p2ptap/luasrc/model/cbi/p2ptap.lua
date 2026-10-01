@@ -82,14 +82,7 @@ o.description = translate("例如 10.0.0.1/24。同局域网各节点 IP 地址�
 o = s:taboption("network", Value, "tap_ipv6", translate("虚拟 IPv6 地址/前缀 (TAP IPv6 CIDR)"))
 o.placeholder = "fd00::1/64"
 o.description = translate("例如 fd00::1/64。提供原生二层 IPv6 组网能力。")
-function o.validate(self, value, section)
-	if value and #value > 0 then
-		if not value:match("^[%x:]+/%d+$") then
-			return nil, translate("IPv6 地址格式错误！必须为带前缀格式 (如 fd00::1/64)")
-		end
-	end
-	return value
-end
+o.datatype = "cidr6"
 
 o = s:taboption("network", Value, "tap_mac", translate("TAP 网卡 MAC 地址 (TAP MAC)"))
 o.datatype = "macaddr"
@@ -108,9 +101,8 @@ o.description = translate("本地局域网内自动发现其他 P2P 节点。")
 o = s:taboption("network", ListValue, "driver_type", translate("TAP 驱动类型 (Driver Type)"))
 o:value("auto",   translate("自动检测 (Auto)"))
 o:value("tap",    translate("TAP 驱动 (Linux/macOS)"))
-o:value("wintun", translate("WinTun 驱动 (Windows)"))
 o.default = "auto"
-o.description = translate("Windows 系统推荐 wintun，其他系统使用 auto 即可。")
+o.description = translate("OpenWrt 使用 auto 或 tap。")
 
 -- Tab: peers
 o = s:taboption("peers", DynamicList, "bootstrap_peers", translate("引导节点列表 (Bootstrap Peers)"))
@@ -263,6 +255,7 @@ o.default = "0.0.0.0"
 o.description = translate("WebUI Dashboard 绑定的 IPv4 监听地址，0.0.0.0 表示监听所有接口。")
 
 o = s:taboption("webui", Value, "webui_listen_ipv6", translate("WebUI 监听 IPv6 地址"))
+o.datatype = "ip6addr"
 o.placeholder = "::"
 o.default = "::"
 o.description = translate("WebUI Dashboard 绑定的 IPv6 监听地址，:: 表示监听所有接口。")
