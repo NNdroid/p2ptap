@@ -13,3 +13,6 @@ PKG_RELEASE:=$(if $(P2PTAP_PKG_RELEASE),$(P2PTAP_PKG_RELEASE),1)
 PKG_PO_VERSION:=$(PKG_VERSION)-r$(PKG_RELEASE)
 
 include $(TOPDIR)/feeds/luci/luci.mk
+
+# call BuildPackage - signature for the OpenWrt package metadata scanner.
+# luci.mk performs the actual build calls, including translation packages.

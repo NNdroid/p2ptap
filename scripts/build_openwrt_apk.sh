@@ -67,6 +67,11 @@ CONFIG_PACKAGE_luci-i18n-p2ptap-zh-cn=m
 CONFIG_PACKAGE_luci-i18n-p2ptap-fr=m
 CONFIG_PACKAGE_luci-i18n-p2ptap-ja=m
 EOF
+if [[ -n "${OPENWRT_GO_BOOTSTRAP_ROOT:-}" ]]; then
+  [[ -x "$OPENWRT_GO_BOOTSTRAP_ROOT/bin/go" && "$OPENWRT_GO_BOOTSTRAP_ROOT" != *'"'* ]] || exit 2
+  sed -i -e '/^CONFIG_GOLANG_BUILD_BOOTSTRAP=/d' -e '/^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=/d' "$SDK_DIR/.config"
+  printf '# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set\nCONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT="%s"\n' "$OPENWRT_GO_BOOTSTRAP_ROOT" >> "$SDK_DIR/.config"
+fi
 make -C "$SDK_DIR" defconfig
 make -C "$SDK_DIR" -j"$JOBS" package/p2ptap/compile V=sc
 make -C "$SDK_DIR" -j"$JOBS" package/luci-app-p2ptap/compile V=sc
