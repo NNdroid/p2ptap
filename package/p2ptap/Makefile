@@ -4,11 +4,11 @@ PKG_NAME:=p2ptap
 PKG_VERSION:=1.0.20261001
 # SDKs without a Git checkout receive this value through the build scripts.
 P2PTAP_PKG_RELEASE?=$(shell git rev-list --count HEAD 2>/dev/null)
-PKG_RELEASE:=41
+PKG_RELEASE:=43
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/NNdroid/p2ptap.git
-PKG_SOURCE_VERSION:=a4bc66b339e3670bb41c98eeac839baac28eb560
+PKG_SOURCE_VERSION:=e9b571f9c1ab26f0b540ccec013ff4c02e632ee5
 PKG_MIRROR_HASH:=skip
 
 PKG_MAINTAINER:=p2ptap developers
