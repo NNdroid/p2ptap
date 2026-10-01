@@ -4,21 +4,23 @@ PKG_NAME:=p2ptap
 PKG_VERSION:=1.0.20261001
 # SDKs without a Git checkout receive this value through the build scripts.
 P2PTAP_PKG_RELEASE?=$(shell git rev-list --count HEAD 2>/dev/null)
-PKG_RELEASE:=35
+PKG_RELEASE:=36
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/NNdroid/p2ptap.git
-PKG_SOURCE_VERSION:=1f1cef89daaceffec2912adf3fd1a0701ef47c96
+PKG_SOURCE_VERSION:=687470e9c33bb6440e283f1df20396d0e86481f6
 PKG_MIRROR_HASH:=skip
 
 PKG_MAINTAINER:=p2ptap developers
 PKG_LICENSE:=MIT
 
-PKG_BUILD_DEPENDS:=golang/host
+PKG_BUILD_DEPENDS:=golang1.27/host
 PKG_BUILD_PARALLEL:=1
 PKG_USE_MIPS16:=0
 
 GO_PKG:=p2ptap
+# Preserve embedded WebUI assets and the local libp2p module replacement.
+GO_PKG_INSTALL_ALL:=1
 GO_PKG_BUILD_PKG:=p2ptap/cmd/p2ptap
 GO_PKG_LDFLAGS:=-s -w -X p2ptap/pkg/version.Version=$(PKG_VERSION) -X p2ptap/pkg/version.BuildTime=unknown -X p2ptap/pkg/version.GitCommit=unknown
 
