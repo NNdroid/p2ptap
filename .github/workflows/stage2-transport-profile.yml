@@ -1,0 +1,58 @@
+name: Stage2 Transport CPU Profile
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transport-cpu-profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOMAXPROCS: 4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Profile TCP, QUIC, WebRTC and WebTransport
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p perf-results
+          for transport in TCP QUIC WebRTC WebTransport; do
+            lower="$(printf '%s' "$transport" | tr '[:upper:]' '[:lower:]')"
+            go test ./pkg/node \
+              -run '^$' \
+              -bench "^BenchmarkThroughput_TCP/${transport}$" \
+              -benchmem \
+              -benchtime=1x \
+              -count=1 \
+              -cpuprofile="perf-results/${lower}.pprof" \
+              | tee "perf-results/${lower}-bench.txt"
+            go tool pprof -top -nodecount=50 "perf-results/${lower}.pprof" \
+              > "perf-results/${lower}-top.txt"
+          done
+
+      - name: Print profile summaries
+        if: always()
+        shell: bash
+        run: |
+          for f in perf-results/*-top.txt; do
+            echo "===== $f ====="
+            cat "$f"
+          done
+
+      - name: Upload transport profiles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage2-transport-cpu-profiles
+          path: perf-results/
