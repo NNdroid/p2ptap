@@ -9,9 +9,11 @@ REMOTE="${OPENWRT_FEED_REMOTE:-$(git remote get-url origin)}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
-  GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
-  export GIT_CONFIG_VALUE_0
+  # Reset checkout's persisted header before adding the publisher credential.
+  export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+  export GIT_CONFIG_VALUE_0= GIT_CONFIG_KEY_1=http.https://github.com/.extraheader
+  GIT_CONFIG_VALUE_1="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+  export GIT_CONFIG_VALUE_1
 fi
 # Distinguish a missing branch from a network/authentication failure.
 REF=$(git ls-remote --heads "$REMOTE" openwrt-feed)
@@ -43,10 +45,12 @@ sed -i -e "s/^PKG_SOURCE_VERSION:=.*/PKG_SOURCE_VERSION:=$SOURCE/" \
 if [[ -n "$PAYLOAD" ]]; then
   expected="$WORK/expected.pem"
   bash scripts/prepare_openwrt_feed_keys.sh public "$expected"
+  openssl pkey -pubin -in "$expected" -outform DER -out "$WORK/expected.der"
   mapfile -t keys < <(find "$PAYLOAD/releases/$OPENWRT_VERSION" -name p2ptap-feed.pem -type f)
   [[ "${#keys[@]}" == 7 ]] || { echo 'Expected all seven target feeds' >&2; exit 1; }
   for key in "${keys[@]}"; do
-    cmp -s "$expected" "$key" || { echo 'Unexpected feed public key' >&2; exit 1; }
+    openssl pkey -pubin -in "$key" -outform DER -out "$WORK/candidate.der"
+    cmp -s "$WORK/expected.der" "$WORK/candidate.der" || { echo 'Unexpected feed public key' >&2; exit 1; }
     (cd "$(dirname "$key")"; sha256sum -c SHA256SUMS)
   done
   mkdir -p "$WORK/tree/releases"
