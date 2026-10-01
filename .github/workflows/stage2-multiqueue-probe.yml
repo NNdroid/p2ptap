@@ -1,0 +1,100 @@
+name: Stage2 Linux Multi-Queue TAP Probe
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: stage2-multiqueue-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  real-tap-multiqueue-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOMAXPROCS: 4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Probe /dev/net/tun and attach four TAP queues
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a
+          id
+          sudo modprobe tun || true
+          test -c /dev/net/tun
+          ls -l /dev/net/tun
+          ip -V
+
+          cat > /tmp/p2ptap_mq_probe.py <<'PY'
+          import fcntl
+          import os
+          import struct
+          import subprocess
+
+          TUNSETIFF = 0x400454ca
+          IFF_TAP = 0x0002
+          IFF_NO_PI = 0x1000
+          IFF_MULTI_QUEUE = 0x0100
+          FLAGS = IFF_TAP | IFF_NO_PI | IFF_MULTI_QUEUE
+          NAME = b"p2ptapmq0"
+
+          fds = []
+          try:
+              for idx in range(4):
+                  fd = os.open("/dev/net/tun", os.O_RDWR | os.O_NONBLOCK)
+                  ifr = struct.pack("16sH22x", NAME, FLAGS)
+                  result = fcntl.ioctl(fd, TUNSETIFF, ifr)
+                  real_name = struct.unpack("16sH22x", result)[0].split(b"\0", 1)[0].decode()
+                  print(f"attached queue={idx} fd={fd} ifname={real_name}")
+                  fds.append(fd)
+
+              subprocess.run(["ip", "link", "set", "dev", "p2ptapmq0", "up"], check=True)
+              subprocess.run(["ip", "-details", "link", "show", "dev", "p2ptapmq0"], check=True)
+              subprocess.run(["ip", "tuntap", "show", "dev", "p2ptapmq0"], check=False)
+              print(f"SUCCESS: attached {len(fds)} queue fds to one IFF_MULTI_QUEUE TAP")
+          finally:
+              for fd in reversed(fds):
+                  os.close(fd)
+          PY
+
+          sudo python3 /tmp/p2ptap_mq_probe.py
+
+      - name: Real multi-queue TAP benchmark
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p perf-results
+          go test -c ./pkg/tap -o /tmp/p2ptap-multiqueue.test
+          sudo ip netns add p2tap-stage2
+          trap 'sudo ip netns del p2tap-stage2' EXIT
+          sudo ip netns exec p2tap-stage2 ip link set lo up
+          sudo ip netns exec p2tap-stage2 env \
+            GOMAXPROCS="$GOMAXPROCS" \
+            P2PTAP_REAL_TAP_BENCH=1 \
+            /tmp/p2ptap-multiqueue.test \
+              -test.run '^$' \
+              -test.bench '^BenchmarkLinuxTAPBridgeMultiQueue$' \
+              -test.benchmem \
+              -test.benchtime=1x \
+              -test.count=5 \
+              -test.timeout=15m \
+            | tee perf-results/linux-real-tap-multiqueue.txt
+
+      - name: Upload real TAP benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-real-tap-multiqueue-results
+          path: perf-results/linux-real-tap-multiqueue.txt

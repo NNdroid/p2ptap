@@ -1,0 +1,68 @@
+name: Linux TAP MultiQueue Benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-tap-multiqueue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GOMAXPROCS: 4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Runner metadata
+        shell: bash
+        run: |
+          uname -a
+          go version
+          lscpu
+          ls -l /dev/net/tun
+          ip route show
+
+      - name: Build TAP benchmark binary
+        shell: bash
+        run: go test -c ./pkg/tap -o /tmp/p2ptap-tap-bench.test
+
+      - name: Benchmark real IFF_MULTI_QUEUE TAP in isolated netns
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p perf-results
+
+          # Keep the benchmark completely outside the hosted runner's Azure
+          # routing/SDN state. Inside this namespace the only data-plane device
+          # is the TAP created by the benchmark, so successful UDP writes cannot
+          # escape through an unrelated RFC1918 cloud route.
+          sudo ip netns add p2tap-bench
+          cleanup() {
+            sudo ip netns del p2tap-bench 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          sudo ip netns exec p2tap-bench ip link set lo up
+
+          sudo ip netns exec p2tap-bench \
+            env GOMAXPROCS="$GOMAXPROCS" \
+            /tmp/p2ptap-tap-bench.test \
+            -test.run '^$' \
+            -test.bench '^BenchmarkLinuxContinuousTAPMultiQueue$' \
+            -test.benchmem \
+            -test.benchtime=1x \
+            -test.count=5 \
+            | tee perf-results/linux-multiqueue.txt
+
+      - name: Upload multiqueue results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-real-tap-multiqueue-results
+          path: perf-results/linux-multiqueue.txt
