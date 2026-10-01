@@ -1,0 +1,9 @@
+{
+  "repository": "NNdroid/p2ptap",
+  "openwrt_version": "25.12.5",
+  "target": "armsr",
+  "subtarget": "armv8",
+  "source_commit": "54e299d6e5ac9adcdee75cea457d6169444b83cc",
+  "source_version": "v1.0.20261001",
+  "package_count": 5
+}
