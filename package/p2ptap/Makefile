@@ -4,11 +4,11 @@ PKG_NAME:=p2ptap
 PKG_VERSION:=1.0.20261001
 # SDKs without a Git checkout receive this value through the build scripts.
 P2PTAP_PKG_RELEASE?=$(shell git rev-list --count HEAD 2>/dev/null)
-PKG_RELEASE:=36
+PKG_RELEASE:=41
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/NNdroid/p2ptap.git
-PKG_SOURCE_VERSION:=687470e9c33bb6440e283f1df20396d0e86481f6
+PKG_SOURCE_VERSION:=a4bc66b339e3670bb41c98eeac839baac28eb560
 PKG_MIRROR_HASH:=skip
 
 PKG_MAINTAINER:=p2ptap developers
@@ -26,6 +26,10 @@ GO_PKG_LDFLAGS:=-s -w -X p2ptap/pkg/version.Version=$(PKG_VERSION) -X p2ptap/pkg
 
 include $(INCLUDE_DIR)/package.mk
 include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
+
+# Match the project's portable release builds; TAP and networking use pure Go.
+GO_PKG_TARGET_VARS += CGO_ENABLED=0
+GO_PKG_DEFAULT_LDFLAGS:=
 
 define Package/p2ptap
   SECTION:=net
