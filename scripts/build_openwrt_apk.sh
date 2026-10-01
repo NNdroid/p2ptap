@@ -43,7 +43,7 @@ git -C "$GO_FEED" sparse-checkout init --cone
 git -C "$GO_FEED" sparse-checkout set lang/golang
 git -C "$GO_FEED" checkout -q --detach FETCH_HEAD
 cp -a "$GO_FEED/lang/golang/." "$SDK_DIR/feeds/packages/lang/golang/"
-(cd "$SDK_DIR"; ./scripts/feeds update -i packages; ./scripts/feeds install -a)
+(cd "$SDK_DIR"; ./scripts/feeds update -i packages; ./scripts/feeds install golang1.27 luci-base luci-compat)
 cp -a openwrt/package/p2ptap openwrt/package/luci-app-p2ptap "$SDK_DIR/package/"
 P2PTAP_SOURCE_VERSION="$SOURCE_VERSION" bash scripts/set_openwrt_version.sh "$RELEASE_VERSION" "$SDK_DIR/package"
 sed -i -e "s/^PKG_SOURCE_VERSION:=.*/PKG_SOURCE_VERSION:=$SOURCE_VERSION/" \
@@ -63,6 +63,9 @@ cat >> "$SDK_DIR/.config" <<'EOF'
 # CONFIG_ALL_KMODS is not set
 CONFIG_PACKAGE_p2ptap=m
 CONFIG_PACKAGE_luci-app-p2ptap=m
+CONFIG_LUCI_LANG_zh_Hans=m
+CONFIG_LUCI_LANG_fr=m
+CONFIG_LUCI_LANG_ja=m
 CONFIG_PACKAGE_luci-i18n-p2ptap-zh-cn=m
 CONFIG_PACKAGE_luci-i18n-p2ptap-fr=m
 CONFIG_PACKAGE_luci-i18n-p2ptap-ja=m
