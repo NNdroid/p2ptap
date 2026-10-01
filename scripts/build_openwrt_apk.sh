@@ -51,6 +51,7 @@ sed -i -e "s/^PKG_SOURCE_VERSION:=.*/PKG_SOURCE_VERSION:=$SOURCE_VERSION/" \
 # The source is fetched by immutable SHA; no stale hash of the moving main archive.
 # SDK defaults may select every package and bootloader variant. Restrict this
 # build to the application and dependencies while retaining target settings.
+touch "$SDK_DIR/.config"
 sed -i -e '/^CONFIG_ALL=/d' -e '/^CONFIG_ALL_NONSHARED=/d' -e '/^CONFIG_ALL_KMODS=/d' "$SDK_DIR/.config"
 cat >> "$SDK_DIR/.config" <<'EOF'
 # CONFIG_ALL is not set
