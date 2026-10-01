@@ -8,7 +8,7 @@ PKG_NAME:=luci-app-p2ptap
 PKG_VERSION:=1.0.20261001
 # SDKs without a Git checkout receive this value through the build scripts.
 P2PTAP_PKG_RELEASE?=$(shell git rev-list --count HEAD 2>/dev/null)
-PKG_RELEASE:=44
+PKG_RELEASE:=45
 # Translation packages must follow the app release, not SDK Git timestamps.
 PKG_PO_VERSION:=$(PKG_VERSION)-r$(PKG_RELEASE)
 
