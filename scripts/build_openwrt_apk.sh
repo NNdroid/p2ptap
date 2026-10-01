@@ -56,16 +56,17 @@ rm -f "$SDK_DIR/tmp/.packageinfo" "$SDK_DIR/tmp/.packagedeps" "$SDK_DIR/tmp/.con
 # SDK defaults may select every package and bootloader variant. Restrict this
 # build to the application and dependencies while retaining target settings.
 touch "$SDK_DIR/.config"
-sed -i -e '/^CONFIG_ALL=/d' -e '/^CONFIG_ALL_NONSHARED=/d' -e '/^CONFIG_ALL_KMODS=/d' "$SDK_DIR/.config"
+sed -i -e '/^CONFIG_ALL=/d' -e '/^CONFIG_ALL_NONSHARED=/d' -e '/^CONFIG_ALL_KMODS=/d' -e '/^CONFIG_AUTOREMOVE=/d' "$SDK_DIR/.config"
 cat >> "$SDK_DIR/.config" <<'EOF'
 # CONFIG_ALL is not set
 # CONFIG_ALL_NONSHARED is not set
 # CONFIG_ALL_KMODS is not set
+# CONFIG_AUTOREMOVE is not set
 CONFIG_PACKAGE_p2ptap=m
 CONFIG_PACKAGE_luci-app-p2ptap=m
-CONFIG_LUCI_LANG_zh_Hans=m
-CONFIG_LUCI_LANG_fr=m
-CONFIG_LUCI_LANG_ja=m
+CONFIG_LUCI_LANG_zh_Hans=y
+CONFIG_LUCI_LANG_fr=y
+CONFIG_LUCI_LANG_ja=y
 CONFIG_PACKAGE_luci-i18n-p2ptap-zh-cn=m
 CONFIG_PACKAGE_luci-i18n-p2ptap-fr=m
 CONFIG_PACKAGE_luci-i18n-p2ptap-ja=m
@@ -76,6 +77,9 @@ if [[ -n "${OPENWRT_GO_BOOTSTRAP_ROOT:-}" ]]; then
   printf '# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set\nCONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT="%s"\n' "$OPENWRT_GO_BOOTSTRAP_ROOT" >> "$SDK_DIR/.config"
 fi
 make -C "$SDK_DIR" defconfig
+for pkg in p2ptap luci-app-p2ptap luci-i18n-p2ptap-zh-cn luci-i18n-p2ptap-fr luci-i18n-p2ptap-ja; do
+  grep -Eq "^CONFIG_PACKAGE_${pkg}=[my]$" "$SDK_DIR/.config" || { echo "Package not selected after defconfig: $pkg" >&2; exit 1; }
+done
 make -C "$SDK_DIR" -j"$JOBS" package/p2ptap/compile V=sc
 make -C "$SDK_DIR" -j"$JOBS" package/luci-app-p2ptap/compile V=sc
 for pkg in p2ptap luci-app-p2ptap luci-i18n-p2ptap-zh-cn luci-i18n-p2ptap-fr luci-i18n-p2ptap-ja; do
