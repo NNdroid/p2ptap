@@ -26,6 +26,7 @@ type Deduplicator struct {
 	maxSeq            uint64                // highest full structured SeqID seen
 	minCounter        uint64                // lowest counter still inside the live window
 	recvd             [counterWindow]uint64 // 64-bit bitmask rings (1 bit per counter)
+	seenCount         uint64                // number of set bits; protected by mu
 	epochSet          bool                  // whether expectedConnEpoch has been negotiated yet
 	expectedConnEpoch uint64                // 24-bit epoch expected on every frame from this peer
 
@@ -64,11 +65,9 @@ func (d *Deduplicator) WindowResets() uint64 {
 func (d *Deduplicator) WindowUtilization() float64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	var bits uint64
-	for _, w := range d.recvd {
-		bits += uint64(popcount(w))
-	}
-	return float64(bits) / float64(counterWindow*64)
+	// Maintain the population when bits change instead of scanning all 1024
+	// words for the receive loop's per-packet telemetry.
+	return float64(d.seenCount) / float64(counterWindow*64)
 }
 
 // SetConnEpoch records the per-connection epoch negotiated with this peer
@@ -236,7 +235,11 @@ func (d *Deduplicator) setBit(c uint64) {
 	c &= 0xFFFF
 	word := c / 64
 	bit := c % 64
-	d.recvd[word] |= 1 << bit
+	mask := uint64(1) << bit
+	if d.recvd[word]&mask == 0 {
+		d.recvd[word] |= mask
+		d.seenCount++
+	}
 }
 
 // testBit reports whether counter c has been seen within the sliding window.
@@ -252,7 +255,11 @@ func (d *Deduplicator) clearBit(c uint64) {
 	c &= 0xFFFF
 	word := c / 64
 	bit := c % 64
-	d.recvd[word] &^= 1 << bit
+	mask := uint64(1) << bit
+	if d.recvd[word]&mask != 0 {
+		d.recvd[word] &^= mask
+		d.seenCount--
+	}
 }
 
 // dedupWindow is the out-of-order tolerance, in counters. Counters that fall
@@ -289,18 +296,10 @@ func (d *Deduplicator) clearAll() {
 	for i := range d.recvd {
 		d.recvd[i] = 0
 	}
+	d.seenCount = 0
 }
 
 // counterDiff returns (a-b) in 16-bit modular arithmetic (0..65535).
 func counterDiff(a, b uint64) uint64 {
 	return (a - b) & 0xFFFF
-}
-
-func popcount(x uint64) int {
-	n := 0
-	for x != 0 {
-		n += int(x & 1)
-		x >>= 1
-	}
-	return n
 }

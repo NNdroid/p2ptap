@@ -5,6 +5,12 @@ on:
     branches:
       - perf/stage2-benchmarks
   workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: Commit or ref to compare with this revision on the same runner
+        required: true
+        default: main
+        type: string
 
 permissions:
   contents: read
@@ -57,9 +63,13 @@ jobs:
     timeout-minutes: 35
     env:
       GOMAXPROCS: 4
+      P2PTAP_BENCH_FRAMES: 100000
+      BASELINE_REF: ${{ inputs.baseline_ref || 'main' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -74,23 +84,74 @@ jobs:
           go version
           lscpu
 
-      - name: Overlay transport throughput baseline
+      - name: Build baseline and candidate with identical benchmark harness
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
           mkdir -p perf-results
-          go test ./pkg/node \
-            -run '^$' \
-            -bench '^BenchmarkThroughput_(TCP|UDP)/(TCP|QUIC|WebRTC|WebTransport)$' \
-            -benchmem \
-            -benchtime=1x \
-            -count=3 \
-            -timeout=30m \
-            | tee perf-results/transport-baseline.txt
+          base_sha="$(git rev-parse --verify --end-of-options "${BASELINE_REF}^{commit}")"
+          git worktree add --detach "$RUNNER_TEMP/p2ptap-baseline" "$base_sha"
+          printf 'baseline=%s\ncandidate=%s\nGOMAXPROCS=%s\nframes=%s\n' \
+            "$base_sha" "$(git rev-parse HEAD)" "$GOMAXPROCS" "$P2PTAP_BENCH_FRAMES" \
+            | tee perf-results/revisions.txt
+          # Apply the SAME logging, timing and workload to both code revisions.
+          cp pkg/node/e2e_protocol_targets_test.go "$RUNNER_TEMP/p2ptap-baseline/pkg/node/"
+          cp pkg/obfuscate/dedup_bench_test.go "$RUNNER_TEMP/p2ptap-baseline/pkg/obfuscate/"
+          go test -c ./pkg/node -o "$RUNNER_TEMP/candidate-node.test"
+          go test -c ./pkg/obfuscate -o "$RUNNER_TEMP/candidate-obfuscate.test"
+          (
+            cd "$RUNNER_TEMP/p2ptap-baseline"
+            go test -c ./pkg/node -o "$RUNNER_TEMP/baseline-node.test"
+            go test -c ./pkg/obfuscate -o "$RUNNER_TEMP/baseline-obfuscate.test"
+          )
+
+      - name: Candidate regression and race tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -count=1 -timeout=15m ./...
+          go test -race -count=1 ./pkg/obfuscate
+
+      - name: Paired overlay transport throughput comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Alternate order to reduce warmup/runner drift bias; never run the
+          # two workloads concurrently on the shared CPU budget.
+          for round in 1 2 3 4 5; do
+            order="baseline candidate"
+            if (( round % 2 == 0 )); then order="candidate baseline"; fi
+            for revision in $order; do
+              "$RUNNER_TEMP/${revision}-node.test" \
+                -test.run '^$' \
+                -test.bench '^BenchmarkThroughput_(TCP|UDP)/(TCP|QUIC|WebRTC|WebTransport)$' \
+                -test.benchmem -test.benchtime=1x -test.count=1 -test.timeout=5m \
+                2>&1 | tee -a "perf-results/transport-${revision}.txt"
+            done
+          done
+          for revision in baseline candidate; do
+            "$RUNNER_TEMP/${revision}-obfuscate.test" \
+              -test.run '^$' -test.bench '^BenchmarkDedupReceiveTelemetry$' \
+              -test.benchmem -test.benchtime=1s -test.count=5 \
+              | tee "perf-results/dedup-${revision}.txt"
+            "$RUNNER_TEMP/${revision}-node.test" \
+              -test.run '^$' -test.bench '^BenchmarkThroughput_TCP/TCP$' \
+              -test.benchtime=1x -test.count=1 \
+              -test.cpuprofile="perf-results/${revision}.pprof" \
+              > "perf-results/profile-${revision}.txt" 2>&1
+            go tool pprof -top -nodecount=40 "$RUNNER_TEMP/${revision}-node.test" \
+              "perf-results/${revision}.pprof" > "perf-results/${revision}-top.txt"
+          done
+
+      - name: Summarize throughput and delivery
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/compare_throughput.py perf-results | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload transport results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: transport-baseline-results
-          path: perf-results/transport-baseline.txt
+          path: perf-results/

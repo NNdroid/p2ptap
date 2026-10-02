@@ -40,11 +40,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"p2ptap/pkg/logger"
 	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/tap"
 )
@@ -604,7 +607,15 @@ func benchThroughput(b *testing.B, pair *protocolPair, build func(seq int) []byt
 	if target < 5000 {
 		target = 5000 // steady-state floor: tiny N measures latency, not throughput
 	}
+	if value := os.Getenv("P2PTAP_BENCH_FRAMES"); value != "" {
+		frames, err := strconv.Atoi(value)
+		if err != nil || frames < 5000 {
+			b.Fatalf("P2PTAP_BENCH_FRAMES must be an integer >= 5000: %q", value)
+		}
+		target = frames
+	}
 	written := 0
+	b.ResetTimer()
 	start := time.Now()
 	for written < target && time.Since(start) < 2*time.Second {
 		if _, err := pair.pipeA.Write(build(written)); err != nil {
@@ -617,21 +628,26 @@ func benchThroughput(b *testing.B, pair *protocolPair, build func(seq int) []byt
 	sinceGrowth := time.Now()
 	for time.Since(start) < 6*time.Second {
 		cur := delivered.load()
+		if cur >= uint64(written) {
+			break
+		}
 		if cur != last {
 			last = cur
 			sinceGrowth = time.Now()
-		} else if time.Since(sinceGrowth) >= 75*time.Millisecond || cur >= uint64(written) {
+		} else if time.Since(sinceGrowth) >= 75*time.Millisecond {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 	elapsed := time.Since(start)
+	b.StopTimer()
 
 	deliveredN := delivered.load()
 	if deliveredN == 0 {
 		b.Fatalf("throughput: ZERO frames delivered over %s — data path stalled", elapsed.Truncate(time.Millisecond))
 	}
 	fps := float64(deliveredN) / elapsed.Seconds()
+	b.ReportMetric(float64(elapsed.Nanoseconds())/float64(deliveredN), "ns/op")
 	b.ReportMetric(fps, "frames/s")
 	b.ReportMetric(float64(deliveredN)*float64(len(throughputBenchPayload))/elapsed.Seconds()/1e6, "MB/s")
 	b.ReportMetric(100*float64(deliveredN)/float64(written), "%delivered")
@@ -659,6 +675,8 @@ func (c *atomicCounter) load() uint64 {
 }
 
 func BenchmarkThroughput_UDP(b *testing.B) {
+	logger.SetGlobalLevel(logger.LevelInfo)
+	defer logger.SetGlobalLevel(logger.LevelDebug)
 	for _, spec := range allTransportSpecs() {
 		spec := spec
 		b.Run(spec.name, func(b *testing.B) {
@@ -677,6 +695,8 @@ func BenchmarkThroughput_UDP(b *testing.B) {
 }
 
 func BenchmarkThroughput_TCP(b *testing.B) {
+	logger.SetGlobalLevel(logger.LevelInfo)
+	defer logger.SetGlobalLevel(logger.LevelDebug)
 	for _, spec := range allTransportSpecs() {
 		spec := spec
 		b.Run(spec.name, func(b *testing.B) {
