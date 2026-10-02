@@ -44,6 +44,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -615,6 +616,7 @@ func benchThroughput(b *testing.B, pair *protocolPair, build func(seq int) []byt
 		target = frames
 	}
 	written := 0
+	initialDrops := atomic.LoadUint64(&pair.nodeA.dispatchDropCount)
 	b.ResetTimer()
 	start := time.Now()
 	for written < target && time.Since(start) < 2*time.Second {
@@ -623,18 +625,14 @@ func benchThroughput(b *testing.B, pair *protocolPair, build func(seq int) []byt
 		}
 		written++
 	}
-	// Drain: wait for in-flight backlog (up to 5s, or 75ms of no growth).
-	last := uint64(0)
-	sinceGrowth := time.Now()
+	// A quiet interval does not mean the queue is empty: a temporarily blocked
+	// stream can resume with thousands of pending frames. Wait until each input
+	// is either delivered or explicitly dropped by the sending queue, with a
+	// bounded total workload duration. Never close a node after only 75ms idle.
 	for time.Since(start) < 6*time.Second {
 		cur := delivered.load()
-		if cur >= uint64(written) {
-			break
-		}
-		if cur != last {
-			last = cur
-			sinceGrowth = time.Now()
-		} else if time.Since(sinceGrowth) >= 75*time.Millisecond {
+		dropped := atomic.LoadUint64(&pair.nodeA.dispatchDropCount) - initialDrops
+		if cur+dropped >= uint64(written) {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -643,6 +641,12 @@ func benchThroughput(b *testing.B, pair *protocolPair, build func(seq int) []byt
 	b.StopTimer()
 
 	deliveredN := delivered.load()
+	droppedN := atomic.LoadUint64(&pair.nodeA.dispatchDropCount) - initialDrops
+	undrained := uint64(0)
+	if accounted := deliveredN + droppedN; accounted < uint64(written) {
+		undrained = uint64(written) - accounted
+		b.Logf("drain budget exhausted: %d frames neither delivered nor counted as send-queue drops", undrained)
+	}
 	if deliveredN == 0 {
 		b.Fatalf("throughput: ZERO frames delivered over %s — data path stalled", elapsed.Truncate(time.Millisecond))
 	}
@@ -652,6 +656,8 @@ func benchThroughput(b *testing.B, pair *protocolPair, build func(seq int) []byt
 	b.ReportMetric(float64(deliveredN)*float64(len(throughputBenchPayload))/elapsed.Seconds()/1e6, "MB/s")
 	b.ReportMetric(100*float64(deliveredN)/float64(written), "%delivered")
 	b.ReportMetric(float64(written), "written")
+	b.ReportMetric(float64(droppedN), "dispatch_drops")
+	b.ReportMetric(float64(undrained), "undrained")
 	// Stop the drain goroutine by closing the node (its TAP reads return EOF).
 	pair.pipeB.Close()
 	<-done
