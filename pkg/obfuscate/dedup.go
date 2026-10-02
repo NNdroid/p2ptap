@@ -133,6 +133,12 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 	defer d.mu.Unlock()
 
 	// --- Anti-replay via per-connection epoch ---
+	// Plaintext peers can send before their first SeqSync. Adopt the FIRST
+	// epoch atomically, but never let later data replace an established epoch.
+	if !d.epochSet {
+		d.expectedConnEpoch = ConnEpochFromSeq(seqID)
+		d.epochSet = true
+	}
 	if d.epochSet && ConnEpochFromSeq(seqID) != d.expectedConnEpoch {
 		atomic.AddUint64(&d.replayDrops, 1)
 		log.Debug("Dedup: stale epoch drop seq=%d got=%d expect=%d", seqID, ConnEpochFromSeq(seqID), d.expectedConnEpoch)

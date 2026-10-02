@@ -31,6 +31,12 @@ jobs:
       - name: Install Dependencies
         run: go mod download
 
+      - name: Verify P2P failure recovery and strategy contracts
+        run: >-
+          go test -count=3 -timeout=120s
+          -run '^Test(Strategy.*|ReceiveEpochCannotResetReplayWindow|DispatchWorkerWrappedTimeoutKeepsHealthyPeerMoving|LimitedCircuitConvergesAndDeliversBothDirections|DedupAdoptsFirstEpochOnly)$'
+          ./pkg/node ./pkg/obfuscate
+
       - name: Run Unit & E2E Integration Tests (IPv4/IPv6 Ping, Strategies, Deduplication)
         run: go test -v -count=1 ./...
 

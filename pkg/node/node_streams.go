@@ -349,11 +349,8 @@ func (n *Node) handleStream(s network.Stream) {
 			}
 			n.dedupPeersMu.Unlock()
 		}
-		if obfuscate.IsStructuredSeq(seqID) {
-			if ep := obfuscate.ConnEpochFromSeq(seqID); ep != peerDedup.ConnEpoch() {
-				peerDedup.SetConnEpoch(ep)
-			}
-		}
+		// Only SeqSync may change an established epoch. A delayed data frame
+		// from an older session must not reset the current replay window.
 		if peerDedup.IsDuplicate(seqID) {
 
 			n.Collector.RecordDedup()

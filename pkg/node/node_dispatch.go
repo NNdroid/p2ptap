@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"runtime"
@@ -56,6 +57,14 @@ const dispatchDropWarnThreshold = 10
 // frames are dropped: in the queue (cheap, worker stays free) rather than after
 // a 5s block (expensive, starves everyone else).
 const peerStallCooldown = 3 * time.Second
+
+// notePeerSendError sees through framing, retry and batch error wrappers.
+func (n *Node) notePeerSendError(pid peer.ID, err error) {
+	var timeout net.Error
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		n.markPeerStalled(pid)
+	}
+}
 
 // markPeerStalled records that pid's egress just timed out. Logging is
 // edge-triggered: a peer already inside its cooldown window is re-armed
@@ -244,9 +253,7 @@ func (n *Node) dispatchWorker(id int) {
 							// this peer does not cost another worker the full
 							// deadline. Other error kinds (no addresses, stream
 							// reset) are fast failures and must not trip it.
-							if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-								n.markPeerStalled(target)
-							}
+							n.notePeerSendError(target, err)
 							log.Debug("Tx unicast send error to peer %s: %v", target.String(), err)
 							n.handleUnicastFailure(target, dstMAC, err)
 						} else {
@@ -258,9 +265,7 @@ func (n *Node) dispatchWorker(id int) {
 						batch[0] = nil
 					} else {
 						if err := n.Dispatcher.SendBatchToPeer(n.ctx, target, batch); err != nil {
-							if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-								n.markPeerStalled(target)
-							}
+							n.notePeerSendError(target, err)
 							log.Debug("Tx batched unicast send error to peer %s (n=%d): %v",
 								target.String(), len(batch), err)
 							n.handleUnicastFailure(target, dstMAC, err)
