@@ -54,7 +54,7 @@ def summarize(directory):
         delivery_new = min(s["%delivered"] for s in new)
         print(f"| {key} | {old_median:.2f} [{min(old_rates):.2f}, {max(old_rates):.2f}] "
               f"| {new_median:.2f} [{min(new_rates):.2f}, {max(new_rates):.2f}] "
-              f"| {change:+.1f}% | {delivery_old:.1f}% / {delivery_new:.1f}% |")
+              f"| {change:+.1f}% | {delivery_old:.2f}% / {delivery_new:.2f}% |")
         result[key] = {"baseline": old, "candidate": new, "change_percent": change}
     (directory / "comparison.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 

@@ -486,11 +486,11 @@ func TestProtocolMatrix_UDPDNSTargetAndTCPHTTPTarget(t *testing.T) {
 // ── Throughput benchmarks: TCP and UDP per transport ────────────────────────
 //
 // BenchmarkThroughput_UDP and BenchmarkThroughput_TCP pump bulk frames
-// A->B->A's-collector over each transport and report ns/op (per frame) and
-// frames/sec derived from it. They measure the OVERLAY (TAP write through
-// processTapFrame, obfuscate, transport, peer TAP read), which is the number
-// users actually experience for VPN throughput; the in-process MemTAP removes
-// OS scheduling noise so numbers are stable and comparable across transports.
+// A->B's-collector over each real loopback transport. They report delivered
+// payload MB/s, ns per delivered frame, frames/s, and delivery percentage.
+// This measures the overlay (MemTAP, processTapFrame, encryption, transport,
+// peer MemTAP), excluding native TAP and WAN costs. With benchtime=1x the Go
+// B/op and allocs/op metrics describe the whole workload, not one frame.
 
 var throughputBenchPayload = bytes.Repeat([]byte("p2ptap-throughput-"), 66) // 1188B: frame = 14+20+8+1188 = 1230 < the 1514 TAP cap
 

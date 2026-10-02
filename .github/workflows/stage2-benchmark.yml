@@ -89,7 +89,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p perf-results
-          base_sha="$(git rev-parse --verify --end-of-options "${BASELINE_REF}^{commit}")"
+          # Feature-branch checkouts have origin/main, but no local main.
+          base_sha="$(git rev-parse --verify --end-of-options "${BASELINE_REF}^{commit}" 2>/dev/null \
+            || git rev-parse --verify --end-of-options "origin/${BASELINE_REF}^{commit}")"
           git worktree add --detach "$RUNNER_TEMP/p2ptap-baseline" "$base_sha"
           printf 'baseline=%s\ncandidate=%s\nGOMAXPROCS=%s\nframes=%s\n' \
             "$base_sha" "$(git rev-parse HEAD)" "$GOMAXPROCS" "$P2PTAP_BENCH_FRAMES" \
