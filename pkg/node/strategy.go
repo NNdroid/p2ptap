@@ -46,6 +46,10 @@ type PeerStreams struct {
 	// changes are reconciled from the immutable snapshot before the next write.
 	writeDeadlineRenew    map[network.Stream]time.Time
 	writeDeadlineSnapshot *peerStreamsSnapshot
+	// Most batches stay on one stream. Cache that stream's map entry so the
+	// steady path avoids interface-key hashing without sharing its deadline.
+	writeDeadlineStream    network.Stream
+	nextWriteDeadlineRenew time.Time
 }
 
 type peerStreamsSnapshot struct {
@@ -529,6 +533,10 @@ func (sd *StrategyDispatcher) removeStreamUnderLock(ps *PeerStreams, s network.S
 	}
 	ps.mu.Unlock()
 	delete(ps.writeDeadlineRenew, s)
+	if ps.writeDeadlineStream == s {
+		ps.writeDeadlineStream = nil
+		ps.nextWriteDeadlineRenew = time.Time{}
+	}
 	// A failed write may have sent a partial length prefix or body. Never
 	// reuse that stream for another frame, and release its blocked reader.
 	_ = s.Reset()
@@ -926,6 +934,10 @@ func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer pe
 				}
 				if !active {
 					delete(ps.writeDeadlineRenew, cached)
+					if ps.writeDeadlineStream == cached {
+						ps.writeDeadlineStream = nil
+						ps.nextWriteDeadlineRenew = time.Time{}
+					}
 				}
 			}
 			ps.writeDeadlineSnapshot = snapshot
@@ -936,12 +948,17 @@ func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer pe
 	}
 	writeOne := func(s network.Stream) error {
 		now := time.Now()
-		if ps == nil || !now.Before(ps.writeDeadlineRenew[s]) {
+		if ps != nil && ps.writeDeadlineStream != s {
+			ps.writeDeadlineStream = s
+			ps.nextWriteDeadlineRenew = ps.writeDeadlineRenew[s]
+		}
+		if ps == nil || !now.Before(ps.nextWriteDeadlineRenew) {
 			if err := s.SetWriteDeadline(now.Add(writeDeadlineWindow)); err != nil {
 				return fmt.Errorf("set write deadline: %w", err)
 			}
 			if ps != nil {
-				ps.writeDeadlineRenew[s] = now.Add(writeDeadlineWindow - writeDeadlineRenewThreshold)
+				ps.nextWriteDeadlineRenew = now.Add(writeDeadlineWindow - writeDeadlineRenewThreshold)
+				ps.writeDeadlineRenew[s] = ps.nextWriteDeadlineRenew
 			}
 		}
 		for _, f := range frags {
