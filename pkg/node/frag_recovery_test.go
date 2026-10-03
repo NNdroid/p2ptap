@@ -77,6 +77,21 @@ func TestFragReassembleMaximumSealedFrameAtMinimumChunkSize(t *testing.T) {
 	}
 }
 
+func TestFragReassembleCumulativeBytesAbortAndRecover(t *testing.T) {
+	f := newFragReassembler()
+	pid := newTestPeerID(t)
+	chunk := bytes.Repeat([]byte{0x5a}, (maxReasmBytes+1)/2)
+	f.reassemble(pid, appendFragHeader(nil, 1, 0, 2, chunk), reasmChannelDirect, 1)
+	if out, complete := f.reassemble(pid, appendFragHeader(nil, 1, 1, 2, chunk), reasmChannelDirect, 1); complete || out != nil || len(f.bufs) != 0 {
+		t.Fatal("valid envelopes exceeded cumulative byte cap or retained corrupt state")
+	}
+	f.reassemble(pid, appendFragHeader(nil, 1, 0, 2, []byte("good")), reasmChannelDirect, 1)
+	out, complete := f.reassemble(pid, appendFragHeader(nil, 1, 1, 2, []byte("tail")), reasmChannelDirect, 1)
+	if !complete || string(out) != "goodtail" {
+		t.Fatal("aborted group prevented subsequent recovery")
+	}
+}
+
 type fragmentIDHost struct {
 	host.Host
 	pid peer.ID

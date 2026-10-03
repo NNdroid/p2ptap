@@ -47,6 +47,8 @@ def summarize(directory):
             raise ValueError(f"{key}: expected five samples per revision")
         if any("undrained" not in sample or "dispatch_drops" not in sample for sample in old + new):
             raise ValueError(f"{key}: missing drain accounting; use the current harness for both revisions")
+        if any(s["%delivered"] != 100 or s["undrained"] != 0 or s["dispatch_drops"] != 0 for s in new):
+            raise ValueError(f"{key}: candidate lost or failed to drain frames; refusing a throughput win")
         old_rates = [s["MB/s"] for s in old]
         new_rates = [s["MB/s"] for s in new]
         old_median, new_median = statistics.median(old_rates), statistics.median(new_rates)
