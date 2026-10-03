@@ -34,7 +34,7 @@ jobs:
       - name: Verify P2P failure recovery and strategy contracts
         run: >-
           go test -count=3 -timeout=120s
-          -run '^Test(Strategy.*|WriteFrames.*|ReceiveEpochCannotResetReplayWindow|DispatchWorkerWrappedTimeoutKeepsHealthyPeerMoving|LimitedCircuitConvergesAndDeliversBothDirections|DedupAdoptsFirstEpochOnly)$'
+          -run '^Test(Strategy.*|WriteFrames.*|StreamFragment.*|Frag.*|BufferPool.*|ReceiveFragment.*|ReceiveEpochCannotResetReplayWindow|DispatchWorkerWrappedTimeoutKeepsHealthyPeerMoving|LimitedCircuitConvergesAndDeliversBothDirections|DedupAdoptsFirstEpochOnly)$'
           ./pkg/node ./pkg/obfuscate
 
       - name: Run Unit & E2E Integration Tests (IPv4/IPv6 Ping, Strategies, Deduplication)

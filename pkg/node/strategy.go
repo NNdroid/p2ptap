@@ -54,7 +54,6 @@ type PeerStreams struct {
 
 type peerStreamsSnapshot struct {
 	streams []network.Stream
-	allTCP  bool
 }
 
 func NewPeerStreams(pID peer.ID) *PeerStreams {
@@ -69,12 +68,8 @@ func NewPeerStreams(pID peer.ID) *PeerStreams {
 // rebuildLocked re-sorts the streams snapshot. Caller MUST hold ps.mu (write).
 func (ps *PeerStreams) rebuildLocked() {
 	next := make([]network.Stream, 0, len(ps.streams))
-	allTCP := len(ps.streams) > 0
-	for transportName, s := range ps.streams {
+	for _, s := range ps.streams {
 		next = append(next, s)
-		if !strings.Contains(transportName, "/tcp/") {
-			allTCP = false
-		}
 	}
 	if len(next) > 1 {
 		sort.SliceStable(next, func(i, j int) bool {
@@ -82,7 +77,7 @@ func (ps *PeerStreams) rebuildLocked() {
 		})
 	}
 	ps.sorted = next
-	ps.snapshot.Store(&peerStreamsSnapshot{streams: next, allTCP: allTCP})
+	ps.snapshot.Store(&peerStreamsSnapshot{streams: next})
 }
 
 func (ps *PeerStreams) AddStream(transportName string, s network.Stream) {
@@ -139,32 +134,6 @@ func scoreStreamTransport(s network.Stream) int {
 		return 10 // Private LAN direct: high priority
 	}
 	return 20 // Public WAN direct: medium priority
-}
-
-// prefersTCPFragPayload reports whether ALL active streams for this peer are
-// carried over TCP (identified by "/tcp" in the multiaddr key). When true, the
-// caller may use a much larger fragment payload threshold because TCP/yamux is a
-// reliable byte-stream with no UDP path-MTU constraint — unlike QUIC/WebRTC
-// where every UDP datagram must fit under the ~1200-byte IP MTU. This check
-// avoids needless fragmentation on the common TCP-direct-connect path, cutting
-// double-AEAD overhead by ~50% for bulk transfers.
-// Returns false when any stream is non-TCP or when no streams are registered.
-func (ps *PeerStreams) prefersTCPFragPayload() bool {
-	if snap := ps.snapshot.Load(); snap != nil {
-		return snap.allTCP
-	}
-	// Compatibility slow path for a zero-value/struct-literal PeerStreams.
-	ps.mu.RLock()
-	defer ps.mu.RUnlock()
-	if len(ps.streams) == 0 {
-		return false
-	}
-	for key := range ps.streams {
-		if !strings.Contains(key, "/tcp/") {
-			return false
-		}
-	}
-	return true
 }
 
 // StrategyDispatcher implements 'best_path', 'redundant', and 'fallback' transport strategies
@@ -397,9 +366,8 @@ func (sd *StrategyDispatcher) SendToPeer(ctx context.Context, targetPeer peer.ID
 	if sd.node != nil {
 		cipher = sd.node.obfCipherForPeer(targetPeer)
 	}
-	// Use a transport-aware fragment-payload threshold: TCP/yamux streams have
-	// no UDP path-MTU constraint, so we use a much larger limit to avoid
-	// pointless fragmentation and the associated double-AEAD overhead.
+	// Reliable streams segment below the application. Respect an explicit
+	// fragment limit, otherwise avoid the extra fragment and AEAD layers.
 	var fragMaxPayload int
 	if sd.node != nil {
 		fragMaxPayload = sd.node.maxFragPayloadForPS(ps)
@@ -440,9 +408,8 @@ func (sd *StrategyDispatcher) SendToPeer(ctx context.Context, targetPeer peer.ID
 // SendToPeer and writePackedBatchLocked both route through it so the paths can
 // never drift apart.
 //
-// maxPayload controls the per-fragment inner-payload threshold. Pass 0 to use
-// the node-default (QUIC-safe). Callers with an active TCP PeerStreams should
-// use maxFragPayloadForPS(ps) to avoid needless fragmentation on byte-streams.
+// maxPayload controls the per-fragment inner-payload threshold. Callers with
+// active streams use maxFragPayloadForPS(ps); 0 selects the overlay default.
 func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, cipher obfuscate.ObfCipher, rawData []byte, maxPayload int) ([][]byte, int, bool, error) {
 	if sd.node == nil {
 		return [][]byte{rawData}, len(rawData), false, nil
@@ -454,25 +421,16 @@ func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, cipher obfu
 	data := rawData
 	innerPooled := false
 	if cipher != nil {
-		// Only take a pooled destination when the sealed logical frame will
-		// actually need fragmentation. Non-fragmented callers keep the existing
-		// ownership contract and allocation behaviour.
-		if len(rawData)+cipher.Overhead() > maxPayload {
-			innerBuf := acquireFrameBuf(len(rawData) + cipher.Overhead())
-			enc, err := sd.node.sealPeerFrameInto(targetPeer, cipher, rawData, innerBuf[:0])
-			if err != nil {
-				releaseFrameBuf(innerBuf)
-				return nil, 0, false, fmt.Errorf("seal frame for peer %s: %w", targetPeer.String(), err)
-			}
-			data = enc
-			innerPooled = true
-		} else {
-			enc, err := sd.node.sealPeerFrame(targetPeer, cipher, rawData)
-			if err != nil {
-				return nil, 0, false, fmt.Errorf("seal frame for peer %s: %w", targetPeer.String(), err)
-			}
-			data = enc
+		// Keep ciphertext owned until every synchronous write/retry returns.
+		// Reuse the destination for both single frames and fragmented frames.
+		innerBuf := acquireFrameBuf(len(rawData) + cipher.Overhead())
+		enc, err := sd.node.sealPeerFrameInto(targetPeer, cipher, rawData, innerBuf[:0])
+		if err != nil {
+			releaseFrameBuf(innerBuf)
+			return nil, 0, false, fmt.Errorf("seal frame for peer %s: %w", targetPeer.String(), err)
 		}
+		data = enc
+		innerPooled = true
 	} else {
 		log.Debug("Tx: SENDING FRAME TO %s IN PLAINTEXT — no per-peer cipher negotiated (encryption disabled or handshake incomplete)",
 			targetPeer.String())

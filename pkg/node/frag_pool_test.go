@@ -42,7 +42,7 @@ func TestFragmentFramePooledRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Unpack fragment %d: %v", i, err)
 		}
-		final, complete := rx.reassemble(remote, fragPayload, reasmChannelDirect)
+		final, complete := rx.reassemble(remote, fragPayload, reasmChannelDirect, 0)
 		if complete && final != nil {
 			reassembled = final
 		}

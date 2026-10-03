@@ -300,7 +300,7 @@ func (n *Node) handleStream(s network.Stream) {
 		// frame to obtain the real TAP payload + seqID. Non-fragment frames use
 		// the payload/seqID from the first Unpack directly.
 		if n.fragRX != nil && isFragPayload(payload) {
-			finalPacked, complete := n.fragRX.reassemble(remotePeer, payload, reasmChannelDirect)
+			finalPacked, complete := n.fragRX.reassemble(remotePeer, payload, reasmChannelDirect, obfuscate.ConnEpochFromSeq(seqID))
 			if !complete {
 				continue // more fragments pending
 			}
@@ -906,9 +906,9 @@ func (n *Node) handleRelayStream(s network.Stream) {
 		//      bare envelope. We now fall through and let UnpackRelayFrame try,
 		//      which keeps interop with peers running an older build.
 		envelope := data
-		if _, outer, uerr := obfuscate.Unpack(data); uerr == nil {
+		if outerSeq, outer, uerr := obfuscate.Unpack(data); uerr == nil {
 			if n.fragRX != nil && isFragPayload(outer) {
-				finalPacked, complete := n.fragRX.reassemble(remotePeer, outer, reasmChannelRelay)
+				finalPacked, complete := n.fragRX.reassemble(remotePeer, outer, reasmChannelRelay, obfuscate.ConnEpochFromSeq(outerSeq))
 				if !complete {
 					continue // more fragments pending
 				}

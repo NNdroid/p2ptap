@@ -21,8 +21,8 @@ func TestPeerStreamsSnapshotReadsDoNotWaitForTopologyMutex(t *testing.T) {
 		if len(streams) != 1 {
 			t.Errorf("GetAllStreams len = %d, want 1", len(streams))
 		}
-		if !ps.prefersTCPFragPayload() {
-			t.Error("prefersTCPFragPayload = false, want true for TCP-only snapshot")
+		if (&Node{}).maxFragPayloadForPS(ps) != maxFragPayloadStream {
+			t.Error("stream fragment policy did not use snapshot")
 		}
 		done <- struct{}{}
 	}()
@@ -41,16 +41,16 @@ func TestPeerStreamsSnapshotTracksMixedTransport(t *testing.T) {
 	ps.streams["/ip4/10.0.0.1/tcp/1234"] = nil
 	ps.rebuildLocked()
 	ps.mu.Unlock()
-	if !ps.prefersTCPFragPayload() {
-		t.Fatal("TCP-only snapshot should prefer large TCP fragment payload")
+	if (&Node{}).maxFragPayloadForPS(ps) != maxFragPayloadStream {
+		t.Fatal("TCP snapshot should use the reliable-stream limit")
 	}
 
 	ps.mu.Lock()
 	ps.streams["/ip4/10.0.0.1/udp/1234/quic-v1"] = nil
 	ps.rebuildLocked()
 	ps.mu.Unlock()
-	if ps.prefersTCPFragPayload() {
-		t.Fatal("mixed TCP/QUIC snapshot must use UDP-safe fragment payload")
+	if (&Node{}).maxFragPayloadForPS(ps) != maxFragPayloadStream {
+		t.Fatal("mixed TCP/QUIC snapshot should use the reliable-stream limit")
 	}
 }
 
@@ -64,7 +64,7 @@ func BenchmarkPeerStreamsSnapshotParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			_ = ps.GetAllStreams()
-			_ = ps.prefersTCPFragPayload()
+			_ = (&Node{}).maxFragPayloadForPS(ps)
 		}
 	})
 }

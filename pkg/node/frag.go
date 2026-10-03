@@ -12,14 +12,11 @@ import (
 
 // Tunnel-level fragmentation for TAP frames.
 //
-// A single TAP Ethernet frame (up to ~1514 bytes) obfuscated via
-// obfuscate.Pack can exceed the QUIC path MTU (~1250 bytes), forcing IP
-// fragmentation / loss of the underlying UDP datagram and triggering TCP
-// retransmits + congestion control on the carried L4 stream.  To avoid that,
-// frames larger than MaxFragPayload are split into independent fragments,
-// each fragment re-obfuscated and sent as its own WriteFrame.  The receiver
-// reassembles fragments (keyed by the original frame's sequence) before
-// deobfuscating the inner TAP frame.
+// Reliable libp2p streams perform their own transport segmentation, including
+// QUIC, WebRTC and WebTransport. Application fragmentation is retained for
+// explicitly configured limits and overlay paths without registered streams.
+// Each fragment is independently obfuscated; the receiver reassembles the
+// original sealed frame before decrypting and unpacking it.
 //
 // Layout of a fragment payload (carried inside the OUTER obfuscate.Pack):
 //
@@ -39,18 +36,18 @@ const (
 	// 65535-slot parts slice and an unbounded number of concurrent groups can
 	// be opened, exhausting memory before the 2s reaper reclaims them.
 	//
-	// A real TAP frame (≤ obfuscate.MaxFrameSize) split into ≥512-byte chunks
-	// yields at most ~128 parts, so 256 leaves generous margin. The per-group
-	// reassembled size is itself capped at one obfuscated frame (MaxFrameSize),
-	// and at most maxReasmGroups groups may be in flight at once.
-	maxFragTotal   = 256
+	// A full sealed frame split at the minimum configured 256-byte limit needs
+	// 257 parts. Include the AEAD tag in the byte cap, and allow that exact
+	// part count. At most maxReasmGroups groups may be in flight at once.
+	maxFragTotal   = (obfuscate.MaxSealedFrameSize + 255) / 256
 	maxReasmGroups = 1024
-	maxReasmBytes  = obfuscate.MaxFrameSize
+	maxReasmBytes  = obfuscate.MaxSealedFrameSize
 )
 
 type reasmKey struct {
 	peerID  peer.ID
 	origSeq uint32
+	epoch   uint64 // a reconnect/restart may reuse origSeq while old parts remain
 	// channel namespaces the two reassembly streams a single peer link can
 	// interleave: DIRECT data frames (reasmChannelDirect) and RELAY envelope
 	// frames (reasmChannelRelay). Both are fragmented with the SAME per-sender
@@ -106,8 +103,8 @@ func (f *fragReassembler) nextOrigSeq() uint32 {
 // header and passes them through.
 //
 // When maxPayload > 0 it is used as the fragment size limit (allows callers
-// to specify a larger limit for TCP/yamux streams). Otherwise the node-default
-// (derived from Config.MTU / QUIC path-MTU) is used.
+// to specify a larger limit for reliable streams). Otherwise the conservative
+// node-default is used.
 func (n *Node) fragmentFrame(packed []byte, frag *fragReassembler, txEpoch uint64, maxPayload int) ([][]byte, bool) {
 	if maxPayload <= 0 {
 		maxPayload = n.maxFragPayload()
@@ -159,8 +156,8 @@ func (n *Node) fragmentFrame(packed []byte, frag *fragReassembler, txEpoch uint6
 	return out, true
 }
 
-// releaseFragmentBuffers returns buffers allocated by the fragmented TX path.
-// Non-fragmented frames remain caller-owned and are never passed here.
+// releaseFragmentBuffers returns buffers owned by encryptAndFragment or the
+// fragmented TX path. Callers must check the returned pooled-ownership flag.
 func releaseFragmentBuffers(frags [][]byte) {
 	for _, f := range frags {
 		releaseFrameBuf(f)
@@ -186,7 +183,7 @@ func isFragPayload(payload []byte) bool {
 }
 
 // reassemble processes one fragment (the deobfuscated outer payload).
-// Keyed per remotePeer to prevent cross-peer origSeq collision.
+// Keyed by peer, epoch and channel to isolate origSeq reuse across sessions.
 //
 //   - If the payload is NOT a fragment envelope: returns (nil, true) so the
 //     caller treats payload as the finished TAP frame directly.
@@ -195,7 +192,7 @@ func isFragPayload(payload []byte) bool {
 //   - if the group is now complete -> returns (reassembledPacked, true),
 //     where reassembledPacked is the ORIGINAL obfuscated frame; the caller
 //     deobfuscates it (a second Unpack) to obtain the TAP frame.
-func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte, channel uint8) (finalPacked []byte, complete bool) {
+func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte, channel uint8, epoch uint64) (finalPacked []byte, complete bool) {
 	if !isFragPayload(payload) {
 		// Not a fragment: the caller already has the finished TAP frame.
 		return nil, true
@@ -205,24 +202,21 @@ func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte, channel
 	fragIndex := binary.BigEndian.Uint16(payload[6:8])
 	fragTotal := binary.BigEndian.Uint16(payload[8:10])
 	chunk := payload[fragHeaderLen:]
+	chunkLen := int(binary.BigEndian.Uint16(payload[10:12]))
+	// Validate before allocating or looking up a group. Invalid envelopes must
+	// not consume group slots or bypass bounds through the single-part path.
+	if fragTotal == 0 || fragTotal > maxFragTotal || fragIndex >= fragTotal ||
+		chunkLen != len(chunk) || len(chunk) == 0 || len(chunk) > maxReasmBytes {
+		return nil, false
+	}
+	if fragTotal == 1 {
+		return chunk, true
+	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if fragTotal <= 1 {
-		// Single-fragment envelope: the chunk after the header IS the
-		// original obfuscated frame.
-		return chunk, true
-	}
-	if fragTotal > maxFragTotal {
-		// Attacker-controlled part count; refuse to allocate a giant parts
-		// slice. Legitimate frames never exceed maxFragTotal.
-		log.Debug("Rx: dropping fragment group from %s origSeq=%d with excessive fragTotal=%d (>%d)",
-			remotePeer.String(), origSeq, fragTotal, maxFragTotal)
-		return nil, false
-	}
-
-	key := reasmKey{peerID: remotePeer, origSeq: origSeq, channel: channel}
+	key := reasmKey{peerID: remotePeer, origSeq: origSeq, channel: channel, epoch: epoch}
 	rb, ok := f.bufs[key]
 	if !ok || rb.deadline.Before(time.Now()) {
 		// Bound concurrent groups: if we are at capacity, evict the oldest
@@ -240,17 +234,20 @@ func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte, channel
 		}
 		f.bufs[key] = rb
 	}
+	if rb.total != int(fragTotal) {
+		return nil, false // preserve the existing valid group
+	}
 	if int(fragIndex) < rb.total && rb.parts[fragIndex] == nil {
-		chunkCopy := make([]byte, len(chunk))
-		copy(chunkCopy, chunk)
 		// Cap the reassembled frame at one obfuscated TAP frame. A group that
 		// would exceed this is corrupt or hostile; abort it rather than buffer
 		// unbounded bytes.
-		if rb.size+len(chunkCopy) > maxReasmBytes {
+		if rb.size+len(chunk) > maxReasmBytes {
 			log.Debug("Rx: fragment group from %s origSeq=%d exceeded max reassembly bytes; aborting", remotePeer.String(), origSeq)
 			delete(f.bufs, key)
 			return nil, false
 		}
+		chunkCopy := make([]byte, len(chunk))
+		copy(chunkCopy, chunk)
 		rb.size += len(chunkCopy)
 		rb.parts[fragIndex] = chunkCopy
 		rb.got++
@@ -320,7 +317,10 @@ func (n *Node) maxFragPayload() int {
 		}
 		return v
 	}
-	mtu := c.MTU
+	mtu := 1500
+	if c != nil {
+		mtu = c.MTU
+	}
 	if mtu <= 0 {
 		mtu = 1500
 	}
@@ -338,22 +338,18 @@ func (n *Node) maxFragPayload() int {
 	return p
 }
 
-// maxFragPayloadTCP is the fragment-payload threshold used when the underlying
-// transport is a reliable byte-stream (TCP + yamux). TCP has no datagram MTU
-// constraint, so we use a large value to avoid pointless fragmentation and the
-// associated double-AEAD overhead. Capped at 65400 bytes: well below the 1 MiB
-// maxFrameLen limit but large enough that virtually no standard Ethernet frame
-// (~1514 bytes) ever triggers fragmentation on a TCP link.
-const maxFragPayloadTCP = 65400
+// All registered libp2p data transports expose reliable byte streams. Their
+// underlying datagram MTU does not constrain WriteFrame payloads.
+const maxFragPayloadStream = 65400
 
-// maxFragPayloadForPS returns the per-peer fragment-payload threshold appropriate
-// for the active streams in ps. For purely TCP links the threshold is
-// maxFragPayloadTCP (no UDP path-MTU constraint). For QUIC, WebRTC, or mixed
-// transports the standard QUIC-safe limit is used. When ps is nil, falls back
-// to the standard limit.
+// Explicit configuration applies to every transport. Without registered
+// streams retain the conservative overlay fragment policy.
 func (n *Node) maxFragPayloadForPS(ps *PeerStreams) int {
-	if ps != nil && ps.prefersTCPFragPayload() {
-		return maxFragPayloadTCP
+	if c := n.config(); c != nil && c.Obfuscation.MaxFragSize > 0 {
+		return n.maxFragPayload()
+	}
+	if ps != nil && len(ps.GetAllStreams()) > 0 {
+		return maxFragPayloadStream
 	}
 	return n.maxFragPayload()
 }

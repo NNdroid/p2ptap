@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"p2ptap/pkg/config"
 	"p2ptap/pkg/obfuscate"
@@ -16,6 +17,82 @@ import (
 type coalescedTestStream struct {
 	strategyDeadlineStream
 	writes int
+}
+
+func TestStrategyBatchPooledCiphertextRecoversPartialWrite(t *testing.T) {
+	pid := peer.ID("timeout-peer")
+	for _, mode := range []string{"best_path", "fallback", "redundant"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.PSK = ""
+			packer := obfuscate.NewFramePackerFull(nil)
+			cipher, err := obfuscate.NewObfCipher(obfuscate.ObfAlgoChaCha20, make([]byte, 32))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var frames [][]byte
+			for i := 1; i <= 3; i++ {
+				payload := bytes.Repeat([]byte{byte(i)}, 1500)
+				payload[0], payload[5], payload[6] = 2, 1, 2
+				frame := make([]byte, packer.MaxPackedLen(len(payload)))
+				count, err := packer.Pack(packer.MakeSeqID(uint64(i), 222), payload, frame)
+				if err != nil {
+					t.Fatal(err)
+				}
+				frames = append(frames, frame[:count])
+			}
+			originals := make([][]byte, len(frames))
+			for i := range frames {
+				originals[i] = bytes.Clone(frames[i])
+			}
+			n := &Node{Config: cfg, Packer: packer, fragRX: newFragReassembler()}
+			n.SetConfig(cfg)
+			table := map[peer.ID]*PeerObf{pid: {negotiated: true, txCipher: cipher, rxCipher: cipher, localEpoch: 222, peerEpoch: 222}}
+			n.perPeerObf.Store(&table)
+			sd := NewStrategyDispatcher(nil, mode)
+			sd.SetNode(n)
+			old := &prefixFailBatchStream{prefix: frameLenSize + len(frames[0]) + cipher.Overhead()}
+			fresh := &coalescedTestStream{}
+			sd.RegisterStream(pid, "old", old)
+			sd.RegisterStream(pid, "fresh", fresh)
+			ps := sd.GetOrCreatePeerStreams(pid)
+			// Equal-priority mock streams have no transport address to sort by.
+			ps.snapshot.Store(&peerStreamsSnapshot{streams: []network.Stream{old, fresh}})
+			if err := sd.SendBatchToPeer(context.Background(), pid, frames); err != nil {
+				t.Fatal(err)
+			}
+			if old.resets != 1 {
+				t.Fatal("partial encrypted stream not reset")
+			}
+			for i := range frames {
+				if !bytes.Equal(frames[i], originals[i]) {
+					t.Fatal("retry source frame modified")
+				}
+			}
+			dev, pipe := tap.NewMemTAPPair("cipher-retry", "cipher-pipe")
+			defer dev.Close()
+			defer pipe.Close()
+			rx := &Node{Config: cfg, TAP: dev, Collector: noopCollector{}, Dispatcher: NewStrategyDispatcher(nil, mode), Packer: packer,
+				dedupPeers: make(map[peer.ID]*obfuscate.Deduplicator), MACTable: vswitch.NewMACTable(),
+				IPTracker: NewIPTrafficTracker(), tapWriteCh: make(chan tapWriteJob, 8)}
+			rx.SetConfig(cfg)
+			rx.perPeerObf.Store(&table)
+			rx.anchorDedupForPeer(pid, 0, 222)
+			for _, wire := range [][]byte{old.buf.Bytes(), fresh.buf.Bytes()} {
+				rx.handleStream(&epochInputStream{input: bytes.NewReader(wire)})
+			}
+			if len(rx.tapWriteCh) != 3 {
+				t.Fatalf("encrypted retry deliveries=%d, want 3", len(rx.tapWriteCh))
+			}
+			for i := 1; i <= 3; i++ {
+				job := <-rx.tapWriteCh
+				if len(job.data) != 1500 || job.data[1499] != byte(i) {
+					t.Fatal("pooled ciphertext corrupted during retry")
+				}
+				releaseFrameBuf(job.data)
+			}
+		})
+	}
 }
 
 func (s *coalescedTestStream) Write(p []byte) (int, error) {
@@ -185,7 +262,7 @@ func TestStrategyBatchKeepsEncryptedFragmentsDistinct(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sealed, ok := rx.reassemble(pid, chunk, reasmChannelDirect)
+		sealed, ok := rx.reassemble(pid, chunk, reasmChannelDirect, 0)
 		if !ok {
 			continue
 		}

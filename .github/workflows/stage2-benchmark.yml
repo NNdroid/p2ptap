@@ -99,6 +99,7 @@ jobs:
           # Apply the SAME logging, timing and workload to both code revisions.
           cp pkg/node/e2e_protocol_targets_test.go "$RUNNER_TEMP/p2ptap-baseline/pkg/node/"
           cp pkg/obfuscate/dedup_bench_test.go "$RUNNER_TEMP/p2ptap-baseline/pkg/obfuscate/"
+          cp pkg/node/stream_frag_policy_test.go pkg/node/bufpool_test.go "$RUNNER_TEMP/p2ptap-baseline/pkg/node/"
           go test -c ./pkg/node -o "$RUNNER_TEMP/candidate-node.test"
           go test -c ./pkg/obfuscate -o "$RUNNER_TEMP/candidate-obfuscate.test"
           (
@@ -158,6 +159,17 @@ jobs:
           go test ./pkg/node -run '^$' -bench '^BenchmarkWriteFrameBatch$' \
             -benchmem -benchtime=500ms -count=5 \
             | tee perf-results/framing-coalescing.txt
+
+      - name: Measure stream encryption and buffer ownership overhead
+        shell: bash
+        run: |
+          set -euo pipefail
+          for revision in baseline candidate; do
+            "$RUNNER_TEMP/${revision}-node.test" \
+              -test.run '^$' -test.bench '^(BenchmarkEncryptStreamFrame|BenchmarkBufferPoolRoundTrip)$' \
+              -test.benchmem -test.benchtime=500ms -test.count=5 \
+              | tee "perf-results/stream-buffers-${revision}.txt"
+          done
 
       - name: Upload transport results
         if: always()

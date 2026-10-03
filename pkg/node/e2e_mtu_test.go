@@ -11,8 +11,7 @@ import (
 )
 
 // TestE2ELargeFrameFragmentation proves that a TAP frame whose size EXCEEDS the
-// per-fragment payload (maxFragPayload ≈ 1118 bytes, derived from the tunnel MTU
-// minus obfuscation + fragment overhead) is correctly split, transmitted,
+// per-fragment payload (explicitly configured to 512 bytes) is correctly split, transmitted,
 // reassembled and delivered intact at the peer. This is the end-to-end guard for
 // the "large packets fail but small packets work" class of frame-delivery bug
 // (Risk #4): it exercises
@@ -32,6 +31,8 @@ func TestE2ELargeFrameFragmentation(t *testing.T) {
 
 	cfgA := createTestNodeConfig("10.0.0.1/24", "fd00::1/64", "best_path")
 	cfgB := createTestNodeConfig("10.0.0.2/24", "fd00::2/64", "best_path")
+	cfgA.Obfuscation.MaxFragSize = 512
+	cfgB.Obfuscation.MaxFragSize = 512
 	cfgA.TapMAC = "02:00:00:00:00:01"
 	cfgB.TapMAC = "02:00:00:00:00:02"
 
@@ -85,7 +86,7 @@ func TestE2ELargeFrameFragmentation(t *testing.T) {
 
 	readerB := newFrameReader(tapB_pipe)
 
-	// Small + large sizes. The large ones exceed maxFragPayload (~1118) and thus
+	// Small + large sizes. The large ones exceed the explicit 512-byte limit and thus
 	// MUST traverse the fragment/reassemble path; a bug there drops or corrupts
 	// them while the small one still passes (the classic "大包不通小包通").
 	cases := []struct {

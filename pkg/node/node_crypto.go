@@ -79,7 +79,7 @@ func (n *Node) sealPeerFrame(p peer.ID, cipher obfuscate.ObfCipher, data []byte)
 	return n.sealPeerFrameInto(p, cipher, data, nil)
 }
 
-// sealPeerFrameInto is the pooled-destination form used by fragmentation. The
+// sealPeerFrameInto is the pooled-destination form used by data dispatch. The
 // re-key frame counter remains centralized here so allocation strategy never
 // changes nonce/accounting semantics.
 func (n *Node) sealPeerFrameInto(p peer.ID, cipher obfuscate.ObfCipher, data, dst []byte) ([]byte, error) {
