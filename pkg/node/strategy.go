@@ -437,7 +437,7 @@ func (sd *StrategyDispatcher) SendToPeer(ctx context.Context, targetPeer peer.ID
 // or on a hot path. Returns the frames and the original TAP Ethernet-frame
 // length used for WebUI throughput accounting. cipher may be nil (plaintext
 // obfuscation only).
-// SendToPeer and writeFrameLocked both route through it so the two paths can
+// SendToPeer and writePackedBatchLocked both route through it so the paths can
 // never drift apart.
 //
 // maxPayload controls the per-fragment inner-payload threshold. Pass 0 to use
@@ -800,16 +800,13 @@ func (sd *StrategyDispatcher) relayFallbackIfPossible(targetPeer peer.ID, rawDat
 // SendBatchToPeer sends multiple packed frames to the same target peer.  When
 // the peer has a live direct stream it takes ONE writeMu lock and resolves the
 // per-peer ObfCipher ONCE for the whole batch, then encrypts + fragments +
-// writes each frame back-to-back under that single lock (writeFrameLocked).
-// This removes the per-frame obfCipherForPeer lookup and the per-frame
-// lock/unlock churn that the previous per-frame SendToPeer loop paid, capturing
-// most of the batching benefit WITHOUT touching the wire protocol, the RX path,
-// or introducing any Nagle-style latency (frames are still written the moment
-// they are dequeued).
+// writes already queued frames in bounded transport batches under that lock.
+// Each independent wire frame is retained, but consecutive prefixes and bodies
+// share a transport write. There is no timer or delay to wait for more frames.
 //
 // Each frame remains an independent length-prefixed, per-peer-encrypted tunnel
 // frame, so the receiver needs no changes.  On any direct write failure the
-// shared lock is released and the REMAINING frames (including the failed one)
+// shared lock is released and the REMAINING frames (including the failed batch)
 // are routed through the robust per-frame SendToPeer path, which performs
 // dead-stream removal, stream re-open and overlay-relay fallback — so a stalled
 // direct link never silently drops a frame.  Relay-only peers (no direct
@@ -846,11 +843,14 @@ func (sd *StrategyDispatcher) SendBatchToPeer(ctx context.Context, targetPeer pe
 		cipher = sd.node.obfCipherForPeer(targetPeer)
 	}
 
-	for i, data := range packedFrames {
-		if err := sd.writeFrameLocked(targetPeer, ps, cipher, data); err != nil {
+	const batchFrames = 32
+	for i := 0; i < len(packedFrames); i += batchFrames {
+		end := min(i+batchFrames, len(packedFrames))
+		if err := sd.writePackedBatchLocked(targetPeer, ps, cipher, packedFrames[i:end]); err != nil {
 			// A direct write failed (stalled/dead stream).  Release the shared
-			// lock and route the REMAINING frames (this one included) through the
-			// robust per-frame path.  Frames already written stay sent.
+			// lock and route the remaining batch through the per-frame path.
+			// A failed write can have delivered a prefix of the batch: retries
+			// retain each original SeqID so receive dedup suppresses that prefix.
 			log.Debug("Tx batch frame %d/%d to peer %s failed under shared lock: %v; routing remainder via SendToPeer",
 				i+1, len(packedFrames), targetPeer.String(), err)
 			// SendToPeer eventually acquires ps.writeMu itself.  Do not defer this
@@ -867,45 +867,40 @@ func (sd *StrategyDispatcher) SendBatchToPeer(ctx context.Context, targetPeer pe
 	return nil
 }
 
-// writeFrameLocked encrypts and writes a single packed frame to targetPeer's
-// direct streams while the caller holds ps.writeMu.  cipher is the per-peer
-// ObfCipher resolved ONCE by the caller (once per SendToPeer call, or once per
-// whole SendBatchToPeer batch), eliminating the per-frame obfCipherForPeer
-// lookup.  The wire format is unchanged: each frame is an independent
-// length-prefixed, per-peer-encrypted tunnel frame.
-//
-// On a write error it returns the error WITHOUT performing dead-stream removal,
-// stream re-open or relay fallback — the caller decides how to recover (e.g.
-// SendBatchToPeer routes the remainder via SendToPeer).
-// writeFrameLocked encrypts + fragments + writes a single packed frame to
-// targetPeer's direct streams while the caller holds ps.writeMu. cipher is the
-// per-peer ObfCipher resolved ONCE by the caller (once per SendToPeer call, or
-// once per whole SendBatchToPeer batch), eliminating the per-frame
-// obfCipherForPeer lookup. The wire format is unchanged: each frame is an
-// independent length-prefixed, per-peer-encrypted tunnel frame. The shared
-// encryptAndFragment helper is reused so SendToPeer and the batch path cannot
-// drift apart.
-//
-// On a write error it returns the error WITHOUT performing dead-stream removal,
-// stream re-open or relay fallback — the caller decides how to recover (e.g.
-// SendBatchToPeer routes the remainder via SendToPeer).
-func (sd *StrategyDispatcher) writeFrameLocked(targetPeer peer.ID, ps *PeerStreams, cipher obfuscate.ObfCipher, packedData []byte) error {
+// writePackedBatchLocked retains encrypted fragments until the bounded batch
+// write finishes. Pooled fragment ownership remains separate from the caller's
+// packed frames, which may be retried after a partial transport write.
+// Callers hold ps.writeMu and pass at most 32 logical frames.
+func (sd *StrategyDispatcher) writePackedBatchLocked(targetPeer peer.ID, ps *PeerStreams, cipher obfuscate.ObfCipher, packedFrames [][]byte) error {
 	streams := ps.GetAllStreams()
 	if len(streams) == 0 {
-		return fmt.Errorf("no direct streams for peer %s", targetPeer.String())
+		return fmt.Errorf("no direct streams for peer %s", targetPeer)
 	}
 	var fragMaxPayload int
 	if sd.node != nil {
 		fragMaxPayload = sd.node.maxFragPayloadForPS(ps)
 	}
-	frags, origLen, releaseFrags, err := sd.encryptAndFragment(targetPeer, cipher, packedData, fragMaxPayload)
-	if err != nil {
-		return err
+	var owned [32][][]byte
+	defer func() {
+		for _, frags := range owned {
+			releaseFragmentBuffers(frags)
+		}
+	}()
+	var scratch [32][]byte
+	wireFrames := scratch[:0]
+	logicalBytes := 0
+	for i, data := range packedFrames {
+		frags, origLen, pooled, err := sd.encryptAndFragment(targetPeer, cipher, data, fragMaxPayload)
+		if err != nil {
+			return err
+		}
+		if pooled {
+			owned[i] = frags
+		}
+		wireFrames = append(wireFrames, frags...)
+		logicalBytes += origLen
 	}
-	if releaseFrags {
-		defer releaseFragmentBuffers(frags)
-	}
-	return sd.writeFragsToStreams(ps, targetPeer, streams, origLen, frags, true)
+	return sd.writeFragsToStreams(ps, targetPeer, streams, logicalBytes, wireFrames, true)
 }
 
 // writeFragsToStreams writes the (already encrypted + fragmented) frags to
@@ -961,12 +956,7 @@ func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer pe
 				ps.writeDeadlineRenew[s] = ps.nextWriteDeadlineRenew
 			}
 		}
-		for _, f := range frags {
-			if err := WriteFrame(s, f); err != nil {
-				return err
-			}
-		}
-		return nil
+		return writeFrames(s, frags)
 	}
 	record := func(recordPayload bool) {
 		if sd.node != nil {

@@ -151,6 +151,14 @@ jobs:
           set -euo pipefail
           python3 scripts/compare_throughput.py perf-results | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Measure independent-frame coalescing overhead
+        shell: bash
+        run: |
+          set -o pipefail
+          go test ./pkg/node -run '^$' -bench '^BenchmarkWriteFrameBatch$' \
+            -benchmem -benchtime=500ms -count=5 \
+            | tee perf-results/framing-coalescing.txt
+
       - name: Upload transport results
         if: always()
         uses: actions/upload-artifact@v4

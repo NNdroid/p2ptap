@@ -18,10 +18,8 @@ const (
 // WriteFrame writes a length-prefixed frame to the stream.
 // Format: [4-byte big-endian length][payload]
 //
-// The 4-byte length prefix is written from a stack-allocated buffer (no heap
-// allocation), followed by a single streaming write of the payload. Keeping the
-// header off the heap matters on the hot path; the transport coalesces the two
-// writes into as few segments as its own buffering permits.
+// Prefix and payload share a pooled buffer and a write so transports do not
+// emit a separate record just for the four-byte prefix.
 func WriteFrame(w io.Writer, data []byte) error {
 	if len(data) == 0 {
 		return nil
@@ -41,6 +39,57 @@ func WriteFrame(w io.Writer, data []byte) error {
 		return fmt.Errorf("write frame: %w", err)
 	}
 	return nil
+}
+
+// writeFrames coalesces an already available burst of independently framed
+// messages. Each length prefix and payload is unchanged; no receiver support
+// or timer is needed. Bound the scratch buffer and each transport write, and
+// fall back to WriteFrame for a single oversized message.
+func writeFrames(w io.Writer, frames [][]byte) error {
+	if len(frames) == 1 {
+		return WriteFrame(w, frames[0])
+	}
+	const maxWriteBatch = 64 * 1024
+	buf := AcquireSealedBuf(maxWriteBatch)
+	defer ReleaseSealedBuf(buf)
+	used := 0
+	flush := func() error {
+		if used == 0 {
+			return nil
+		}
+		if err := writeAll(w, buf[:used]); err != nil {
+			return fmt.Errorf("write frames: %w", err)
+		}
+		used = 0
+		return nil
+	}
+	for _, data := range frames {
+		if len(data) == 0 {
+			continue
+		}
+		if len(data) > maxFrameLen {
+			return fmt.Errorf("frame too large: %d > %d", len(data), maxFrameLen)
+		}
+		total := frameLenSize + len(data)
+		if total > maxWriteBatch {
+			if err := flush(); err != nil {
+				return err
+			}
+			if err := WriteFrame(w, data); err != nil {
+				return err
+			}
+			continue
+		}
+		if used+total > maxWriteBatch {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+		binary.BigEndian.PutUint32(buf[used:used+frameLenSize], uint32(len(data)))
+		copy(buf[used+frameLenSize:used+total], data)
+		used += total
+	}
+	return flush()
 }
 
 func writeAll(w io.Writer, data []byte) error {
