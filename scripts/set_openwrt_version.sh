@@ -21,11 +21,16 @@ for ROOT in "$@"; do
         [ -f "$ROOT/$PACKAGE/Makefile" ] || { echo "Missing $ROOT/$PACKAGE/Makefile" >&2; exit 1; }
     done
 done
+# BSD sed requires a separate empty backup suffix; GNU sed does not.
+SED_INPLACE=(-i)
+if [[ "$(uname -s)" == Darwin ]]; then
+    SED_INPLACE=(-i '')
+fi
 for ROOT in "$@"; do
     for PACKAGE in p2ptap luci-app-p2ptap; do
-        sed -i -e "s/^PKG_VERSION:=.*/PKG_VERSION:=${VERSION_NUM}/" -e "s/^PKG_RELEASE:=.*/PKG_RELEASE:=${RELEASE_COUNT}/" "$ROOT/$PACKAGE/Makefile"
+        sed "${SED_INPLACE[@]}" -e "s/^PKG_VERSION:=.*/PKG_VERSION:=${VERSION_NUM}/" -e "s/^PKG_RELEASE:=.*/PKG_RELEASE:=${RELEASE_COUNT}/" "$ROOT/$PACKAGE/Makefile"
     done
-    sed -i -e "s/^P2PTAP_VERSION:=.*/P2PTAP_VERSION:=${RELEASE_VERSION}/" \
+    sed "${SED_INPLACE[@]}" -e "s/^P2PTAP_VERSION:=.*/P2PTAP_VERSION:=${RELEASE_VERSION}/" \
         -e "s/^P2PTAP_GIT_COMMIT:=.*/P2PTAP_GIT_COMMIT:=${COMMIT}/" "$ROOT/p2ptap/Makefile"
 done
 printf '%s\n' "$VERSION_NUM"
