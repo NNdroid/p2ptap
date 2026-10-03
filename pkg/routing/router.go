@@ -3,10 +3,10 @@ package routing
 import (
 	"container/heap"
 	"fmt"
-	"log"
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -101,9 +101,12 @@ const (
 
 // edgeCost maps a link-state edge to its routing cost: observed latency plus a
 // class-dependent penalty plus a per-hop penalty. Connectivity is preserved
-// (every edge has a finite cost); throughput is maximised (high-quality,
-// few-hop paths cost less).
+// (every normal edge has a finite cost). This latency heuristic does not
+// establish a throughput optimum.
 func edgeCost(e LinkEdge) int64 {
+	if e.Weight > math.MaxInt64-CircuitPenaltyMS-HopPenaltyMS {
+		return math.MaxInt64
+	}
 	c := e.Weight
 	if e.Class == LinkCircuit {
 		c += CircuitPenaltyMS
@@ -119,6 +122,7 @@ type Router struct {
 	graph       map[peer.ID]map[peer.ID]LinkEdge // nodeA -> nodeB -> {RTT ms, class}
 	seqMap      map[peer.ID]uint64               // origin -> max seq seen
 	lastUpdated map[peer.ID]time.Time
+	revision    atomic.Uint64
 }
 
 func NewRouter(localPeerID peer.ID) *Router {
@@ -236,7 +240,11 @@ func (r *Router) UpdateDirectLink(target peer.ID, rttMs int64, class LinkClass) 
 		rttMs = 1
 	}
 
-	r.graph[r.localPeerID][target] = LinkEdge{Weight: rttMs, Class: class}
+	next := LinkEdge{Weight: rttMs, Class: class}
+	if r.graph[r.localPeerID][target] != next {
+		r.revision.Add(1)
+	}
+	r.graph[r.localPeerID][target] = next
 	r.lastUpdated[r.localPeerID] = time.Now()
 
 	// Reciprocal edge guarantee: in a P2P overlay, establishing a direct transport
@@ -248,33 +256,26 @@ func (r *Router) UpdateDirectLink(target peer.ID, rttMs int64, class LinkClass) 
 		r.graph[target] = make(map[peer.ID]LinkEdge)
 	}
 	if _, exists := r.graph[target][r.localPeerID]; !exists {
+		r.revision.Add(1)
 		r.graph[target][r.localPeerID] = LinkEdge{Weight: rttMs, Class: class}
 		r.lastUpdated[target] = time.Now()
 	}
 }
 
-// UpdateLinkRTT refreshes only the observed latency of an existing edge,
-// preserving its transport class. Used by RTT probes / stats loops that
-// re-measure a peer without knowing (and without wanting to overwrite) whether
-// the underlying libp2p link is direct or circuit. If the edge does not yet
-// exist it is created as a direct link (legacy behaviour).
+// UpdateLinkRTT changes only an existing local adjacency. A late probe must
+// not resurrect a disconnected link or change a circuit into a direct link.
 func (r *Router) UpdateLinkRTT(target peer.ID, rttMs int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	if rttMs <= 0 {
-		rttMs = 1
+	if edge, ok := r.graph[r.localPeerID][target]; ok {
+		rttMs = max(rttMs, 1)
+		if edge.Weight != rttMs {
+			edge.Weight = rttMs
+			r.graph[r.localPeerID][target] = edge
+			r.revision.Add(1)
+		}
+		r.lastUpdated[r.localPeerID] = time.Now()
 	}
-	if r.graph[r.localPeerID] == nil {
-		r.graph[r.localPeerID] = make(map[peer.ID]LinkEdge)
-	}
-	if e, ok := r.graph[r.localPeerID][target]; ok {
-		e.Weight = rttMs
-		r.graph[r.localPeerID][target] = e
-	} else {
-		r.graph[r.localPeerID][target] = LinkEdge{Weight: rttMs, Class: LinkDirect}
-	}
-	r.lastUpdated[r.localPeerID] = time.Now()
 }
 
 // SetEdge records an undirected latency edge between any two mesh nodes. Unlike
@@ -297,25 +298,28 @@ func (r *Router) SetEdge(a, b peer.ID, rttMs int64, class LinkClass) {
 	if r.graph[b] == nil {
 		r.graph[b] = make(map[peer.ID]LinkEdge)
 	}
+	if r.graph[a][b] != (LinkEdge{Weight: rttMs, Class: class}) || r.graph[b][a] != (LinkEdge{Weight: rttMs, Class: class}) {
+		r.revision.Add(1)
+	}
 	r.graph[a][b] = LinkEdge{Weight: rttMs, Class: class}
 	r.graph[b][a] = LinkEdge{Weight: rttMs, Class: class}
 	r.lastUpdated[a] = time.Now()
 	r.lastUpdated[b] = time.Now()
 }
 
-// RemoveDirectLink removes a direct link when a peer disconnects
+// RemoveDirectLink withdraws local adjacency, retaining independent remote
+// LSA evidence and sequence numbers so relay failover stays available.
 func (r *Router) RemoveDirectLink(target peer.ID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	if r.graph[r.localPeerID] != nil {
+	if _, ok := r.graph[r.localPeerID][target]; ok {
 		delete(r.graph[r.localPeerID], target)
+		r.revision.Add(1)
 	}
-	delete(r.graph, target)
-	delete(r.lastUpdated, target)
-	delete(r.seqMap, target)
-	for u := range r.graph {
-		delete(r.graph[u], target)
+	// Withdraw only the reciprocal edge of this physical connection.
+	if _, ok := r.graph[target][r.localPeerID]; ok {
+		delete(r.graph[target], r.localPeerID)
+		r.revision.Add(1)
 	}
 }
 
@@ -336,6 +340,9 @@ func (r *Router) CleanStaleNodes(maxAge time.Duration) {
 		}
 	}
 
+	if len(stalePeers) > 0 {
+		r.revision.Add(1)
+	}
 	for _, pID := range stalePeers {
 		delete(r.graph, pID)
 		delete(r.lastUpdated, pID)
@@ -382,6 +389,7 @@ func (r *Router) ProcessLSA(lsa *LinkStatePayload) bool {
 				continue
 			}
 			if now.Sub(t) > lsaStaleAge {
+				r.revision.Add(1)
 				delete(r.graph, pid)
 				delete(r.seqMap, pid)
 				delete(r.lastUpdated, pid)
@@ -420,6 +428,9 @@ func (r *Router) ProcessLSA(lsa *LinkStatePayload) bool {
 			}
 			nbrMap[nbrID] = LinkEdge{Weight: rtt, Class: class}
 		}
+	}
+	if !sameEdges(r.graph[originID], nbrMap) {
+		r.revision.Add(1)
 	}
 	r.graph[originID] = nbrMap
 	return true
@@ -486,8 +497,13 @@ type priorityItem struct {
 
 type priorityQueue []*priorityItem
 
-func (pq priorityQueue) Len() int           { return len(pq) }
-func (pq priorityQueue) Less(i, j int) bool { return pq[i].dist < pq[j].dist }
+func (pq priorityQueue) Len() int { return len(pq) }
+func (pq priorityQueue) Less(i, j int) bool {
+	if pq[i].dist != pq[j].dist {
+		return pq[i].dist < pq[j].dist
+	}
+	return pq[i].node < pq[j].node
+}
 func (pq priorityQueue) Swap(i, j int) {
 	pq[i], pq[j] = pq[j], pq[i]
 	pq[i].index = i
@@ -509,8 +525,8 @@ func (pq *priorityQueue) Pop() interface{} {
 	return item
 }
 
-// ComputeRoutes runs Dijkstra's algorithm to calculate shortest latency paths
-// to all reachable nodes. Locking wrapper around computeRoutesLocked.
+// ComputeRoutes calculates minimum-cost paths within the relay hop budget.
+// Each (node, hop count) retains its own label so feasible prefixes survive.
 func (r *Router) ComputeRoutes() map[peer.ID]RouteInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -524,129 +540,19 @@ func (r *Router) ComputeRoutes() map[peer.ID]RouteInfo {
 // to hang GetRouteInfoDTOs whenever an LSA landed mid-call, wedging all route
 // writers and the WebUI stats path).
 func (r *Router) computeRoutesLocked() map[peer.ID]RouteInfo {
-	dist := make(map[peer.ID]int64)    // penalised cost — drives path selection
-	rttDist := make(map[peer.ID]int64) // observed RTT sum — drives display only
-	prev := make(map[peer.ID]peer.ID)
+	return r.routesWithinBudgetLocked(MaxRelayTTL, nil)
+}
 
-	// Gather all unique vertices (source & destination nodes) in graph
-	vertices := make(map[peer.ID]bool)
-	for u, nbrs := range r.graph {
-		vertices[u] = true
-		for v := range nbrs {
-			vertices[v] = true
+func sameEdges(a, b map[peer.ID]LinkEdge) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for pid, edge := range a {
+		if other, ok := b[pid]; !ok || edge != other {
+			return false
 		}
 	}
-
-	for v := range vertices {
-		dist[v] = math.MaxInt64
-	}
-	dist[r.localPeerID] = 0
-	rttDist[r.localPeerID] = 0
-
-	pq := &priorityQueue{}
-	heap.Init(pq)
-	heap.Push(pq, &priorityItem{
-		node: r.localPeerID,
-		dist: 0,
-	})
-
-	visited := make(map[peer.ID]bool)
-
-	for pq.Len() > 0 {
-		curr := heap.Pop(pq).(*priorityItem)
-		u := curr.node
-
-		if visited[u] {
-			continue
-		}
-		visited[u] = true
-
-		for v, edge := range r.graph[u] {
-			// Never relax a self-edge (u == v). Even though 0+w < 0 is false
-			// so dist[u] is never improved through it, skipping keeps the graph
-			// clean and avoids any chance of the local node becoming its own
-			// relay hop in reconstructed paths.
-			if v == u {
-				continue
-			}
-			if visited[v] {
-				continue
-			}
-			// Selection cost uses the class-aware edgeCost (circuit penalised,
-			// per-hop penalty). Display RTT accumulates the raw observed weight.
-			newDist := dist[u] + edgeCost(edge)
-			newRTT := rttDist[u] + edge.Weight
-			if newDist < dist[v] {
-				dist[v] = newDist
-				rttDist[v] = newRTT
-				prev[v] = u
-
-				heap.Push(pq, &priorityItem{
-					node: v,
-					dist: newDist,
-				})
-			}
-		}
-	}
-
-	routes := make(map[peer.ID]RouteInfo)
-	directLinks := r.graph[r.localPeerID]
-
-	// Reconstruct paths from prev map
-	for dest, d := range dist {
-		if dest == r.localPeerID || d == math.MaxInt64 {
-			continue
-		}
-
-		// Backtrack path from dest -> localPeerID
-		path := []peer.ID{dest}
-		curr := dest
-		for curr != r.localPeerID {
-			p, ok := prev[curr]
-			if !ok {
-				break
-			}
-			path = append(path, p)
-			curr = p
-		}
-
-		// Reverse path so it goes localPeerID -> hop1 -> ... -> dest
-		for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
-			path[i], path[j] = path[j], path[i]
-		}
-
-		nextHop := dest
-		if len(path) > 1 {
-			nextHop = path[1]
-		}
-
-		// A route whose first hop is the local node itself is meaningless: you
-		// cannot relay a frame through yourself. This can only arise from a
-		// graph inconsistency (e.g. a stray self-edge that slipped past the
-		// ingest guards). Drop the route so the destination falls back to
-		// "Overlay Relay (Multi-Hop)" / unreachable instead of being silently
-		// looped back to the local node.
-		if nextHop == r.localPeerID {
-			log.Printf("ComputeRoutes: dropping inconsistent route to %s whose next hop is the local node itself", dest.String())
-			continue
-		}
-
-		directRTT := int64(0)
-		if e, ok := directLinks[dest]; ok {
-			directRTT = e.Weight
-		}
-
-		routes[dest] = RouteInfo{
-			Dest:        dest,
-			NextHop:     nextHop,
-			Path:        path,
-			TotalRTTMs:  rttDist[dest],
-			DirectRTTMs: directRTT,
-			IsDirect:    nextHop == dest,
-		}
-	}
-
-	return routes
+	return true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -785,10 +691,18 @@ func (r *Router) findSubPath(src, dst, exclude peer.ID) ([]peer.ID, int64) {
 // GetRouteInfoDTOs converts computed routes into observer DTOs for dashboard rendering,
 // evaluating all direct and multi-hop candidate paths across the mesh topology.
 func (r *Router) GetRouteInfoDTOs(lookup func(pID peer.ID) (nodeName string, tapIP string, tapIPv6 string)) []observer.RouteInfoDTO {
+	return r.GetRouteInfoDTOsForRoutes(nil, lookup)
+}
+
+// GetRouteInfoDTOsForRoutes annotates the actual published node decisions,
+// including hysteresis, rather than showing a different theoretical winner.
+func (r *Router) GetRouteInfoDTOsForRoutes(routes map[peer.ID]RouteInfo, lookup func(peer.ID) (string, string, string)) []observer.RouteInfoDTO {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	routes := r.computeRoutesLocked()
+	if routes == nil {
+		routes = r.computeRoutesLocked()
+	}
 	dtos := make([]observer.RouteInfoDTO, 0, len(routes))
 
 	getName := func(pID peer.ID) string {

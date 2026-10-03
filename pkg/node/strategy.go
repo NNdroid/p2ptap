@@ -3,7 +3,6 @@ package node
 import (
 	"context"
 	"fmt"
-	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -43,15 +42,25 @@ type PeerStreams struct {
 	// atomic load and never contend with stream registration/removal.
 	snapshot atomic.Pointer[peerStreamsSnapshot]
 
-	// nextWriteDeadlineRenew tracks when the write deadline must be refreshed.
-	// All writes to this field happen under writeMu, so no atomic is needed.
-	// Zero value means "renew immediately".
+	// Deadlines belong to streams, not peers. Protected by writeMu; topology
+	// changes are reconciled from the immutable snapshot before the next write.
+	writeDeadlineRenew    map[network.Stream]time.Time
+	writeDeadlineSnapshot *peerStreamsSnapshot
+	// Most batches stay on one stream. Cache that stream's map entry so the
+	// steady path avoids interface-key hashing without sharing its deadline.
+	writeDeadlineStream    network.Stream
 	nextWriteDeadlineRenew time.Time
+	// Adaptive transport selection is confined to multi-stream writers.
+	writeQuality        map[network.Stream]streamWriteQuality
+	preferredStream     network.Stream
+	streamSelectedAt    time.Time
+	nextStreamSelection time.Time
+	streamProbeCursor   int
+	selectionSnapshot   *peerStreamsSnapshot
 }
 
 type peerStreamsSnapshot struct {
 	streams []network.Stream
-	allTCP  bool
 }
 
 func NewPeerStreams(pID peer.ID) *PeerStreams {
@@ -65,21 +74,23 @@ func NewPeerStreams(pID peer.ID) *PeerStreams {
 
 // rebuildLocked re-sorts the streams snapshot. Caller MUST hold ps.mu (write).
 func (ps *PeerStreams) rebuildLocked() {
-	next := make([]network.Stream, 0, len(ps.streams))
-	allTCP := len(ps.streams) > 0
-	for transportName, s := range ps.streams {
-		next = append(next, s)
-		if !strings.Contains(transportName, "/tcp/") {
-			allTCP = false
-		}
+	names := make([]string, 0, len(ps.streams))
+	for name := range ps.streams {
+		names = append(names, name)
 	}
-	if len(next) > 1 {
-		sort.SliceStable(next, func(i, j int) bool {
-			return scoreStreamTransport(next[i]) < scoreStreamTransport(next[j])
-		})
+	sort.Slice(names, func(i, j int) bool {
+		a, b := scoreStreamTransport(ps.streams[names[i]]), scoreStreamTransport(ps.streams[names[j]])
+		if a != b {
+			return a < b
+		}
+		return names[i] < names[j]
+	})
+	next := make([]network.Stream, 0, len(names))
+	for _, name := range names {
+		next = append(next, ps.streams[name])
 	}
 	ps.sorted = next
-	ps.snapshot.Store(&peerStreamsSnapshot{streams: next, allTCP: allTCP})
+	ps.snapshot.Store(&peerStreamsSnapshot{streams: next})
 }
 
 func (ps *PeerStreams) AddStream(transportName string, s network.Stream) {
@@ -136,32 +147,6 @@ func scoreStreamTransport(s network.Stream) int {
 		return 10 // Private LAN direct: high priority
 	}
 	return 20 // Public WAN direct: medium priority
-}
-
-// prefersTCPFragPayload reports whether ALL active streams for this peer are
-// carried over TCP (identified by "/tcp" in the multiaddr key). When true, the
-// caller may use a much larger fragment payload threshold because TCP/yamux is a
-// reliable byte-stream with no UDP path-MTU constraint — unlike QUIC/WebRTC
-// where every UDP datagram must fit under the ~1200-byte IP MTU. This check
-// avoids needless fragmentation on the common TCP-direct-connect path, cutting
-// double-AEAD overhead by ~50% for bulk transfers.
-// Returns false when any stream is non-TCP or when no streams are registered.
-func (ps *PeerStreams) prefersTCPFragPayload() bool {
-	if snap := ps.snapshot.Load(); snap != nil {
-		return snap.allTCP
-	}
-	// Compatibility slow path for a zero-value/struct-literal PeerStreams.
-	ps.mu.RLock()
-	defer ps.mu.RUnlock()
-	if len(ps.streams) == 0 {
-		return false
-	}
-	for key := range ps.streams {
-		if !strings.Contains(key, "/tcp/") {
-			return false
-		}
-	}
-	return true
 }
 
 // StrategyDispatcher implements 'best_path', 'redundant', and 'fallback' transport strategies
@@ -256,6 +241,9 @@ func (sd *StrategyDispatcher) openStream(parentCtx context.Context, targetPeer p
 			return ps, streams[0], nil
 		}
 	}
+	if sd.h == nil {
+		return nil, nil, fmt.Errorf("open stream to peer %s: host unavailable", targetPeer)
+	}
 
 	log.Debug("No active streams to peer %s, opening new stream...", targetPeer.String())
 
@@ -346,7 +334,9 @@ func (sd *StrategyDispatcher) SendToPeer(ctx context.Context, targetPeer peer.ID
 		// them to itself-as-hopper, and silently drop the ICMP payload (exactly
 		// the "ping peer fails but link ping-pong OK" symptom). This guard keeps
 		// directly-connected peers on the direct path unconditionally.
-		if !sd.node.isDirectlyConnected(targetPeer) {
+		// A live circuit also reaches the final peer; keep its data encrypted
+		// for that endpoint rather than diverting it into a speculative hop.
+		if !sd.node.hasPeerConnection(targetPeer) {
 			if hop := sd.node.relayHopForTarget(targetPeer); hop != "" {
 				// A boot hop means the target is only reachable THROUGH a boot
 				// (same boot, or another boot in the same PSK network across the
@@ -389,9 +379,8 @@ func (sd *StrategyDispatcher) SendToPeer(ctx context.Context, targetPeer peer.ID
 	if sd.node != nil {
 		cipher = sd.node.obfCipherForPeer(targetPeer)
 	}
-	// Use a transport-aware fragment-payload threshold: TCP/yamux streams have
-	// no UDP path-MTU constraint, so we use a much larger limit to avoid
-	// pointless fragmentation and the associated double-AEAD overhead.
+	// Reliable streams segment below the application. Respect an explicit
+	// fragment limit, otherwise avoid the extra fragment and AEAD layers.
 	var fragMaxPayload int
 	if sd.node != nil {
 		fragMaxPayload = sd.node.maxFragPayloadForPS(ps)
@@ -429,12 +418,11 @@ func (sd *StrategyDispatcher) SendToPeer(ctx context.Context, targetPeer peer.ID
 // or on a hot path. Returns the frames and the original TAP Ethernet-frame
 // length used for WebUI throughput accounting. cipher may be nil (plaintext
 // obfuscation only).
-// SendToPeer and writeFrameLocked both route through it so the two paths can
+// SendToPeer and writePackedBatchLocked both route through it so the paths can
 // never drift apart.
 //
-// maxPayload controls the per-fragment inner-payload threshold. Pass 0 to use
-// the node-default (QUIC-safe). Callers with an active TCP PeerStreams should
-// use maxFragPayloadForPS(ps) to avoid needless fragmentation on byte-streams.
+// maxPayload controls the per-fragment inner-payload threshold. Callers with
+// active streams use maxFragPayloadForPS(ps); 0 selects the overlay default.
 func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, cipher obfuscate.ObfCipher, rawData []byte, maxPayload int) ([][]byte, int, bool, error) {
 	if sd.node == nil {
 		return [][]byte{rawData}, len(rawData), false, nil
@@ -446,25 +434,16 @@ func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, cipher obfu
 	data := rawData
 	innerPooled := false
 	if cipher != nil {
-		// Only take a pooled destination when the sealed logical frame will
-		// actually need fragmentation. Non-fragmented callers keep the existing
-		// ownership contract and allocation behaviour.
-		if len(rawData)+cipher.Overhead() > maxPayload {
-			innerBuf := acquireFrameBuf(len(rawData) + cipher.Overhead())
-			enc, err := sd.node.sealPeerFrameInto(targetPeer, cipher, rawData, innerBuf[:0])
-			if err != nil {
-				releaseFrameBuf(innerBuf)
-				return nil, 0, false, fmt.Errorf("seal frame for peer %s: %w", targetPeer.String(), err)
-			}
-			data = enc
-			innerPooled = true
-		} else {
-			enc, err := sd.node.sealPeerFrame(targetPeer, cipher, rawData)
-			if err != nil {
-				return nil, 0, false, fmt.Errorf("seal frame for peer %s: %w", targetPeer.String(), err)
-			}
-			data = enc
+		// Keep ciphertext owned until every synchronous write/retry returns.
+		// Reuse the destination for both single frames and fragmented frames.
+		innerBuf := acquireFrameBuf(len(rawData) + cipher.Overhead())
+		enc, err := sd.node.sealPeerFrameInto(targetPeer, cipher, rawData, innerBuf[:0])
+		if err != nil {
+			releaseFrameBuf(innerBuf)
+			return nil, 0, false, fmt.Errorf("seal frame for peer %s: %w", targetPeer.String(), err)
 		}
+		data = enc
+		innerPooled = true
 	} else {
 		log.Debug("Tx: SENDING FRAME TO %s IN PLAINTEXT — no per-peer cipher negotiated (encryption disabled or handshake incomplete)",
 			targetPeer.String())
@@ -512,13 +491,30 @@ func (sd *StrategyDispatcher) removeStreamUnderLock(ps *PeerStreams, s network.S
 	if s == nil {
 		return
 	}
-	var tName string
-	if conn := s.Conn(); conn != nil {
-		tName = conn.RemoteMultiaddr().String()
-	} else {
-		tName = "(disconnected)"
+	ps.mu.Lock()
+	removed := false
+	for name, current := range ps.streams {
+		if current == s {
+			delete(ps.streams, name)
+			removed = true
+		}
 	}
-	ps.RemoveStream(tName, s)
+	if removed {
+		ps.rebuildLocked()
+	}
+	ps.mu.Unlock()
+	delete(ps.writeDeadlineRenew, s)
+	delete(ps.writeQuality, s)
+	if ps.preferredStream == s {
+		ps.preferredStream = nil
+	}
+	if ps.writeDeadlineStream == s {
+		ps.writeDeadlineStream = nil
+		ps.nextWriteDeadlineRenew = time.Time{}
+	}
+	// A failed write may have sent a partial length prefix or body. Never
+	// reuse that stream for another frame, and release its blocked reader.
+	_ = s.Reset()
 }
 
 // writeOverStreams tries each currently-registered stream in order; the first
@@ -526,19 +522,7 @@ func (sd *StrategyDispatcher) removeStreamUnderLock(ps *PeerStreams, s network.S
 // cleanup). The caller MUST hold ps.writeMu. Returns the last write error (nil
 // only when at least one stream succeeded).
 func (sd *StrategyDispatcher) writeOverStreams(ps *PeerStreams, targetPeer peer.ID, frags [][]byte, origLen int) error {
-	var lastErr error
-	for _, s := range ps.GetAllStreams() {
-		if s == nil {
-			continue
-		}
-		if err := sd.writeFragsToStreams(ps, targetPeer, []network.Stream{s}, origLen, frags, true); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-		sd.removeStreamUnderLock(ps, s)
-	}
-	return lastErr
+	return sd.writeFragsToStreams(ps, targetPeer, ps.GetAllStreams(), origLen, frags, true)
 }
 
 // retryWithFreshStream opens a new stream OUTSIDE any writeMu lock and retries
@@ -552,7 +536,7 @@ func (sd *StrategyDispatcher) retryWithFreshStream(ctx context.Context, targetPe
 			return nil
 		}
 		if origErr != nil {
-			return fmt.Errorf("best_path retry failed: %w (original: %v)", openErr, origErr)
+			return fmt.Errorf("best_path retry failed: %w; reopen: %w", origErr, openErr)
 		}
 		return fmt.Errorf("best_path: %w", openErr)
 	}
@@ -566,6 +550,9 @@ func (sd *StrategyDispatcher) retryWithFreshStream(ctx context.Context, targetPe
 		}
 		if rfErr := sd.relayFallbackIfPossible(targetPeer, rawData); rfErr == nil {
 			return nil
+		}
+		if origErr != nil {
+			return fmt.Errorf("best_path retry failed: %w; retry: %w", origErr, err)
 		}
 		return fmt.Errorf("best_path: no streams after retry for peer %s: %w", targetPeer.String(), err)
 	}
@@ -593,9 +580,8 @@ func (sd *StrategyDispatcher) sendBestPath(ctx context.Context, targetPeer peer.
 		ps.writeMu.Unlock()
 		return nil
 	}
-	// Dead stream: drop it under lock, then release BEFORE reopening so we never
-	// hold writeMu across the (up-to-8s) NewStream call.
-	sd.removeStreamUnderLock(ps, streams[0])
+	// The writer retired the failed stream. Release BEFORE reopening so we
+	// never hold writeMu across the NewStream call.
 	ps.writeMu.Unlock()
 	log.Debug("Removed dead best_path stream for peer %s (%v), retrying with fresh stream", targetPeer.String(), err)
 	return sd.retryWithFreshStream(ctx, targetPeer, ps, frags, origLen, rawData, err)
@@ -619,7 +605,7 @@ func (sd *StrategyDispatcher) sendFallback(ctx context.Context, targetPeer peer.
 		if rfErr := sd.relayFallbackIfPossible(targetPeer, rawData); rfErr == nil {
 			return nil
 		}
-		return fmt.Errorf("fallback: %w (after stream failures, open failed)", openErr)
+		return fmt.Errorf("fallback: %w; reopen: %w", lastErr, openErr)
 	}
 	ps2.writeMu.Lock()
 	remaining := ps2.GetAllStreams()
@@ -632,7 +618,7 @@ func (sd *StrategyDispatcher) sendFallback(ctx context.Context, targetPeer peer.
 		if rfErr := sd.relayFallbackIfPossible(targetPeer, rawData); rfErr == nil {
 			return nil
 		}
-		return fmt.Errorf("fallback: no streams after reopen for peer %s: %w", targetPeer.String(), err)
+		return fmt.Errorf("fallback: %w; retry: %w", lastErr, err)
 	}
 	ps2.writeMu.Unlock()
 	if rfErr := sd.relayFallbackIfPossible(targetPeer, rawData); rfErr == nil {
@@ -649,23 +635,9 @@ func (sd *StrategyDispatcher) sendFallback(ctx context.Context, targetPeer peer.
 // hole that previously existed for this mode.
 func (sd *StrategyDispatcher) sendRedundant(ctx context.Context, targetPeer peer.ID, ps *PeerStreams, frags [][]byte, origLen int, rawData []byte) error {
 	ps.writeMu.Lock()
-	streams := ps.GetAllStreams()
-	sentAny := false
-	for _, s := range streams {
-		if s == nil {
-			continue
-		}
-		// Redundant mode writes the same logical TAP frame over every healthy
-		// transport. Count that payload once in the topology, while the protocol
-		// tracker still records every physical copy below.
-		if err := sd.writeFragsToStreams(ps, targetPeer, []network.Stream{s}, origLen, frags, !sentAny); err == nil {
-			sentAny = true
-		} else {
-			sd.removeStreamUnderLock(ps, s)
-		}
-	}
+	writeErr := sd.writeFragsToStreams(ps, targetPeer, ps.GetAllStreams(), origLen, frags, true)
 	ps.writeMu.Unlock()
-	if sentAny {
+	if writeErr == nil {
 		return nil
 	}
 	// All streams failed (or none existed): try a fresh stream, then relay fallback.
@@ -674,7 +646,7 @@ func (sd *StrategyDispatcher) sendRedundant(ctx context.Context, targetPeer peer
 		if rfErr := sd.relayFallbackIfPossible(targetPeer, rawData); rfErr == nil {
 			return nil
 		}
-		return fmt.Errorf("redundant: %w", openErr)
+		return fmt.Errorf("redundant: %w; reopen: %w", writeErr, openErr)
 	}
 	ps2.writeMu.Lock()
 	remaining := ps2.GetAllStreams()
@@ -687,7 +659,7 @@ func (sd *StrategyDispatcher) sendRedundant(ctx context.Context, targetPeer peer
 		if rfErr := sd.relayFallbackIfPossible(targetPeer, rawData); rfErr == nil {
 			return nil
 		}
-		return fmt.Errorf("redundant: no streams after reopen for peer %s: %w", targetPeer.String(), err)
+		return fmt.Errorf("redundant: %w; retry: %w", writeErr, err)
 	}
 	ps2.writeMu.Unlock()
 	if rfErr := sd.relayFallbackIfPossible(targetPeer, rawData); rfErr == nil {
@@ -803,16 +775,13 @@ func (sd *StrategyDispatcher) relayFallbackIfPossible(targetPeer peer.ID, rawDat
 // SendBatchToPeer sends multiple packed frames to the same target peer.  When
 // the peer has a live direct stream it takes ONE writeMu lock and resolves the
 // per-peer ObfCipher ONCE for the whole batch, then encrypts + fragments +
-// writes each frame back-to-back under that single lock (writeFrameLocked).
-// This removes the per-frame obfCipherForPeer lookup and the per-frame
-// lock/unlock churn that the previous per-frame SendToPeer loop paid, capturing
-// most of the batching benefit WITHOUT touching the wire protocol, the RX path,
-// or introducing any Nagle-style latency (frames are still written the moment
-// they are dequeued).
+// writes already queued frames in bounded transport batches under that lock.
+// Each independent wire frame is retained, but consecutive prefixes and bodies
+// share a transport write. There is no timer or delay to wait for more frames.
 //
 // Each frame remains an independent length-prefixed, per-peer-encrypted tunnel
 // frame, so the receiver needs no changes.  On any direct write failure the
-// shared lock is released and the REMAINING frames (including the failed one)
+// shared lock is released and the REMAINING frames (including the failed batch)
 // are routed through the robust per-frame SendToPeer path, which performs
 // dead-stream removal, stream re-open and overlay-relay fallback — so a stalled
 // direct link never silently drops a frame.  Relay-only peers (no direct
@@ -823,10 +792,9 @@ func (sd *StrategyDispatcher) SendBatchToPeer(ctx context.Context, targetPeer pe
 		return nil
 	}
 
-	// Relay-only / circuit-only peers have no direct application stream, so the
-	// shared-lock optimisation below does not apply.  Route each frame through
-	// SendToPeer, which makes the relay-vs-direct decision per frame.
-	if sd.node != nil && !sd.hasDirectStream(targetPeer) && !sd.node.isDirectlyConnected(targetPeer) {
+	// Peers without an endpoint transport use the per-frame overlay/boot path.
+	// A live circuit is an endpoint transport and can use the batch writer.
+	if sd.node != nil && !sd.hasDirectStream(targetPeer) && !sd.node.hasPeerConnection(targetPeer) {
 		return sd.sendFramesViaSendToPeer(ctx, targetPeer, packedFrames)
 	}
 
@@ -850,97 +818,136 @@ func (sd *StrategyDispatcher) SendBatchToPeer(ctx context.Context, targetPeer pe
 		cipher = sd.node.obfCipherForPeer(targetPeer)
 	}
 
-	for i, data := range packedFrames {
-		if err := sd.writeFrameLocked(targetPeer, ps, cipher, data); err != nil {
+	const batchFrames = 32
+	for i := 0; i < len(packedFrames); i += batchFrames {
+		end := min(i+batchFrames, len(packedFrames))
+		if err := sd.writePackedBatchLocked(targetPeer, ps, cipher, packedFrames[i:end]); err != nil {
 			// A direct write failed (stalled/dead stream).  Release the shared
-			// lock and route the REMAINING frames (this one included) through the
-			// robust per-frame path.  Frames already written stay sent.
+			// lock and route the remaining batch through the per-frame path.
+			// A failed write can have delivered a prefix of the batch: retries
+			// retain each original SeqID so receive dedup suppresses that prefix.
 			log.Debug("Tx batch frame %d/%d to peer %s failed under shared lock: %v; routing remainder via SendToPeer",
 				i+1, len(packedFrames), targetPeer.String(), err)
 			// SendToPeer eventually acquires ps.writeMu itself.  Do not defer this
 			// unlock: returning through the fallback while still holding the lock
 			// self-deadlocks this peer's entire transmit path.
 			ps.writeMu.Unlock()
-			return sd.sendFramesViaSendToPeer(ctx, targetPeer, packedFrames[i:])
+			if retryErr := sd.sendFramesViaSendToPeer(ctx, targetPeer, packedFrames[i:]); retryErr != nil {
+				return fmt.Errorf("batch write: %w; recovery: %w", err, retryErr)
+			}
+			return nil
 		}
 	}
 	ps.writeMu.Unlock()
 	return nil
 }
 
-// writeFrameLocked encrypts and writes a single packed frame to targetPeer's
-// direct streams while the caller holds ps.writeMu.  cipher is the per-peer
-// ObfCipher resolved ONCE by the caller (once per SendToPeer call, or once per
-// whole SendBatchToPeer batch), eliminating the per-frame obfCipherForPeer
-// lookup.  The wire format is unchanged: each frame is an independent
-// length-prefixed, per-peer-encrypted tunnel frame.
-//
-// On a write error it returns the error WITHOUT performing dead-stream removal,
-// stream re-open or relay fallback — the caller decides how to recover (e.g.
-// SendBatchToPeer routes the remainder via SendToPeer).
-// writeFrameLocked encrypts + fragments + writes a single packed frame to
-// targetPeer's direct streams while the caller holds ps.writeMu. cipher is the
-// per-peer ObfCipher resolved ONCE by the caller (once per SendToPeer call, or
-// once per whole SendBatchToPeer batch), eliminating the per-frame
-// obfCipherForPeer lookup. The wire format is unchanged: each frame is an
-// independent length-prefixed, per-peer-encrypted tunnel frame. The shared
-// encryptAndFragment helper is reused so SendToPeer and the batch path cannot
-// drift apart.
-//
-// On a write error it returns the error WITHOUT performing dead-stream removal,
-// stream re-open or relay fallback — the caller decides how to recover (e.g.
-// SendBatchToPeer routes the remainder via SendToPeer).
-func (sd *StrategyDispatcher) writeFrameLocked(targetPeer peer.ID, ps *PeerStreams, cipher obfuscate.ObfCipher, packedData []byte) error {
+// writePackedBatchLocked retains encrypted fragments until the bounded batch
+// write finishes. Pooled fragment ownership remains separate from the caller's
+// packed frames, which may be retried after a partial transport write.
+// Callers hold ps.writeMu and pass at most 32 logical frames.
+func (sd *StrategyDispatcher) writePackedBatchLocked(targetPeer peer.ID, ps *PeerStreams, cipher obfuscate.ObfCipher, packedFrames [][]byte) error {
 	streams := ps.GetAllStreams()
 	if len(streams) == 0 {
-		return fmt.Errorf("no direct streams for peer %s", targetPeer.String())
+		return fmt.Errorf("no direct streams for peer %s", targetPeer)
 	}
 	var fragMaxPayload int
 	if sd.node != nil {
 		fragMaxPayload = sd.node.maxFragPayloadForPS(ps)
 	}
-	frags, origLen, releaseFrags, err := sd.encryptAndFragment(targetPeer, cipher, packedData, fragMaxPayload)
-	if err != nil {
-		return err
+	var owned [32][][]byte
+	defer func() {
+		for _, frags := range owned {
+			releaseFragmentBuffers(frags)
+		}
+	}()
+	var scratch [32][]byte
+	wireFrames := scratch[:0]
+	logicalBytes := 0
+	for i, data := range packedFrames {
+		frags, origLen, pooled, err := sd.encryptAndFragment(targetPeer, cipher, data, fragMaxPayload)
+		if err != nil {
+			return err
+		}
+		if pooled {
+			owned[i] = frags
+		}
+		wireFrames = append(wireFrames, frags...)
+		logicalBytes += origLen
 	}
-	if releaseFrags {
-		defer releaseFragmentBuffers(frags)
-	}
-	return sd.writeFragsToStreams(ps, targetPeer, streams, origLen, frags, true)
+	return sd.writeFragsToStreams(ps, targetPeer, streams, logicalBytes, wireFrames, true)
 }
 
 // writeFragsToStreams writes the (already encrypted + fragmented) frags to
 // targetPeer's direct streams according to the active strategy.  It records TX
-// bytes once on success and returns the first write error, if any.
+// logical payload bytes once on success, and wire bytes for every physical copy.
 //
 // ps must not be nil. Callers must hold ps.writeMu. The write deadline is
-// refreshed at most once per second (throttled via ps.nextWriteDeadlineRenew)
+// refreshed only near expiry, independently for each stream,
 // to avoid the per-frame SetWriteDeadline syscall cost under high PPS.
 func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer peer.ID, streams []network.Stream, tapPayloadLen int, frags [][]byte, recordPeerPayload bool) error {
-	// Throttle SetWriteDeadline: only call it when the existing deadline is
-	// within writeDeadlineRenewThreshold of expiry. All callers hold
-	// ps.writeMu, so ps.nextWriteDeadlineRenew is safe to read/write here.
 	const writeDeadlineWindow = 2500 * time.Millisecond
 	const writeDeadlineRenewThreshold = 1000 * time.Millisecond
-	needsDeadline := ps == nil || time.Now().After(ps.nextWriteDeadlineRenew)
-	writeOne := func(s network.Stream) error {
-		if needsDeadline {
-			_ = s.SetWriteDeadline(time.Now().Add(writeDeadlineWindow))
+	if ps != nil {
+		snapshot := ps.snapshot.Load()
+		if snapshot != ps.writeDeadlineSnapshot {
+			// Prune retired streams without acquiring writeMu from Add/Remove,
+			// which would invert the registration and writer lock order.
+			activeStreams := ps.GetAllStreams()
+			for cached := range ps.writeDeadlineRenew {
+				active := false
+				for _, s := range activeStreams {
+					if s == cached {
+						active = true
+						break
+					}
+				}
+				if !active {
+					delete(ps.writeDeadlineRenew, cached)
+					if ps.writeDeadlineStream == cached {
+						ps.writeDeadlineStream = nil
+						ps.nextWriteDeadlineRenew = time.Time{}
+					}
+				}
+			}
+			ps.writeDeadlineSnapshot = snapshot
 		}
-		for _, f := range frags {
-			if err := WriteFrame(s, f); err != nil {
-				return err
+		if ps.writeDeadlineRenew == nil {
+			ps.writeDeadlineRenew = make(map[network.Stream]time.Time, len(streams))
+		}
+	}
+	writeOne := func(s network.Stream) error {
+		now := time.Now()
+		if ps != nil && ps.writeDeadlineStream != s {
+			ps.writeDeadlineStream = s
+			ps.nextWriteDeadlineRenew = ps.writeDeadlineRenew[s]
+		}
+		if ps == nil || !now.Before(ps.nextWriteDeadlineRenew) {
+			if err := s.SetWriteDeadline(now.Add(writeDeadlineWindow)); err != nil {
+				return fmt.Errorf("set write deadline: %w", err)
+			}
+			if ps != nil {
+				ps.nextWriteDeadlineRenew = now.Add(writeDeadlineWindow - writeDeadlineRenewThreshold)
+				ps.writeDeadlineRenew[s] = ps.nextWriteDeadlineRenew
 			}
 		}
-		return nil
+		if len(streams) < 2 {
+			return writeFrames(s, frags)
+		}
+		err := writeFrames(s, frags)
+		if err == nil {
+			wireBytes := 0
+			for _, frag := range frags {
+				wireBytes += len(frag) + 4
+			}
+			completed := time.Now()
+			ps.recordStreamWrite(s, wireBytes, completed.Sub(now), completed)
+		}
+		return err
 	}
-	if needsDeadline && ps != nil {
-		ps.nextWriteDeadlineRenew = time.Now().Add(writeDeadlineWindow - writeDeadlineRenewThreshold)
-	}
-
-	record := func() {
+	record := func(recordPayload bool) {
 		if sd.node != nil {
-			if recordPeerPayload {
+			if recordPayload && recordPeerPayload {
 				sd.node.recordPeerTxBytes(targetPeer, tapPayloadLen)
 			}
 			if sd.node.protoTracker != nil {
@@ -958,29 +965,44 @@ func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer pe
 
 	switch sd.mode {
 	case "redundant", "fallback":
-		// Try each stream in order; first success wins.  (Dead-stream cleanup
-		// and relay fallback are handled by the caller's outer retry logic.)
 		var lastErr error
+		sentAny := false
 		for _, s := range streams {
 			if s == nil {
 				continue
 			}
 			writeErr := writeOne(s)
 			if writeErr == nil {
-				record()
-				return nil
+				record(!sentAny)
+				sentAny = true
+				if sd.mode == "fallback" {
+					return nil
+				}
+				continue
 			}
 			lastErr = writeErr
+			sd.removeStreamUnderLock(ps, s)
+		}
+		if sentAny {
+			return nil
+		}
+		if lastErr == nil {
+			return fmt.Errorf("no streams for peer %s", targetPeer)
 		}
 		return lastErr
 	default: // best_path
-		if len(streams) == 0 {
+		if len(streams) == 0 || streams[0] == nil {
 			return fmt.Errorf("no streams for peer %s", targetPeer.String())
 		}
-		if err := writeOne(streams[0]); err != nil {
+		selected := 0
+		if len(streams) > 1 {
+			selected = ps.selectStreamIndex(streams, time.Now())
+		}
+		if err := writeOne(streams[selected]); err != nil {
+			sd.removeStreamUnderLock(ps, streams[selected])
 			return err
 		}
-		record()
+		record(true)
 		return nil
 	}
 }
@@ -1050,10 +1072,8 @@ func (sd *StrategyDispatcher) BroadcastToAllPeers(ctx context.Context, data []by
 			perPeerCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 			defer cancel()
 			if err := sd.SendToPeer(perPeerCtx, target, pkt); err != nil {
-				if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-					if sd.node != nil {
-						sd.node.markPeerStalled(target)
-					}
+				if sd.node != nil {
+					sd.node.notePeerSendError(target, err)
 				}
 				log.Debug("P2P broadcast write to peer %s failed: %v", target.String(), err)
 			}
@@ -1121,10 +1141,8 @@ func (sd *StrategyDispatcher) BroadcastBatchToAllPeers(ctx context.Context, fram
 				batch = append(batch, it.data)
 			}
 			if err := sd.SendBatchToPeer(perPeerCtx, target, batch); err != nil {
-				if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-					if sd.node != nil {
-						sd.node.markPeerStalled(target)
-					}
+				if sd.node != nil {
+					sd.node.notePeerSendError(target, err)
 				}
 				log.Debug("P2P broadcast batch write to peer %s failed: %v", target.String(), err)
 			}

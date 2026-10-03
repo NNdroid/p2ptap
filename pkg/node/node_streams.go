@@ -300,7 +300,7 @@ func (n *Node) handleStream(s network.Stream) {
 		// frame to obtain the real TAP payload + seqID. Non-fragment frames use
 		// the payload/seqID from the first Unpack directly.
 		if n.fragRX != nil && isFragPayload(payload) {
-			finalPacked, complete := n.fragRX.reassemble(remotePeer, payload, reasmChannelDirect)
+			finalPacked, complete := n.fragRX.reassemble(remotePeer, payload, reasmChannelDirect, obfuscate.ConnEpochFromSeq(seqID))
 			if !complete {
 				continue // more fragments pending
 			}
@@ -349,11 +349,8 @@ func (n *Node) handleStream(s network.Stream) {
 			}
 			n.dedupPeersMu.Unlock()
 		}
-		if obfuscate.IsStructuredSeq(seqID) {
-			if ep := obfuscate.ConnEpochFromSeq(seqID); ep != peerDedup.ConnEpoch() {
-				peerDedup.SetConnEpoch(ep)
-			}
-		}
+		// Only SeqSync may change an established epoch. A delayed data frame
+		// from an older session must not reset the current replay window.
 		if peerDedup.IsDuplicate(seqID) {
 
 			n.Collector.RecordDedup()
@@ -909,9 +906,9 @@ func (n *Node) handleRelayStream(s network.Stream) {
 		//      bare envelope. We now fall through and let UnpackRelayFrame try,
 		//      which keeps interop with peers running an older build.
 		envelope := data
-		if _, outer, uerr := obfuscate.Unpack(data); uerr == nil {
+		if outerSeq, outer, uerr := obfuscate.Unpack(data); uerr == nil {
 			if n.fragRX != nil && isFragPayload(outer) {
-				finalPacked, complete := n.fragRX.reassemble(remotePeer, outer, reasmChannelRelay)
+				finalPacked, complete := n.fragRX.reassemble(remotePeer, outer, reasmChannelRelay, obfuscate.ConnEpochFromSeq(outerSeq))
 				if !complete {
 					continue // more fragments pending
 				}
@@ -1017,10 +1014,12 @@ func (n *Node) handleRelayStream(s network.Stream) {
 
 		// Destination is another peer: forward frame if TTL > 1
 		if ttl > 1 {
-			routes := n.getCachedRoutes()
 			nextHop := finalDst
-			if route, ok := routes[finalDst]; ok && route.NextHop != "" && route.NextHop != n.Host.ID() {
+			if route, ok := n.overlayRoute(finalDst, int(ttl)-1, remotePeer); ok {
 				nextHop = route.NextHop
+			} else if !n.routeHopUsable(finalDst, finalDst) {
+				n.relayDiag.loopGuard()
+				continue
 			}
 			// Loop guard: never hand the frame straight back to the peer that
 			// just delivered it. That would form a 2-node relay cycle (bounded

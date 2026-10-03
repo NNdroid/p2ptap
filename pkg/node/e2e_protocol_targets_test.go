@@ -40,11 +40,15 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"p2ptap/pkg/logger"
 	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/tap"
 )
@@ -483,11 +487,11 @@ func TestProtocolMatrix_UDPDNSTargetAndTCPHTTPTarget(t *testing.T) {
 // ── Throughput benchmarks: TCP and UDP per transport ────────────────────────
 //
 // BenchmarkThroughput_UDP and BenchmarkThroughput_TCP pump bulk frames
-// A->B->A's-collector over each transport and report ns/op (per frame) and
-// frames/sec derived from it. They measure the OVERLAY (TAP write through
-// processTapFrame, obfuscate, transport, peer TAP read), which is the number
-// users actually experience for VPN throughput; the in-process MemTAP removes
-// OS scheduling noise so numbers are stable and comparable across transports.
+// A->B's-collector over each real loopback transport. They report delivered
+// payload MB/s, ns per delivered frame, frames/s, and delivery percentage.
+// This measures the overlay (MemTAP, processTapFrame, encryption, transport,
+// peer MemTAP), excluding native TAP and WAN costs. With benchtime=1x the Go
+// B/op and allocs/op metrics describe the whole workload, not one frame.
 
 var throughputBenchPayload = bytes.Repeat([]byte("p2ptap-throughput-"), 66) // 1188B: frame = 14+20+8+1188 = 1230 < the 1514 TAP cap
 
@@ -573,7 +577,7 @@ func benchProtocolPair(b *testing.B, spec transportSpec) *protocolPair {
 // throughput. Two design points:
 //
 //   - Under saturation the egress path backpressures BY DROPPING (dispatch
-//     queue full → dispatchNonblocking drops after its 5ms grace), so 100%
+//     queue full → dispatchNonblocking drops after its bounded grace), so 100%
 //     delivery is NOT an invariant — the metric is how much payload the
 //     overlay actually delivers, which is what VPN users experience.
 //   - A minimum of 5000 frames is pumped regardless of the calibration b.N:
@@ -604,7 +608,16 @@ func benchThroughput(b *testing.B, pair *protocolPair, build func(seq int) []byt
 	if target < 5000 {
 		target = 5000 // steady-state floor: tiny N measures latency, not throughput
 	}
+	if value := os.Getenv("P2PTAP_BENCH_FRAMES"); value != "" {
+		frames, err := strconv.Atoi(value)
+		if err != nil || frames < 5000 {
+			b.Fatalf("P2PTAP_BENCH_FRAMES must be an integer >= 5000: %q", value)
+		}
+		target = frames
+	}
 	written := 0
+	initialDrops := atomic.LoadUint64(&pair.nodeA.dispatchDropCount)
+	b.ResetTimer()
 	start := time.Now()
 	for written < target && time.Since(start) < 2*time.Second {
 		if _, err := pair.pipeA.Write(build(written)); err != nil {
@@ -612,30 +625,40 @@ func benchThroughput(b *testing.B, pair *protocolPair, build func(seq int) []byt
 		}
 		written++
 	}
-	// Drain: wait for in-flight backlog (up to 5s, or 75ms of no growth).
-	last := uint64(0)
-	sinceGrowth := time.Now()
+	// A quiet interval does not mean the queue is empty: a temporarily blocked
+	// stream can resume with thousands of pending frames. Wait until each input
+	// is either delivered or explicitly dropped by the sending queue, with a
+	// bounded total workload duration. Never close a node after only 75ms idle.
 	for time.Since(start) < 6*time.Second {
 		cur := delivered.load()
-		if cur != last {
-			last = cur
-			sinceGrowth = time.Now()
-		} else if time.Since(sinceGrowth) >= 75*time.Millisecond || cur >= uint64(written) {
+		dropped := atomic.LoadUint64(&pair.nodeA.dispatchDropCount) - initialDrops
+		if cur+dropped >= uint64(written) {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 	elapsed := time.Since(start)
+	b.StopTimer()
 
 	deliveredN := delivered.load()
+	droppedN := atomic.LoadUint64(&pair.nodeA.dispatchDropCount) - initialDrops
+	undrained := uint64(0)
+	if accounted := deliveredN + droppedN; accounted < uint64(written) {
+		undrained = uint64(written) - accounted
+		b.Logf("drain budget exhausted: %d frames neither delivered nor counted as send-queue drops", undrained)
+	}
 	if deliveredN == 0 {
 		b.Fatalf("throughput: ZERO frames delivered over %s — data path stalled", elapsed.Truncate(time.Millisecond))
 	}
 	fps := float64(deliveredN) / elapsed.Seconds()
+	b.ReportMetric(float64(elapsed.Nanoseconds())/float64(deliveredN), "ns/op")
 	b.ReportMetric(fps, "frames/s")
 	b.ReportMetric(float64(deliveredN)*float64(len(throughputBenchPayload))/elapsed.Seconds()/1e6, "MB/s")
 	b.ReportMetric(100*float64(deliveredN)/float64(written), "%delivered")
 	b.ReportMetric(float64(written), "written")
+	b.ReportMetric(float64(deliveredN), "delivered") // integer counts expose even one lost frame
+	b.ReportMetric(float64(droppedN), "dispatch_drops")
+	b.ReportMetric(float64(undrained), "undrained")
 	// Stop the drain goroutine by closing the node (its TAP reads return EOF).
 	pair.pipeB.Close()
 	<-done
@@ -659,6 +682,8 @@ func (c *atomicCounter) load() uint64 {
 }
 
 func BenchmarkThroughput_UDP(b *testing.B) {
+	logger.SetGlobalLevel(logger.LevelInfo)
+	defer logger.SetGlobalLevel(logger.LevelDebug)
 	for _, spec := range allTransportSpecs() {
 		spec := spec
 		b.Run(spec.name, func(b *testing.B) {
@@ -677,6 +702,8 @@ func BenchmarkThroughput_UDP(b *testing.B) {
 }
 
 func BenchmarkThroughput_TCP(b *testing.B) {
+	logger.SetGlobalLevel(logger.LevelInfo)
+	defer logger.SetGlobalLevel(logger.LevelDebug)
 	for _, spec := range allTransportSpecs() {
 		spec := spec
 		b.Run(spec.name, func(b *testing.B) {

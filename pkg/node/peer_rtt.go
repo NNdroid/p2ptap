@@ -81,6 +81,16 @@ func (n *Node) recordPeerRTTProbeAt(pid peer.ID, source string, rtt time.Duratio
 // immediately overwriting the full data-plane result the operator just asked
 // for.
 func (n *Node) peerRTTMeasurement(pid peer.ID, now time.Time) peerRTTSnapshot {
+	return n.peerRTTMeasurementForScope(pid, now, false)
+}
+
+// Link weights use probes carried by a libp2p connection, never TAP ICMP
+// measurements which may have traversed an entirely different overlay path.
+func (n *Node) peerLinkRTTMeasurement(pid peer.ID, now time.Time) peerRTTSnapshot {
+	return n.peerRTTMeasurementForScope(pid, now, true)
+}
+
+func (n *Node) peerRTTMeasurementForScope(pid peer.ID, now time.Time, linkOnly bool) peerRTTSnapshot {
 	if n == nil || pid == "" {
 		return peerRTTSnapshot{}
 	}
@@ -106,7 +116,7 @@ func (n *Node) peerRTTMeasurement(pid peer.ID, now time.Time) peerRTTSnapshot {
 
 	var source string
 	var samples []peerRTTProbeSample
-	if samples = chooseRecent(rttSourceTAPICMP, tapRTTPreferredFor); len(samples) > 0 {
+	if samples = chooseRecent(rttSourceTAPICMP, tapRTTPreferredFor); !linkOnly && len(samples) > 0 {
 		source = rttSourceTAPICMP
 	} else if samples = chooseRecent(rttSourceLibp2pPing, manualPingPreferredFor); len(samples) > 0 {
 		source = rttSourceLibp2pPing
@@ -160,7 +170,7 @@ func summarizePeerRTTSamples(source string, samples []peerRTTProbeSample) peerRT
 // absent entry and 0 as a meaningless cost: a genuine sub-millisecond LAN RTT
 // must not collapse into the "unknown" zero.
 func routingRTTMsFromSnapshot(snap peerRTTSnapshot) (int64, bool) {
-	if !snap.rttMeasured || snap.rttMs <= 0 {
+	if snap.source == rttSourceTAPICMP || !snap.rttMeasured || snap.rttMs <= 0 {
 		return 0, false
 	}
 	ms := int64(math.Round(snap.rttMs))
@@ -170,18 +180,8 @@ func routingRTTMsFromSnapshot(snap peerRTTSnapshot) (int64, bool) {
 	return ms, true
 }
 
-// preferredLinkRTTMs picks the authoritative link weight for one peer.
-//
-// A completed probe outranks the peerstore EWMA: the EWMA is a smoothed
-// control-plane figure that libp2p only updates on its own schedule, while the
-// probe is a real round trip over the path the operator is looking at. The EWMA
-// is therefore a provisional fallback, used only until the first probe returns
-// so a freshly connected peer is not stuck on the synthetic edge cost.
-//
-// This precedence is the single source of truth for the routing graph's view of
-// a link: inverting it made the Mesh Quality matrix (fed by the graph) and the
-// topology chart (fed by PeerInfoDTO) report different latencies for the same
-// link in the same stats tick.
+// preferredLinkRTTMs uses a connection-scoped probe ahead of the peerstore
+// EWMA. TAP end-to-end telemetry is explicitly ineligible as an adjacency cost.
 func preferredLinkRTTMs(snap peerRTTSnapshot, peerstoreEWMAMs int64) (int64, bool) {
 	if ms, ok := routingRTTMsFromSnapshot(snap); ok {
 		return ms, true

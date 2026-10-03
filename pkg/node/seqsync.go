@@ -486,7 +486,11 @@ func (n *Node) SyncSeqToPeer(p peer.ID) error {
 			}
 			delay += time.Duration(mrand.Uint64N(uint64(delay) / 2))
 			log.Debug("SeqSync: retry %d/%d with %s in %v", attempt+1, maxAttempts, p.String(), delay)
-			time.Sleep(delay)
+			select {
+			case <-n.ctx.Done():
+				return n.ctx.Err()
+			case <-time.After(delay):
+			}
 		}
 		err := n.syncSeqToPeerAttempt(p)
 		if err == nil {

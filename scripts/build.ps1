@@ -105,25 +105,18 @@ Write-Host "       Building P2P TAP VPN Releases ($($SelectedTargets.Count) targ
 Write-Host "=========================================================" -ForegroundColor Cyan
 
 try {
+    $ver = & (Join-Path $ScriptDir 'get_version.ps1')
+    $buildTime = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
+    try {
+        $gitCommit = & git rev-parse HEAD 2>$null
+        if ($LASTEXITCODE -ne 0) { $gitCommit = 'unknown' }
+    } catch { $gitCommit = 'unknown' }
+    $ldflags = "-s -w -X p2ptap/pkg/version.Version=$ver -X p2ptap/pkg/version.BuildTime=$buildTime -X p2ptap/pkg/version.GitCommit=$gitCommit"
     foreach ($t in $SelectedTargets) {
         $os = $t.OS
         $arch = $t.Arch
         $pkgName = "p2ptap-$os-$arch"
         $ext = if ($os -eq "windows") { ".exe" } else { "" }
-
-        $ver = if ($env:P2PTAP_VERSION) { $env:P2PTAP_VERSION } else { "v1.0." + (Get-Date -Format "yyyyMMdd") }
-        $buildTime = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
-        $gitCommit = "unknown"
-        try {
-            $prevErrorAction = $ErrorActionPreference
-            $ErrorActionPreference = 'SilentlyContinue'
-            $c = & git rev-parse --short HEAD 2>$null
-            if ($c) { $gitCommit = ($c -replace "`n","").Trim() }
-            $ErrorActionPreference = $prevErrorAction
-        } catch {
-            $gitCommit = "unknown"
-        }
-        $ldflags = "-s -w -X p2ptap/pkg/version.Version=$ver -X p2ptap/pkg/version.BuildTime=$buildTime -X p2ptap/pkg/version.GitCommit=$gitCommit"
 
         $env:CGO_ENABLED = "0"
         $env:GOOS = $os

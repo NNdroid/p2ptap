@@ -59,8 +59,16 @@ type RelayCtrlHeader struct {
 // transparently to target, which runs the inner protocol with its logical peer
 // set to Origin. See handleRelayCtrl.
 func (n *Node) openControlStream(ctx context.Context, target peer.ID, proto protocol.ID) (network.Stream, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if n.isDirectlyConnected(target) {
 		return n.Host.NewStream(ctx, target, proto)
+	}
+	// A live circuit already reaches the true endpoint. Prefer it over a
+	// speculative boot/overlay hop, and allow its Limited transport explicitly.
+	if n.hasPeerConnection(target) {
+		return n.openStreamViaRelayContext(ctx, target, proto)
 	}
 	if hop := n.relayHopForTarget(target); hop != "" {
 		if n.isBootstrapPeer(hop) {
@@ -75,7 +83,7 @@ func (n *Node) openControlStream(ctx context.Context, target peer.ID, proto prot
 	// No overlay hop available: fall back to the boot circuit relay (Circuit
 	// Relay v2). This is the classic path for a peer reachable only through a
 	// bootstrap node that does not speak the application-level overlay relay.
-	return n.openStreamViaRelay(target, proto)
+	return n.openStreamViaRelayContext(ctx, target, proto)
 }
 
 // openRelayCtrlStream opens a RelayCtrlProtocolID stream to hop and writes the

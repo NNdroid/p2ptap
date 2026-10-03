@@ -3,7 +3,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 PAYLOAD="${1:-}"
-VERSION="${P2PTAP_PKG_VERSION:-v1.0.$(date -u +%Y%m%d)}"
+VERSION="$(bash "$ROOT_DIR/scripts/get_version.sh" "${P2PTAP_PKG_VERSION:-}")"
 SOURCE="$(git rev-parse HEAD)"
 REMOTE="${OPENWRT_FEED_REMOTE:-$(git remote get-url origin)}"
 WORK="$(mktemp -d)"

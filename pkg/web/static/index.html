@@ -1521,16 +1521,16 @@
         <div class="modal-card ext33" style="max-width: 840px; width: 95%; max-height: 90vh; overflow-y: auto;">
             <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 12px; border-bottom: 1px solid var(--border-subtle);">
                 <div class="modal-title-box" style="display: flex; align-items: center; gap: 8px;">
-                    <svg class="ico modal-title-ico" aria-hidden="true" style="color: #38bdf8;"><use href="#ic-lock"/></svg>
+                    <svg class="ico modal-title-ico" aria-hidden="true" style="color: var(--info);"><use href="#ic-lock"/></svg>
                     <strong style="font-size: 1.05rem; color: var(--text-primary);" data-i18n="crypto_inspector_title">Peer Cryptography & Anti-Replay Sequence Inspector</strong>
                 </div>
                 <button class="modal-close" data-onclick="closeCryptoInspectorModal()" style="background: none; border: none; font-size: 1.4rem; color: var(--text-muted); cursor: pointer;">&times;</button>
             </div>
             <div class="modal-body" style="padding: 16px 4px; display: flex; flex-direction: column; gap: 14px;">
-                <div style="display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; background: rgba(0,0,0,0.2); padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border-subtle);">
+                <div style="display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; background: var(--surface-recessed); padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border-subtle);">
                     <div style="display: flex; gap: 8px; align-items: center;">
                         <label style="font-size: 0.82rem; font-weight: 600; color: var(--text-secondary);" data-i18n="select_peer_lbl">Select Peer:</label>
-                        <select id="cryptoInspectorPeerSelect" class="module-select" data-onchange="renderCryptoInspectorContent(this.value)" style="padding: 5px 12px; font-size: 0.82rem; border-radius: 6px; background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-subtle);">
+                        <select id="cryptoInspectorPeerSelect" class="module-select" data-onchange="renderCryptoInspectorContent(this.value)" style="padding: 5px 12px; font-size: 0.82rem; border-radius: 6px; background: var(--input-bg); color: var(--text-primary); border: 1px solid var(--border-subtle);">
                             <!-- Injected via JS -->
                         </select>
                     </div>

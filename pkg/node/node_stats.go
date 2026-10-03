@@ -547,7 +547,7 @@ func (n *Node) updateWebCollectorState() {
 		if sig.connCount > 0 {
 			// UpdateLinkRTT preserves the edge class (direct/circuit) instead of
 			// overwriting it as direct.
-			if routingRTT, ok := routingRTTMsFromSnapshot(rtt); ok {
+			if routingRTT, ok := routingRTTMsFromSnapshot(n.peerLinkRTTMeasurement(pID, nowCalc)); ok {
 				n.Router.UpdateLinkRTT(pID, routingRTT)
 			}
 		}
@@ -1058,14 +1058,14 @@ func (n *Node) updateWebCollectorState() {
 	// (fed by PeerInfoDTO) showed the measurement, and the two panels disagreed
 	// by up to an order of magnitude.
 	for _, pID := range n.Host.Network().Peers() {
-		rttMs, ok := preferredLinkRTTMs(n.peerRTTMeasurement(pID, nowCalc), n.getPeerLatency(pID))
+		rttMs, ok := preferredLinkRTTMs(n.peerLinkRTTMeasurement(pID, nowCalc), n.getPeerLatency(pID))
 		if !ok {
 			continue
 		}
 		n.Router.UpdateLinkRTT(pID, rttMs)
 	}
 
-	routesDTO := n.Router.GetRouteInfoDTOs(func(pID peer.ID) (string, string, string) {
+	routesDTO := n.Router.GetRouteInfoDTOsForRoutes(n.getCachedRoutes(), func(pID peer.ID) (string, string, string) {
 		if val, ok := n.peerMeta.Load(pID); ok {
 			meta := val.(PeerMeta)
 			return meta.NodeName, meta.TapIP, meta.TapIPv6
@@ -1145,15 +1145,9 @@ func (n *Node) updateWebCollectorState() {
 	})
 	n.Collector.UpdatePeerMetas(metaDTOs)
 
-	// Build MeshMatrix DTOs from the SAME freshly computed route set as the route
-	// table above, rather than from getCachedRoutes().
-	//
-	// getCachedRoutes() serves the per-frame TAP fast path a copy that may be up
-	// to 2s old and is NOT invalidated by an UpdateLinkRTT weight refresh, so the
-	// matrix could still show a link weight the routing graph had already
-	// replaced — while the topology chart, which reads the live graph, showed the
-	// new one. Reusing routesDTO removes that lag and one redundant Dijkstra pass
-	// per stats tick.
+	// Matrix and route DTOs share one graph snapshot. Routing RTT estimates
+	// remain distinct from the measured end-to-end telemetry in the same DTOs.
+	// Graph revisions invalidate packet decisions immediately on topology changes.
 	//
 	// Hops = number of links = number of nodes in path minus 1 (path includes
 	// both the local node and the destination). A direct link is 1 hop; one

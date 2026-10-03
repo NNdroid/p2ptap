@@ -397,14 +397,27 @@ func (n *Node) reconnectPeer(pid peer.ID) {
 // direct address). For peers that merely *failed* direct this round we keep
 // their addresses and let libp2p race circuit vs. direct.
 func (n *Node) openStreamViaRelay(target peer.ID, proto protocol.ID) (network.Stream, error) {
+	return n.openStreamViaRelayContext(n.ctx, target, proto)
+}
+
+func (n *Node) hasPeerConnection(target peer.ID) bool {
+	state := n.Host.Network().Connectedness(target)
+	return state == network.Connected || state == network.Limited
+}
+
+func (n *Node) openStreamViaRelayContext(parent context.Context, target peer.ID, proto protocol.ID) (network.Stream, error) {
+	if err := parent.Err(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	ctx = network.WithAllowLimitedConn(ctx, "p2ptap-control")
 	// Bug A fix: if the target is already connected (e.g. a boot-relay circuit
 	// link we established earlier is still live), reuse that connection directly
 	// instead of insisting on (re)synthesizing a fresh circuit address. This is
 	// what lets the relay-priority control path recognize and reuse a live
 	// circuit link instead of always failing with "no connected relay".
-	if n.Host.Network().Connectedness(target) == network.Connected {
-		ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
-		defer cancel()
+	if n.hasPeerConnection(target) {
 		s, err := n.Host.NewStream(ctx, target, proto)
 		if err != nil {
 			n.recordRelayControlFailure(target, err)
@@ -434,8 +447,6 @@ func (n *Node) openStreamViaRelay(target peer.ID, proto protocol.ID) (network.St
 	}
 	n.Host.Peerstore().AddAddrs(target, relayAddrs, peerstore.AddressTTL)
 
-	ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
-	defer cancel()
 	s, err := n.Host.NewStream(ctx, target, proto)
 	if err != nil {
 		n.recordRelayControlFailure(target, err)
@@ -981,7 +992,7 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-		if n.Host.Network().Connectedness(pi.ID) == network.Connected {
+		if n.hasPeerConnection(pi.ID) {
 			return nil
 		}
 		return fmt.Errorf("peer %s not connected after concurrent dial", pi.ID.String())

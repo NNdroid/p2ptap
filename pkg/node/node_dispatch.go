@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"runtime"
@@ -42,6 +43,11 @@ func defaultDispatchWorkerCount() int {
 // the egress queue is saturated and ping/Iperf frames are being silently dropped.
 const dispatchDropWarnThreshold = 10
 
+// Absorb short scheduler/GC stalls before dropping a bounded queue's payload.
+// The previous 5ms grace lost frames during otherwise healthy bulk flows.
+// Sustained congestion still has a finite wait and cannot grow queue memory.
+const dispatchBurstGrace = 25 * time.Millisecond
+
 // Peer-egress stall circuit-breaker.
 //
 // A stream write to a wedged/slow peer blocks for the full 5s write deadline
@@ -56,6 +62,14 @@ const dispatchDropWarnThreshold = 10
 // frames are dropped: in the queue (cheap, worker stays free) rather than after
 // a 5s block (expensive, starves everyone else).
 const peerStallCooldown = 3 * time.Second
+
+// notePeerSendError sees through framing, retry and batch error wrappers.
+func (n *Node) notePeerSendError(pid peer.ID, err error) {
+	var timeout net.Error
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		n.markPeerStalled(pid)
+	}
+}
 
 // markPeerStalled records that pid's egress just timed out. Logging is
 // edge-triggered: a peer already inside its cooldown window is re-armed
@@ -101,12 +115,9 @@ func (n *Node) dispatchNonblocking(task dispatchTask) {
 		// delivered immediately
 	default:
 		// Channel full — try with a short timeout to avoid dropping under brief bursts
-		timer := time.NewTimer(5 * time.Millisecond)
+		timer := time.NewTimer(dispatchBurstGrace)
 		defer timer.Stop()
-		select {
-		case n.dispatchCh <- task:
-			// delivered after brief wait
-		case <-timer.C:
+		if !n.enqueueDispatchWithin(task, timer.C) {
 			// The task is dropped: return a pooled payload buffer now so it
 			// does not leak. Caller-owned buffers (owned=false) are plain heap
 			// allocations and need no action.
@@ -123,9 +134,25 @@ func (n *Node) dispatchNonblocking(task dispatchTask) {
 				if cap(n.dispatchCh) > 0 {
 					fill = (len(n.dispatchCh) * 100) / cap(n.dispatchCh)
 				}
-				log.Warn("Dispatch channel full after 5ms: dropped %d frames total (P2P send backpressure, %d active workers, queue %d%% full)",
-					dropped, dispatchWorkerCount, fill)
+				log.Warn("Dispatch channel full after %s: dropped %d frames total (P2P send backpressure, %d active workers, queue %d%% full)",
+					dispatchBurstGrace, dropped, dispatchWorkerCount, fill)
 			}
+		}
+	}
+}
+
+// An elapsed timer and a free queue slot can be ready simultaneously after a
+// scheduler pause. Give the slot a final non-blocking chance before dropping.
+func (n *Node) enqueueDispatchWithin(task dispatchTask, expired <-chan time.Time) bool {
+	select {
+	case n.dispatchCh <- task:
+		return true
+	case <-expired:
+		select {
+		case n.dispatchCh <- task:
+			return true
+		default:
+			return false
 		}
 	}
 }
@@ -244,9 +271,7 @@ func (n *Node) dispatchWorker(id int) {
 							// this peer does not cost another worker the full
 							// deadline. Other error kinds (no addresses, stream
 							// reset) are fast failures and must not trip it.
-							if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-								n.markPeerStalled(target)
-							}
+							n.notePeerSendError(target, err)
 							log.Debug("Tx unicast send error to peer %s: %v", target.String(), err)
 							n.handleUnicastFailure(target, dstMAC, err)
 						} else {
@@ -258,9 +283,7 @@ func (n *Node) dispatchWorker(id int) {
 						batch[0] = nil
 					} else {
 						if err := n.Dispatcher.SendBatchToPeer(n.ctx, target, batch); err != nil {
-							if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-								n.markPeerStalled(target)
-							}
+							n.notePeerSendError(target, err)
 							log.Debug("Tx batched unicast send error to peer %s (n=%d): %v",
 								target.String(), len(batch), err)
 							n.handleUnicastFailure(target, dstMAC, err)
@@ -476,33 +499,37 @@ func (n *Node) macCleanLoop() {
 // getCachedRoutes returns the current routing table, reusing a cached copy
 // when available (<2s stale).  This avoids redundant per-frame Dijkstra
 // computations in tapReadLoop when topology changes are infrequent.
-func (n *Node) getCachedRoutes() map[peer.ID]routing.RouteInfo {
-	n.cachedRoutesMu.RLock()
-	if time.Since(n.cachedRoutesAt) < 2*time.Second && n.cachedRoutes != nil {
-		defer n.cachedRoutesMu.RUnlock()
-		return n.cachedRoutes
-	}
-	n.cachedRoutesMu.RUnlock()
+type nodeRouteSnapshot struct {
+	routes   map[peer.ID]routing.RouteInfo
+	revision uint64
+	at       time.Time
+}
 
-	n.cachedRoutesMu.Lock()
-	defer n.cachedRoutesMu.Unlock()
-	// Double-check: another goroutine may have populated the cache between the RUnlock and Lock.
-	if time.Since(n.cachedRoutesAt) < 2*time.Second && n.cachedRoutes != nil {
-		return n.cachedRoutes
-	}
+func (n *Node) getCachedRoutes() map[peer.ID]routing.RouteInfo {
 	if n.Router == nil {
 		return nil
 	}
-	n.cachedRoutes = n.Router.ComputeRoutes()
+	revision := n.Router.Revision()
+	if snap := n.cachedRouteSnapshot.Load(); snap != nil && snap.revision == revision && time.Since(snap.at) < 2*time.Second {
+		return snap.routes
+	}
+	n.cachedRoutesMu.Lock()
+	defer n.cachedRoutesMu.Unlock()
+	if snap := n.cachedRouteSnapshot.Load(); snap != nil && snap.revision == n.Router.Revision() && time.Since(snap.at) < 2*time.Second {
+		return snap.routes
+	}
+	n.cachedRoutes, n.cachedRoutesRevision = n.Router.ComputeRoutesSnapshot(n.cachedRoutes)
 	n.cachedRoutesAt = time.Now()
+	n.cachedRouteSnapshot.Store(&nodeRouteSnapshot{routes: n.cachedRoutes, revision: n.cachedRoutesRevision, at: n.cachedRoutesAt})
 	return n.cachedRoutes
 }
 
-// invalidateRouteCache forces the next getCachedRoutes call to recompute.
-// Called periodically from macCleanLoop to pick up topology changes.
+// Explicit invalidation is reserved for maintenance; graph changes advance
+// Router.Revision and are visible on the next packet without periodic polling.
 func (n *Node) invalidateRouteCache() {
 	n.cachedRoutesMu.Lock()
 	n.cachedRoutesAt = time.Time{}
+	n.cachedRouteSnapshot.Store(nil)
 	n.cachedRoutesMu.Unlock()
 }
 
@@ -633,23 +660,14 @@ func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
 			if n.hasBootRelayUplink(orig.Via) && !n.isBootRelayBlacklisted(orig.Via) {
 				return orig.Via
 			}
-		} else if n.supportsOverlayRelay(orig.Via) && !n.isOverlayRelayBlacklisted(orig.Via) {
+		} else if n.routeHopUsable(orig.Via, targetPeer) {
 			return orig.Via
 		}
 	}
 
-	// 2. Routing table from LSAs (Dijkstra shortest path)
-	if routes := n.getCachedRoutes(); len(routes) > 0 {
-		if r, ok := routes[targetPeer]; ok && r.NextHop != "" &&
-			r.NextHop != targetPeer && (n.Host == nil || r.NextHop != n.Host.ID()) {
-			if n.isBootstrapPeer(r.NextHop) {
-				if n.hasBootRelayUplink(r.NextHop) && !n.isBootRelayBlacklisted(r.NextHop) {
-					return r.NextHop
-				}
-			} else if n.supportsOverlayRelay(r.NextHop) && !n.isOverlayRelayBlacklisted(r.NextHop) {
-				return r.NextHop
-			}
-		}
+	// 2. The same eligible, hop-bounded route used by TAP and relay transit.
+	if route, ok := n.overlayRoute(targetPeer, routing.MaxRelayTTL, ""); ok && route.NextHop != targetPeer {
+		return route.NextHop
 	}
 
 	// 3. Fallback when the route table has no entry for the target yet:

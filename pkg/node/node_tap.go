@@ -784,8 +784,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 		// every relay-only frame here — before it ever reached the relay branch —
 		// blackholing all multi-hop / overlay-relay traffic (e.g. A -> relay ->
 		// C could never deliver).
-		routes := n.getCachedRoutes()
-		route, hasRoute := routes[targetPeer]
+		route, hasRoute := n.overlayRoute(targetPeer, routing.MaxRelayTTL, "")
 
 		// Relay-aware usability gate (shared helper): for a relayed destination
 		// the final peer is never directly connected, so canEgressToPeer gates
@@ -794,7 +793,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 		// here — before it ever reached the relay branch — blackholing all
 		// multi-hop / overlay-relay traffic (e.g. A -> relay -> C could never
 		// deliver).
-		if !n.canEgressToPeer(targetPeer) {
+		if !n.canEgressWithRoute(targetPeer, route, hasRoute) {
 			hop := n.relayHopForTarget(targetPeer)
 			bootUplink := hop != "" && n.isBootstrapPeer(hop) && n.hasBootRelayUplink(hop)
 			if log.IsDebug() {

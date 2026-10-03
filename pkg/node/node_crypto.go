@@ -79,7 +79,7 @@ func (n *Node) sealPeerFrame(p peer.ID, cipher obfuscate.ObfCipher, data []byte)
 	return n.sealPeerFrameInto(p, cipher, data, nil)
 }
 
-// sealPeerFrameInto is the pooled-destination form used by fragmentation. The
+// sealPeerFrameInto is the pooled-destination form used by data dispatch. The
 // re-key frame counter remains centralized here so allocation strategy never
 // changes nonce/accounting semantics.
 func (n *Node) sealPeerFrameInto(p peer.ID, cipher obfuscate.ObfCipher, data, dst []byte) ([]byte, error) {
@@ -153,7 +153,7 @@ func (n *Node) obfCipherForPeer(p peer.ID) obfuscate.ObfCipher {
 // the current key. It is a no-op if a re-key is already in flight for that
 // peer, and silently does nothing if the peer is disconnected.
 func (n *Node) triggerPeerRekey(p peer.ID) {
-	if n.Host.Network().Connectedness(p) != network.Connected && n.relayHopForTarget(p) == "" {
+	if !n.hasPeerConnection(p) && n.relayHopForTarget(p) == "" {
 		return
 	}
 	if n.isResyncLeader(p) {
@@ -166,7 +166,7 @@ func (n *Node) triggerPeerRekey(p peer.ID) {
 			log.Debug("SeqSync: starting re-key loop for %s (iAmResyncLeader=%v) — driving handshake to break any decrypt-fail deadlock", p.String(), n.isResyncLeader(p))
 			consecutiveFailures := 0
 			for {
-				if n.Host.Network().Connectedness(p) != network.Connected &&
+				if !n.hasPeerConnection(p) &&
 					n.relayHopForTarget(p) == "" {
 					return
 				}
@@ -216,7 +216,7 @@ func (n *Node) triggerPeerRekey(p peer.ID) {
 				return
 			case <-time.After(10 * time.Second):
 			}
-			if n.Host.Network().Connectedness(p) != network.Connected {
+			if !n.hasPeerConnection(p) {
 				return
 			}
 			if n.isPeerReady(p) {

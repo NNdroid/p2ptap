@@ -141,10 +141,11 @@ func TestTapWriteSerializesNativeDeviceWrites(t *testing.T) {
 func TestSendBatchFallbackUnlocksPeerWriteMutex(t *testing.T) {
 	target := peer.ID("batch-fallback-peer")
 	stream := &mockWriteStream{failWrites: 1}
+	replacement := &strategyReplacementStream{}
 	ps := NewPeerStreams(target)
 	ps.AddStream("mock", stream)
 
-	sd := NewStrategyDispatcher(nil, "fallback")
+	sd := NewStrategyDispatcher(&strategyReplacementHost{stream: replacement}, "fallback")
 	sd.peerMap[target] = ps
 
 	done := make(chan error, 1)
@@ -160,7 +161,7 @@ func TestSendBatchFallbackUnlocksPeerWriteMutex(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("batch fallback blocked while re-acquiring PeerStreams.writeMu")
 	}
-	if stream.buf.Len() == 0 {
+	if replacement.buf.Len() == 0 {
 		t.Fatal("fallback path did not write the frame after the initial failure")
 	}
 }

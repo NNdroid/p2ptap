@@ -2,6 +2,23 @@ package obfuscate
 
 import "testing"
 
+func TestDedupAdoptsFirstEpochOnly(t *testing.T) {
+	d := NewDeduplicator()
+	first := buildSeqID(7, 1)
+	if d.IsDuplicate(first) {
+		t.Fatal("first frame rejected")
+	}
+	if !d.IsDuplicate(buildSeqID(8, 2)) {
+		t.Fatal("data changed initial epoch")
+	}
+	if !d.IsDuplicate(first) {
+		t.Fatal("epoch mismatch cleared the original duplicate bit")
+	}
+	if d.IsDuplicate(buildSeqID(7, 3)) {
+		t.Fatal("current epoch stopped accepting new frames")
+	}
+}
+
 // The counter field of a structured SeqID is 32 bits wide (see frame.go), but
 // the dedup bitmask is a 16-bit ring. These tests pin that the *distance*
 // decisions are made over the full 32 bits — the mod-2^16 comparison used to

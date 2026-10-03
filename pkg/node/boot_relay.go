@@ -499,11 +499,7 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 		}
 		n.dedupPeersMu.Unlock()
 	}
-	if obfuscate.IsStructuredSeq(seqID) {
-		if ep := obfuscate.ConnEpochFromSeq(seqID); ep != peerDedup.ConnEpoch() {
-			peerDedup.SetConnEpoch(ep)
-		}
-	}
+	// Keep the same epoch/replay contract as the direct receive path.
 	if peerDedup.IsDuplicate(seqID) {
 		n.Collector.RecordDedup()
 		// PERF: cached base58 — this is on every relayed frame (see peer_idstr.go).

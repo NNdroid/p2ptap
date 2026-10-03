@@ -71,10 +71,7 @@ BIN_DIR="$ROOT_DIR/bin"
 mkdir -p "$BIN_DIR"
 
 # ---- Version injection (matching build.ps1 logic) ----
-VERSION="${P2PTAP_VERSION:-}"
-if [ -z "$VERSION" ]; then
-  VERSION="v1.0.$(date -u +%Y%m%d)"
-fi
+VERSION="$(bash "$SCRIPT_DIR/get_version.sh" "${P2PTAP_VERSION:-}")"
 BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 GIT_COMMIT="$( (git rev-parse HEAD 2>/dev/null || echo 'unknown') | head -1)"
 VER_FLAGS="-X p2ptap/pkg/version.Version=$VERSION -X p2ptap/pkg/version.BuildTime=$BUILD_TIME -X p2ptap/pkg/version.GitCommit=$GIT_COMMIT"
@@ -166,7 +163,7 @@ elif [ "$TARGET" = "openwrt" ]; then
   done
 elif [ "$TARGET" = "aar" ]; then
   # Android AAR library build (delegates to the gomobile-based script).
-  exec "$SCRIPT_DIR/build-aar.sh"
+  P2PTAP_VERSION="$VERSION" exec "$SCRIPT_DIR/build-aar.sh"
 elif [ "$TARGET" != "all" ] && [ -n "$TARGET" ]; then
   OS_PART="${TARGET%%-*}"
   ARCH_PART="${TARGET#*-}"
