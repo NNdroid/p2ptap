@@ -390,7 +390,26 @@ func randomBetween(minVal, maxVal int) int {
 	return randv2.IntN(maxVal-minVal+1) + minVal
 }
 
+// Each borrower exclusively owns the generator until Put. Seeding uses fresh
+// process randomness, just like the previous per-word rand/v2 calls; no padding
+// byte templates are cached or reused between packets.
+var paddingRandomPool = sync.Pool{New: func() any {
+	var seed [32]byte
+	for i := 0; i < len(seed); i += 8 {
+		binary.LittleEndian.PutUint64(seed[i:], randv2.Uint64())
+	}
+	return randv2.NewChaCha8(seed)
+}}
+
 func fillRandom(buf []byte) {
+	// Keep short padding on the cheaper per-P runtime generator. For larger
+	// regions, amortize generator lookup across the entire random byte stream.
+	if len(buf) >= 256 {
+		rng := paddingRandomPool.Get().(*randv2.ChaCha8)
+		_, _ = rng.Read(buf)
+		paddingRandomPool.Put(rng)
+		return
+	}
 	for len(buf) >= 8 {
 		binary.LittleEndian.PutUint64(buf[:8], randv2.Uint64())
 		buf = buf[8:]
@@ -829,7 +848,11 @@ func EncryptPayloadRegionInto(dst, frame []byte, cipher ObfCipher) ([]byte, erro
 	seqID := binary.BigEndian.Uint64(frame[2:10])
 
 	// Assemble [header | ciphertext | trailing padding] directly into dst.
-	// append grows only when the caller did not provide sufficient capacity.
+	// Reserve the complete frame once: growing first for the header, then for
+	// ciphertext and finally for padding otherwise allocates and copies twice.
+	if cap(dst) < len(frame)+cipher.Overhead() {
+		dst = make([]byte, 0, len(frame)+cipher.Overhead())
+	}
 	out := append(dst[:0], frame[:hLen]...)
 	out = cipher.SealTo(out, nonce[:], frame[hLen:hLen+pLen])
 	ctLen := len(out) - hLen
@@ -888,6 +911,12 @@ func DecryptPayloadRegionInto(dst, frame []byte, cipher ObfCipher) ([]byte, erro
 
 	// Reassemble with a single append chain into the caller's buffer:
 	// [header | pt | trailing padding].
+	// The decrypted frame excludes the tag. Preserve reuse when the caller
+	// supplies exactly enough space for plaintext, including maximum frames.
+	capacity := max(hLen, len(frame)-cipher.Overhead())
+	if cap(dst) < capacity {
+		dst = make([]byte, 0, capacity)
+	}
 	out := append(dst[:0], frame[:hLen]...)
 	var err error
 	out, err = cipher.OpenTo(out, nonce[:], frame[hLen:hLen+pLen])
