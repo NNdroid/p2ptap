@@ -43,6 +43,11 @@ func defaultDispatchWorkerCount() int {
 // the egress queue is saturated and ping/Iperf frames are being silently dropped.
 const dispatchDropWarnThreshold = 10
 
+// Absorb short scheduler/GC stalls before dropping a bounded queue's payload.
+// The previous 5ms grace lost frames during otherwise healthy bulk flows.
+// Sustained congestion still has a finite wait and cannot grow queue memory.
+const dispatchBurstGrace = 25 * time.Millisecond
+
 // Peer-egress stall circuit-breaker.
 //
 // A stream write to a wedged/slow peer blocks for the full 5s write deadline
@@ -110,12 +115,9 @@ func (n *Node) dispatchNonblocking(task dispatchTask) {
 		// delivered immediately
 	default:
 		// Channel full — try with a short timeout to avoid dropping under brief bursts
-		timer := time.NewTimer(5 * time.Millisecond)
+		timer := time.NewTimer(dispatchBurstGrace)
 		defer timer.Stop()
-		select {
-		case n.dispatchCh <- task:
-			// delivered after brief wait
-		case <-timer.C:
+		if !n.enqueueDispatchWithin(task, timer.C) {
 			// The task is dropped: return a pooled payload buffer now so it
 			// does not leak. Caller-owned buffers (owned=false) are plain heap
 			// allocations and need no action.
@@ -132,9 +134,25 @@ func (n *Node) dispatchNonblocking(task dispatchTask) {
 				if cap(n.dispatchCh) > 0 {
 					fill = (len(n.dispatchCh) * 100) / cap(n.dispatchCh)
 				}
-				log.Warn("Dispatch channel full after 5ms: dropped %d frames total (P2P send backpressure, %d active workers, queue %d%% full)",
-					dropped, dispatchWorkerCount, fill)
+				log.Warn("Dispatch channel full after %s: dropped %d frames total (P2P send backpressure, %d active workers, queue %d%% full)",
+					dispatchBurstGrace, dropped, dispatchWorkerCount, fill)
 			}
+		}
+	}
+}
+
+// An elapsed timer and a free queue slot can be ready simultaneously after a
+// scheduler pause. Give the slot a final non-blocking chance before dropping.
+func (n *Node) enqueueDispatchWithin(task dispatchTask, expired <-chan time.Time) bool {
+	select {
+	case n.dispatchCh <- task:
+		return true
+	case <-expired:
+		select {
+		case n.dispatchCh <- task:
+			return true
+		default:
+			return false
 		}
 	}
 }

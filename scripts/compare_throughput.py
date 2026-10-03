@@ -19,7 +19,7 @@ def read_samples(path):
         if key is None:
             continue
         metrics = dict((unit, float(value)) for value, unit in re.findall(
-            r"([\d.]+)\s+(MB/s|%delivered|frames/s|written|dispatch_drops|undrained)\b", line))
+            r"([\d.]+)\s+(MB/s|%delivered|delivered|frames/s|written|dispatch_drops|undrained)\b", line))
         if "MB/s" in metrics and "%delivered" in metrics:
             samples.setdefault(key, []).append(metrics)
             key = None
@@ -45,9 +45,9 @@ def summarize(directory):
         old, new = baseline[key], candidate[key]
         if len(old) != 5 or len(new) != 5:
             raise ValueError(f"{key}: expected five samples per revision")
-        if any("undrained" not in sample or "dispatch_drops" not in sample for sample in old + new):
+        if any(any(metric not in sample for metric in ("undrained", "dispatch_drops", "delivered", "written")) for sample in old + new):
             raise ValueError(f"{key}: missing drain accounting; use the current harness for both revisions")
-        if any(s["%delivered"] != 100 or s["undrained"] != 0 or s["dispatch_drops"] != 0 for s in new):
+        if any(s["delivered"] != s["written"] or s["%delivered"] != 100 or s["undrained"] != 0 or s["dispatch_drops"] != 0 for s in new):
             raise ValueError(f"{key}: candidate lost or failed to drain frames; refusing a throughput win")
         old_rates = [s["MB/s"] for s in old]
         new_rates = [s["MB/s"] for s in new]

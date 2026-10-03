@@ -577,7 +577,7 @@ func benchProtocolPair(b *testing.B, spec transportSpec) *protocolPair {
 // throughput. Two design points:
 //
 //   - Under saturation the egress path backpressures BY DROPPING (dispatch
-//     queue full → dispatchNonblocking drops after its 5ms grace), so 100%
+//     queue full → dispatchNonblocking drops after its bounded grace), so 100%
 //     delivery is NOT an invariant — the metric is how much payload the
 //     overlay actually delivers, which is what VPN users experience.
 //   - A minimum of 5000 frames is pumped regardless of the calibration b.N:
@@ -656,6 +656,7 @@ func benchThroughput(b *testing.B, pair *protocolPair, build func(seq int) []byt
 	b.ReportMetric(float64(deliveredN)*float64(len(throughputBenchPayload))/elapsed.Seconds()/1e6, "MB/s")
 	b.ReportMetric(100*float64(deliveredN)/float64(written), "%delivered")
 	b.ReportMetric(float64(written), "written")
+	b.ReportMetric(float64(deliveredN), "delivered") // integer counts expose even one lost frame
 	b.ReportMetric(float64(droppedN), "dispatch_drops")
 	b.ReportMetric(float64(undrained), "undrained")
 	// Stop the drain goroutine by closing the node (its TAP reads return EOF).
