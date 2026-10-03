@@ -65,9 +65,20 @@ func TestLimitedCircuitConvergesAndDeliversBothDirections(t *testing.T) {
 		if pair[0].Host.Network().Connectedness(pair[1].Host.ID()) != network.Limited {
 			t.Fatal("endpoint transport is not Limited")
 		}
-		pair[0].triggerPeerRekey(pair[1].Host.ID())
 	}
-	for !a.isPeerReady(c.Host.ID()) || !c.isPeerReady(a.Host.ID()) || !a.hasNegotiatedCipher(c.Host.ID()) || !c.hasNegotiatedCipher(a.Host.ID()) {
+	// ConnectedF owns the initial handshake. Extra forced rekeys here can
+	// rotate one endpoint after the old ready flags satisfied this wait, racing
+	// the test's single data frame against a new generation's key commit.
+	// Require matching directional keys and completed initial rekey work.
+	for {
+		poA, poC := a.peerObf(c.Host.ID()), c.peerObf(a.Host.ID())
+		_, busyA := a.rekeyPeers.Load(c.Host.ID())
+		_, busyC := c.rekeyPeers.Load(a.Host.ID())
+		if !busyA && !busyC && a.isPeerReady(c.Host.ID()) && c.isPeerReady(a.Host.ID()) &&
+			poA != nil && poC != nil && poA.negotiated && poC.negotiated &&
+			bytes.Equal(poA.txKey, poC.rxKey) && bytes.Equal(poC.txKey, poA.rxKey) {
+			break
+		}
 		select {
 		case <-ctx.Done():
 			t.Fatal("Limited control handshake did not converge", ctx.Err())
