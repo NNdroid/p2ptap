@@ -99,6 +99,7 @@ jobs:
           # Apply the SAME logging, timing and workload to both code revisions.
           cp pkg/node/e2e_protocol_targets_test.go "$RUNNER_TEMP/p2ptap-baseline/pkg/node/"
           cp pkg/obfuscate/dedup_bench_test.go "$RUNNER_TEMP/p2ptap-baseline/pkg/obfuscate/"
+          cp pkg/obfuscate/frame_perf_test.go "$RUNNER_TEMP/p2ptap-baseline/pkg/obfuscate/"
           cp pkg/node/stream_frag_policy_test.go pkg/node/bufpool_test.go "$RUNNER_TEMP/p2ptap-baseline/pkg/node/"
           go test -c ./pkg/node -o "$RUNNER_TEMP/candidate-node.test"
           go test -c ./pkg/obfuscate -o "$RUNNER_TEMP/candidate-obfuscate.test"
@@ -114,6 +115,21 @@ jobs:
           set -euo pipefail
           go test -count=1 -timeout=15m ./...
           go test -race -count=1 ./pkg/obfuscate
+
+      - name: Paired padding and encryption comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          for round in 1 2 3 4 5; do
+            order="baseline candidate"
+            if (( round % 2 == 0 )); then order="candidate baseline"; fi
+            for revision in $order; do
+              "$RUNNER_TEMP/${revision}-obfuscate.test" \
+                -test.run '^$' -test.bench '^Benchmark(PaddingPack|PaddingParallel|FrameSeal)$' \
+                -test.benchmem -test.benchtime=500ms -test.count=1 \
+                | tee -a "perf-results/padding-${revision}.txt"
+            done
+          done
 
       - name: Paired overlay transport throughput comparison
         shell: bash
