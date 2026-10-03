@@ -50,6 +50,13 @@ type PeerStreams struct {
 	// steady path avoids interface-key hashing without sharing its deadline.
 	writeDeadlineStream    network.Stream
 	nextWriteDeadlineRenew time.Time
+	// Adaptive transport selection is confined to multi-stream writers.
+	writeQuality        map[network.Stream]streamWriteQuality
+	preferredStream     network.Stream
+	streamSelectedAt    time.Time
+	nextStreamSelection time.Time
+	streamProbeCursor   int
+	selectionSnapshot   *peerStreamsSnapshot
 }
 
 type peerStreamsSnapshot struct {
@@ -67,14 +74,20 @@ func NewPeerStreams(pID peer.ID) *PeerStreams {
 
 // rebuildLocked re-sorts the streams snapshot. Caller MUST hold ps.mu (write).
 func (ps *PeerStreams) rebuildLocked() {
-	next := make([]network.Stream, 0, len(ps.streams))
-	for _, s := range ps.streams {
-		next = append(next, s)
+	names := make([]string, 0, len(ps.streams))
+	for name := range ps.streams {
+		names = append(names, name)
 	}
-	if len(next) > 1 {
-		sort.SliceStable(next, func(i, j int) bool {
-			return scoreStreamTransport(next[i]) < scoreStreamTransport(next[j])
-		})
+	sort.Slice(names, func(i, j int) bool {
+		a, b := scoreStreamTransport(ps.streams[names[i]]), scoreStreamTransport(ps.streams[names[j]])
+		if a != b {
+			return a < b
+		}
+		return names[i] < names[j]
+	})
+	next := make([]network.Stream, 0, len(names))
+	for _, name := range names {
+		next = append(next, ps.streams[name])
 	}
 	ps.sorted = next
 	ps.snapshot.Store(&peerStreamsSnapshot{streams: next})
@@ -491,6 +504,10 @@ func (sd *StrategyDispatcher) removeStreamUnderLock(ps *PeerStreams, s network.S
 	}
 	ps.mu.Unlock()
 	delete(ps.writeDeadlineRenew, s)
+	delete(ps.writeQuality, s)
+	if ps.preferredStream == s {
+		ps.preferredStream = nil
+	}
 	if ps.writeDeadlineStream == s {
 		ps.writeDeadlineStream = nil
 		ps.nextWriteDeadlineRenew = time.Time{}
@@ -914,7 +931,19 @@ func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer pe
 				ps.writeDeadlineRenew[s] = ps.nextWriteDeadlineRenew
 			}
 		}
-		return writeFrames(s, frags)
+		if len(streams) < 2 {
+			return writeFrames(s, frags)
+		}
+		err := writeFrames(s, frags)
+		if err == nil {
+			wireBytes := 0
+			for _, frag := range frags {
+				wireBytes += len(frag) + 4
+			}
+			completed := time.Now()
+			ps.recordStreamWrite(s, wireBytes, completed.Sub(now), completed)
+		}
+		return err
 	}
 	record := func(recordPayload bool) {
 		if sd.node != nil {
@@ -965,8 +994,12 @@ func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer pe
 		if len(streams) == 0 || streams[0] == nil {
 			return fmt.Errorf("no streams for peer %s", targetPeer.String())
 		}
-		if err := writeOne(streams[0]); err != nil {
-			sd.removeStreamUnderLock(ps, streams[0])
+		selected := 0
+		if len(streams) > 1 {
+			selected = ps.selectStreamIndex(streams, time.Now())
+		}
+		if err := writeOne(streams[selected]); err != nil {
+			sd.removeStreamUnderLock(ps, streams[selected])
 			return err
 		}
 		record(true)

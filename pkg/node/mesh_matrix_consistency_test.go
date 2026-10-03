@@ -19,16 +19,9 @@ type recordingCollector struct {
 func (r *recordingCollector) UpdateMeshMatrix(m []observer.MeshMatrixCellDTO) { r.matrix = m }
 func (r *recordingCollector) UpdateRoutes(rs []observer.RouteInfoDTO)         { r.routes = rs }
 
-// TestMeshMatrixAgreesWithTopologyRTT is the end-to-end guard for the WebUI
-// report that the Mesh Quality & Latency matrix and the topology star chart
-// showed different latencies "in many places" for the same link.
-//
-// The two panels read two different code paths — the matrix reads the routing
-// graph, the star prefers PeerInfoDTO.rtt_ms (the probe) — so they only agree if
-// the graph weight itself is the probe result. updateWebCollectorState used to
-// write that weight from the peerstore EWMA AFTER writing it from the probe, so
-// the matrix showed the EWMA while the star showed the probe.
-func TestMeshMatrixAgreesWithTopologyRTT(t *testing.T) {
+// TAP experience and adjacency estimates have distinct scopes. Panels retain
+// measured telemetry while the routing graph uses only connection measurements.
+func TestMeshMatrixKeepsTAPTelemetrySeparateFromRoutingRTT(t *testing.T) {
 	mk := func(ip, ip6 string) (*Node, *recordingCollector) {
 		tapDev, _ := tap.NewMemTAPPair("tap"+ip, "pipe"+ip)
 		col := &recordingCollector{}
@@ -69,7 +62,7 @@ func TestMeshMatrixAgreesWithTopologyRTT(t *testing.T) {
 
 	nodeA.updateWebCollectorState()
 
-	// 1. The matrix must carry the probe, not the EWMA.
+	// 1. The matrix carries real TAP telemetry independently of route cost.
 	var cell *observer.MeshMatrixCellDTO
 	for i := range colA.matrix {
 		if colA.matrix[i].DstPeerID == bID.String() {
@@ -89,14 +82,11 @@ func TestMeshMatrixAgreesWithTopologyRTT(t *testing.T) {
 	if cell.RTTSource != rttSourceTAPICMP {
 		t.Fatalf("matrix RTT source = %q, want %q", cell.RTTSource, rttSourceTAPICMP)
 	}
-	// This is the regression: the routing-graph weight must be the measured
-	// value, not the 24ms peerstore EWMA that overwrote it.
-	if cell.RTTMs != 2 {
-		t.Fatalf("matrix routing RTT = %d ms, want 2 ms (1.7 rounded up from the probe, not the %v EWMA)", cell.RTTMs, staleEWMAMs)
+	if cell.RTTMs != 24 {
+		t.Fatalf("TAP measurement changed adjacency estimate: %dms", cell.RTTMs)
 	}
 
-	// 2. The topology star must resolve the same link to the same weight, so a
-	//    viewer reading both panels sees one number.
+	// 2. The topology graph uses the same adjacency estimate.
 	var topoRTT int64
 	var found bool
 	for _, tn := range nodeA.GetTopology().Nodes {
@@ -112,8 +102,7 @@ func TestMeshMatrixAgreesWithTopologyRTT(t *testing.T) {
 		t.Fatalf("topology RTT %d ms disagrees with the matrix %d ms for the same link", topoRTT, cell.RTTMs)
 	}
 
-	// 3. The route table must expose the same measured value, since it is the
-	//    third place the same latency is displayed.
+	// 3. Route DTOs preserve both physical path estimates and TAP telemetry.
 	var route *observer.RouteInfoDTO
 	for i := range colA.routes {
 		if colA.routes[i].DestPeer == bID.String() {
@@ -124,7 +113,7 @@ func TestMeshMatrixAgreesWithTopologyRTT(t *testing.T) {
 	if route == nil {
 		t.Fatalf("no route DTO for peer B")
 	}
-	if !route.RTTMeasured || route.MeasuredRTTMs != 1.7 || route.TotalRTTMs != 2 {
+	if !route.RTTMeasured || route.MeasuredRTTMs != 1.7 || route.TotalRTTMs != 24 {
 		t.Fatalf("route DTO disagrees with the matrix: measured=%v %v ms, total=%d ms", route.RTTMeasured, route.MeasuredRTTMs, route.TotalRTTMs)
 	}
 }

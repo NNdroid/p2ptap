@@ -18,7 +18,7 @@ import (
 // surfaced as "≈24 ms" in the table next to "1.7ms" on the star for the same peer.
 func TestPreferredLinkRTTMs(t *testing.T) {
 	measured := func(ms float64) peerRTTSnapshot {
-		return peerRTTSnapshot{rttMs: ms, rttMeasured: true, source: rttSourceTAPICMP}
+		return peerRTTSnapshot{rttMs: ms, rttMeasured: true, source: rttSourceP2PEcho}
 	}
 
 	tests := []struct {
@@ -119,10 +119,12 @@ func TestPeerRTTMeasurementPrefersFreshSources(t *testing.T) {
 		t.Fatalf("fresh TAP ICMP did not outrank the echo: %+v", snap)
 	}
 
-	// The routing weight derived from that snapshot is the measured value — the
-	// number both WebUI panels must render — not the peerstore EWMA.
-	if ms, ok := preferredLinkRTTMs(snap, 24); !ok || ms != 2 {
-		t.Fatalf("expected the measured 2ms to become the link weight, got (%d, ok=%v)", ms, ok)
+	// End-to-end TAP telemetry cannot replace the physical adjacency weight.
+	if ms, ok := preferredLinkRTTMs(snap, 24); !ok || ms != 24 {
+		t.Fatalf("TAP measurement contaminated link weight: (%d, ok=%v)", ms, ok)
+	}
+	if link := n.peerLinkRTTMeasurement(both, now); link.source != rttSourceP2PEcho || link.rttMs != 12 {
+		t.Fatalf("link scope did not retain the connection probe: %+v", link)
 	}
 
 	// An all-timeout window is loss telemetry, not a measurement: the EWMA

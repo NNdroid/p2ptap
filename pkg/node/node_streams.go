@@ -1014,10 +1014,12 @@ func (n *Node) handleRelayStream(s network.Stream) {
 
 		// Destination is another peer: forward frame if TTL > 1
 		if ttl > 1 {
-			routes := n.getCachedRoutes()
 			nextHop := finalDst
-			if route, ok := routes[finalDst]; ok && route.NextHop != "" && route.NextHop != n.Host.ID() {
+			if route, ok := n.overlayRoute(finalDst, int(ttl)-1, remotePeer); ok {
 				nextHop = route.NextHop
+			} else if !n.routeHopUsable(finalDst, finalDst) {
+				n.relayDiag.loopGuard()
+				continue
 			}
 			// Loop guard: never hand the frame straight back to the peer that
 			// just delivered it. That would form a 2-node relay cycle (bounded

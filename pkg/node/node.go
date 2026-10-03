@@ -136,15 +136,17 @@ type Node struct {
 	// conflicts and their arbitration verdicts (see dup_ip_arbitration.go). It is
 	// rebuilt alongside arpIndex on every topology change and surfaced via
 	// GetDuplicateIPConflicts for alerting/observability.
-	dupIPConflictsMu    sync.Mutex
-	dupIPConflicts      []DuplicateIPConflict
-	cachedRoutesMu      sync.RWMutex
-	cachedRoutes        map[peer.ID]routing.RouteInfo
-	cachedRoutesAt      time.Time
-	relayLatencyMu      sync.RWMutex
-	relayLatency        map[peer.ID]time.Duration // per-relay-peer RTT cache
-	relayAuthMu         sync.Mutex
-	relayAuthInProgress map[peer.ID]bool // dedup ConnectedF-triggered relay auth per peer
+	dupIPConflictsMu     sync.Mutex
+	dupIPConflicts       []DuplicateIPConflict
+	cachedRoutesMu       sync.RWMutex
+	cachedRoutes         map[peer.ID]routing.RouteInfo
+	cachedRoutesAt       time.Time
+	cachedRoutesRevision uint64
+	cachedRouteSnapshot  atomic.Pointer[nodeRouteSnapshot]
+	relayLatencyMu       sync.RWMutex
+	relayLatency         map[peer.ID]time.Duration // per-relay-peer RTT cache
+	relayAuthMu          sync.Mutex
+	relayAuthInProgress  map[peer.ID]bool // dedup ConnectedF-triggered relay auth per peer
 
 	// relayOnlyPeers tracks peers whose ONLY working path is a circuit relay
 	// (e.g. mDNS-discovered peers on a private subnet we cannot reach directly).
@@ -2870,6 +2872,14 @@ func (n *Node) GetTopology() TopologyResponse {
 	for _, e := range snap.Edges {
 		addEdge(e.From, e.To, e.RTT)
 		addEdge(e.To, e.From, e.RTT)
+	}
+	// Local adjacency is directional evidence. The undirected snapshot's
+	// minimum remote RTT must not replace our own connection estimate.
+	adj[self] = make(map[peer.ID]int64)
+	for id, rtt := range n.Router.BuildLSA(0, routing.NodeIdentity{}).Neighbors {
+		if pid, err := peer.Decode(id); err == nil {
+			adj[self][pid] = rtt
+		}
 	}
 
 	// Dijkstra from self.
