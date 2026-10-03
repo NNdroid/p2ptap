@@ -34,6 +34,28 @@ On Windows, run the terminal as Administrator and omit `sudo`.
 
 The Web UI listens on the configured TAP address. For example, a node with `tap_ip` set to `10.0.0.1/24` is normally available at `http://10.0.0.1`.
 
+## Build Versions and Releases
+
+Build scripts generate `v1.0.YYYYMMDD.COUNT-HASH7`, for example
+`v1.0.20261003.60-abc1234`. The date is UTC, `COUNT` is the number of commits
+reachable from the source commit (`git rev-list --count`), and `HASH7` is exactly
+the first seven characters of its full Git hash. Automatic versioning requires
+full Git history; use `git fetch --unshallow` for a shallow checkout.
+
+In Actions → **Build & Release** → **Run workflow**:
+
+- Leave **version** empty to generate the version, or enter an override such as
+  `v1.2.3` or `v1.0.20261003.60-abc1234` (the `v` prefix is optional).
+- **publish_release** defaults to checked. Uncheck it to build and upload Actions
+  artifacts without creating/updating a GitHub Release or publishing the OpenWrt
+  feed. All build targets use the same resolved version.
+
+Local builds accept the same override through `P2PTAP_VERSION`. OpenWrt builds
+use `P2PTAP_PKG_VERSION`; the daemon retains the complete version, while APK/LuCI
+package metadata uses the numeric portion and the Git commit count as `PKG_RELEASE`.
+An existing release tag pointing to another commit is rejected before a publishing
+build starts.
+
 ## Two-Node Setup
 
 Each node needs its own configuration and identity key. For two nodes to share the same virtual Ethernet segment:

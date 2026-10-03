@@ -3,20 +3,17 @@
 set -euo pipefail
 RAW_VERSION="${1:?Usage: set_openwrt_version.sh VERSION PACKAGE_ROOT...}"
 shift
-VERSION_NUM="${RAW_VERSION#v}"
-# Releases use numeric versions (including date-based v1.0.YYYYMMDD tags).
-# Reject shell/make syntax and unsupported prerelease tags instead of silently
-# emitting an invalid package or changing upgrade ordering.
-if [[ ! "$VERSION_NUM" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
-    echo "Unsupported OpenWrt release version: $RAW_VERSION (expected v1.0.20261001 or 1.2.3)" >&2
-    exit 1
-fi
+RELEASE_VERSION="$(bash "$(dirname "${BASH_SOURCE[0]}")/get_version.sh" "$RAW_VERSION")"
+# APK versions must remain ordered numeric versions; keep HASH7 in the daemon.
+VERSION_NUM="${RELEASE_VERSION#v}"
+VERSION_NUM="${VERSION_NUM%-*}"
 SOURCE_REF="${P2PTAP_SOURCE_VERSION:-HEAD}"
 if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
     echo 'Full Git history is required for PKG_RELEASE; fetch with depth 0' >&2
     exit 1
 fi
-RELEASE_COUNT=$(git rev-list --count "$SOURCE_REF")
+COMMIT=$(git rev-parse --verify "${SOURCE_REF}^{commit}")
+RELEASE_COUNT=$(git rev-list --count "$COMMIT")
 [[ "$RELEASE_COUNT" =~ ^[1-9][0-9]*$ ]] || exit 1
 [ "$#" -gt 0 ] || { echo 'No package roots specified' >&2; exit 1; }
 for ROOT in "$@"; do
@@ -28,5 +25,7 @@ for ROOT in "$@"; do
     for PACKAGE in p2ptap luci-app-p2ptap; do
         sed -i -e "s/^PKG_VERSION:=.*/PKG_VERSION:=${VERSION_NUM}/" -e "s/^PKG_RELEASE:=.*/PKG_RELEASE:=${RELEASE_COUNT}/" "$ROOT/$PACKAGE/Makefile"
     done
+    sed -i -e "s/^P2PTAP_VERSION:=.*/P2PTAP_VERSION:=${RELEASE_VERSION}/" \
+        -e "s/^P2PTAP_GIT_COMMIT:=.*/P2PTAP_GIT_COMMIT:=${COMMIT}/" "$ROOT/p2ptap/Makefile"
 done
 printf '%s\n' "$VERSION_NUM"

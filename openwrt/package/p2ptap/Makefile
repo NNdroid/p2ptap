@@ -2,6 +2,9 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=p2ptap
 PKG_VERSION:=1.0.0
+# Keep the complete upstream version in the binary; APK metadata is numeric.
+P2PTAP_VERSION:=v$(PKG_VERSION)
+P2PTAP_GIT_COMMIT:=unknown
 # SDKs without a Git checkout receive this value through the build scripts.
 P2PTAP_PKG_RELEASE?=$(shell git rev-list --count HEAD 2>/dev/null)
 PKG_RELEASE:=$(if $(P2PTAP_PKG_RELEASE),$(P2PTAP_PKG_RELEASE),1)
@@ -22,7 +25,7 @@ GO_PKG:=p2ptap
 # Preserve embedded WebUI assets and the local libp2p module replacement.
 GO_PKG_INSTALL_ALL:=1
 GO_PKG_BUILD_PKG:=p2ptap/cmd/p2ptap
-GO_PKG_LDFLAGS:=-s -w -X p2ptap/pkg/version.Version=$(PKG_VERSION) -X p2ptap/pkg/version.BuildTime=unknown -X p2ptap/pkg/version.GitCommit=unknown
+GO_PKG_LDFLAGS:=-s -w -X p2ptap/pkg/version.Version=$(P2PTAP_VERSION) -X p2ptap/pkg/version.BuildTime=unknown -X p2ptap/pkg/version.GitCommit=$(P2PTAP_GIT_COMMIT)
 
 include $(INCLUDE_DIR)/package.mk
 include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk

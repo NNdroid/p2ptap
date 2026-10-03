@@ -7,13 +7,21 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Package version (empty: UTC date version)'
+        description: 'Version override (empty: v1.0.YYYYMMDD.COUNT-HASH7, UTC)'
+        type: string
         default: ''
+      publish_feed:
+        description: 'Publish signed feed (unchecked: build artifacts only)'
+        type: boolean
+        default: true
   workflow_call:
     inputs:
       version:
         type: string
         required: true
+      publish_feed:
+        type: boolean
+        default: true
     secrets:
       OPENWRT_FEED_SIGNING_KEY_B64:
         required: true
@@ -27,16 +35,28 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      publish_feed: ${{ steps.version.outputs.publish_feed }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
       - id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
+          PUBLISH_FEED: ${{ inputs.publish_feed }}
         run: |
           set -euo pipefail
-          VERSION="${INPUT_VERSION:-v1.0.$(date -u +%Y%m%d)}"
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then VERSION="$GITHUB_REF_NAME"; fi
-          [[ "$VERSION" =~ ^v?[0-9]+(\.[0-9]+)*$ ]] || exit 1
-          printf 'version=v%s\n' "${VERSION#v}" >> "$GITHUB_OUTPUT"
+          VERSION="$INPUT_VERSION"
+          if [[ -z "$VERSION" && "$GITHUB_REF" == refs/tags/* ]]; then VERSION="$GITHUB_REF_NAME"; fi
+          VERSION="$(bash scripts/get_version.sh "$VERSION" "$GITHUB_SHA")"
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+          # An absent input on push keeps the existing automatic publication.
+          if [[ "$PUBLISH_FEED" == false ]]; then
+            echo 'publish_feed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'publish_feed=true' >> "$GITHUB_OUTPUT"
+          fi
   build:
     needs: prepare
     runs-on: ubuntu-latest
@@ -80,9 +100,8 @@ jobs:
           node scripts/test_openwrt_version.cjs
           node scripts/test_openwrt_status.cjs
           bash scripts/test_openwrt_feed_keys.sh
-          export P2PTAP_PKG_VERSION="${INPUT_VERSION:-v1.0.$(date -u +%Y%m%d)}"
+          export P2PTAP_PKG_VERSION="$INPUT_VERSION"
           export OPENWRT_GO_BOOTSTRAP_ROOT="$(go env GOROOT)"
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then export P2PTAP_PKG_VERSION="$GITHUB_REF_NAME"; fi
           export OPENWRT_FEED_SIGNING_KEY_FILE="$RUNNER_TEMP/p2ptap-feed-private.pem"
           export OPENWRT_FEED_PUBLIC_KEY_FILE="$RUNNER_TEMP/p2ptap-feed-public.pem"
           bash scripts/prepare_openwrt_feed_keys.sh pair "$OPENWRT_FEED_SIGNING_KEY_FILE" "$OPENWRT_FEED_PUBLIC_KEY_FILE"
@@ -97,6 +116,7 @@ jobs:
         run: rm -f "$RUNNER_TEMP/p2ptap-feed-private.pem" "$RUNNER_TEMP/p2ptap-feed-public.pem"
   publish:
     needs: [prepare, build]
+    if: ${{ needs.prepare.outputs.publish_feed == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -120,6 +140,5 @@ jobs:
           INPUT_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          export P2PTAP_PKG_VERSION="${INPUT_VERSION:-v1.0.$(date -u +%Y%m%d)}"
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then export P2PTAP_PKG_VERSION="$GITHUB_REF_NAME"; fi
+          export P2PTAP_PKG_VERSION="$INPUT_VERSION"
           bash scripts/publish_openwrt_feed.sh feed-dist

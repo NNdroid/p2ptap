@@ -23,7 +23,7 @@ ROOT_DIR="$( cd "$SCRIPT_DIR/.." &> /dev/null && pwd )"
 PORT="${2:-4001}"
 
 # Version injection
-VERSION="${P2PTAP_VERSION:-v1.0.$(date -u +%Y%m%d)}"
+VERSION="$(bash "$SCRIPT_DIR/get_version.sh" "${P2PTAP_VERSION:-}")"
 BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 GIT_COMMIT="$( (git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo 'unknown') | head -1)"
 VER_FLAGS="-X p2ptap/pkg/version.Version=$VERSION -X p2ptap/pkg/version.BuildTime=$BUILD_TIME -X p2ptap/pkg/version.GitCommit=$GIT_COMMIT"
