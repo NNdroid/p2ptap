@@ -7229,13 +7229,13 @@
                    <span style="margin-left:6px; color:var(--text-muted);">${t('active_pathway_unknown') || 'No Live Connection'}</span>`;
 
             const getAddrScoreInfo = (a) => {
-                if (!a) return { score: 999, label: 'Score 999', color: '#94a3b8' };
-                if (a.includes('/p2p-circuit')) return { score: 100, label: t('score_relay') || 'Relay (Score 100)', color: '#fbbf24' };
-                if (a.includes('127.0.0.1') || a.includes('/ip6/::1')) return { score: 0, label: t('score_loopback') || 'Loopback (Score 0)', color: '#a855f7' };
+                if (!a) return { score: 999, label: 'Score 999', color: 'var(--text-secondary)' };
+                if (a.includes('/p2p-circuit')) return { score: 100, label: t('score_relay') || 'Relay (Score 100)', color: 'var(--warn)' };
+                if (a.includes('127.0.0.1') || a.includes('/ip6/::1')) return { score: 0, label: t('score_loopback') || 'Loopback (Score 0)', color: 'var(--accent-purple)' };
                 if (a.includes('192.168.') || a.includes('/ip4/10.') || a.includes('/ip4/172.') || a.includes('/ip6/fd')) {
-                    return { score: 10, label: t('score_lan_direct') || 'LAN Direct (Score 10)', color: '#34d399' };
+                    return { score: 10, label: t('score_lan_direct') || 'LAN Direct (Score 10)', color: 'var(--success)' };
                 }
-                return { score: 20, label: t('score_wan_direct') || 'WAN Direct (Score 20)', color: '#38bdf8' };
+                return { score: 20, label: t('score_wan_direct') || 'WAN Direct (Score 20)', color: 'var(--info)' };
             };
 
             const body = document.getElementById('multiaddrModalBody');
@@ -7251,7 +7251,7 @@
                         const sc = getAddrScoreInfo(a);
                         return `<div class="ma-entry${isActive ? ' active' : ''}" data-ma-index="${idx}" data-ma-addr="${escapeHTML(a)}">
                             <span class="ma-tag">[${tag}]</span>
-                            <span style="font-size:0.72rem; padding:1px 6px; border-radius:4px; margin-right:4px; font-weight:600; color:${sc.color}; background:rgba(255,255,255,0.06); border:1px solid ${sc.color}40;" title="Priority Score (0:Loopback, 10:LAN, 20:WAN, 100:Relay)">${sc.label}</span>
+                            <span style="font-size:0.72rem; padding:1px 6px; border-radius:4px; margin-right:4px; font-weight:600; color:${sc.color}; background:var(--glass-fill); border:1px solid var(--border-subtle);" title="Priority Score (0:Loopback, 10:LAN, 20:WAN, 100:Relay)">${sc.label}</span>
                             <span class="ma-addr-text">${escapeHTML(a)}</span>
                             <span class="ma-rtt" style="display:none; margin-left:6px; font-size:0.68rem; font-weight:bold;"></span>
                         </div>`;
@@ -7290,7 +7290,7 @@
                 if (rttSpan) {
                     rttSpan.style.display = 'inline-block';
                     rttSpan.textContent = '...';
-                    rttSpan.style.color = '#94a3b8';
+                    rttSpan.style.color = 'var(--text-secondary)';
                     rttSpan.style.background = 'rgba(148, 163, 184, 0.12)';
                     rttSpan.style.padding = '1px 5px';
                     rttSpan.style.borderRadius = '3px';
@@ -7551,7 +7551,7 @@
                     <div class="glass-card" style="padding:18px; display:flex; flex-direction:column; gap:12px; border-left:3px solid var(--danger);">
                         <div style="display:flex; justify-content:space-between; align-items:center;">
                             <strong style="color:var(--danger); font-size:1.05rem;">⚠️ Ping Target Unreachable</strong>
-                            <span style="font-size:0.75rem; background:rgba(239,68,68,0.15); color:#f87171; padding:2px 8px; border-radius:5px;">${escapeHTML(target)}</span>
+                            <span style="font-size:0.75rem; background:rgba(239,68,68,0.15); color: var(--danger); padding:2px 8px; border-radius:5px;">${escapeHTML(target)}</span>
                         </div>
                         <div style="font-size:0.85rem; color:var(--text-secondary);">
                             ${d && d.error ? escapeHTML(d.error) : 'Target peer did not respond to P2P ping probe.'}
@@ -7654,7 +7654,7 @@
                         <strong style="font-size:1.05rem; color:var(--text-primary);">🛣️ P2P Overlay Forwarding Path (${hops.length} Nodes)</strong>
                         <span style="font-size:0.78rem; background:var(--glass-fill); padding:3px 10px; border-radius:6px; color:var(--accent-cyan); border:1px solid var(--border-subtle);">${tracePathIcon} ${transportPathLabel(tracePath)}</span>
                     </div>
-                    <div style="display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:8px; padding:14px 10px; background:rgba(0,0,0,0.2); border-radius:12px; border:1px solid var(--border-subtle);">
+                    <div style="display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:8px; padding:14px 10px; background:var(--surface-recessed); border-radius:12px; border:1px solid var(--border-subtle);">
                         ${hopsHtml}
                     </div>
                     <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-secondary); border-top:1px solid var(--border-subtle); padding-top:8px;">
@@ -8108,17 +8108,17 @@
                 let color, badgeColor, icon, badgeText;
                 if (status === 'PASS') {
                     color = 'rgba(52,211,153,0.4)';
-                    badgeColor = 'var(--status-green)';
+                    badgeColor = 'var(--success)';
                     icon = '✅';
                     badgeText = t('troubleshoot_pass') || 'PASS';
                 } else if (status === 'FAIL') {
                     color = 'rgba(248,113,113,0.4)';
-                    badgeColor = 'var(--status-red)';
+                    badgeColor = 'var(--danger)';
                     icon = '❌';
                     badgeText = t('troubleshoot_fail') || 'FAIL';
                 } else if (status === 'WARN') {
                     color = 'rgba(251,191,36,0.4)';
-                    badgeColor = 'var(--status-yellow)';
+                    badgeColor = 'var(--warn)';
                     icon = '⚠️';
                     badgeText = t('troubleshoot_warn') || 'WARN';
                 } else if (status === 'SKIP') {
@@ -9180,7 +9180,7 @@
             }
             const secs = ms / 1000;
             const txt = secs >= 1 ? secs.toFixed(1) + 's' : ms + 'ms';
-            const color = ms < 1000 ? '#94a3b8' : (ms < 5000 ? '#fbbf24' : '#f87171');
+            const color = ms < 1000 ? 'var(--text-secondary)' : (ms < 5000 ? 'var(--warn)' : 'var(--danger)');
             return `<span style="font-size:0.68rem; color:${color};" title="SeqSync handshake convergence: ${ms} ms (time from first crypto handshake to link usable)">⌛ ${txt}</span>`;
         }
 
@@ -9189,12 +9189,12 @@
         // p.conn_state is the aggregate verdict; p.conn_stage (0..4) drives the
         // progress dots; p.conn_detail is the hover/secondary text.
         const CONN_STATE_META = {
-            ok:            { color: '#34d399', bg: 'rgba(52,211,153,0.12)',  bd: 'rgba(52,211,153,0.35)' },
-            relay_ok:      { color: '#fbbf24', bg: 'rgba(245,158,11,0.12)',  bd: 'rgba(245,158,11,0.35)' },
-            connecting:    { color: '#38bdf8', bg: 'rgba(56,189,248,0.12)',  bd: 'rgba(56,189,248,0.35)' },
-            proto_mismatch:{ color: '#f87171', bg: 'rgba(248,113,113,0.12)', bd: 'rgba(248,113,113,0.35)' },
-            obf_failed:    { color: '#f87171', bg: 'rgba(248,113,113,0.12)', bd: 'rgba(248,113,113,0.35)' },
-            unreachable:   { color: '#94a3b8', bg: 'rgba(148,163,184,0.12)', bd: 'rgba(148,163,184,0.35)' },
+            ok:            { color: 'var(--success)', bg: 'var(--accent-green-fill)', bd: 'var(--accent-green-border)' },
+            relay_ok:      { color: 'var(--warn)', bg: 'var(--warn-fill)', bd: 'var(--warn-border)' },
+            connecting:    { color: 'var(--info)', bg: 'var(--accent-cyan-fill)', bd: 'var(--accent-cyan-border)' },
+            proto_mismatch:{ color: 'var(--danger)', bg: 'var(--danger-fill)', bd: 'var(--danger-border)' },
+            obf_failed:    { color: 'var(--danger)', bg: 'var(--danger-fill)', bd: 'var(--danger-border)' },
+            unreachable:   { color: 'var(--text-secondary)', bg: 'var(--slate-fill)', bd: 'var(--slate-border)' },
         };
         const CONN_STAGE_LABELS = ['Conn', 'Proto', 'Crypt', 'Data'];
         function connStateBadge(p) {
@@ -9305,24 +9305,24 @@
         }
 
         const channelCategoryConfig = {
-            sync:         { icon: '🔄', color: '#38bdf8', borderColor: 'var(--accent-cyan-border)' },
-            routing:      { icon: '🗺️', color: '#a78bfa', borderColor: 'var(--accent-purple-border)' },
-            pubsub:       { icon: '📡', color: '#fbbf24', borderColor: 'var(--accent-yellow-border, #92400e)' },
-            data:         { icon: '🚀', color: '#34d399', borderColor: 'var(--accent-green-border)' },
-            security:     { icon: '🛡️', color: '#f87171', borderColor: 'var(--danger-border, #7f1d1d)' },
-            transport:    { icon: '🕳️', color: '#c084fc', borderColor: 'var(--accent-purple-border)' },
-            diagnostics:  { icon: '🩺', color: '#38bdf8', borderColor: 'var(--border-subtle)' },
-            discovery:    { icon: '🔍', color: '#38bdf8', borderColor: 'var(--accent-cyan-border)' },
+            sync:         { icon: '🔄', color: 'var(--info)', borderColor: 'var(--accent-cyan-border)' },
+            routing:      { icon: '🗺️', color: 'var(--accent-purple)', borderColor: 'var(--accent-purple-border)' },
+            pubsub:       { icon: '📡', color: 'var(--warn)', borderColor: 'var(--accent-yellow-border, #92400e)' },
+            data:         { icon: '🚀', color: 'var(--success)', borderColor: 'var(--accent-green-border)' },
+            security:     { icon: '🛡️', color: 'var(--danger)', borderColor: 'var(--danger-border, #7f1d1d)' },
+            transport:    { icon: '🕳️', color: 'var(--accent-purple)', borderColor: 'var(--accent-purple-border)' },
+            diagnostics:  { icon: '🩺', color: 'var(--info)', borderColor: 'var(--border-subtle)' },
+            discovery:    { icon: '🔍', color: 'var(--info)', borderColor: 'var(--accent-cyan-border)' },
         };
 
         function channelStatusBadge(status) {
-            if (status === 'active')    return `<span style="color:#34d399;font-weight:700;font-size:0.75rem;">● ${t('channel_status_active') || 'Active'}</span>`;
-            if (status === 'running')   return `<span style="color:#38bdf8;font-weight:700;font-size:0.75rem;">● ${t('channel_status_running') || 'Running'}</span>`;
-            if (status === 'synced')    return `<span style="color:#34d399;font-weight:700;font-size:0.75rem;">● ${t('channel_status_synced') || 'Synchronized'}</span>`;
-            if (status === 'ready')     return `<span style="color:#a78bfa;font-weight:700;font-size:0.75rem;">● ${t('channel_status_ready') || 'Ready'}</span>`;
-            if (status === 'standby')   return `<span style="color:#fbbf24;font-weight:700;font-size:0.75rem;">⏸ ${t('channel_status_standby') || 'Standby'}</span>`;
-            if (status === 'open-mode') return `<span style="color:#fbbf24;font-weight:700;font-size:0.75rem;">◌ ${t('channel_status_open') || 'Open'}</span>`;
-            if (status === 'idle')      return `<span style="color:#94a3b8;font-weight:700;font-size:0.75rem;">◌ ${t('channel_status_idle') || 'Idle'}</span>`;
+            if (status === 'active')    return `<span style="color: var(--success);font-weight:700;font-size:0.75rem;">● ${t('channel_status_active') || 'Active'}</span>`;
+            if (status === 'running')   return `<span style="color: var(--info);font-weight:700;font-size:0.75rem;">● ${t('channel_status_running') || 'Running'}</span>`;
+            if (status === 'synced')    return `<span style="color: var(--success);font-weight:700;font-size:0.75rem;">● ${t('channel_status_synced') || 'Synchronized'}</span>`;
+            if (status === 'ready')     return `<span style="color: var(--accent-purple);font-weight:700;font-size:0.75rem;">● ${t('channel_status_ready') || 'Ready'}</span>`;
+            if (status === 'standby')   return `<span style="color: var(--warn);font-weight:700;font-size:0.75rem;">⏸ ${t('channel_status_standby') || 'Standby'}</span>`;
+            if (status === 'open-mode') return `<span style="color: var(--warn);font-weight:700;font-size:0.75rem;">◌ ${t('channel_status_open') || 'Open'}</span>`;
+            if (status === 'idle')      return `<span style="color: var(--text-secondary);font-weight:700;font-size:0.75rem;">◌ ${t('channel_status_idle') || 'Idle'}</span>`;
             return `<span style="color:var(--text-muted);font-size:0.75rem;">◌ ${escapeHTML(status)}</span>`;
         }
 
@@ -9350,7 +9350,7 @@
                 }
 
                 if (totalFrames === 0) {
-                    const emptyBarHtml = `<div class="proto-traffic-segment" style="width:100%; background:rgba(255,255,255,0.08); border-radius:4px;"></div>`;
+                    const emptyBarHtml = `<div class="proto-traffic-segment" style="width:100%; background:var(--glass-fill-strong); border-radius:4px;"></div>`;
                     if (trafficBar._lastHtml !== emptyBarHtml) {
                         trafficBar._lastHtml = emptyBarHtml;
                         trafficBar.innerHTML = emptyBarHtml;
@@ -9552,7 +9552,7 @@
                         if (eventsEl && eventsEl.innerHTML !== eventsHtml) eventsEl.innerHTML = eventsHtml;
 
                         const errsEl = card.querySelector('.proto-errors-val');
-                        const errsHtml = errCount > 0 ? `<span style="color:#f87171;">Errors: <strong>${errCount}</strong></span>` : '';
+                        const errsHtml = errCount > 0 ? `<span style="color: var(--danger);">Errors: <strong>${errCount}</strong></span>` : '';
                         if (errsEl && errsEl.innerHTML !== errsHtml) errsEl.innerHTML = errsHtml;
 
                         const metaEl = card.querySelector('.proto-meta-val');
@@ -9596,10 +9596,10 @@
             const scoreEl = document.getElementById('meshHealthScore');
             if (scoreEl) {
                 scoreEl.textContent = `${score}%`;
-                if (score >= 90) scoreEl.style.color = '#34d399';
-                else if (score >= 70) scoreEl.style.color = '#38bdf8';
-                else if (score >= 50) scoreEl.style.color = '#fbbf24';
-                else scoreEl.style.color = '#f87171';
+                if (score >= 90) scoreEl.style.color = 'var(--success)';
+                else if (score >= 70) scoreEl.style.color = 'var(--info)';
+                else if (score >= 50) scoreEl.style.color = 'var(--warn)';
+                else scoreEl.style.color = 'var(--danger)';
             }
 
             const metricsRow = document.getElementById('meshHealthMetricsRow');
@@ -9609,7 +9609,7 @@
                     <span class="mesh-health-pill">🌐 ${t('lbl_direct_ratio') || 'Direct Ratio'}: <strong>${directRatio === null ? '—' : (directRatio * 100).toFixed(0) + '%'}</strong> (${directPeers}/${totalPeers})</span>
                     <span class="mesh-health-pill">🔐 ${t('lbl_crypto_grade') || 'Encryption'}: <strong>${escapeHTML(algoStr)}</strong></span>
                     <span class="mesh-health-pill">🛡️ ${t('lbl_dedup_drops') || 'Window Dedup'}: <strong>${dedupCount.toLocaleString()}</strong></span>
-                    <span class="mesh-health-pill">⚠️ ${t('lbl_dup_conflicts') || 'IP Conflicts'}: <strong style="color:${dupIPs > 0 ? '#f87171' : '#34d399'}">${dupIPs}</strong></span>
+                    <span class="mesh-health-pill">⚠️ ${t('lbl_dup_conflicts') || 'IP Conflicts'}: <strong style="color:${dupIPs > 0 ? 'var(--danger)' : 'var(--success)'}">${dupIPs}</strong></span>
                 `;
             }
 
@@ -9617,23 +9617,23 @@
             if (tipsEl) {
                 const tips = [];
                 if (!tapAvailable) {
-                    tips.push(`<span class="mesh-health-tip-item" style="color:#f87171;">${t('tip_tap_failed') || '❌ TAP device self-test failed: verify kernel driver and permissions.'}</span>`);
+                    tips.push(`<span class="mesh-health-tip-item" style="color: var(--danger);">${t('tip_tap_failed') || '❌ TAP device self-test failed: verify kernel driver and permissions.'}</span>`);
                 }
                 if (dupIPs > 0) {
                     const msg = (t('tip_dup_ips') || '⚠️ {count} duplicate IP conflict(s) detected in mesh topology.').replace('{count}', dupIPs);
-                    tips.push(`<span class="mesh-health-tip-item" style="color:#f87171;">${escapeHTML(msg)}</span>`);
+                    tips.push(`<span class="mesh-health-tip-item" style="color: var(--danger);">${escapeHTML(msg)}</span>`);
                 }
                 if (decryptErrs > 0) {
                     const btnLabel = t('btn_crypto_inspector') || 'Crypto & Sequence Inspector';
-                    const linkHtml = `<a href="javascript:void(0)" data-onclick="openCryptoInspector()" style="color:#38bdf8; text-decoration:underline; font-weight:600; cursor:pointer;">${escapeHTML(btnLabel)}</a>`;
+                    const linkHtml = `<a href="javascript:void(0)" data-onclick="openCryptoInspector()" style="color: var(--info); text-decoration:underline; font-weight:600; cursor:pointer;">${escapeHTML(btnLabel)}</a>`;
                     const template = t('tip_decrypt_errs') || '⚠️ {count} decryption failure(s) observed. Click {btn} to inspect & resync.';
                     const finalHtml = template.replace('{count}', decryptErrs).replace('{btn}', linkHtml);
-                    tips.push(`<span class="mesh-health-tip-item" style="color:#fbbf24;">${finalHtml}</span>`);
+                    tips.push(`<span class="mesh-health-tip-item" style="color: var(--warn);">${finalHtml}</span>`);
                 }
                 if (totalPeers === 0) {
                     tips.push(`<span class="mesh-health-tip-item">ℹ️ ${t('no_peers_connected') || 'No peers connected. Ready to establish secure P2P mesh.'}</span>`);
                 } else if (tips.length === 0) {
-                    tips.push(`<span class="mesh-health-tip-item" style="color:#34d399;">✅ ${t('mesh_status_optimal') || 'Mesh link quality optimal: all connected peers securely synchronized with forward-secret AEAD.'}</span>`);
+                    tips.push(`<span class="mesh-health-tip-item" style="color: var(--success);">✅ ${t('mesh_status_optimal') || 'Mesh link quality optimal: all connected peers securely synchronized with forward-secret AEAD.'}</span>`);
                 }
                 tipsEl.innerHTML = tips.join('');
             }
@@ -9659,19 +9659,19 @@
             if (!bar || !legend) return;
 
             if (total === 0) {
-                bar.innerHTML = `<div class="proto-traffic-segment" style="width:100%; background:rgba(255,255,255,0.08); border-radius:4px;"></div>`;
+                bar.innerHTML = `<div class="proto-traffic-segment" style="width:100%; background:var(--glass-fill-strong); border-radius:4px;"></div>`;
                 legend.innerHTML = `<span class="proto-traffic-item"><span class="proto-traffic-dot" style="background:#64748b;"></span> ${t('common_idle') || 'Standby (0 packets captured)'}</span>`;
                 return;
             }
 
             const protos = [
-                { name: 'IPv4', count: ipv4, color: '#38bdf8' },
-                { name: 'IPv6', count: ipv6, color: '#a78bfa' },
-                { name: 'ARP',  count: arp,  color: '#fbbf24' },
-                { name: 'ICMP', count: icmp, color: '#34d399' },
+                { name: 'IPv4', count: ipv4, color: 'var(--info)' },
+                { name: 'IPv6', count: ipv6, color: 'var(--accent-purple)' },
+                { name: 'ARP',  count: arp,  color: 'var(--warn)' },
+                { name: 'ICMP', count: icmp, color: 'var(--success)' },
                 { name: 'UDP',  count: udp,  color: '#f472b6' },
-                { name: 'TCP',  count: tcp,  color: '#60a5fa' },
-                { name: 'Other',count: other,color: '#94a3b8' },
+                { name: 'TCP',  count: tcp,  color: 'var(--info)' },
+                { name: 'Other',count: other,color: 'var(--text-secondary)' },
             ].filter(p => p.count > 0);
 
             bar.innerHTML = protos.map(p => {
@@ -9740,42 +9740,42 @@
                 <div class="sliding-window-meter">
                     <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.82rem;">
                         <strong style="color:var(--text-primary);">📊 ${t('sliding_window_lbl') || 'Anti-Replay Sliding Window'}</strong>
-                        <span style="color:#38bdf8; font-family:monospace; font-weight:700;">Fill: ${winUtilPct}%</span>
+                        <span style="color: var(--info); font-family:monospace; font-weight:700;">Fill: ${winUtilPct}%</span>
                     </div>
                     <div class="seq-win-track">
                         <div class="seq-win-range" style="left:10%; width:80%;"></div>
                     </div>
                     <div style="display:flex; justify-content:space-between; font-size:0.75rem; font-family:monospace; color:var(--text-muted);">
                         <span>Min Valid: <strong>${minValid.toLocaleString()}</strong></span>
-                        <span>Current Max: <strong style="color:#34d399;">${maxSeq.toLocaleString()}</strong></span>
-                        <span>Replays Dropped: <strong style="color:#f87171;">${peer.replay_drops || 0}</strong></span>
+                        <span>Current Max: <strong style="color: var(--success);">${maxSeq.toLocaleString()}</strong></span>
+                        <span>Replays Dropped: <strong style="color: var(--danger);">${peer.replay_drops || 0}</strong></span>
                     </div>
                 </div>
 
                 <div class="crypto-key-compare-grid">
                     <div class="crypto-key-box">
                         <span class="crypto-key-lbl">${t('tx_key_fp_lbl') || 'TxKey Fingerprint'}</span>
-                        <span class="crypto-key-val" style="color:#38bdf8;">${escapeHTML(peer.obf_tx_key_fp || '(derived in-memory)')}</span>
+                        <span class="crypto-key-val" style="color: var(--info);">${escapeHTML(peer.obf_tx_key_fp || '(derived in-memory)')}</span>
                     </div>
                     <div class="crypto-key-box">
                         <span class="crypto-key-lbl">${t('rx_key_fp_lbl') || 'RxKey Fingerprint'}</span>
-                        <span class="crypto-key-val" style="color:#34d399;">${escapeHTML(peer.obf_rx_key_fp || '(derived in-memory)')}</span>
+                        <span class="crypto-key-val" style="color: var(--success);">${escapeHTML(peer.obf_rx_key_fp || '(derived in-memory)')}</span>
                     </div>
                     <div class="crypto-key-box">
                         <span class="crypto-key-lbl">${t('ephemeral_fp_lbl') || 'Remote Ephemeral PubKey FP'}</span>
-                        <span class="crypto-key-val" style="color:#a78bfa;">${escapeHTML(peer.obf_remote_eph_fp || 'Negotiated via P256')}</span>
+                        <span class="crypto-key-val" style="color: var(--accent-purple);">${escapeHTML(peer.obf_remote_eph_fp || 'Negotiated via P256')}</span>
                     </div>
                     <div class="crypto-key-box">
                         <span class="crypto-key-lbl">${t('cipher_algo_lbl') || 'Cipher & Mode'}</span>
-                        <span class="crypto-key-val" style="color:#fbbf24;">${escapeHTML(cipherStr)}</span>
+                        <span class="crypto-key-val" style="color: var(--warn);">${escapeHTML(cipherStr)}</span>
                     </div>
                 </div>
 
-                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:10px; font-size:0.78rem; background:rgba(0,0,0,0.15); padding:10px 14px; border-radius:8px; border:1px solid var(--border-subtle);">
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:10px; font-size:0.78rem; background:var(--surface-recessed); padding:10px 14px; border-radius:8px; border:1px solid var(--border-subtle);">
                     <div><span style="color:var(--text-muted);">${t('handshake_latency_lbl') || 'Convergence'}:</span> <strong style="color:var(--text-primary); font-family:monospace;">${convergeStr}</strong></div>
                     <div><span style="color:var(--text-muted);">Last Rotation:</span> <strong style="color:var(--text-primary); font-family:monospace;">${escapeHTML(rekeyAgoStr)}</strong></div>
-                    <div><span style="color:var(--text-muted);">Decryption Check:</span> <strong style="color:#34d399;">${peer.obf_decrypt_ok || 0} OK</strong> / <strong style="color:#f87171;">${peer.obf_decrypt_errs || 0} Errs</strong></div>
-                    <div><span style="color:var(--text-muted);">Handshake Role:</span> <strong style="color:#38bdf8;">${leaderStr}</strong></div>
+                    <div><span style="color:var(--text-muted);">Decryption Check:</span> <strong style="color: var(--success);">${peer.obf_decrypt_ok || 0} OK</strong> / <strong style="color: var(--danger);">${peer.obf_decrypt_errs || 0} Errs</strong></div>
+                    <div><span style="color:var(--text-muted);">Handshake Role:</span> <strong style="color: var(--info);">${leaderStr}</strong></div>
                 </div>
             `;
         }
@@ -9858,10 +9858,10 @@
 
             const newHtml = filtered.map(s => {
                 const dirLabel = s.direction === 'outbound'
-                    ? `<span style="color:#38bdf8;">${t('dir_out') || 'Outbound ↑'}</span>`
-                    : `<span style="color:#a78bfa;">${t('dir_in') || 'Inbound ↓'}</span>`;
+                    ? `<span style="color: var(--info);">${t('dir_out') || 'Outbound ↑'}</span>`
+                    : `<span style="color: var(--accent-purple);">${t('dir_in') || 'Inbound ↓'}</span>`;
                 const transportBadge = `<span style="background:var(--glass-fill);border:1px solid var(--border-subtle);padding:2px 7px;border-radius:5px;font-size:0.73rem;color:var(--text-secondary);">${escapeHTML(s.transport || 'P2P')}</span>`;
-                const statusDot = `<span style="color:#34d399;font-weight:700;font-size:0.75rem;">● ${t('stream_active') || 'Active'}</span>`;
+                const statusDot = `<span style="color: var(--success);font-weight:700;font-size:0.75rem;">● ${t('stream_active') || 'Active'}</span>`;
                 const peerDisplay = s.peer_name
                     ? `<div style="font-weight:600;color:var(--text-primary);font-size:0.85rem;">${escapeHTML(s.peer_name)}</div><div style="font-family:monospace;font-size:0.72rem;color:var(--text-muted);">${escapeHTML(s.peer_id_short || s.peer_id)}</div>`
                     : `<div style="font-family:monospace;font-size:0.75rem;color:var(--text-muted);">${escapeHTML(s.peer_id_short || s.peer_id)}</div>`;
@@ -9906,7 +9906,7 @@
                 : role === 'server'
                     ? (t('exit_status_role_server') || 'Server (offering egress)')
                     : (t('exit_status_role_both') || 'Client + Server');
-            const roleColor = role === 'client' ? '#38bdf8' : role === 'server' ? '#34d399' : '#a78bfa';
+            const roleColor = role === 'client' ? 'var(--info)' : role === 'server' ? 'var(--success)' : 'var(--accent-purple)';
 
             let html = `<div style="margin-bottom:6px;"><span style="color:${roleColor}; font-weight:700;">● ${roleLabel}</span></div>`;
 
@@ -9953,7 +9953,7 @@
                 badge.innerText = "⚡ Active";
                 badge.className = "pill-badge role-static";
                 badge.style.background = "rgba(16,185,129,0.2)";
-                badge.style.color = "#a7f3d0";
+                badge.style.color = "var(--success)";
                 badge.style.border = "1px solid rgba(16,185,129,0.4)";
 
                 const name = exit.active_exit_peer_name || exit.active_peer_id.substring(0, 12) + '…';
@@ -10189,7 +10189,7 @@
                 badge.innerText = t('acl_badge_active') || '● Active';
                 badge.className = 'pill-badge role-static';
                 badge.style.background = 'rgba(167,139,250,0.2)';
-                badge.style.color = '#c4b5fd';
+                badge.style.color = 'var(--accent-purple)';
                 badge.style.border = '1px solid rgba(167,139,250,0.4)';
             }
 
@@ -10718,9 +10718,9 @@
                         const elGCCPU = document.getElementById('sysGCCPUFrac');
                         elGCCPU.innerText = `${pct.toFixed(2)} %`;
                         // colour-code: <5% green (healthy), 5-25% amber, >25% red (GC pressure)
-                        if (pct < 5) elGCCPU.style.color = '#34d399';
-                        else if (pct < 25) elGCCPU.style.color = '#fbbf24';
-                        else elGCCPU.style.color = '#f87171';
+                        if (pct < 5) elGCCPU.style.color = 'var(--success)';
+                        else if (pct < 25) elGCCPU.style.color = 'var(--warn)';
+                        else elGCCPU.style.color = 'var(--danger)';
                     }
                     document.getElementById('sysGoroutines').innerText = sys.goroutines || 0;
                     document.getElementById('sysGC').innerText = sys.gc_count || 0;
@@ -10734,9 +10734,9 @@
                     // GC pause colour: <1ms green, 1-10ms amber, >10ms red (latency stability indicator)
                     const pauseEl = document.getElementById('sysLastGCPause');
                     if (sys.last_gc_pause_ms !== undefined) {
-                        if (sys.last_gc_pause_ms < 1) pauseEl.style.color = '#34d399';
-                        else if (sys.last_gc_pause_ms < 10) pauseEl.style.color = '#fbbf24';
-                        else pauseEl.style.color = '#f87171';
+                        if (sys.last_gc_pause_ms < 1) pauseEl.style.color = 'var(--success)';
+                        else if (sys.last_gc_pause_ms < 10) pauseEl.style.color = 'var(--warn)';
+                        else pauseEl.style.color = 'var(--danger)';
                     }
                 }
 
@@ -10870,15 +10870,15 @@
                             ? ` · AutoNAT ${p.reachability}` : '';
                         let reachClass, reachText, reachIcon;
                         if (peerPath === 'circuit-relay' || peerPath === 'overlay-relay') {
-                            reachClass = '#fbbf24';
+                            reachClass = 'var(--warn)';
                             reachText = transportPathLabel(peerPath) + peerAutoNAT;
                             reachIcon = '🟡';
                         } else if (peerPath === 'direct') {
-                            reachClass = '#34d399';
+                            reachClass = 'var(--success)';
                             reachText = transportPathLabel(peerPath) + peerAutoNAT;
                             reachIcon = '🟢';
                         } else {
-                            reachClass = '#94a3b8';
+                            reachClass = 'var(--text-secondary)';
                             reachText = transportPathLabel(peerPath) + peerAutoNAT;
                             reachIcon = '⚪';
                         }
@@ -10984,7 +10984,7 @@
                                 <div style="display:flex; flex-direction:column; gap:3px; align-items:flex-start;">
                                     <span class="pill-badge" style="padding:2px 8px; font-size:0.75rem;">${escapeHTML(p.transport || 'P2P')}</span>
                                     ${p.transport_priority ? `
-                                        <span style="font-size:0.68rem; font-weight:600; padding:1px 5px; border-radius:4px; color:${p.transport_score === 10 ? '#34d399' : (p.transport_score === 0 ? '#a855f7' : (p.transport_score === 20 ? '#38bdf8' : '#fbbf24'))}; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.1);" title="${t('priority_score_tooltip') || 'Routing Priority Score: lower is higher priority (0:Loopback, 10:LAN Direct, 20:WAN Direct, 100:Relay)'}">
+                                        <span style="font-size:0.68rem; font-weight:600; padding:1px 5px; border-radius:4px; color:${p.transport_score === 10 ? 'var(--success)' : (p.transport_score === 0 ? '#a855f7' : (p.transport_score === 20 ? 'var(--info)' : 'var(--warn)'))}; background:var(--glass-fill); border:1px solid var(--border-subtle);" title="${t('priority_score_tooltip') || 'Routing Priority Score: lower is higher priority (0:Loopback, 10:LAN Direct, 20:WAN Direct, 100:Relay)'}">
                                             🎯 ${escapeHTML(p.transport_priority)}
                                         </span>
                                     ` : ''}
@@ -10996,7 +10996,7 @@
                             <td><span style="color:var(--accent-purple); font-size:0.8rem">${jitterStr}</span> <span style="color:var(--text-muted); font-size:0.75rem">(${lossStr})</span></td>
                             <td>
                                 <div style="display:flex; gap:6px; align-items:center;">
-                                    <button class="btn-glass" style="padding:2px 8px; font-size:0.75rem; background:rgba(56, 189, 248, 0.15); border-color:rgba(56, 189, 248, 0.4); color:#38bdf8;" title="${t('btn_crypto_inspector') || 'Crypto & Seq Inspector'}" data-onclick="openCryptoInspector(${attrStr(p.peer_id)})">🔐</button>
+                                    <button class="btn-glass" style="padding:2px 8px; font-size:0.75rem; background:rgba(56, 189, 248, 0.15); border-color:rgba(56, 189, 248, 0.4); color: var(--info);" title="${t('btn_crypto_inspector') || 'Crypto & Seq Inspector'}" data-onclick="openCryptoInspector(${attrStr(p.peer_id)})">🔐</button>
                                     <button class="btn-glass" style="padding:2px 8px; font-size:0.75rem; background:var(--accent-cyan-fill); border-color:var(--accent-cyan-border);" data-onclick="openSpeedTestModal(${attrStr(p.peer_id)})">${t('speedtest_btn')}</button>
                                 </div>
                             </td>
@@ -11022,7 +11022,7 @@
                                 ? `<span style="color:var(--success); font-weight:600; font-size:0.78rem;">🌐 Exit Server${m.exit_nat ? ' (NAT)' : ''}</span>`
                                 : '<span style="color:var(--text-muted);">-</span>';
 
-                            const channelColor = m.sync_source && m.sync_source.includes('Peek-Map') ? '#fbbf24' : '#38bdf8';
+                            const channelColor = m.sync_source && m.sync_source.includes('Peek-Map') ? 'var(--warn)' : 'var(--info)';
                             const channelBadge = `<span style="background:var(--glass-fill); border:1px solid var(--glass-fill-strong); color:${channelColor}; font-weight:600; padding:2px 8px; border-radius:6px; font-size:0.75rem;">${escapeHTML(m.sync_source || 'P2P / LSA')}</span>`;
 
                             let tapAddrs = '';
@@ -11243,7 +11243,7 @@
                             const rttMeasured = m.rtt_measured === true && Number(m.measured_rtt_ms) > 0;
                             const rttValue = rttMeasured ? Number(m.measured_rtt_ms) : m.rtt_ms;
                             const rttKnown = rttMeasured || m.rtt_ms > 0;
-                            const rttColor = !rttKnown ? '#94a3b8' : (rttValue < 50 ? '#34d399' : (rttValue < 150 ? '#fbbf24' : '#f87171'));
+                            const rttColor = !rttKnown ? 'var(--text-secondary)' : (rttValue < 50 ? 'var(--success)' : (rttValue < 150 ? 'var(--warn)' : 'var(--danger)'));
                             const rttText = rttMeasured
                                 ? `${Number(m.measured_rtt_ms).toFixed(1)} ms`
                                 : (m.rtt_ms > 0 ? `≈${m.rtt_ms} ms route est.` : '—');
@@ -13418,8 +13418,8 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 const boxY = midY - boxH / 2;
 
                 ctx.save();
-                // Frosted Dark Glass Pill
-                ctx.shadowColor = edgeHi ? "#38bdf8" : "rgba(0,0,0,0.5)";
+                // The label's shadow follows its surface in both themes.
+                ctx.shadowColor = edgeHi ? "#38bdf8" : (lightT ? "rgba(15,23,42,0.12)" : "rgba(0,0,0,0.5)");
                 ctx.shadowBlur = edgeHi ? 10 : 6;
                 ctx.fillStyle = lightT ? "rgba(255,255,255,0.95)" : "rgba(10, 16, 32, 0.88)";
                 ctx.strokeStyle = blackhole ? "#f87171" : (edgeHi ? "#38bdf8" : (target.isRelayed ? "rgba(245, 158, 11, 0.6)" : "rgba(56, 189, 248, 0.4)"));
@@ -14980,6 +14980,11 @@ window.toggleSubnetRoute = async function(cidr, enable) {
         });
         fetchLogs();
         window.addEventListener('resize', function() {
+            drawTopologyMesh();
+            if (bwChartState.history.length) drawBandwidthChart(bwChartState.history);
+            if (ppsChartState.history.length) drawPacketRateChart(ppsChartState.history);
+        });
+        window.addEventListener('p2ptap:themechange', function () {
             drawTopologyMesh();
             if (bwChartState.history.length) drawBandwidthChart(bwChartState.history);
             if (ppsChartState.history.length) drawPacketRateChart(ppsChartState.history);

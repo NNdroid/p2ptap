@@ -26,5 +26,6 @@
             d.setAttribute('data-theme', next);
         }
         try { localStorage.setItem('p2ptap_theme', next); } catch (e) { /* ignore */ }
+        window.dispatchEvent(new CustomEvent('p2ptap:themechange'));
     };
 })();
