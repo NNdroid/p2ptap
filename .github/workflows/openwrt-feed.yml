@@ -2,8 +2,6 @@ name: OpenWrt 25.12 Signed APK Feed
 on:
   push:
     tags: ['v*']
-    branches: [main, 'codex/openwrt-luci-fixes']
-    paths: ['openwrt/**', 'scripts/**', '.github/workflows/openwrt-feed.yml']
   workflow_dispatch:
     inputs:
       version:
