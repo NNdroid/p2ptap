@@ -7,7 +7,7 @@ p2ptap is a peer-to-peer Layer 2 TAP VPN built on [go-libp2p](https://github.com
 - **Layer 2 virtual switching** — Forwards complete Ethernet frames, learns MAC addresses, and floods broadcast and multicast traffic such as ARP, mDNS, and NDP.
 - **Multiple transports** — Supports QUIC, WebRTC Direct, WebTransport, and TCP, with optional TCP Brutal congestion control.
 - **Direct-path preference** — Races direct and relayed connections, gives direct connections a preference window, and automatically returns traffic to a direct path when it becomes available.
-- **Flexible routing strategies** — Includes `best_path` for the lowest-latency path, `redundant` for duplicate delivery, and `fallback` for automatic failover.
+- **Flexible routing strategies** — `best_path` chooses among existing streams using topology priority and local write performance; `redundant` duplicates over existing streams; `fallback` tries existing streams in order. Strategies do not establish additional transports or guarantee the lowest RTT.
 - **End-to-end TAP diagnostics** — The Web UI can test real bidirectional ICMP traffic across both TAP interfaces and distinguish stale metadata, peer firewall failures, and unreachable paths.
 - **Traffic obfuscation** — Provides `fixed`, `block`, `random`, `dynamic`, and `auto` padding modes.
 - **Security** — Uses Ed25519 node identities, Noise/TLS 1.3 encryption, PSK-based private-network isolation, and MAC anti-spoofing checks.
@@ -33,6 +33,10 @@ sudo ./p2ptap run -c config.json
 On Windows, run the terminal as Administrator and omit `sudo`.
 
 The Web UI listens on the configured TAP address. For example, a node with `tap_ip` set to `10.0.0.1/24` is normally available at `http://10.0.0.1`.
+
+The dashboard has four pages: **Overview** for addresses and live traffic, **Peers** for connections and topology, **Routing & firewall** for gateways, routes and ACL status, and **Diagnostics** for probes and logs. Discovery metadata, forwarding tables, system/encryption details, protocol streams and capture tools expand on demand. ACL rules use the settings editor; opening it does not add a rule, and Cancel discards edits. The connection indicator marks retained data as stale when refresh fails. Logs and capture streams connect while the diagnostics page is visible.
+
+Browser regression checks use local API fixtures: install the development dependencies `playwright` and `ws`, make them available on `NODE_PATH`, then run `node scripts/test-webui.cjs`. The check uses installed Chrome by default; set `WEBUI_BROWSER_EXE` to another Chromium executable if needed. These checks cover desktop/mobile navigation and configuration interactions without requiring a live VPN.
 
 ## Build Versions and Releases
 
@@ -64,6 +68,9 @@ Each node needs its own configuration and identity key. For two nodes to share t
 - Assign a unique `tap_ip`, `tap_ipv6`, and `tap_mac` to each node.
 - Give each node a different `node_key_file`; do not copy the same generated node key to both systems.
 - Enable mDNS when both nodes can discover each other on the local network, or add reachable p2ptap addresses under `static_peers`.
+- Static and bootstrap entries must be complete multiaddrs ending in `/p2p/<PeerID>`, for example `/ip4/192.0.2.1/tcp/4001/p2p/<PeerID>` or `/ip6/2001:db8::1/udp/4001/quic-v1/p2p/<PeerID>`. Bare IPs and peer IDs are rejected. Static peers can also use relay fallback. An explicitly empty bootstrap list is supported for static-only meshes.
+- WebUI saves report pending restart fields against the active startup configuration. Changes to `static_peers` or `transport_strategy` require a restart; the stats continue to report the strategy actually used by the dispatcher. Android saves use the app configuration store, so restarting the VPN loads the saved values.
+- The WebUI overview emphasizes measured upload/download rates. The peer list shows five essential columns and opens full live details, separating local link traffic from peer-reported node totals. Topology, logs and capture tools expand on demand; log and capture streams connect only while their panels are open. Ping, route tracing and connectivity checks share one target input.
 - Make sure both nodes use compatible obfuscation settings.
 
 Example TAP addresses:

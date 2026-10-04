@@ -15,6 +15,10 @@ import (
 )
 
 type StatsCollector struct {
+	configState webConfigState
+	// PersistConfig is installed before serving HTTP by embedded clients whose
+	// authoritative configuration lives outside a Go config.json file.
+	PersistConfig     func(*config.Config) error
 	mu                sync.RWMutex
 	NodeName          string
 	PeerID            string

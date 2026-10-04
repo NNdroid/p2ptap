@@ -135,7 +135,7 @@ type TAPInterceptor struct {
 	v6IP          net.IP
 	port          uint16
 	collector     *StatsCollector
-	cfg           atomic.Pointer[config.Config]
+	configState   *webConfigState
 	configPath    string
 	sessions      sync.Map // key: string -> *tcpSession
 	sessionCount  atomic.Int64
@@ -164,6 +164,7 @@ func NewTAPInterceptor(virtualIP4Str string, virtualIP6Str string, port int, col
 	}
 
 	it := &TAPInterceptor{
+		configState:   configStateFor(collector, cfg),
 		enableV4:      enableV4,
 		enableV6:      enableV6,
 		v4IP:          v4,
@@ -181,9 +182,6 @@ func NewTAPInterceptor(virtualIP4Str string, virtualIP6Str string, port int, col
 			},
 		},
 	}
-	if cfg != nil {
-		it.cfg.Store(cfg)
-	}
 
 	go it.cleanStaleSessionsLoop()
 	interceptLog.Info("Userspace Ultra-Fast Interceptor active for WebUI on %s:%d & [%s]:%d (Zero CPU overhead on regular traffic)", v4.String(), port, v6.String(), port)
@@ -192,7 +190,7 @@ func NewTAPInterceptor(virtualIP4Str string, virtualIP6Str string, port int, col
 
 // loadCfg returns the current configuration snapshot this interceptor serves,
 // or nil when none was supplied at construction.
-func (it *TAPInterceptor) loadCfg() *config.Config { return it.cfg.Load() }
+func (it *TAPInterceptor) loadCfg() *config.Config { return it.configState.saved.Load() }
 
 // sendTCPResponse dispatches one frame through the right address family for
 // the session (sess.isIPv6 was fixed at creation time).
@@ -218,12 +216,13 @@ func (it *TAPInterceptor) rejectBusy(writer PacketWriter, sess *tcpSession, key 
 // effectiveToken returns the bearer token currently guarding /api/*: the
 // sidecar the Web server persisted at startup (reflecting the resolved token,
 // including the generated-token case) first, falling back to the snapshot
-// config (pre-startup or no configPath). Mirrors Server.authRequired.
+// startup config (pre-startup or no configPath). Pending changes must not
+// switch authentication before restart. Mirrors Server.authRequired.
 func (it *TAPInterceptor) effectiveToken() string {
 	if t := config.LoadWebUIToken(it.configPath); t != "" {
 		return t
 	}
-	if c := it.loadCfg(); c != nil {
+	if c := it.configState.startup; c != nil {
 		return c.WebUI.AuthToken
 	}
 	return ""
@@ -789,6 +788,8 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 	}
 
 	if bytes.HasPrefix(lines[0], []byte("POST /api/config")) {
+		it.configState.mu.Lock()
+		defer it.configState.mu.Unlock()
 		bodyIdx := bytes.Index(req, []byte("\r\n\r\n"))
 		var body []byte
 		if bodyIdx != -1 {
@@ -839,8 +840,12 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 		if incoming.WebUI.Port == 0 {
 			incoming.WebUI = cur.WebUI
 		}
-		// TransportsConfig is a struct (requires restart), always preserve from running
-		incoming.Transports = cur.Transports
+		if incoming.WebUI.AuthToken == "" {
+			incoming.WebUI.AuthToken = cur.WebUI.AuthToken
+		}
+		if incoming.Transports == (config.TransportsConfig{}) {
+			incoming.Transports = cur.Transports
+		}
 
 		if err := incoming.Validate(); err != nil {
 			return it.buildHTTPResponse(400, "application/json", []byte(fmt.Sprintf(`{"error":"invalid config: %v"}`, err)))
@@ -850,8 +855,8 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 		if cur != nil && cur.ConfigPath != "" {
 			effectivePath = cur.ConfigPath
 		}
-		if effectivePath != "" {
-			config.UpdateConfigFileDelta(effectivePath, &incoming)
+		if err := persistWebConfig(it.collector, effectivePath, &incoming); err != nil {
+			return it.buildHTTPResponse(500, "application/json", []byte(`{"error":"configuration could not be saved"}`))
 		}
 
 		// Publish the freshly merged config as a NEW snapshot (never mutate the
@@ -860,14 +865,13 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 		// object. Deliver it to the node via OnConfigReload so SetConfig makes the
 		// atomic snapshot the data plane reads.
 		newCfg := incoming // heap-allocated copy escapes to the Store below
-		it.cfg.Store(&newCfg)
+		it.configState.saved.Store(&newCfg)
 
 		// Hot-reload global logger level
 		logger.SetGlobalLevel(logger.ParseLevel(incoming.LogLevel))
 
 		if it.collector != nil {
 			it.collector.NodeName = incoming.NodeName
-			it.collector.TransportStrategy = incoming.TransportStrategy
 			it.collector.ExitNode.Enable = incoming.ExitNode.Enable
 			it.collector.ExitNode.NATMasquerade = incoming.ExitNode.NATMasquerade
 			it.collector.ExitNode.WANInterface = incoming.ExitNode.WANInterface
@@ -875,7 +879,8 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 				it.collector.OnConfigReload(&newCfg)
 			}
 		}
-		return it.buildHTTPResponse(200, "application/json", []byte(`{"status":"ok","message":"Configuration saved and applied successfully"}`))
+		data, _ := json.Marshal(configSaveResponse(restartRequiredFields(it.configState.startup, &incoming)))
+		return it.buildHTTPResponse(200, "application/json", data)
 	}
 
 	// ── /api/peer/probe — P2P stream-level connectivity check (GET / POST) ──

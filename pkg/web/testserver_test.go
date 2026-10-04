@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"testing"
+
+	"p2ptap/pkg/config"
 )
 
 // startTestServerOnFreePort boots a WebUI server on a port the OS picks and
@@ -18,6 +20,10 @@ import (
 // Probing for a free port and then binding it leaves a small race window; a
 // lost race just retries against the next candidate.
 func startTestServerOnFreePort(t *testing.T, collector *StatsCollector) (*Server, string) {
+	return startConfigTestServerOnFreePort(t, collector, nil)
+}
+
+func startConfigTestServerOnFreePort(t *testing.T, collector *StatsCollector, cfg *config.Config) (*Server, string) {
 	t.Helper()
 	var lastErr error
 	for attempt := 0; attempt < 10; attempt++ {
@@ -28,7 +34,7 @@ func startTestServerOnFreePort(t *testing.T, collector *StatsCollector) (*Server
 		port := probe.Addr().(*net.TCPAddr).Port
 		_ = probe.Close()
 
-		srv, err := StartServer(collector, "127.0.0.1", "", port, nil, "", nil)
+		srv, err := StartServer(collector, "127.0.0.1", "", port, cfg, "", nil)
 		if err == nil {
 			return srv, fmt.Sprintf("127.0.0.1:%d", port)
 		}

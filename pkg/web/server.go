@@ -82,9 +82,9 @@ type (
 )
 
 type Server struct {
-	collector *StatsCollector
-	cfg       atomic.Pointer[config.Config]
-	authToken string
+	collector   *StatsCollector
+	configState *webConfigState
+	authToken   string
 	// authTokenAuto records that the effective token was GENERATED at startup
 	// (the operator config had none). Such a token must never be written back
 	// into config.json (0644 world-readable): the 0600 sidecar is its only
@@ -157,7 +157,7 @@ var webLog = logger.New("WebUI")
 // on hot-reload, so callers must always read through this accessor rather than
 // caching the *config.Config pointer, to avoid data races with the data plane.
 func (s *Server) loadCfg() *config.Config {
-	return s.cfg.Load()
+	return s.configState.saved.Load()
 }
 
 // AuthToken returns the bearer token currently required for /api/* requests.
@@ -321,6 +321,7 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	}
 
 	s := &Server{
+		configState:       configStateFor(collector, cfg),
 		collector:         collector,
 		authToken:         authToken,
 		authTokenAuto:     authTokenAuto,
@@ -329,9 +330,6 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 		listenIPv6:        listenIPv6,
 		port:              port,
 		socketProtectHook: socketProtectHook,
-	}
-	if cfg != nil {
-		s.cfg.Store(cfg)
 	}
 
 	// Embedded dashboard assets are served by the stdlib file server, which
@@ -1166,11 +1164,44 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 		}
 
 		if collector != nil && collector.AddStaticPeer != nil {
-			if err := collector.AddStaticPeer(req.Multiaddr); err != nil {
+			normalized, err := config.NormalizePeerAddress(req.Multiaddr)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			s.configState.mu.Lock()
+			defer s.configState.mu.Unlock()
+			current := s.loadCfg()
+			if current == nil {
+				writeError(w, http.StatusInternalServerError, "running config unavailable")
+				return
+			}
+			candidate := *current
+			candidate.StaticPeers = append(append([]string{}, current.StaticPeers...), normalized)
+			if err := candidate.Validate(); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			effectivePath := s.configPath
+			if current.ConfigPath != "" {
+				effectivePath = current.ConfigPath
+			}
+			if err := s.persistConfig(effectivePath, &candidate); err != nil {
+				writeError(w, http.StatusInternalServerError, "configuration could not be saved")
+				return
+			}
+			s.configState.saved.Store(&candidate)
+			if collector.OnConfigReload != nil {
+				collector.OnConfigReload(&candidate)
+			}
+			if err := collector.AddStaticPeer(normalized); err != nil {
 				writeJSON(w, map[string]interface{}{"success": false, "error": err.Error()})
 				return
 			}
-			writeJSON(w, map[string]interface{}{"success": true, "message": "Static peer added and permanently registered"})
+			response := configSaveResponse(restartRequiredFields(s.configState.startup, &candidate))
+			response["success"] = true
+			response["message"] = "Static peer saved and connection requested; restart applies the saved reconnect policy"
+			writeJSON(w, response)
 			return
 		}
 		writeJSON(w, map[string]interface{}{"success": false, "error": "callback not initialized"})
@@ -1234,6 +1265,9 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 		}
 
 		if r.Method == http.MethodPost {
+			s.configState.mu.Lock()
+			defer s.configState.mu.Unlock()
+			c = s.loadCfg()
 			var incoming config.Config
 			if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
 				writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
@@ -1285,7 +1319,7 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			}
 			// Never allow a request to disable auth via the WebUI itself.
 			if incoming.WebUI.AuthToken == "" {
-				incoming.WebUI.AuthToken = s.authToken
+				incoming.WebUI.AuthToken = c.WebUI.AuthToken
 			}
 
 			if err := incoming.Validate(); err != nil {
@@ -1297,30 +1331,20 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			if c.ConfigPath != "" {
 				effectivePath = c.ConfigPath
 			}
-			if effectivePath != "" {
-				// SECURITY: an auto-generated token must never land in the
-				// 0644 config.json (any local user could read it and gain
-				// full /api admin). The runtime copy keeps the live token;
-				// the disk copy blanks it — its durable home is the 0600
-				// sidecar written at startup. Operator-authored tokens
-				// (authTokenAuto=false) persist untouched, as configured.
-				persist := incoming
-				if s.authTokenAuto {
-					persist.WebUI.AuthToken = ""
-				}
-				config.UpdateConfigFileDelta(effectivePath, &persist)
+			if err := s.persistConfig(effectivePath, &incoming); err != nil {
+				writeError(w, http.StatusInternalServerError, "configuration could not be saved")
+				return
 			}
 
 			// Hot-reload mutable fields. Replace the whole config pointer
 			// atomically so concurrent readers never observe a torn struct.
 			newCfg := incoming // copy then apply callbacks-free reload
-			s.cfg.Store(&newCfg)
+			s.configState.saved.Store(&newCfg)
 
 			logger.SetGlobalLevel(logger.ParseLevel(incoming.LogLevel))
 
 			if collector != nil {
 				collector.NodeName = incoming.NodeName
-				collector.TransportStrategy = incoming.TransportStrategy
 				collector.ExitNode.Enable = incoming.ExitNode.Enable
 				collector.ExitNode.NATMasquerade = incoming.ExitNode.NATMasquerade
 				collector.ExitNode.WANInterface = incoming.ExitNode.WANInterface
@@ -1335,14 +1359,8 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 
 			// Which restart-only fields actually changed (compared AFTER the
 			// preserve-zero-value block, so untouched fields don't false-trigger).
-			restartFields := restartRequiredFields(c, &incoming)
-
-			writeJSON(w, map[string]interface{}{
-				"status":           "ok",
-				"message":          "Configuration saved and applied successfully",
-				"restart_required": len(restartFields) > 0,
-				"restart_fields":   restartFields,
-			})
+			restartFields := restartRequiredFields(s.configState.startup, &incoming)
+			writeJSON(w, configSaveResponse(restartFields))
 			return
 		}
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")

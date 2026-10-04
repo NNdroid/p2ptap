@@ -157,6 +157,21 @@ type StateListener interface {
 	OnMetricsUpdate(peerCount int32, directPeers int32, relayPeers int32, txSpeed int64, rxSpeed int64, totalTx int64, totalRx int64)
 }
 
+// ConfigStore durably saves WebUI configuration in the app's own storage.
+// Returning an error rejects the save before any runtime snapshot is changed.
+type ConfigStore interface {
+	SaveConfig(cfgJSON string) error
+}
+
+var configStoreMu sync.RWMutex
+var configStore ConfigStore
+
+func SetConfigStore(store ConfigStore) {
+	configStoreMu.Lock()
+	defer configStoreMu.Unlock()
+	configStore = store
+}
+
 var (
 	mu              sync.Mutex
 	instance        *node.Node
@@ -205,23 +220,10 @@ func Start(cfgJSON string, tunFd int) error {
 		return errors.New("android: invalid TUN fd")
 	}
 
-	cfg := config.DefaultConfig()
-	if cfgJSON != "" {
-		if err := json.Unmarshal([]byte(cfgJSON), cfg); err != nil {
-			closeDetachedTunFD(tunFd)
-			return fmt.Errorf("android: invalid config JSON: %w", err)
-		}
-	}
-	if err := cfg.Validate(); err != nil {
+	cfg, err := parseConfig(cfgJSON)
+	if err != nil {
 		closeDetachedTunFD(tunFd)
-		return fmt.Errorf("android: invalid config: %w", err)
-	}
-
-	// Exit Node server is not supported on Android (TUN-only client, no host
-	// routing/NAT). Reject it explicitly rather than silently doing nothing.
-	if cfg.ExitNode.Enable {
-		closeDetachedTunFD(tunFd)
-		return errors.New("android: exit node server is not supported on this build")
+		return err
 	}
 
 	mu.Lock()
@@ -241,6 +243,19 @@ func Start(cfgJSON string, tunFd int) error {
 	if err != nil {
 		_ = dev.Close()
 		return fmt.Errorf("android: create node: %w", err)
+	}
+	configStoreMu.RLock()
+	store := configStore
+	configStoreMu.RUnlock()
+	collector.PersistConfig = func(candidate *config.Config) error {
+		if store == nil {
+			return errors.New("android: configuration storage is not registered")
+		}
+		data, err := json.Marshal(candidate)
+		if err != nil {
+			return err
+		}
+		return store.SaveConfig(string(data))
 	}
 
 	if n.Gateway != nil {

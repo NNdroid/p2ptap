@@ -221,13 +221,18 @@ type PeerInfoDTO struct {
 	// relayOnlyPeers set, which is marked on circuit-relay connect and cleared
 	// once a direct transport appears. Exposing it lets the WebUI tell the
 	// operator "this peer can never go direct" instead of just "relayed".
-	RelayOnly         bool     `json:"relay_only"`
-	IsExitNode        bool     `json:"is_exit_node"`
-	ExitNAT           bool     `json:"exit_nat"`
-	TxSpeed           uint64   `json:"tx_speed"`
-	RxSpeed           uint64   `json:"rx_speed"`
-	TotalTx           uint64   `json:"total_tx"`
-	TotalRx           uint64   `json:"total_rx"`
+	RelayOnly  bool   `json:"relay_only"`
+	IsExitNode bool   `json:"is_exit_node"`
+	ExitNAT    bool   `json:"exit_nat"`
+	TxSpeed    uint64 `json:"tx_speed"`
+	RxSpeed    uint64 `json:"rx_speed"`
+	TotalTx    uint64 `json:"total_tx"`
+	TotalRx    uint64 `json:"total_rx"`
+	// LinkTotalTx/Rx are local logical TAP payload bytes exchanged with this
+	// peer. TotalTx/Rx above remain the remote node's advertised totals.
+	LinkTotalTx       uint64   `json:"link_total_tx"`
+	LinkTotalRx       uint64   `json:"link_total_rx"`
+	LinkSpeedMeasured bool     `json:"link_speed_measured"`
 	TapIP             string   `json:"tap_ip"`
 	TapIPv6           string   `json:"tap_ipv6"`
 	OSArch            string   `json:"os_arch"`

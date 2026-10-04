@@ -119,16 +119,7 @@
                 sync_events_lbl: "Sync Events",
                 synced_peers_lbl: "Synced Peers",
                 resync_success: "SeqSync & Key Rotation triggered",
-
-                mesh_health_score_lbl: "Mesh Health",
-                mesh_health_title: "Overlay Mesh Link Quality & Self-Healing Status",
-                mesh_health_desc: "Real-time health assessment covering direct-path ratio, cryptographic integrity, packet loss, and routing stability",
                 btn_crypto_inspector: "Crypto & Sequence Inspector",
-                lbl_direct_ratio: "Direct Ratio",
-                lbl_crypto_grade: "Encryption Grade",
-                lbl_dedup_drops: "Window Dedup",
-                lbl_dup_conflicts: "IP Conflicts",
-                traffic_comp_title: "Ethernet & Network Traffic Composition",
                 crypto_inspector_title: "Peer Cryptography & Anti-Replay Sequence Inspector",
                 select_peer_lbl: "Select Peer:",
                 btn_resync_this_peer: "Resync This Peer",
@@ -140,11 +131,7 @@
                 rx_key_fp_lbl: "RxKey Fingerprint",
                 cipher_algo_lbl: "Negotiated Cipher",
                 handshake_latency_lbl: "Handshake Latency",
-                tip_tap_failed: "❌ TAP device self-test failed: verify kernel driver and permissions.",
-                tip_dup_ips: "⚠️ {count} duplicate IP conflict(s) detected in mesh topology.",
-                tip_decrypt_errs: "⚠️ {count} decryption failure(s) observed. Click {btn} to inspect & resync.",
                 no_peers_connected: "No peers connected. Ready to establish secure P2P mesh.",
-                mesh_status_optimal: "Mesh link quality optimal: all connected peers securely synchronized with forward-secret AEAD.",
 
                 lbl_arp_broadcast: "ARP Broadcast Frames",
                 lbl_broadcast_pkts: "Broadcast Packets",
@@ -519,7 +506,6 @@
                 stat_total_routes: "Total Computed Routes",
                 stat_relayed_routes: "Relay Accelerated Paths",
                 stat_max_savings: "Max Latency Reduction",
-                stat_mesh_health: "Mesh Topology Health",
                 arp_table: "📋 Virtual Network ARP / NDP Neighbor Table",
                 ip_analytics: "📊 24-Hour Per-IP Traffic Analytics",
                 mac_table: "🔀 Virtual Switch MAC Address Table",
@@ -624,7 +610,7 @@
                 psk_desc: "Empty for public network, set key for encrypted isolation",
                 section_transport: "Transport & Logging",
                 section_transport_desc: "Routing strategy and diagnostic verbosity",
-                strategy_desc: "How packets are routed across P2P links",
+                strategy_desc: "Selects among existing streams; does not create extra transports. Changes require a restart.",
                 loglevel_desc: "Controls verbosity of console output",
                 enable_mdns_lbl: "Enable mDNS LAN Discovery",
                 enable_mdns_desc: "Auto-discover peers on the same LAN via mDNS (local network only)",
@@ -736,7 +722,7 @@
                 acl_label_more: "more",
                 acl_default_accept: "ACCEPT (allow)",
                 acl_default_drop: "DROP (deny)",
-                strategy_redundant: "Dual-Send Redundant",
+                strategy_redundant: "Duplicate over existing streams",
                 strategy_fallback: "Failover Fallback",
                 log_level_debug: "Verbose Debug",
                 log_level_info: "Standard Info",
@@ -747,19 +733,7 @@
                 obfs_random: "Random Length",
                 obfs_dynamic: "Variable Range",
                 obfs_auto: "Auto-Detect & Switch",
-                acl_editor_title: "🛡️ ACL Rule Editor",
                 acl_no_rules: "No custom ACL rules yet — add one or pick a template.",
-                acl_test_title: "🧪 ACL Rule Tester",
-                acl_test_peer: "Source Peer ID",
-                acl_test_dir: "Direction",
-                acl_test_proto: "Protocol",
-                acl_test_dstip: "Destination IP",
-                acl_test_dstport: "Destination Port",
-                acl_test_allow: "ALLOWED",
-                acl_test_deny: "DENIED",
-                acl_test_matched: "Matched rule",
-                acl_test_default: "No rule matched — applied default policy",
-                acl_template_lbl: "Insert Template…",
                 acl_comment_placeholder: "Comment / Description",
                 close_btn: "Close",
                 cancel_btn: "Cancel",
@@ -849,15 +823,7 @@
                 frames_unit: "\u5e27",
                 handshake_latency_lbl: "\u63e1\u624b\u6536\u655b\u65f6\u5ef6",
                 hops_label: "\u8282\u70b9",
-                lbl_crypto_grade: "\u52a0\u5bc6\u5b89\u5168\u8bc4\u7ea7",
-                lbl_dedup_drops: "\u6ed1\u52a8\u7a97\u53e3\u53bb\u91cd",
-                lbl_direct_ratio: "\u76f4\u8fde\u94fe\u8def\u5360\u6bd4",
-                lbl_dup_conflicts: "IP \u5730\u5740\u51b2\u7a81",
                 lbl_peers: "\u8282\u70b9",
-                mesh_health_desc: "\u7efc\u5408\u8bc4\u4f30\u76f4\u8fde\u8def\u5f84\u6bd4\u3001\u524d\u5411\u5b89\u5168\u52a0\u5bc6\u5b8c\u5907\u5ea6\u3001\u4e22\u5305\u7387\u53ca\u94fe\u8def\u81ea\u6108\u7a33\u5b9a\u6027",
-                mesh_health_score_lbl: "\u7f51\u72b6\u5065\u5eb7\u5ea6",
-                mesh_health_title: "\u8986\u76d6\u7f51\u7edc\u94fe\u8def\u8d28\u91cf\u4e0e\u81ea\u6108\u72b6\u6001",
-                mesh_status_optimal: "\u7f51\u72b6\u94fe\u8def\u8d28\u91cf\u5904\u4e8e\u6700\u4f73\u72b6\u6001\uff1a\u6240\u6709\u8fde\u63a5\u8282\u70b9\u5747\u5df2\u901a\u8fc7\u524d\u5411\u5b89\u5168 AEAD \u5efa\u7acb\u5f3a\u52a0\u5bc6\u540c\u6b65\u3002",
                 no_peers_connected: "\u5f53\u524d\u65e0\u6d3b\u52a8\u8282\u70b9\u8fde\u63a5\uff0c\u5c31\u7eea\u5efa\u7acb P2P \u5b89\u5168\u7f51\u72b6\u7f51\u7edc\u3002",
                 proto_traffic_distribution: "\u534f\u8bae\u6d41\u91cf\u5206\u5e03",
                 resync_success: "\u5df2\u89e6\u53d1 SeqSync \u63e1\u624b\u4e0e\u5bc6\u94a5\u8f6e\u6362",
@@ -867,10 +833,6 @@
                 sliding_window_lbl: "\u9632\u91cd\u653e\u6ed1\u52a8\u7a97\u53e3 (0..65535)",
                 sync_events_lbl: "\u540c\u6b65\u4e8b\u4ef6",
                 synced_peers_lbl: "\u5df2\u540c\u6b65\u8282\u70b9",
-                tip_decrypt_errs: "\u26a0\ufe0f \u68c0\u6d4b\u5230 {count} \u6b21\u89e3\u5bc6\u5931\u8d25\u3002\u70b9\u51fb {btn} \u68c0\u67e5\u5e76\u91cd\u65b0\u540c\u6b65\u5bc6\u94a5\u3002",
-                tip_dup_ips: "\u26a0\ufe0f \u5728\u7f51\u72b6\u62d3\u6251\u4e2d\u68c0\u6d4b\u5230 {count} \u4e2a\u91cd\u590d IP / \u91cd\u53e0\u7f51\u6bb5\u51b2\u7a81\u3002",
-                tip_tap_failed: "\u274c TAP \u865a\u62df\u7f51\u5361\u81ea\u68c0\u5931\u8d25\uff1a\u8bf7\u68c0\u67e5\u5185\u6838\u9a71\u52a8\u53ca\u8fd0\u884c\u6743\u9650\u3002",
-                traffic_comp_title: "\u4ee5\u592a\u7f51\u4e0e\u7f51\u7edc\u534f\u8bae\u6d41\u91cf\u6784\u6210",
                 tx_frames_lbl: "\u53d1\u9001\u5e27\u6570 (TX)",
                 tx_key_fp_lbl: "TxKey \u52a0\u5bc6\u6307\u7eb9",
                 view_raw: ">_ \u7ec8\u7aef\u8f93\u51fa",
@@ -1002,16 +964,7 @@
                 sync_events_lbl: "同步事件",
                 synced_peers_lbl: "已同步节点",
                 resync_success: "已触发序号重同步与前向保密密钥轮换",
-
-                mesh_health_score_lbl: "全网健康度",
-                mesh_health_title: "Overlay Mesh 链路质量与自愈状态",
-                mesh_health_desc: "实时综合评估全网节点直连率、密码学加密完整度、丢包率与拓扑选路稳定性",
                 btn_crypto_inspector: "密码学与序列分析",
-                lbl_direct_ratio: "直连率",
-                lbl_crypto_grade: "加密等级",
-                lbl_dedup_drops: "窗口去重",
-                lbl_dup_conflicts: "IP 冲突",
-                traffic_comp_title: "以太网与网络层流量构成",
                 crypto_inspector_title: "节点密码学与防重放序列深度观测台",
                 select_peer_lbl: "选择观测节点:",
                 btn_resync_this_peer: "重新协商该节点",
@@ -1023,11 +976,7 @@
                 rx_key_fp_lbl: "接收密钥指纹 (RxKey)",
                 cipher_algo_lbl: "协商加密套件",
                 handshake_latency_lbl: "握手收敛耗时",
-                tip_tap_failed: "❌ TAP 虚拟网卡自检失败：请检查系统内核驱动与运行权限。",
-                tip_dup_ips: "⚠️ 在 Mesh 拓扑中检测到 {count} 个冲突的重复 IP。",
-                tip_decrypt_errs: "⚠️ 观察到 {count} 次解密失败。点击「{btn}」查看详情并重同步。",
                 no_peers_connected: "暂无在线节点连接，已准备就绪以建立安全 P2P 虚拟网。",
-                mesh_status_optimal: "全网链路质量极佳：所有在线节点均已通过具备前向保密的 AEAD 安全同步。",
 
                 lbl_arp_broadcast: "ARP 广播以太帧",
                 lbl_broadcast_pkts: "广播包",
@@ -1401,7 +1350,6 @@
                 stat_total_routes: "已计算的路由总数",
                 stat_relayed_routes: "智能中转加速路径",
                 stat_max_savings: "最大延迟优化节省",
-                stat_mesh_health: "Overlay 网状拓扑状态",
                 arp_table: "📋 虚拟网络 ARP / NDP 邻居表",
                 ip_analytics: "📊 24小时 IP 流量统计",
                 mac_table: "🔀 虚拟交换机 MAC 地址表",
@@ -1506,7 +1454,7 @@
                 psk_desc: "留空为公开网络，设置密钥后加密隔离",
                 section_transport: "传输与日志",
                 section_transport_desc: "路由策略与诊断日志详细程度",
-                strategy_desc: "报文在 P2P 链路上的路由方式",
+                strategy_desc: "选择已有通道上的发送策略，不会主动增加传输连接；修改后需要重启。",
                 loglevel_desc: "控制控制台日志输出的详细程度",
                 enable_mdns_lbl: "启用 mDNS 局域网节点发现",
                 enable_mdns_desc: "通过 mDNS 自动发现同一局域网内的节点（仅限本地网络）",
@@ -1618,7 +1566,7 @@
                 acl_label_more: "条未显示",
                 acl_default_accept: "ACCEPT (放行)",
                 acl_default_drop: "DROP (拒绝)",
-                strategy_redundant: "双发冗余",
+                strategy_redundant: "已有通道复制发送",
                 strategy_fallback: "故障转移回退",
                 log_level_debug: "详细调试",
                 log_level_info: "标准信息",
@@ -1629,19 +1577,7 @@
                 obfs_random: "随机长度",
                 obfs_dynamic: "可变范围",
                 obfs_auto: "自动检测与切换",
-                acl_editor_title: "🛡️ ACL 规则编辑器",
                 acl_no_rules: "尚未定义自定义规则 —— 添加一条或选择模板。",
-                acl_test_title: "🧪 ACL 规则测试器",
-                acl_test_peer: "源 Peer ID",
-                acl_test_dir: "方向",
-                acl_test_proto: "协议",
-                acl_test_dstip: "目的 IP",
-                acl_test_dstport: "目的端口",
-                acl_test_allow: "已放行",
-                acl_test_deny: "已拒绝",
-                acl_test_matched: "命中规则",
-                acl_test_default: "无规则命中 —— 已应用默认策略",
-                acl_template_lbl: "插入模板…",
                 acl_comment_placeholder: "备注 / 描述",
                 close_btn: "关闭",
                 cancel_btn: "取消",
@@ -1789,15 +1725,7 @@
                 frames_unit: "\u8a0a\u6846",
                 handshake_latency_lbl: "\u63e1\u624b\u6536\u6582\u5ef6\u9072",
                 hops_label: "\u7bc0\u9ede",
-                lbl_crypto_grade: "\u52a0\u5bc6\u5b89\u5168\u8a55\u7d1a",
-                lbl_dedup_drops: "\u6ed1\u52d5\u8996\u7a97\u53bb\u91cd",
-                lbl_direct_ratio: "\u76f4\u9023\u9023\u7d50\u4f54\u6bd4",
-                lbl_dup_conflicts: "IP \u4f4d\u5740\u885d\u7a81",
                 lbl_peers: "\u7bc0\u9ede",
-                mesh_health_desc: "\u7d9c\u5408\u8a55\u4f30\u76f4\u9023\u8def\u5f91\u6bd4\u3001\u524d\u5411\u5b89\u5168\u52a0\u5bc6\u5b8c\u5099\u5ea6\u3001\u5c01\u5305\u907a\u5931\u7387\u53ca\u9023\u7d50\u81ea\u7652\u7a69\u5b9a\u6027",
-                mesh_health_score_lbl: "\u7db2\u72c0\u5065\u5eb7\u5ea6",
-                mesh_health_title: "\u8986\u84cb\u7db2\u8def\u9023\u7d50\u54c1\u8cea\u8207\u81ea\u7652\u72c0\u614b",
-                mesh_status_optimal: "\u7db2\u72c0\u9023\u7d50\u54c1\u8cea\u8655\u65bc\u6700\u4f73\u72c0\u614b\uff1a\u6240\u6709\u9023\u7dda\u7bc0\u9ede\u5747\u5df2\u900f\u904e\u524d\u5411\u5b89\u5168 AEAD \u5efa\u7acb\u5f37\u52a0\u5bc6\u540c\u6b65\u3002",
                 no_peers_connected: "\u76ee\u524d\u7121\u6d3b\u52d5\u7bc0\u9ede\u9023\u7dda\uff0c\u5c31\u7dd2\u5efa\u7acb P2P \u5b89\u5168\u7db2\u72c0\u7db2\u8def\u3002",
                 proto_traffic_distribution: "\u901a\u8a0a\u5354\u5b9a\u6d41\u91cf\u5206\u4f48",
                 resync_success: "\u5df2\u89f8\u767c SeqSync \u63e1\u624b\u8207\u91d1\u9470\u8f2a\u63db",
@@ -1807,10 +1735,6 @@
                 sliding_window_lbl: "\u9632\u91cd\u653e\u6ed1\u52d5\u8996\u7a97 (0..65535)",
                 sync_events_lbl: "\u540c\u6b65\u4e8b\u4ef6",
                 synced_peers_lbl: "\u5df2\u540c\u6b65\u7bc0\u9ede",
-                tip_decrypt_errs: "\u26a0\ufe0f \u5075\u6e2c\u5230 {count} \u6b21\u89e3\u5bc6\u5931\u6557\u3002\u9ede\u64ca {btn} \u6aa2\u67e5\u4e26\u91cd\u65b0\u540c\u6b65\u91d1\u9470\u3002",
-                tip_dup_ips: "\u26a0\ufe0f \u5728\u7db2\u72c0\u62d3\u64b2\u4e2d\u5075\u6e2c\u5230 {count} \u500b\u91cd\u8907 IP / \u91cd\u758a\u5b50\u7db2\u8def\u885d\u7a81\u3002",
-                tip_tap_failed: "\u274c TAP \u865b\u64ec\u7db2\u5361\u81ea\u6211\u6aa2\u6e2c\u5931\u6557\uff1a\u8acb\u6aa2\u67e5\u6838\u5fc3\u9a45\u52d5\u53ca\u6b0a\u9650\u3002",
-                traffic_comp_title: "\u4e59\u592a\u7db2\u8def\u8207\u7db2\u8def\u901a\u8a0a\u5354\u5b9a\u6d41\u91cf\u69cb\u6210",
                 tx_frames_lbl: "\u767c\u9001\u8a0a\u6846\u6578 (TX)",
                 tx_key_fp_lbl: "TxKey \u52a0\u5bc6\u6307\u7d0b",
                 view_raw: ">_ \u7d42\u7aef\u6a5f\u8f38\u51fa",
@@ -2149,7 +2073,6 @@
                 stat_total_routes: "已計算的路由總數",
                 stat_relayed_routes: "智慧中轉加速路徑",
                 stat_max_savings: "最大延遲優化節省",
-                stat_mesh_health: "Overlay 網狀拓撲狀態",
                 arp_table: "📋 虛擬網路 ARP / NDP 鄰居表",
                 ip_analytics: "📊 24小時 IP 流量統計",
                 mac_table: "🔀 虛擬交換機 MAC 位址表",
@@ -2219,7 +2142,7 @@
                 psk_desc: "留空為公開網路，設定金鑰後加密隔離",
                 section_transport: "傳輸與日誌",
                 section_transport_desc: "路由策略與診斷日誌詳細程度",
-                strategy_desc: "封包在 P2P 鏈路上的路由方式",
+                strategy_desc: "選擇已有通道上的傳送策略，不會主動增加傳輸連線；修改後需要重新啟動。",
                 loglevel_desc: "控制主控台日誌輸出的詳細程度",
                 enable_mdns_lbl: "啟用 mDNS 區域網路節點發現",
                 enable_mdns_desc: "透過 mDNS 自動發現同一區域網路內的節點（僅限本地網路）",
@@ -2314,7 +2237,7 @@
                 acl_label_more: "條未顯示",
                 acl_default_accept: "ACCEPT (放行)",
                 acl_default_drop: "DROP (拒絕)",
-                strategy_redundant: "雙發冗餘",
+                strategy_redundant: "已有通道複製傳送",
                 strategy_fallback: "故障轉移回退",
                 log_level_debug: "詳細除錯",
                 log_level_info: "標準資訊",
@@ -2325,19 +2248,7 @@
                 obfs_random: "隨機長度",
                 obfs_dynamic: "可變範圍",
                 obfs_auto: "自動偵測與切換",
-                acl_editor_title: "🛡️ ACL 規則編輯器",
                 acl_no_rules: "尚未定義自訂規則 —— 新增一條或選擇模板。",
-                acl_test_title: "🧪 ACL 規則測試器",
-                acl_test_peer: "來源 Peer ID",
-                acl_test_dir: "方向",
-                acl_test_proto: "協定",
-                acl_test_dstip: "目的 IP",
-                acl_test_dstport: "目的連接埠",
-                acl_test_allow: "已放行",
-                acl_test_deny: "已拒絕",
-                acl_test_matched: "命中規則",
-                acl_test_default: "無規則命中 —— 已套用預設策略",
-                acl_template_lbl: "插入模板…",
                 acl_comment_placeholder: "備註 / 描述",
                 close_btn: "關閉",
                 cancel_btn: "取消",
@@ -2621,15 +2532,7 @@
                 frames_unit: "\u30d5\u30ec\u30fc\u30e0",
                 handshake_latency_lbl: "\u30cf\u30f3\u30c9\u30b7\u30a7\u30a4\u30af\u53ce\u675f\u6642\u9593",
                 hops_label: "\u30d4\u30a2",
-                lbl_crypto_grade: "\u6697\u53f7\u5316\u30b0\u30ec\u30fc\u30c9",
-                lbl_dedup_drops: "\u30a6\u30a3\u30f3\u30c9\u30a6\u91cd\u8907\u6392\u9664",
-                lbl_direct_ratio: "\u76f4\u63a5\u63a5\u7d9a\u7387",
-                lbl_dup_conflicts: "IP \u7af6\u5408",
                 lbl_peers: "\u30d4\u30a2",
-                mesh_health_desc: "\u76f4\u63a5\u30d1\u30b9\u6bd4\u7387\u3001\u6697\u53f7\u5316\u6574\u5408\u6027\u3001\u30d1\u30b1\u30c3\u30c8\u30ed\u30b9\u3001\u30eb\u30fc\u30c6\u30a3\u30f3\u30b0\u5b89\u5b9a\u6027\u3092\u7dcf\u5408\u8a55\u4fa1",
-                mesh_health_score_lbl: "\u30e1\u30c3\u30b7\u30e5\u5065\u5168\u6027",
-                mesh_health_title: "\u30aa\u30fc\u30d0\u30fc\u30ec\u30a4\u30ea\u30f3\u30af\u54c1\u8cea\uff06\u81ea\u5df1\u4fee\u5fa9\u30b9\u30c6\u30fc\u30bf\u30b9",
-                mesh_status_optimal: "\u30e1\u30c3\u30b7\u30e5\u54c1\u8cea\u306f\u6700\u9069\u3067\u3059\uff1a\u3059\u3079\u3066\u306e\u63a5\u7d9a\u30d4\u30a2\u304c AEAD \u6697\u53f7\u5316\u3067\u5b89\u5168\u306b\u540c\u671f\u3055\u308c\u3066\u3044\u307e\u3059\u3002",
                 no_peers_connected: "\u63a5\u7d9a\u30d4\u30a2\u304c\u3042\u308a\u307e\u305b\u3093\u3002\u5b89\u5168\u306a P2P \u30e1\u30c3\u30b7\u30e5\u3092\u78ba\u7acb\u3067\u304d\u307e\u3059\u3002",
                 proto_traffic_distribution: "\u30d7\u30ed\u30c8\u30b3\u30eb\u30c8\u30e9\u30d5\u30a3\u30c3\u30af\u5206\u5e03",
                 resync_success: "SeqSync \u3068\u9375\u306e\u30ed\u30fc\u30c6\u30fc\u30b7\u30e7\u30f3\u304c\u958b\u59cb\u3055\u308c\u307e\u3057\u305f",
@@ -2639,10 +2542,6 @@
                 sliding_window_lbl: "\u30ea\u30d7\u30ec\u30a4\u9632\u6b62\u30b9\u30e9\u30a4\u30c7\u30a3\u30f3\u30b0\u30a6\u30a3\u30f3\u30c9\u30a6 (0..65535)",
                 sync_events_lbl: "\u540c\u671f\u30a4\u30d9\u30f3\u30c8",
                 synced_peers_lbl: "\u540c\u671f\u6e08\u307f\u30d4\u30a2",
-                tip_decrypt_errs: "\u26a0\ufe0f {count} \u4ef6\u306e\u5fa9\u53f7\u5931\u6557\u3092\u691c\u51fa\u3057\u307e\u3057\u305f\u3002{btn} \u3092\u30af\u30ea\u30c3\u30af\u3057\u3066\u78ba\u8a8d\u30fb\u518d\u540c\u671f\u3057\u3066\u304f\u3060\u3055\u3044\u3002",
-                tip_dup_ips: "\u26a0\ufe0f \u30c8\u30dd\u30ed\u30b8\u5185\u3067 {count} \u4ef6\u306e IP \u91cd\u8907 / \u30b5\u30d6\u30cd\u30c3\u30c8\u91cd\u8907\u304c\u691c\u51fa\u3055\u308c\u307e\u3057\u305f\u3002",
-                tip_tap_failed: "\u274c TAP \u30c7\u30d0\u30a4\u30b9\u81ea\u5df1\u8a3a\u65ad\u5931\u6557\uff1a\u30c9\u30e9\u30a4\u30d0\u3068\u6a29\u9650\u3092\u78ba\u8a8d\u3057\u3066\u304f\u3060\u3055\u3044\u3002",
-                traffic_comp_title: "\u30a4\u30fc\u30b5\u30cd\u30c3\u30c8\uff06\u30cd\u30c3\u30c8\u30ef\u30fc\u30af\u30c8\u30e9\u30d5\u30a3\u30c3\u30af\u69cb\u6210",
                 tx_frames_lbl: "\u9001\u4fe1\u30d5\u30ec\u30fc\u30e0 (TX)",
                 tx_key_fp_lbl: "TxKey \u30d5\u30a3\u30f3\u30ac\u30fc\u30d7\u30ea\u30f3\u30c8",
                 view_raw: ">_ \u30bf\u30fc\u30df\u30ca\u30eb",
@@ -2918,7 +2817,6 @@
                 stat_total_routes: "計算済みルート総数",
                 stat_relayed_routes: "中継加速パス",
                 stat_max_savings: "最大レイテンシ削減",
-                stat_mesh_health: "メッシュトポロジー状態",
                 arp_table: "📋 仮想ネットワーク ARP / NDP テーブル",
                 ip_analytics: "📊 24時間 IP トラフィック分析",
                 mac_table: "🔀 仮想スイッチ MAC テーブル",
@@ -2988,7 +2886,7 @@
                 psk_desc: "空欄でパブリック、設定で暗号化分離",
                 section_transport: "転送とログ",
                 section_transport_desc: "ルーティング戦略と診断ログの詳細度",
-                strategy_desc: "P2Pリンク上のパケットルーティング方式",
+                strategy_desc: "既存のストリームを選択します。追加の接続は作成しません。変更には再起動が必要です。",
                 loglevel_desc: "コンソール出力の詳細度を制御",
                 enable_mdns_lbl: "mDNS LAN ノード検出を有効化",
                 enable_mdns_desc: "mDNS で同一 LAN 内のノードを自動検出します（ローカルネットワークのみ）",
@@ -3087,7 +2985,7 @@
                 acl_label_more: "件以上",
                 acl_default_accept: "ACCEPT (許可)",
                 acl_default_drop: "DROP (拒否)",
-                strategy_redundant: "デュアル送信冗長",
+                strategy_redundant: "既存ストリームに複製送信",
                 strategy_fallback: "フェイルオーバー",
                 log_level_debug: "詳細デバッグ",
                 log_level_info: "標準情報",
@@ -3098,19 +2996,7 @@
                 obfs_random: "ランダム長",
                 obfs_dynamic: "可変範囲",
                 obfs_auto: "自動検出と切替",
-                acl_editor_title: "🛡️ ACL ルールエディタ",
                 acl_no_rules: "カスタムルールはまだありません — 追加するかテンプレートを選択。",
-                acl_test_title: "🧪 ACL ルールテスター",
-                acl_test_peer: "送信元ピアID",
-                acl_test_dir: "方向",
-                acl_test_proto: "プロトコル",
-                acl_test_dstip: "宛先IP",
-                acl_test_dstport: "宛先ポート",
-                acl_test_allow: "許可",
-                acl_test_deny: "拒否",
-                acl_test_matched: "一致したルール",
-                acl_test_default: "ルール未一致 — デフォルトポリシーを適用",
-                acl_template_lbl: "テンプレートを挿入…",
                 acl_comment_placeholder: "コメント / 説明",
                 close_btn: "閉じる",
                 active_exit_badge: "⚡ アクティブゲートウェイ",
@@ -3452,15 +3338,7 @@
                 frames_unit: "Frames",
                 handshake_latency_lbl: "Handshake-Latenz",
                 hops_label: "Peers",
-                lbl_crypto_grade: "Verschl\u00fcsselungsgrad",
-                lbl_dedup_drops: "Fenster-Deduplizierung",
-                lbl_direct_ratio: "Direktverbindungsquote",
-                lbl_dup_conflicts: "IP-Konflikte",
                 lbl_peers: "Peers",
-                mesh_health_desc: "Echtzeitbewertung von Direktpfadquote, Krypto-Integrit\u00e4t, Paketverlust und Routing-Stabilit\u00e4t",
-                mesh_health_score_lbl: "Mesh-Zustand",
-                mesh_health_title: "Overlay-Mesh-Linkqualit\u00e4t & Selbstheilungsstatus",
-                mesh_status_optimal: "Mesh-Linkqualit\u00e4t optimal: Alle verbundenen Peers sind sicher mit AEAD synchronisiert.",
                 no_peers_connected: "Keine Peers verbunden. Bereit f\u00fcr sicheres P2P-Mesh.",
                 proto_traffic_distribution: "Protokoll-Verkehrsverteilung",
                 resync_success: "SeqSync & Schl\u00fcsselrotation ausgel\u00f6st",
@@ -3470,10 +3348,6 @@
                 sliding_window_lbl: "Anti-Replay-Schiebefenster (0..65535)",
                 sync_events_lbl: "Sync-Ereignisse",
                 synced_peers_lbl: "Synchronisierte Peers",
-                tip_decrypt_errs: "\u26a0\ufe0f {count} Entschl\u00fcsselungsfehler aufgetreten. Klicken Sie auf {btn} zum Pr\u00fcfen & Neusynchronisieren.",
-                tip_dup_ips: "\u26a0\ufe0f {count} doppelte IP- / Subnetz-Konflikte in Mesh-Topologie erkannt.",
-                tip_tap_failed: "\u274c TAP-Ger\u00e4te-Selbsttest fehlgeschlagen: Treiber und Berechtigungen pr\u00fcfen.",
-                traffic_comp_title: "Ethernet- & Netzwerkverkehrszusammensetzung",
                 tx_frames_lbl: "Gesendete Frames (TX)",
                 tx_key_fp_lbl: "TxKey-Fingerabdruck",
                 view_raw: ">_ Terminal",
@@ -3749,7 +3623,6 @@
                 stat_total_routes: "Berechnete Routen gesamt",
                 stat_relayed_routes: "Relay-beschleunigte Pfade",
                 stat_max_savings: "Max. Latenzreduzierung",
-                stat_mesh_health: "Netzwerktopologie-Status",
                 arp_table: "📋 Virtuelle ARP/NDP-Nachbartabelle",
                 ip_analytics: "📊 24h-IP-Datenverkehrsanalyse",
                 mac_table: "🔀 Virtuelle Switch MAC-Tabelle",
@@ -3819,7 +3692,7 @@
                 psk_desc: "Leer für öffentliches Netz, Schlüssel für Verschlüsselung",
                 section_transport: "Transport & Protokollierung",
                 section_transport_desc: "Routing-Strategie und Diagnose-Ausführlichkeit",
-                strategy_desc: "Wie Pakete über P2P-Verbindungen geroutet werden",
+                strategy_desc: "Wählt vorhandene Streams; erstellt keine zusätzlichen Verbindungen. Änderungen erfordern einen Neustart.",
                 loglevel_desc: "Steuert die Ausführlichkeit der Konsolenausgabe",
                 enable_mdns_lbl: "mDNS LAN-Knotenerkennung aktivieren",
                 enable_mdns_desc: "Erkennt Peers im selben LAN automatisch via mDNS (nur lokales Netzwerk)",
@@ -3917,7 +3790,7 @@
                 acl_label_more: "weitere",
                 acl_default_accept: "ACCEPT (erlauben)",
                 acl_default_drop: "DROP (verweigern)",
-                strategy_redundant: "Doppelt senden (redundant)",
+                strategy_redundant: "Über vorhandene Streams duplizieren",
                 strategy_fallback: "Failover (Rückfall)",
                 log_level_debug: "Ausführliches Debug",
                 log_level_info: "Standardinformationen",
@@ -3928,19 +3801,7 @@
                 obfs_random: "Zufällige Länge",
                 obfs_dynamic: "Variabler Bereich",
                 obfs_auto: "Auto-Erkennung & Wechsel",
-                acl_editor_title: "🛡️ ACL-Regeleditor",
                 acl_no_rules: "Noch keine benutzerdefinierten ACL-Regeln — eine hinzufügen oder Vorlage wählen.",
-                acl_test_title: "🧪 ACL-Regeltester",
-                acl_test_peer: "Quell-Peer-ID",
-                acl_test_dir: "Richtung",
-                acl_test_proto: "Protokoll",
-                acl_test_dstip: "Ziel-IP",
-                acl_test_dstport: "Zielport",
-                acl_test_allow: "ERLAUBT",
-                acl_test_deny: "VERWEIGERT",
-                acl_test_matched: "Zutreffende Regel",
-                acl_test_default: "Keine Regel traf — Standardrichtlinie angewendet",
-                acl_template_lbl: "Vorlage einfügen…",
                 acl_comment_placeholder: "Kommentar / Beschreibung",
                 close_btn: "Schließen",
                 acl_status_title: "🛡️ Firewall",
@@ -4283,15 +4144,7 @@
                 frames_unit: "tramas",
                 handshake_latency_lbl: "Latencia de negociaci\u00f3n",
                 hops_label: "pares",
-                lbl_crypto_grade: "Nivel de cifrado",
-                lbl_dedup_drops: "Deduplicaci\u00f3n de ventana",
-                lbl_direct_ratio: "Proporci\u00f3n directa",
-                lbl_dup_conflicts: "Conflictos de IP",
                 lbl_peers: "pares",
-                mesh_health_desc: "Evaluaci\u00f3n en tiempo real de ruta directa, integridad criptogr\u00e1fica, p\u00e9rdida de paquetes y estabilidad de enrutamiento",
-                mesh_health_score_lbl: "Salud de la malla",
-                mesh_health_title: "Calidad del enlace de malla y estado de autorreparaci\u00f3n",
-                mesh_status_optimal: "Calidad de enlace \u00f3ptima: todos los pares conectados est\u00e1n sincronizados de forma segura con AEAD.",
                 no_peers_connected: "No hay pares conectados. Listo para establecer malla P2P segura.",
                 proto_traffic_distribution: "Distribuci\u00f3n del tr\u00e1fico de protocolos",
                 resync_success: "SeqSync y rotaci\u00f3n de claves activados",
@@ -4301,10 +4154,6 @@
                 sliding_window_lbl: "Ventana deslizante antirrepetici\u00f3n (0..65535)",
                 sync_events_lbl: "Eventos de sincronizaci\u00f3n",
                 synced_peers_lbl: "Pares sincronizados",
-                tip_decrypt_errs: "\u26a0\ufe0f {count} fallo(s) de descifrado detectados. Haga clic en {btn} para inspeccionar y resincronizar.",
-                tip_dup_ips: "\u26a0\ufe0f {count} conflicto(s) de IP / subred duplicados en la topolog\u00eda.",
-                tip_tap_failed: "\u274c Error en autotest de dispositivo TAP: verifique controladores y permisos.",
-                traffic_comp_title: "Composici\u00f3n del tr\u00e1fico Ethernet y de red",
                 tx_frames_lbl: "Tramas enviadas (TX)",
                 tx_key_fp_lbl: "Huella digital TxKey",
                 view_raw: ">_ Terminal",
@@ -4580,7 +4429,6 @@
                 stat_total_routes: "Rutas Calculadas Totales",
                 stat_relayed_routes: "Rutas Aceleradas por Relé",
                 stat_max_savings: "Reducción Máx. Latencia",
-                stat_mesh_health: "Estado Topológico de Red",
                 arp_table: "📋 Tabla de Vecinos ARP / NDP Virtual",
                 ip_analytics: "📊 Análisis de Tráfico por IP 24h",
                 mac_table: "🔀 Tabla MAC del Conmutador Virtual",
@@ -4650,7 +4498,7 @@
                 psk_desc: "Vacío para red pública, clave para aislamiento cifrado",
                 section_transport: "Transporte y Registro",
                 section_transport_desc: "Estrategia de enrutamiento y nivel de diagnóstico",
-                strategy_desc: "Cómo se enrutan los paquetes a través de enlaces P2P",
+                strategy_desc: "Selecciona flujos existentes sin crear conexiones adicionales. Los cambios requieren un reinicio.",
                 loglevel_desc: "Controla el nivel de detalle de la salida de consola",
                 enable_mdns_lbl: "Habilitar detección de nodos LAN por mDNS",
                 enable_mdns_desc: "Descubre automáticamente nodos en la misma LAN vía mDNS (solo red local)",
@@ -4748,7 +4596,7 @@
                 acl_label_more: "más",
                 acl_default_accept: "ACCEPT (permitir)",
                 acl_default_drop: "DROP (denegar)",
-                strategy_redundant: "Doble envío (redundante)",
+                strategy_redundant: "Duplicar por los flujos existentes",
                 strategy_fallback: "Conmutación por error",
                 log_level_debug: "Depuración detallada",
                 log_level_info: "Información estándar",
@@ -4759,19 +4607,7 @@
                 obfs_random: "Longitud aleatoria",
                 obfs_dynamic: "Rango variable",
                 obfs_auto: "Detección automática y cambio",
-                acl_editor_title: "🛡️ Editor de reglas ACL",
                 acl_no_rules: "Aún no hay reglas ACL personalizadas — añada una o elija una plantilla.",
-                acl_test_title: "🧪 Probador de reglas ACL",
-                acl_test_peer: "ID de peer de origen",
-                acl_test_dir: "Dirección",
-                acl_test_proto: "Protocolo",
-                acl_test_dstip: "IP de destino",
-                acl_test_dstport: "Puerto de destino",
-                acl_test_allow: "PERMITIDO",
-                acl_test_deny: "DENEGADO",
-                acl_test_matched: "Regla coincidente",
-                acl_test_default: "Ninguna regla coincidió — se aplicó la política predeterminada",
-                acl_template_lbl: "Insertar plantilla…",
                 acl_comment_placeholder: "Comentario / Descripción",
                 close_btn: "Cerrar",
                 acl_status_title: "🛡️ Firewall",
@@ -5114,15 +4950,7 @@
                 frames_unit: "trames",
                 handshake_latency_lbl: "Latence de n\u00e9gociation",
                 hops_label: "pairs",
-                lbl_crypto_grade: "Niveau de chiffrement",
-                lbl_dedup_drops: "D\u00e9duplication de fen\u00eatre",
-                lbl_direct_ratio: "Taux direct",
-                lbl_dup_conflicts: "Conflits IP",
                 lbl_peers: "pairs",
-                mesh_health_desc: "\u00c9valuation en temps r\u00e9el du ratio direct, de l'int\u00e9grit\u00e9 crypto, de la perte de paquets et de la stabilit\u00e9 du routage",
-                mesh_health_score_lbl: "Sant\u00e9 du maillage",
-                mesh_health_title: "Qualit\u00e9 de liaison et statut d'auto-gu\u00e9rison",
-                mesh_status_optimal: "Qualit\u00e9 de liaison optimale : tous les pairs sont synchronis\u00e9s en toute s\u00e9curit\u00e9 avec AEAD.",
                 no_peers_connected: "Aucun pair connect\u00e9. Pr\u00eat \u00e0 \u00e9tablir un maillage P2P s\u00e9curis\u00e9.",
                 proto_traffic_distribution: "Distribution du trafic par protocole",
                 resync_success: "SeqSync et rotation des cl\u00e9s d\u00e9clench\u00e9s",
@@ -5132,10 +4960,6 @@
                 sliding_window_lbl: "Fen\u00eatre glissante anti-rejeu (0..65535)",
                 sync_events_lbl: "\u00c9v\u00e9nements de synchronisation",
                 synced_peers_lbl: "Pairs synchronis\u00e9s",
-                tip_decrypt_errs: "\u26a0\ufe0f {count} \u00e9chec(s) de d\u00e9chiffrement d\u00e9tect\u00e9(s). Cliquez sur {btn} pour inspecter et resynchroniser.",
-                tip_dup_ips: "\u26a0\ufe0f {count} conflit(s) d'IP / sous-r\u00e9seaux d\u00e9tect\u00e9s dans la topologie.",
-                tip_tap_failed: "\u274c \u00c9chec de l'autotest du p\u00e9riph\u00e9rique TAP : v\u00e9rifiez les pilotes et permissions.",
-                traffic_comp_title: "Composition du trafic Ethernet et r\u00e9seau",
                 tx_frames_lbl: "Trames envoy\u00e9es (TX)",
                 tx_key_fp_lbl: "Empreinte TxKey",
                 view_raw: ">_ Terminal",
@@ -5473,7 +5297,6 @@
                 stat_total_routes: "Total des Routes Calculées",
                 stat_relayed_routes: "Voies Accélérées par Relais",
                 stat_max_savings: "Réduction Max. de Latence",
-                stat_mesh_health: "Santé de la Topologie",
                 arp_table: "📋 Table des Voisins ARP / NDP Virtuelle",
                 ip_analytics: "📊 Analyse du Trafic par IP sur 24h",
                 mac_table: "🔀 Table MAC du Commutateur Virtuel",
@@ -5522,7 +5345,7 @@
                 psk_desc: "Vide pour réseau public, clé pour isolation chiffrée",
                 section_transport: "Transport & Journalisation",
                 section_transport_desc: "Stratégie de routage et verbosité du diagnostic",
-                strategy_desc: "Comment les paquets sont routés via les liaisons P2P",
+                strategy_desc: "Choisit les flux existants sans créer de connexions supplémentaires. Les modifications nécessitent un redémarrage.",
                 loglevel_desc: "Contrôle la verbosité de la sortie console",
                 enable_mdns_lbl: "Activer la découverte de nœuds LAN via mDNS",
                 enable_mdns_desc: "Découvre automatiquement les nœuds du même LAN via mDNS (réseau local uniquement)",
@@ -5611,7 +5434,7 @@
                 acl_label_more: "plus",
                 acl_default_accept: "ACCEPT (autoriser)",
                 acl_default_drop: "DROP (refuser)",
-                strategy_redundant: "Double envoi (redondant)",
+                strategy_redundant: "Dupliquer sur les flux existants",
                 strategy_fallback: "Basculement (secours)",
                 log_level_debug: "Débogage détaillé",
                 log_level_info: "Informations standard",
@@ -5622,19 +5445,7 @@
                 obfs_random: "Longueur aléatoire",
                 obfs_dynamic: "Plage variable",
                 obfs_auto: "Détection auto et basculement",
-                acl_editor_title: "🛡️ Éditeur de règles ACL",
                 acl_no_rules: "Pas encore de règles ACL personnalisées — ajoutez-en une ou choisissez un modèle.",
-                acl_test_title: "🧪 Testeur de règles ACL",
-                acl_test_peer: "ID du pair source",
-                acl_test_dir: "Direction",
-                acl_test_proto: "Protocole",
-                acl_test_dstip: "IP de destination",
-                acl_test_dstport: "Port de destination",
-                acl_test_allow: "AUTORISÉ",
-                acl_test_deny: "REFUSÉ",
-                acl_test_matched: "Règle correspondante",
-                acl_test_default: "Aucune règle ne correspond — application de la politique par défaut",
-                acl_template_lbl: "Insérer un modèle…",
                 acl_comment_placeholder: "Commentaire / Description",
                 close_btn: "Fermer",
                 cancel_btn: "Annuler",
@@ -5914,6 +5725,81 @@
             }
         };
 
+        const dashboardLabels = {
+            en: ['Overview', 'Peers', 'Routing & firewall', 'Diagnostics', 'Discovery details', 'Forwarding tables & latency matrix', 'System & encryption', 'Traffic details', 'Protocol streams', 'Edit rules', 'Connecting…', 'Live · refreshes every 2s', 'Connection lost · data may be stale', 'Dashboard'],
+            'zh-CN': ['概览', '节点', '路由与防火墙', '诊断', '节点发现详情', '转发表与延迟矩阵', '系统与加密', '流量详情', '协议流', '编辑规则', '正在连接…', '已连接 · 每 2 秒刷新', '连接中断 · 数据可能已过期', '控制台页面'],
+            'zh-TW': ['概覽', '節點', '路由與防火牆', '診斷', '節點發現詳情', '轉發表與延遲矩陣', '系統與加密', '流量詳情', '協定串流', '編輯規則', '正在連線…', '已連線 · 每 2 秒更新', '連線中斷 · 資料可能已過期', '控制台頁面'],
+            ja: ['概要', 'ノード', 'ルートとファイアウォール', '診断', 'ノード検出の詳細', '転送テーブルと遅延行列', 'システムと暗号化', 'トラフィック詳細', 'プロトコルストリーム', 'ルールを編集', '接続中…', '接続済み · 2秒ごとに更新', '接続切断 · データが古い可能性があります', 'ダッシュボード'],
+            de: ['Übersicht', 'Knoten', 'Routing & Firewall', 'Diagnose', 'Erkennungsdetails', 'Weiterleitungstabellen & Latenzmatrix', 'System & Verschlüsselung', 'Verkehrsdetails', 'Protokollströme', 'Regeln bearbeiten', 'Verbindung wird hergestellt…', 'Verbunden · Aktualisierung alle 2s', 'Verbindung unterbrochen · Daten möglicherweise veraltet', 'Dashboard'],
+            es: ['Resumen', 'Nodos', 'Rutas y cortafuegos', 'Diagnóstico', 'Detalles de descubrimiento', 'Tablas de reenvío y matriz de latencia', 'Sistema y cifrado', 'Detalles de tráfico', 'Flujos de protocolo', 'Editar reglas', 'Conectando…', 'Conectado · actualización cada 2s', 'Conexión perdida · los datos pueden estar desactualizados', 'Panel'],
+            fr: ['Vue générale', 'Nœuds', 'Routage et pare-feu', 'Diagnostic', 'Détails de découverte', 'Tables de transfert et matrice de latence', 'Système et chiffrement', 'Détails du trafic', 'Flux de protocole', 'Modifier les règles', 'Connexion…', 'Connecté · actualisation toutes les 2s', 'Connexion perdue · données potentiellement anciennes', 'Tableau de bord'],
+        };
+        const dashboardLabelKeys = ['overview', 'peers', 'network', 'diagnostics', 'peer_details', 'forwarding_details', 'runtime_details', 'traffic_details', 'protocol_details', 'edit_acl', 'connecting', 'live', 'offline', 'navigation'];
+        Object.entries(dashboardLabels).forEach(([lang, labels]) => {
+            dashboardLabelKeys.forEach((key, i) => { i18nDict[lang]['dashboard_' + key] = labels[i]; });
+        });
+        const compactLabels = {
+            en: ['Network', 'Settings', 'Retry', 'Upload', 'Download', 'Details', 'Peer details', 'Diagnose', 'Result view', 'Traffic with this peer', 'Measured link rate', 'Peer-reported node totals', 'Ping & route test'],
+            'zh-CN': ['网络', '设置', '重试', '上传', '下载', '详情', '节点详情', '连通诊断', '结果显示方式', '与此节点的流量', '实测链路速率', '对端上报的全局流量', 'Ping 与路径检测'],
+            'zh-TW': ['網路', '設定', '重試', '上傳', '下載', '詳情', '節點詳情', '連線診斷', '結果顯示方式', '與此節點的流量', '實測鏈路速率', '對端回報的全域流量', 'Ping 與路徑檢測'],
+            ja: ['ネットワーク', '設定', '再試行', '送信', '受信', '詳細', 'ノードの詳細', '接続診断', '結果表示', 'このノードとの通信量', '測定済みリンク速度', '相手ノードの報告総量', 'Ping と経路テスト'],
+            de: ['Netzwerk', 'Einstellungen', 'Erneut versuchen', 'Upload', 'Download', 'Details', 'Knotendetails', 'Verbindung prüfen', 'Ergebnisansicht', 'Verkehr mit diesem Knoten', 'Gemessene Linkrate', 'Vom Knoten gemeldeter Gesamtverkehr', 'Ping & Routentest'],
+            es: ['Red', 'Ajustes', 'Reintentar', 'Subida', 'Bajada', 'Detalles', 'Detalles del nodo', 'Diagnosticar', 'Vista de resultados', 'Tráfico con este nodo', 'Velocidad medida del enlace', 'Totales informados por el nodo', 'Ping y prueba de ruta'],
+            fr: ['Réseau', 'Réglages', 'Réessayer', 'Envoi', 'Réception', 'Détails', 'Détails du nœud', 'Diagnostiquer', 'Affichage du résultat', 'Trafic avec ce nœud', 'Débit mesuré du lien', 'Totaux déclarés par le nœud', 'Ping et test de route'],
+        };
+        const compactLabelKeys = ['network', 'settings', 'retry', 'tx', 'rx', 'details', 'peer_info', 'diagnose', 'result_view', 'link_traffic', 'link_rate', 'remote_traffic', 'probe_title'];
+        Object.entries(compactLabels).forEach(([lang, labels]) => {
+            compactLabelKeys.forEach((key, i) => { i18nDict[lang]['dashboard_' + key] = labels[i]; });
+        });
+
+        const compactActionLabels = {
+    "en": [
+        "Ping",
+        "Trace route",
+        "Bandwidth",
+        "Connection"
+    ],
+    "zh-CN": [
+        "Ping",
+        "路径追踪",
+        "实时吞吐量",
+        "连接状态"
+    ],
+    "zh-TW": [
+        "Ping",
+        "路徑追蹤",
+        "即時吞吐量",
+        "連線狀態"
+    ],
+    "ja": [
+        "Ping",
+        "経路追跡",
+        "通信速度",
+        "接続状態"
+    ],
+    "de": [
+        "Ping",
+        "Route verfolgen",
+        "Bandbreite",
+        "Verbindung"
+    ],
+    "es": [
+        "Ping",
+        "Trazar ruta",
+        "Ancho de banda",
+        "Conexión"
+    ],
+    "fr": [
+        "Ping",
+        "Tracer la route",
+        "Débit",
+        "Connexion"
+    ]
+};
+        Object.entries(compactActionLabels).forEach(([lang, labels]) => {
+            ['ping', 'trace', 'bandwidth', 'connection'].forEach((key, i) => { i18nDict[lang]['dashboard_' + key] = labels[i]; });
+        });
+
         let currentLang = localStorage.getItem('p2ptap_lang') || (navigator.language && navigator.language.startsWith('zh') ? (navigator.language.includes('TW') || navigator.language.includes('HK') ? 'zh-TW' : 'zh-CN') : 'en');
         if (!i18nDict[currentLang]) currentLang = 'en';
 
@@ -5944,6 +5830,11 @@
                 }
             });
 
+            document.documentElement.lang = lang;
+            document.querySelectorAll('[data-i18n-aria]').forEach(el => {
+                el.setAttribute('aria-label', t(el.getAttribute('data-i18n-aria')));
+            });
+
             document.getElementById('cfgPSK').placeholder = t('psk_placeholder');
 
             // pcap_desc contains HTML <span> tags, so use innerHTML instead of textContent
@@ -5954,9 +5845,61 @@
         }
 
         let currentFullConfig = {};
-        let lastTxBytes = 0;
-        let lastRxBytes = 0;
-        let lastFetchTime = Date.now();
+        const dashboardPages = ['overview', 'peers', 'network', 'diagnostics'];
+
+        function currentDashboardPage() {
+            return dashboardPages.find(name => !document.getElementById('dashboard-' + name).hidden) || 'overview';
+        }
+
+        function redrawDashboardCharts() {
+            drawTopologyMesh();
+            if (bwChartState.history.length) drawBandwidthChart(bwChartState.history);
+            if (ppsChartState.history.length) drawPacketRateChart(ppsChartState.history);
+        }
+
+        function selectDashboardPage(name, updateHistory = true) {
+            if (!dashboardPages.includes(name)) name = 'overview';
+            const previous = currentDashboardPage();
+            dashboardPages.forEach(page => {
+                const selected = page === name;
+                document.getElementById('dashboard-' + page).hidden = !selected;
+                const tab = document.getElementById('dashboard-tab-' + page);
+                tab.setAttribute('aria-selected', String(selected));
+                tab.tabIndex = selected ? 0 : -1;
+            });
+            if (updateHistory && location.hash !== '#' + name) history.pushState(null, '', '#' + name);
+            if (name === 'peers' && !document.hidden) {
+                startTopologyLoop();
+            } else if (topoRAFId !== null) {
+                cancelAnimationFrame(topoRAFId);
+                topoRAFId = null;
+            }
+            syncDiagnosticStreams();
+            redrawDashboardCharts();
+            if (previous !== name) window.scrollTo(0, 0);
+            fetchStats();
+        }
+
+        function syncDiagnosticStreams() {
+            const active = !document.hidden && currentDashboardPage() === 'diagnostics';
+            if (active && document.getElementById('logsDetails').open) {
+                logStream.connect();
+                fetchLogs();
+            } else logStream.disconnect();
+            if (active && document.getElementById('captureDetails').open) {
+                pcapStream.connect();
+                pcapRefreshState();
+            } else pcapStream.disconnect();
+        }
+
+        function updateDashboardStatus(connected) {
+            const status = document.getElementById('dashboardStatus');
+            status.classList.toggle('is-offline', !connected);
+            document.getElementById('dashboardRetry').hidden = connected;
+            const label = document.getElementById('dashboardStatusText');
+            label.setAttribute('data-i18n', connected ? 'dashboard_live' : 'dashboard_offline');
+            label.textContent = t(connected ? 'dashboard_live' : 'dashboard_offline');
+        }
 
         function formatBytes(bytes) {
             if (!bytes || bytes === 0) return '0 B';
@@ -5972,6 +5915,52 @@
                 return '⚡ ' + (bytesPerSec / 1024).toFixed(1) + ' KB/s';
             }
             return '⚡ ' + (bytesPerSec / (1024 * 1024)).toFixed(2) + ' MB/s';
+        }
+
+        const peerDetailsCache = new Map();
+        let selectedPeerDetails = null;
+        let peerDetailsFocus = null;
+        let peerDetailsContent = null;
+
+        function refreshPeerDetails() {
+            if (!selectedPeerDetails) return;
+            const peer = cachedPeers.find(p => p.peer_id === selectedPeerDetails);
+            document.getElementById('peerDetailsTitle').textContent = peer ? (peer.node_name || t('unnamed_node')) : t('dashboard_peer_info');
+            const body = document.getElementById('peerDetailsBody');
+            const content = peerDetailsCache.get(selectedPeerDetails) || `<p class="empty-row">${escapeHTML(t('no_peers'))}</p>`;
+            if (peerDetailsContent !== content) {
+                const scroll = body.scrollTop;
+                const focusedAction = body.contains(document.activeElement) ? document.activeElement.getAttribute('data-onclick') : null;
+                body.innerHTML = content;
+                peerDetailsContent = content;
+                body.scrollTop = scroll;
+                if (focusedAction) {
+                    const replacement = [...body.querySelectorAll('[data-onclick]')].find(el => el.getAttribute('data-onclick') === focusedAction);
+                    if (replacement) replacement.focus({ preventScroll: true });
+                }
+            }
+        }
+
+        function openPeerDetails(peerID) {
+            if (!peerDetailsCache.has(peerID)) return;
+            selectedPeerDetails = peerID;
+            peerDetailsContent = null;
+            peerDetailsFocus = document.activeElement;
+            refreshPeerDetails();
+            const modal = document.getElementById('peerDetailsModal');
+            modal.classList.add('active');
+            modal.style.display = 'flex';
+            modal.querySelector('button').focus();
+        }
+
+        function closePeerDetails() {
+            const modal = document.getElementById('peerDetailsModal');
+            modal.classList.remove('active');
+            modal.style.display = 'none';
+            selectedPeerDetails = null;
+            peerDetailsContent = null;
+            const target = peerDetailsFocus && peerDetailsFocus.isConnected ? peerDetailsFocus : document.getElementById('dashboard-tab-peers');
+            target.focus();
         }
 
         // Compact rate formatter for tiny edge-label boxes (B / K / M / G).
@@ -6024,10 +6013,10 @@
             }, (isError || isWarn) ? 5000 : 3000);
         }
 
-        async function openConfigModal() {
+        async function openConfigModal(section) {
             try {
                 const res = await fetch('/api/config', withAuth());
-                if (!res.ok) return;
+                if (!res.ok) throw new Error('HTTP ' + res.status);
                 currentFullConfig = await res.json();
 
                 // Exit Node gateway relies on Linux nftables; hide the section on
@@ -6110,9 +6099,11 @@
                 if (cfgModal) {
                     cfgModal.classList.add('active');
                     cfgModal.style.display = 'flex';
+                    if (section === 'acl') document.getElementById('configACLSection').scrollIntoView({ block: 'start' });
                 }
             } catch (e) {
                 console.error("Open config modal error:", e);
+                showToast(t('req_error') + e.message, true);
             }
         }
 
@@ -6397,24 +6388,9 @@
         // natural new-rule default is its inverse:
         //   default_policy = drop   -> new rule defaults to 'accept'
         //   default_policy = accept -> new rule defaults to 'drop'
-        // source is either 'cfgACLDefaultAction' (settings modal) or
-        // 'aclEdDefault' (standalone editor modal).
-        function _aclOppositeAction(source) {
-            let def = 'accept';
-            if (source === 'cfgACLDefaultAction') {
-                const el = document.getElementById('cfgACLDefaultAction');
-                if (el && el.value) def = el.value;
-            } else if (source === 'aclEdDefault') {
-                if (currentFullConfig && currentFullConfig.acl
-                    && currentFullConfig.acl.default_action) {
-                    def = currentFullConfig.acl.default_action;
-                } else {
-                    const el = document.getElementById('aclEdDefault');
-                    if (el && el.value) def = el.value;
-                }
-            }
-            def = String(def).toLowerCase();
-            return (def === 'accept') ? 'drop' : 'accept';
+        function _aclOppositeAction() {
+            const el = document.getElementById('cfgACLDefaultAction');
+            return el && el.value === 'drop' ? 'accept' : 'drop';
         }
 
         function renderACLRulesList() {
@@ -6602,7 +6578,7 @@
                 // rules; if "Default Allow" is set, exceptions are block
                 // rules. Matches the user's mental model of "what kind of
                 // exceptions am I adding?".
-                action: _aclOppositeAction('cfgACLDefaultAction'),
+                action: _aclOppositeAction(),
                 direction: 'both',
                 peer_id: '*',
                 ip_cidr: '*',
@@ -6624,413 +6600,6 @@
                 // Live-re-render so the action chip + left-bar tint track the
                 // new value without a full save round-trip.
                 if (key === 'action') renderACLRulesList();
-            }
-        }
-
-        // ---- Standalone ACL Editor Modal (rich, drag-to-reorder) ----
-        function openACLEditor() {
-            try {
-                if (!currentFullConfig.acl) currentFullConfig.acl = { enable: false, default_action: 'accept', rules: [] };
-                if (!Array.isArray(currentFullConfig.acl.rules)) currentFullConfig.acl.rules = [];
-                document.getElementById('aclEdEnable').checked = !!currentFullConfig.acl.enable;
-                document.getElementById('aclEdDefault').value = currentFullConfig.acl.default_action || 'accept';
-                // Live-refresh the editor rule list when the user flips its
-                // default policy, so the list-mode hint banner + the action
-                // dropdown ordering track the selection. The onChange is
-                // wired once to avoid duplicate fires on repeated re-opens.
-                const edDefSel = document.getElementById('aclEdDefault');
-                if (edDefSel && !edDefSel.__aclLiveWired) {
-                    edDefSel.__aclLiveWired = true;
-                    edDefSel.addEventListener('change', () => {
-                        try {
-                            currentFullConfig.acl.default_action = edDefSel.value;
-                            renderEditorACLRules();
-                        } catch (err) { console.error(err); }
-                    });
-                }
-                renderEditorACLRules();
-                document.getElementById('aclEditorModal').style.display = 'flex';
-            } catch (e) {
-                console.error('openACLEditor error:', e);
-            }
-        }
-
-        function closeACLEditor() {
-            const m = document.getElementById('aclEditorModal');
-            if (m) m.style.display = 'none';
-        }
-
-        function renderEditorACLRules() {
-            const listEl = document.getElementById('aclEditorRulesList');
-            if (!listEl) return;
-            const rules = currentFullConfig.acl.rules;
-            listEl.replaceChildren();
-
-            // List "mode" — driven by the editor's default-action select
-            // value (already synced into currentFullConfig when the user
-            // touches the select). Permit-mode = drop default, rules
-            // accept exceptions; block-mode = accept default, rules deny
-            // exceptions.
-            const defaultVal = String(
-                currentFullConfig.acl.default_action || 'accept').toLowerCase();
-            const isPermitMode = (defaultVal === 'drop');
-
-            const hint = document.createElement('div');
-            hint.className = 'acl-flow-hint ' + (isPermitMode ? 'mode-permit' : 'mode-block');
-            const hintDot = document.createElement('span');
-            hintDot.className = 'acl-flow-hint-dot';
-            hint.appendChild(hintDot);
-            const hintText = document.createElement('span');
-            hintText.textContent = isPermitMode
-                ? t('acl_flow_hint_permit')
-                : t('acl_flow_hint_block');
-            hint.appendChild(hintText);
-            listEl.appendChild(hint);
-
-            if (rules.length === 0) {
-                const empty = document.createElement('div');
-                empty.className = 'cfg-list-empty';
-                empty.style.textAlign = 'center';
-                empty.style.padding = '14px';
-                empty.textContent = t('acl_no_rules');
-                listEl.appendChild(empty);
-                return;
-            }
-
-            const frag = document.createDocumentFragment();
-            rules.forEach((r, idx) => {
-                const row = document.createElement('div');
-                const actionId = (r.action === 'drop' || r.action === 'deny') ? 'drop' : 'accept';
-                row.className = 'acl-rule-row action-' + actionId;
-                row.setAttribute('draggable', 'true');
-                row.setAttribute('data-idx', String(idx));
-
-                const head = document.createElement('div');
-                head.className = 'acl-rule-head';
-
-                const handle = document.createElement('span');
-                handle.className = 'drag-handle';
-                handle.title = t('drag_rule_tip');
-                handle.setAttribute('aria-label', t('drag_rule_tip'));
-                handle.addEventListener('mousedown', (e) => e.stopPropagation());
-                const gripSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-                gripSvg.setAttribute('aria-hidden', 'true');
-                const gripUse = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-                gripUse.setAttribute('href', '#ic-grip');
-                gripSvg.appendChild(gripUse);
-                handle.appendChild(gripSvg);
-                head.appendChild(handle);
-
-                const num = document.createElement('span');
-                num.className = 'acl-rule-num';
-                num.textContent = '#' + (idx + 1);
-                head.appendChild(num);
-
-                const actionChip = document.createElement('span');
-                actionChip.className = 'acl-rule-action' + (actionId === 'drop' ? ' action-drop' : '');
-                actionChip.textContent = (actionId === 'drop') ? t('acl_action_drop') : t('acl_action_accept');
-                head.appendChild(actionChip);
-
-                const actionSel = _buildACLSelect(
-                    actionId,
-                    [_aclActionAccept(), _aclActionDrop()],
-                    'action-select',
-                    (v) => updateEditorACLRuleItem(idx, 'action', v),
-                    isPermitMode ? 'accept' : 'drop'
-                );
-                head.appendChild(actionSel);
-
-                const dirSel = _buildACLSelect(
-                    (!r.direction || r.direction === 'both') ? 'both'
-                      : (r.direction === 'inbound' ? 'in' : 'out'),
-                    [{ id: 'both',    label: t('acl_dir_both') },
-                     { id: 'in',      label: t('acl_dir_in') },
-                     { id: 'out',     label: t('acl_dir_out') }],
-                    'dir-select',
-                    (v) => updateEditorACLRuleItem(idx, 'direction', v === 'in' ? 'inbound' : (v === 'out' ? 'outbound' : 'both'))
-                );
-                head.appendChild(dirSel);
-
-                const protoSel = _buildACLSelect(
-                    (!r.protocol || r.protocol === 'any') ? 'any' : r.protocol,
-                    [{ id: 'any',  label: t('acl_proto_any') },
-                     { id: 'tcp',  label: t('acl_proto_tcp') },
-                     { id: 'udp',  label: t('acl_proto_udp') },
-                     { id: 'icmp', label: t('acl_proto_icmp') }],
-                    'proto-select',
-                    (v) => updateEditorACLRuleItem(idx, 'protocol', v)
-                );
-                head.appendChild(protoSel);
-
-                // Editor modal keeps the explicit ▲ / ▼ move buttons alongside
-                // drag-to-reorder — same `moveEditorACLRule(idx, dir)` helper,
-                // just rendered as themed icon buttons.
-                const upBtn = document.createElement('button');
-                upBtn.type = 'button';
-                upBtn.className = 'acl-rule-del';
-                upBtn.title = t('move_up_tip');
-                upBtn.setAttribute('aria-label', t('move_up_tip'));
-                upBtn.setAttribute('data-onclick', `moveEditorACLRule(${idx}, -1)`);
-                upBtn.addEventListener('mousedown', (e) => e.stopPropagation());
-                const upSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-                upSvg.setAttribute('aria-hidden', 'true');
-                const upUse = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-                upUse.setAttribute('href', '#ic-arrow-up');
-                upSvg.appendChild(upUse);
-                upBtn.appendChild(upSvg);
-                head.appendChild(upBtn);
-
-                const downBtn = document.createElement('button');
-                downBtn.type = 'button';
-                downBtn.className = 'acl-rule-del';
-                downBtn.title = t('move_down_tip');
-                downBtn.setAttribute('aria-label', t('move_down_tip'));
-                downBtn.setAttribute('data-onclick', `moveEditorACLRule(${idx}, 1)`);
-                downBtn.addEventListener('mousedown', (e) => e.stopPropagation());
-                const downSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-                downSvg.setAttribute('aria-hidden', 'true');
-                const downUse = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-                downUse.setAttribute('href', '#ic-arrow-down');
-                downSvg.appendChild(downUse);
-                downBtn.appendChild(downSvg);
-                head.appendChild(downBtn);
-
-                const delBtn = document.createElement('button');
-                delBtn.type = 'button';
-                delBtn.className = 'acl-rule-del';
-                delBtn.title = t('delete_rule');
-                delBtn.setAttribute('aria-label', t('delete_rule'));
-                delBtn.setAttribute('data-onclick', `deleteEditorACLRule(${idx})`);
-                delBtn.addEventListener('mousedown', (e) => e.stopPropagation());
-                const delSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-                delSvg.setAttribute('aria-hidden', 'true');
-                const delUse = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-                delUse.setAttribute('href', '#ic-trash');
-                delSvg.appendChild(delUse);
-                delBtn.appendChild(delSvg);
-                head.appendChild(delBtn);
-
-                row.appendChild(head);
-
-                const fields = document.createElement('div');
-                fields.className = 'acl-rule-fields';
-                const peerInput = document.createElement('input');
-                peerInput.type = 'text';
-                peerInput.className = 'form-input';
-                peerInput.placeholder = t('acl_peer_placeholder');
-                peerInput.value = r.peer_id || '*';
-                peerInput.addEventListener('mousedown', (e) => e.stopPropagation());
-                peerInput.addEventListener('change', () => updateEditorACLRuleItem(idx, 'peer_id', peerInput.value));
-                const cidrInput = document.createElement('input');
-                cidrInput.type = 'text';
-                cidrInput.className = 'form-input';
-                cidrInput.placeholder = t('acl_cidr_placeholder');
-                cidrInput.value = r.ip_cidr || '*';
-                cidrInput.addEventListener('mousedown', (e) => e.stopPropagation());
-                cidrInput.addEventListener('change', () => updateEditorACLRuleItem(idx, 'ip_cidr', cidrInput.value));
-                const portInput = document.createElement('input');
-                portInput.type = 'text';
-                portInput.className = 'form-input';
-                portInput.placeholder = t('acl_port_placeholder');
-                portInput.value = r.port || '0';
-                portInput.addEventListener('mousedown', (e) => e.stopPropagation());
-                portInput.addEventListener('change', () => updateEditorACLRuleItem(idx, 'port', portInput.value));
-                fields.appendChild(peerInput);
-                fields.appendChild(cidrInput);
-                fields.appendChild(portInput);
-                row.appendChild(fields);
-
-                const comment = document.createElement('input');
-                comment.type = 'text';
-                comment.className = 'form-input';
-                comment.placeholder = t('acl_comment_placeholder');
-                comment.value = r.comment || '';
-                comment.addEventListener('mousedown', (e) => e.stopPropagation());
-                comment.addEventListener('change', () => updateEditorACLRuleItem(idx, 'comment', comment.value));
-                const commentWrap = document.createElement('div');
-                commentWrap.className = 'acl-rule-comment';
-                commentWrap.appendChild(comment);
-                row.appendChild(commentWrap);
-
-                frag.appendChild(row);
-            });
-            listEl.appendChild(frag);
-
-            wireDragReorder(listEl, (from, to) => {
-                const arr = currentFullConfig.acl.rules;
-                if (from < 0 || from >= arr.length) return;
-                if (to < 0 || to >= arr.length) return;
-                if (from === to) return;
-                const [m] = arr.splice(from, 1);
-                arr.splice(to, 0, m);
-                renderEditorACLRules();
-            });
-        }
-
-        function addEditorACLRule() {
-            const tmpl = document.getElementById('aclEdTemplate');
-            const kind = tmpl ? tmpl.value : '';
-            if (kind) {
-                applyACLTemplate(kind);
-                if (tmpl) tmpl.value = '';
-            } else {
-                currentFullConfig.acl.rules.push({
-                    rule_id: 'rule-' + Date.now(),
-                    // Same exception-of-default policy: new rules start as
-                    // the opposite of the editor's configured default
-                    // action so the rule list always feels coherent.
-                    action: _aclOppositeAction('aclEdDefault'),
-                    direction: 'both', peer_id: '*',
-                    ip_cidr: '*', protocol: 'any', port: '0', comment: ''
-                });
-            }
-            renderEditorACLRules();
-        }
-
-        function deleteEditorACLRule(idx) {
-            currentFullConfig.acl.rules.splice(idx, 1);
-            renderEditorACLRules();
-        }
-
-        function updateEditorACLRuleItem(idx, key, val) {
-            const r = currentFullConfig.acl.rules[idx];
-            if (r) r[key] = val;
-        }
-
-        function moveEditorACLRule(idx, dir) {
-            const arr = currentFullConfig.acl.rules;
-            const to = idx + dir;
-            if (to < 0 || to >= arr.length) return;
-            const [m] = arr.splice(idx, 1);
-            arr.splice(to, 0, m);
-            renderEditorACLRules();
-        }
-
-        function applyACLTemplate(kind) {
-            const map = {
-                ssh:     { action: 'accept', direction: 'both', peer_id: '*', ip_cidr: '*', protocol: 'tcp', port: '22', comment: 'Allow SSH' },
-                web:     { action: 'accept', direction: 'both', peer_id: '*', ip_cidr: '*', protocol: 'tcp', port: '443', comment: 'Allow Web (HTTPS)' },
-                dns:     { action: 'drop',   direction: 'both', peer_id: '*', ip_cidr: '*', protocol: 'udp', port: '53', comment: 'Block DNS' },
-                rdp:     { action: 'accept', direction: 'both', peer_id: '*', ip_cidr: '*', protocol: 'tcp', port: '3389', comment: 'Allow RDP' },
-                denyall: { action: 'drop',   direction: 'both', peer_id: '*', ip_cidr: '*', protocol: 'any', port: '0', comment: 'Deny all remaining' }
-            };
-            const base = map[kind];
-            if (!base) return;
-            currentFullConfig.acl.rules.push(Object.assign({ rule_id: 'rule-' + Date.now() }, base));
-        }
-
-        async function saveACLEditor() {
-            try {
-                currentFullConfig.acl.enable = document.getElementById('aclEdEnable').checked;
-                currentFullConfig.acl.default_action = document.getElementById('aclEdDefault').value;
-                const res = await fetch('/api/config', withAuth({
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(currentFullConfig)
-                }));
-                if (res.ok) {
-                    showToast(t('save_success'));
-                    closeACLEditor();
-                    fetchStats();
-                } else {
-                    const err = await res.json().catch(() => ({}));
-                    alert(t('save_failed') + (err.error || 'Unknown Error'));
-                }
-            } catch (e) {
-                console.error('saveACLEditor error:', e);
-                alert(t('req_error') + e.message);
-            }
-        }
-
-        // ---- ACL Rule Tester Modal (mirrors node.MatchACL) ----
-        function openACLTestModal() {
-            const m = document.getElementById('aclTestModal');
-            if (m) m.style.display = 'flex';
-            const res = document.getElementById('aclTestResult');
-            if (res) res.innerHTML = '';
-        }
-
-        function closeACLTest() {
-            const m = document.getElementById('aclTestModal');
-            if (m) m.style.display = 'none';
-        }
-
-        function _aclCidrContains(cidr, ip) {
-            try {
-                const parts = cidr.split('/');
-                const base = parts[0];
-                const maskBits = parseInt(parts[1], 10);
-                const ipParts = ip.split('.').map(Number);
-                const baseParts = base.split('.').map(Number);
-                if (ipParts.length !== 4 || baseParts.length !== 4) return false;
-                const mask = maskBits === 0 ? 0 : (0xFFFFFFFF << (32 - maskBits)) >>> 0;
-                const ipInt = ((ipParts[0] << 24) | (ipParts[1] << 16) | (ipParts[2] << 8) | ipParts[3]) >>> 0;
-                const baseInt = ((baseParts[0] << 24) | (baseParts[1] << 16) | (baseParts[2] << 8) | baseParts[3]) >>> 0;
-                return (ipInt & mask) === (baseInt & mask);
-            } catch (e) { return false; }
-        }
-
-        function simulateACLMatch(acl, pkt) {
-            if (!acl || !acl.enable) return { allowed: true, rule: null, note: 'engine-disabled' };
-            for (const rule of acl.rules) {
-                const dir = (rule.direction || '').toLowerCase();
-                if (dir === 'inbound' && pkt.is_tx) continue;
-                if (dir === 'outbound' && !pkt.is_tx) continue;
-                const pid = rule.peer_id || '';
-                if (pid && pid !== '*' && pid !== pkt.peer_id) continue;
-                const proto = (rule.protocol || '').toLowerCase();
-                if (proto && proto !== 'any' && proto !== pkt.protocol) continue;
-                if (rule.port && rule.port !== '0' && pkt.dst_port > 0) {
-                    if (rule.port.indexOf('-') >= 0) {
-                        const pp = rule.port.split('-');
-                        if (pp.length === 2) {
-                            const minP = parseInt(pp[0], 10);
-                            const maxP = parseInt(pp[1], 10);
-                            if (pkt.dst_port < minP || pkt.dst_port > maxP) continue;
-                        }
-                    } else {
-                        const pVal = parseInt(rule.port, 10);
-                        if (pVal > 0 && pkt.dst_port !== pVal) continue;
-                    }
-                }
-                if (rule.ip_cidr && rule.ip_cidr !== '*' && pkt.dst_ip) {
-                    if (!_aclCidrContains(rule.ip_cidr, pkt.dst_ip)) continue;
-                }
-                const act = (rule.action || '').toLowerCase();
-                return { allowed: (act === 'accept' || act === 'allow'), rule: rule, note: 'matched' };
-            }
-            const def = (acl.default_action || 'accept').toLowerCase();
-            return { allowed: (def === 'accept' || def === 'allow' || def === ''), rule: null, note: 'default' };
-        }
-
-        function runACLTest() {
-            try {
-                const peer = document.getElementById('aclTestPeer').value.trim() || '*';
-                const dir = document.getElementById('aclTestDir').value;
-                const proto = document.getElementById('aclTestProto').value;
-                const dstIP = document.getElementById('aclTestDstIP').value.trim();
-                const portRaw = document.getElementById('aclTestDstPort').value.trim();
-                const dstPort = portRaw === '' ? 0 : (parseInt(portRaw, 10) || 0);
-                const pkt = { peer_id: peer, is_tx: (dir === 'outbound'), protocol: proto, dst_ip: dstIP, dst_port: dstPort };
-                const acl = currentFullConfig.acl || { enable: false, default_action: 'accept', rules: [] };
-                const result = simulateACLMatch(acl, pkt);
-                const allow = result.allowed;
-                const rule = result.rule;
-                let html = '';
-                html += `<div style="display:flex; align-items:center; gap:10px; padding:12px 14px; border-radius:10px; background:${allow ? 'var(--accent-green-fill)' : 'var(--danger-fill)'}; border:1px solid ${allow ? 'var(--accent-green-border)' : 'var(--danger-border)'}; margin-bottom:10px;">`;
-                html += `<span style="font-size:1.4rem;">${allow ? '✅' : '⛔'}</span>`;
-                html += `<div><div style="font-weight:700; font-size:1rem; color:${allow ? 'var(--success)' : 'var(--danger)'};">${allow ? t('acl_test_allow') : t('acl_test_deny')}</div>`;
-                html += `<div style="font-size:0.78rem; color:var(--text-secondary);">${proto.toUpperCase()} → ${dstIP || 'any'}:${dstPort || 'any'} (${dir})</div></div></div>`;
-                if (rule) {
-                    const idx = acl.rules.indexOf(rule) + 1;
-                    html += `<div style="font-size:0.82rem; color:var(--text-dim); margin-bottom:6px;">${t('acl_test_matched')} <b style="color:var(--accent-purple);">#${idx}</b>${rule.comment ? ' — ' + rule.comment : ''}</div>`;
-                    html += `<div style="font-size:0.75rem; color:var(--text-muted);">${rule.action.toUpperCase()} · ${rule.direction} · ${rule.protocol} · ${rule.ip_cidr || '*'} : ${rule.port || '0'}</div>`;
-                } else {
-                    html += `<div style="font-size:0.82rem; color:var(--text-dim);">${t('acl_test_default')} (${acl.default_action || 'accept'})</div>`;
-                }
-                document.getElementById('aclTestResult').innerHTML = html;
-            } catch (e) {
-                console.error('runACLTest error:', e);
             }
         }
 
@@ -7175,7 +6744,8 @@
             if (!peer) return;
             currentMultiaddrPeerID = peerID;
 
-            const allAddrsList = (peer.all_addrs && peer.all_addrs.length > 0) ? peer.all_addrs : [peer.addr];
+            const allAddrsList = (peer.all_addrs?.length ? peer.all_addrs : [peer.addr])
+                .filter(addr => typeof addr === 'string' && addr && addr !== 'unknown');
             document.getElementById('multiaddrModalTitle').textContent =
                 '🛣️ ' + allAddrsList.length + ' ' + (t('disc_addrs') || 'Discovered Multiaddr Pathways');
 
@@ -7443,7 +7013,9 @@
         }
 
         function setPingTarget(target) {
+            selectDashboardPage('diagnostics');
             document.getElementById('pingTargetInput').value = target;
+            document.getElementById('pingTargetInput').focus();
         }
 
         function sanitizePingTarget(input) {
@@ -7520,27 +7092,14 @@
         }
 
         /* ── Modern P2P Network Diagnostics (Visual Flow & Terminal) ── */
-        let currentDiagViewMode = 'visual';
 
         function setDiagViewMode(mode) {
-            currentDiagViewMode = mode;
-            const visualBtn = document.getElementById('diagViewVisualBtn');
-            const rawBtn = document.getElementById('diagViewRawBtn');
-            const visualCont = document.getElementById('diagVisualContainer');
-            const rawCont = document.getElementById('pingOutput');
-
-            if (mode === 'visual') {
-                if (visualBtn) visualBtn.classList.add('active');
-                if (rawBtn) rawBtn.classList.remove('active');
-                if (visualCont) visualCont.style.display = 'block';
-                if (rawCont) rawCont.style.display = 'none';
-            } else {
-                if (visualBtn) visualBtn.classList.remove('active');
-                if (rawBtn) rawBtn.classList.add('active');
-                if (visualCont) visualCont.style.display = 'none';
-                if (rawCont) rawCont.style.display = 'block';
-            }
+            const raw = mode === 'raw';
+            document.getElementById('diagViewSelect').value = raw ? 'raw' : 'visual';
+            document.getElementById('diagVisualContainer').style.display = raw ? 'none' : 'block';
+            document.getElementById('pingOutput').style.display = raw ? 'block' : 'none';
         }
+
 
         function renderVisualPingResult(d, target, ok) {
             const cont = document.getElementById('diagVisualContainer');
@@ -7666,6 +7225,7 @@
         }
 
         function runPingDiagnostics() {
+            if (currentDashboardPage() !== 'diagnostics') selectDashboardPage('diagnostics');
             const rawTarget = document.getElementById('pingTargetInput').value.trim();
             const target = sanitizePingTarget(rawTarget);
             const out = document.getElementById('pingOutput');
@@ -7750,6 +7310,7 @@
         }
 
         function runTracerouteDiagnostics() {
+            if (currentDashboardPage() !== 'diagnostics') selectDashboardPage('diagnostics');
             const rawTarget = document.getElementById('pingTargetInput').value.trim();
             const target = sanitizePingTarget(rawTarget);
             const out = document.getElementById('pingOutput');
@@ -7936,30 +7497,6 @@
         // P2P Connectivity Troubleshooter
         // ==========================================
 
-        function populateTroubleshooterDropdown() {
-            const select = document.getElementById('troubleshootPeerSelect');
-            if (!select) return;
-
-            const currentVal = select.value;
-            const hasFocus = document.activeElement === select;
-            
-            let html = `<option value="" disabled selected>${t('troubleshoot_select_peer') || 'Select a Peer to Diagnose'}</option>`;
-            cachedPeers.forEach(p => {
-                const name = p.node_name || 'Unknown Node';
-                const v4 = p.tap_ip ? `v4: ${escapeHTML(p.tap_ip)}` : '';
-                const v6 = p.tap_ipv6 ? `v6: ${escapeHTML(p.tap_ipv6)}` : '';
-                const ipStr = [v4, v6].filter(Boolean).join(' | ') || 'No IP';
-                html += `<option value="${escapeHTML(p.peer_id)}">${escapeHTML(name)} (${ipStr})</option>`;
-            });
-            
-            if (select.innerHTML !== html && !hasFocus) {
-                select.innerHTML = html;
-                if (currentVal && cachedPeers.some(p => p.peer_id === currentVal)) {
-                    select.value = currentVal;
-                }
-            }
-        }
-
         // --- WebUI auth token handling (mirrors server-side bearer requirement) ---
         const AUTH_TOKEN_KEY = 'p2ptap_webui_token';
         function getAuthToken() {
@@ -8042,12 +7579,9 @@
             }
             setAuthToken(tok);
             closeLoginModal(true);
-            // Reconnect WebSockets and refetch immediately with the new token
-            try { if (typeof pcapStream !== 'undefined') pcapStream.connect(); } catch (e) {}
-            try { if (typeof logStream !== 'undefined') logStream.connect(); } catch (e) {}
-            try { if (typeof fetchStats === 'function') fetchStats(); } catch (e) {}
-            try { if (typeof fetchLogs === 'function') fetchLogs(); } catch (e) {}
-            try { if (typeof pcapRefreshState === 'function') pcapRefreshState(); } catch (e) {}
+            // Refresh the active page after authentication.
+            fetchStats();
+            syncDiagnosticStreams();
         }
 
         // Allow Enter key to submit the login form.
@@ -8092,11 +7626,11 @@
         }
 
         async function runConnectivityDiagnosis() {
-            const select = document.getElementById('troubleshootPeerSelect');
-            const manualInput = document.getElementById('troubleshootTargetInput');
+            if (currentDashboardPage() !== 'diagnostics') selectDashboardPage('diagnostics');
+            document.getElementById('connectivityDetails').open = true;
             const resContainer = document.getElementById('troubleshootResults');
             
-            let inputTarget = select.value || manualInput.value.trim();
+            const inputTarget = document.getElementById('pingTargetInput').value.trim();
             if (!inputTarget) {
                 resContainer.innerHTML = `<div style="color: var(--danger);">${t('troubleshoot_no_peer') || 'Please select or enter a peer (IPv4 / IPv6 / Peer ID) to diagnose'}</div>`;
                 return;
@@ -8583,6 +8117,8 @@
         // 7-stage diagnosis. Exposed on window so the data-onclick
         // delegation engine can reach it.
         function runLinkCheckFor(maddr) {
+            selectDashboardPage('diagnostics');
+            document.getElementById('linkCheckDetails').open = true;
             const input = document.getElementById('linkCheckInput');
             const panel = document.querySelector('.linkcheck-panel');
             if (input) {
@@ -8771,6 +8307,8 @@
         function drawBandwidthChart(history) {
             const canvas = document.getElementById('bandwidthCanvas');
             if (!canvas || !history || history.length === 0) return;
+            bwChartState.history = history;
+            if (!canvas.getClientRects().length) return;
             const ctx = canvas.getContext('2d');
             const dpr = window.devicePixelRatio || 1;
             const rect = canvas.getBoundingClientRect();
@@ -8898,6 +8436,8 @@
         function drawPacketRateChart(history) {
             const canvas = document.getElementById('ppsCanvas');
             if (!canvas || !history || history.length === 0) return;
+            ppsChartState.history = history;
+            if (!canvas.getClientRects().length) return;
             const ctx = canvas.getContext('2d');
             const dpr = window.devicePixelRatio || 1;
             const rect = canvas.getBoundingClientRect();
@@ -9573,116 +9113,6 @@
             }
 
             renderStreamsTable(data);
-        }
-
-        /* ── Mesh Link Quality & Health Score ─────────────────────────── */
-        function renderMeshHealthScore(data) {
-            const peers = data.active_peers || [];
-            const totalPeers = peers.length;
-            const directPeers = peers.filter(p => peerTransportPath(p) === 'direct').length;
-            const directRatio = totalPeers > 0 ? (directPeers / totalPeers) : null;
-            const decryptErrs = peers.reduce((sum, p) => sum + (p.obf_decrypt_errs || 0), 0);
-            const dupIPs = (data.duplicate_ips || []).length;
-            const dedupCount = (data.packet_stats ? data.packet_stats.dedup_count : 0);
-            const tapAvailable = !data.tap_self_test || data.tap_self_test.available !== false;
-
-            let score = 100;
-            if (!tapAvailable) score -= 50;
-            if (directRatio !== null && directRatio < 1) score -= Math.round((1 - directRatio) * 15);
-            if (decryptErrs > 0) score -= Math.min(30, decryptErrs * 5);
-            if (dupIPs > 0) score -= Math.min(40, dupIPs * 20);
-            score = Math.max(0, Math.min(100, score));
-
-            const scoreEl = document.getElementById('meshHealthScore');
-            if (scoreEl) {
-                scoreEl.textContent = `${score}%`;
-                if (score >= 90) scoreEl.style.color = 'var(--success)';
-                else if (score >= 70) scoreEl.style.color = 'var(--info)';
-                else if (score >= 50) scoreEl.style.color = 'var(--warn)';
-                else scoreEl.style.color = 'var(--danger)';
-            }
-
-            const metricsRow = document.getElementById('meshHealthMetricsRow');
-            if (metricsRow) {
-                const algoStr = data.obfs_algo || 'AES-GCM (PFS)';
-                metricsRow.innerHTML = `
-                    <span class="mesh-health-pill">🌐 ${t('lbl_direct_ratio') || 'Direct Ratio'}: <strong>${directRatio === null ? '—' : (directRatio * 100).toFixed(0) + '%'}</strong> (${directPeers}/${totalPeers})</span>
-                    <span class="mesh-health-pill">🔐 ${t('lbl_crypto_grade') || 'Encryption'}: <strong>${escapeHTML(algoStr)}</strong></span>
-                    <span class="mesh-health-pill">🛡️ ${t('lbl_dedup_drops') || 'Window Dedup'}: <strong>${dedupCount.toLocaleString()}</strong></span>
-                    <span class="mesh-health-pill">⚠️ ${t('lbl_dup_conflicts') || 'IP Conflicts'}: <strong style="color:${dupIPs > 0 ? 'var(--danger)' : 'var(--success)'}">${dupIPs}</strong></span>
-                `;
-            }
-
-            const tipsEl = document.getElementById('meshHealthTips');
-            if (tipsEl) {
-                const tips = [];
-                if (!tapAvailable) {
-                    tips.push(`<span class="mesh-health-tip-item" style="color: var(--danger);">${t('tip_tap_failed') || '❌ TAP device self-test failed: verify kernel driver and permissions.'}</span>`);
-                }
-                if (dupIPs > 0) {
-                    const msg = (t('tip_dup_ips') || '⚠️ {count} duplicate IP conflict(s) detected in mesh topology.').replace('{count}', dupIPs);
-                    tips.push(`<span class="mesh-health-tip-item" style="color: var(--danger);">${escapeHTML(msg)}</span>`);
-                }
-                if (decryptErrs > 0) {
-                    const btnLabel = t('btn_crypto_inspector') || 'Crypto & Sequence Inspector';
-                    const linkHtml = `<a href="javascript:void(0)" data-onclick="openCryptoInspector()" style="color: var(--info); text-decoration:underline; font-weight:600; cursor:pointer;">${escapeHTML(btnLabel)}</a>`;
-                    const template = t('tip_decrypt_errs') || '⚠️ {count} decryption failure(s) observed. Click {btn} to inspect & resync.';
-                    const finalHtml = template.replace('{count}', decryptErrs).replace('{btn}', linkHtml);
-                    tips.push(`<span class="mesh-health-tip-item" style="color: var(--warn);">${finalHtml}</span>`);
-                }
-                if (totalPeers === 0) {
-                    tips.push(`<span class="mesh-health-tip-item">ℹ️ ${t('no_peers_connected') || 'No peers connected. Ready to establish secure P2P mesh.'}</span>`);
-                } else if (tips.length === 0) {
-                    tips.push(`<span class="mesh-health-tip-item" style="color: var(--success);">✅ ${t('mesh_status_optimal') || 'Mesh link quality optimal: all connected peers securely synchronized with forward-secret AEAD.'}</span>`);
-                }
-                tipsEl.innerHTML = tips.join('');
-            }
-        }
-
-        /* ── L2/L3 Traffic Composition ────────────────────────────────── */
-        function renderTrafficComposition(data) {
-            const ps = data.protocol_stats || {};
-            const ipv4 = ps.ipv4 || 0;
-            const ipv6 = ps.ipv6 || 0;
-            const arp  = ps.arp || 0;
-            const icmp = ps.icmp || 0;
-            const udp  = ps.udp || 0;
-            const tcp  = ps.tcp || 0;
-            const other = ps.other || 0;
-            const total = ipv4 + ipv6 + arp + icmp + udp + tcp + other;
-
-            const totalEl = document.getElementById('trafficCompTotalSummary');
-            if (totalEl) totalEl.textContent = `${total.toLocaleString()} pkts`;
-
-            const bar = document.getElementById('trafficCompBar');
-            const legend = document.getElementById('trafficCompLegend');
-            if (!bar || !legend) return;
-
-            if (total === 0) {
-                bar.innerHTML = `<div class="proto-traffic-segment" style="width:100%; background:var(--glass-fill-strong); border-radius:4px;"></div>`;
-                legend.innerHTML = `<span class="proto-traffic-item"><span class="proto-traffic-dot" style="background:#64748b;"></span> ${t('common_idle') || 'Standby (0 packets captured)'}</span>`;
-                return;
-            }
-
-            const protos = [
-                { name: 'IPv4', count: ipv4, color: 'var(--info)' },
-                { name: 'IPv6', count: ipv6, color: 'var(--accent-purple)' },
-                { name: 'ARP',  count: arp,  color: 'var(--warn)' },
-                { name: 'ICMP', count: icmp, color: 'var(--success)' },
-                { name: 'UDP',  count: udp,  color: '#f472b6' },
-                { name: 'TCP',  count: tcp,  color: 'var(--info)' },
-                { name: 'Other',count: other,color: 'var(--text-secondary)' },
-            ].filter(p => p.count > 0);
-
-            bar.innerHTML = protos.map(p => {
-                const pct = ((p.count / total) * 100).toFixed(1);
-                return `<div class="proto-traffic-segment" style="width:${pct}%; background:${p.color};" title="${p.name}: ${pct}% (${p.count.toLocaleString()} pkts)"></div>`;
-            }).join('');
-
-            legend.innerHTML = protos.map(p => {
-                const pct = ((p.count / total) * 100).toFixed(1);
-                return `<span class="proto-traffic-item"><span class="proto-traffic-dot" style="background:${p.color};"></span> <strong>${p.name}</strong>: ${pct}% (${p.count.toLocaleString()})</span>`;
-            }).join('');
         }
 
         /* ── Peer Cryptography & Sequence Deep Inspector ─────────────── */
@@ -10635,9 +10065,8 @@
             if (document.hidden) return;
             isFetchingStats = true;
             try {
-                const now = Date.now();
                 const res = await fetchWithTimeout('/api/stats', {}, 4000);
-                if (!res.ok) return;
+                if (!res.ok) { updateDashboardStatus(false); return; }
                 const data = await res.json();
                 latestStatsData = data;
                 window.__lastStatsData = data;
@@ -10661,6 +10090,7 @@
                 
                 if (data.peer_id) {
                     document.getElementById('nodePeerID').innerHTML = `<span data-i18n="peer_id_lbl">${t('peer_id_lbl')}</span>: ${escapeHTML(data.peer_id)}`;
+                    document.getElementById('nodePeerID').title = data.peer_id;
                     localNodeInfo.peerID = data.peer_id;
                 }
 
@@ -10683,20 +10113,15 @@
                 const stats = data.packet_stats || {};
                 const currentTx = stats.bytes_sent || 0;
                 const currentRx = stats.bytes_recv || 0;
-                const timeDiffSec = Math.max((now - lastFetchTime) / 1000, 0.5);
 
                 // Real-Time Speedometer
                 const speed = data.speed || {};
                 if (speed.tx_bytes_per_sec !== undefined) {
-                    document.getElementById('txSpeed').innerText = formatSpeed(speed.tx_bytes_per_sec);
+                    document.getElementById('txSpeed').innerText = formatSpeed(speed.tx_bytes_per_sec).replace('⚡ ', '');
                 }
                 if (speed.rx_bytes_per_sec !== undefined) {
-                    document.getElementById('rxSpeed').innerText = formatSpeed(speed.rx_bytes_per_sec);
+                    document.getElementById('rxSpeed').innerText = formatSpeed(speed.rx_bytes_per_sec).replace('⚡ ', '');
                 }
-
-                lastTxBytes = currentTx;
-                lastRxBytes = currentRx;
-                lastFetchTime = now;
 
                 document.getElementById('txBytes').innerText = formatBytes(currentTx);
                 document.getElementById('txPackets').innerHTML = `<span data-i18n="pkts_total">${t('pkts_total')}</span>` + (stats.packets_sent || 0) + ' pkts';
@@ -10813,11 +10238,6 @@
                 document.getElementById('cntTCP').innerText = pTCP;
                 document.getElementById('cntOther').innerText = pOther;
 
-                if (data.protocol_stats) {
-                    document.getElementById('pktStatICMP').innerText = data.protocol_stats.icmp || 0;
-                    document.getElementById('pktStatUDP').innerText = data.protocol_stats.udp || 0;
-                    document.getElementById('pktStatTCP').innerText = data.protocol_stats.tcp || 0;
-                }
 
                 // Broadcast / Multicast / Gateway classification from the
                 // dedicated gateway_packets block (lock-free backend counters).
@@ -10827,12 +10247,6 @@
                     document.getElementById('pktStatMulticast').innerText = gp.multicast || 0;
                     document.getElementById('pktStatGateway').innerText = gp.gateway || 0;
                 }
-
-                // Render Mesh Link Quality & Health Scorecard
-                renderMeshHealthScore(data);
-
-                // Render L2/L3 Traffic Composition breakdown
-                renderTrafficComposition(data);
 
                 // Structured-SeqID diagnostics: synced peers + replay/window drops.
                 if (data.seq_stats) {
@@ -10846,21 +10260,14 @@
                     }
                 }
 
-                if (pTotal > 0) {
-                    document.getElementById('barIPv4').style.width = `${((pIPv4 / pTotal) * 100).toFixed(1)}%`;
-                    document.getElementById('barIPv6').style.width = `${((pIPv6 / pTotal) * 100).toFixed(1)}%`;
-                    document.getElementById('barARP').style.width = `${((pARP / pTotal) * 100).toFixed(1)}%`;
-                    document.getElementById('barOther').style.width = `${((pOther / pTotal) * 100).toFixed(1)}%`;
-                }
-
                 // Active Peers Table & Mesh Canvas Update
                 const peers = data.active_peers || [];
                 cachedPeers = peers;
                 drawTopologyMesh();
-                populateTroubleshooterDropdown();
 
                 document.getElementById('peersCount').innerText = peers.length;
                 const peersBody = document.getElementById('peersList');
+                peerDetailsCache.clear();
                 if (peers.length > 0) {
                     peersBody.innerHTML = peers.map(p => {
                         // Show the transport WE actually observe. Peer-reported
@@ -10904,27 +10311,21 @@
                             ? `Measured by ${peerRTTSourceLabel(p)}; ${p.rtt_sample_count || 1} sample(s)${p.rtt_updated_at ? '; updated ' + p.rtt_updated_at : ''}`
                             : 'No completed RTT measurement yet';
 
-                        const allAddrsList = (p.all_addrs && p.all_addrs.length > 0) ? p.all_addrs : [p.addr];
-                        // Resolve what to show as the "current active pathway":
-                        // prefer a real multiaddr in `p.addr`; if it's missing or
-                        // the placeholder string "unknown", fall back to the
-                        // descriptive `transport` label so the column never lies
-                        // about a real multiaddr that doesn't exist.
-                        const activeAddrText = (p.addr && p.addr !== 'unknown')
-                            ? p.addr
-                            : (p.transport || '—');
+                        const allAddrsList = (p.all_addrs?.length ? p.all_addrs : [p.addr])
+                .filter(addr => typeof addr === 'string' && addr && addr !== 'unknown');
+                        const activeAddrText = (p.addr && p.addr !== 'unknown') ? p.addr : '—';
                         const addrsHoverHtml = `
                             <div class="multiaddr-hover-wrapper">
                                 <div style="font-weight:600; color:var(--accent-cyan); word-break:break-all;" title="Current Active Connected Pathway">⚡ ${escapeHTML(activeAddrText)}</div>
                                 ${allAddrsList.length > 1 ? `
-                                    <button class="btn-multiaddr-view" data-onclick="event.stopPropagation(); openMultiaddrModal(${attrStr(p.peer_id)})">
+                                    <button class="btn-multiaddr-view" data-onclick="event.stopPropagation(); closePeerDetails(); openMultiaddrModal(${attrStr(p.peer_id)})">
                                         🛣️ ${allAddrsList.length} ${t('disc_addrs') || 'Discovered Addr Pathways'} (Click to view)
                                     </button>
-                                ` : `
-                                    <button class="btn-multiaddr-view" data-onclick="event.stopPropagation(); openMultiaddrModal(${attrStr(p.peer_id)})">
+                                ` : allAddrsList.length ? `
+                                    <button class="btn-multiaddr-view" data-onclick="event.stopPropagation(); closePeerDetails(); openMultiaddrModal(${attrStr(p.peer_id)})">
                                         ${t('view_addr') || 'View Multiaddr'}
                                     </button>
-                                `}
+                                ` : ''}
                             </div>
                         `;
 
@@ -10941,70 +10342,69 @@
                             ? `<span class="pill-badge role-relay-only" title="${t('relay_only') || 'Relay-Only'}">🌉 ${t('relay_only') || 'Relay-Only'}</span>`
                             : '';
 
-                        const peerTxSpeedStr = formatSpeed(p.tx_speed || 0);
-                        const peerRxSpeedStr = formatSpeed(p.rx_speed || 0);
                         const peerTotalTxStr = formatBytes(p.total_tx || 0);
                         const peerTotalRxStr = formatBytes(p.total_rx || 0);
 
-                        return `
-                        <tr>
-                            <td>
-                                <div style="display:flex; flex-direction:column;">
-                                    <strong style="color:var(--text-primary); font-size:0.92rem; cursor:pointer;" data-onclick="setPingTarget(${attrStr(p.tap_ip || p.peer_id)})" title="Click to Ping">${escapeHTML(p.node_name) || t('unnamed_node')}</strong>
-                                    <div style="display:flex; gap:5px; align-items:center; margin-top:3px; flex-wrap:wrap;">
-                                        ${exitBadgeHtml}${relayOnlyBadge}
-                                        <span style="font-size:0.7rem; color:var(--success); background:var(--accent-green-fill); padding:1px 6px; border-radius:4px; border:1px solid var(--accent-green-fill);" title="Peer Link Rate: Tx ${peerTotalTxStr}, Rx ${peerTotalRxStr}">
-                                            Peer Rate: ⬆️ ${peerTxSpeedStr} | ⬇️ ${peerRxSpeedStr}
-                                        </span>
-                                    </div>
-                                </div>
-                            </td>
-                            <td><span style="color:var(--text-dim); font-size:0.8rem">${escapeHTML(geoBadge)}</span></td>
-                            <td>${roleBadge}</td>
-                            <td>
-                                <div style="display:flex; flex-direction:column; gap:2px;">
+                        const linkTotals = (p.link_total_tx !== undefined && p.link_total_rx !== undefined)
+                            ? `↑ ${formatBytes(p.link_total_tx)} · ↓ ${formatBytes(p.link_total_rx)}` : '—';
+                        const linkRates = p.link_speed_measured === true
+                            ? `↑ ${formatSpeed(p.tx_speed).replace('⚡ ', '')} · ↓ ${formatSpeed(p.rx_speed).replace('⚡ ', '')}` : '—';
+                        peerDetailsCache.set(p.peer_id, `
+                            <dl class="peer-detail-grid">
+<div><dt>${escapeHTML(t('col_geo'))}</dt><dd><span style="color:var(--text-dim); font-size:0.8rem">${escapeHTML(geoBadge)}</span></dd></div>
+<div><dt>${escapeHTML(t('col_role'))}</dt><dd>${roleBadge}</dd></div>
+<div><dt>${escapeHTML(t('col_osarch'))}</dt><dd><div style="display:flex; flex-direction:column; gap:2px;">
                                     <span style="color:var(--text-dim); font-size:0.8rem; font-weight:500;">${escapeHTML(p.os_arch || '—')}</span>
                                     <span style="color:var(--accent-purple); font-size:0.72rem; font-family:monospace;" title="Node Software Version">${escapeHTML(p.version ? (p.version.startsWith('v') ? p.version : 'v' + p.version) : '—')}</span>
-                                </div>
-                            </td>
-                            <td><div class="tap-ip-cell">${tapIPs}</div></td>
-                            <td><span style="color:${reachClass}; font-size:0.8rem">${reachIcon} ${escapeHTML(reachText)}</span></td>
-                            <td>
-                                <div style="display:flex; flex-direction:column; gap:2px;">
+                                </div></dd></div>
+<div><dt>${escapeHTML(t('col_nat'))}</dt><dd><span style="color:${reachClass}; font-size:0.8rem">${reachIcon} ${escapeHTML(reachText)}</span></dd></div>
+<div><dt>${escapeHTML(t('col_encryption'))}</dt><dd><div style="display:flex; flex-direction:column; gap:2px;">
                                     ${encBadge(p)}
                                     ${handshakeBadge(p)}
-                                </div>
-                            </td>
-                            <td>${connStateBadge(p)}</td>
-                            <td>${returnPathBadge(p)}</td>
-                            <td>${tapDataPathBadge(p)}</td>
-                            <td><code>${escapeHTML(p.peer_id)}</code></td>
-                            <td style="position:relative;">${addrsHoverHtml}</td>
-                            <td>
-                                <div style="display:flex; flex-direction:column; gap:3px; align-items:flex-start;">
+                                </div></dd></div>
+<div><dt>${escapeHTML(t('col_return_path'))}</dt><dd>${returnPathBadge(p)}</dd></div>
+<div><dt>${escapeHTML(t('col_tap_path'))}</dt><dd>${tapDataPathBadge(p)}</dd></div>
+<div><dt>${escapeHTML(t('col_peerid'))}</dt><dd><code>${escapeHTML(p.peer_id)}</code></dd></div>
+<div><dt>${escapeHTML(t('col_multiaddr'))}</dt><dd>${addrsHoverHtml}</dd></div>
+<div><dt>${escapeHTML(t('col_transport'))}</dt><dd><div style="display:flex; flex-direction:column; gap:3px; align-items:flex-start;">
                                     <span class="pill-badge" style="padding:2px 8px; font-size:0.75rem;">${escapeHTML(p.transport || 'P2P')}</span>
                                     ${p.transport_priority ? `
                                         <span style="font-size:0.68rem; font-weight:600; padding:1px 5px; border-radius:4px; color:${p.transport_score === 10 ? 'var(--success)' : (p.transport_score === 0 ? '#a855f7' : (p.transport_score === 20 ? 'var(--info)' : 'var(--warn)'))}; background:var(--glass-fill); border:1px solid var(--border-subtle);" title="${t('priority_score_tooltip') || 'Routing Priority Score: lower is higher priority (0:Loopback, 10:LAN Direct, 20:WAN Direct, 100:Relay)'}">
                                             🎯 ${escapeHTML(p.transport_priority)}
                                         </span>
                                     ` : ''}
-                                </div>
+                                </div></dd></div>
+<div><dt>${escapeHTML(t('col_conn_time'))}</dt><dd><span style="color:var(--accent-purple); font-size:0.82rem;" title="${escapeHTML(p.connected_at || '')}">${escapeHTML(p.connected_since || '—')}</span></dd></div>
+<div><dt>${escapeHTML(t('col_last_active'))}</dt><dd><span style="color:var(--accent-cyan); font-size:0.82rem;">${escapeHTML(p.last_seen || '—')}</span></dd></div>
+<div><dt>${escapeHTML(t('col_jitter_loss'))}</dt><dd><span style="color:var(--accent-purple); font-size:0.8rem">${jitterStr}</span> <span style="color:var(--text-muted); font-size:0.75rem">(${lossStr})</span></dd></div>
+                                <div><dt>${escapeHTML(t('dashboard_link_traffic'))}</dt><dd>${linkTotals}</dd></div>
+                                <div><dt>${escapeHTML(t('dashboard_link_rate'))}</dt><dd>${linkRates}</dd></div>
+                                <div><dt>${escapeHTML(t('dashboard_remote_traffic'))}</dt><dd>↑ ${peerTotalTxStr} · ↓ ${peerTotalRxStr}</dd></div>
+                            </dl>
+                            <div class="peer-detail-actions">
+                                <button type="button" class="btn-glass" data-onclick="closePeerDetails(); setPingTarget(${attrStr(p.tap_ip || p.peer_id)})">Ping</button>
+                                <button type="button" class="btn-glass" data-onclick="closePeerDetails(); openSpeedTestModal(${attrStr(p.peer_id)})">${t('speedtest_btn')}</button>
+                                <button type="button" class="btn-glass" data-onclick="closePeerDetails(); openCryptoInspector(${attrStr(p.peer_id)})">${t('btn_crypto_inspector')}</button>
+                            </div>
+                        `);
+                        return `
+                        <tr class="peer-row" role="row">
+                            <td class="peer-identity-cell" role="cell">
+                                <strong>${escapeHTML(p.node_name) || t('unnamed_node')}</strong>
+                                <code class="peer-id" title="${escapeHTML(p.peer_id)}">${escapeHTML(p.peer_id)}</code>
+                                <div class="peer-badges">${exitBadgeHtml}${relayOnlyBadge}</div>
                             </td>
-                            <td><span style="color:var(--accent-purple); font-size:0.82rem;" title="Connected at ${p.connected_at}">${p.connected_since || '-'}</span></td>
-                            <td><span style="color:var(--accent-cyan); font-size:0.82rem;">${p.last_seen || 'Just now'}</span></td>
-                            <td><strong style="color:${rttColor}" title="${escapeHTML(rttTitle)}">${peerRTTText(p)}</strong><div style="font-size:0.68rem;color:var(--text-muted);">${rttMeasured ? escapeHTML(peerRTTSourceLabel(p)) : 'not measured'}</div></td>
-                            <td><span style="color:var(--accent-purple); font-size:0.8rem">${jitterStr}</span> <span style="color:var(--text-muted); font-size:0.75rem">(${lossStr})</span></td>
-                            <td>
-                                <div style="display:flex; gap:6px; align-items:center;">
-                                    <button class="btn-glass" style="padding:2px 8px; font-size:0.75rem; background:rgba(56, 189, 248, 0.15); border-color:rgba(56, 189, 248, 0.4); color: var(--info);" title="${t('btn_crypto_inspector') || 'Crypto & Seq Inspector'}" data-onclick="openCryptoInspector(${attrStr(p.peer_id)})">🔐</button>
-                                    <button class="btn-glass" style="padding:2px 8px; font-size:0.75rem; background:var(--accent-cyan-fill); border-color:var(--accent-cyan-border);" data-onclick="openSpeedTestModal(${attrStr(p.peer_id)})">${t('speedtest_btn')}</button>
-                                </div>
-                            </td>
+                            <td role="cell" data-label="${escapeHTML(t('col_tapip'))}"><div class="tap-ip-cell">${tapIPs}</div></td>
+                            <td role="cell" data-label="${escapeHTML(t('dashboard_connection'))}">${connStateBadge(p)}<small class="peer-transport">${escapeHTML(p.transport || '—')}</small></td>
+                            <td role="cell" data-label="${escapeHTML(t('col_rtt'))}"><strong style="color:${rttColor}" title="${escapeHTML(rttTitle)}">${peerRTTText(p)}</strong><div style="font-size:0.68rem;color:var(--text-muted);">${rttMeasured ? escapeHTML(peerRTTSourceLabel(p)) : 'not measured'}</div></td>
+                            <td role="cell"><button type="button" class="btn-glass peer-details-btn" data-onclick="openPeerDetails(${attrStr(p.peer_id)})">${t('dashboard_details')}</button></td>
                         </tr>
                     `}).join('');
                 } else {
-                    peersBody.innerHTML = `<tr><td colspan="17" class="empty-row" data-i18n="no_peers">${t('no_peers')}</td></tr>`;
+                    peersBody.innerHTML = `<tr><td colspan="5" class="empty-row" data-i18n="no_peers">${t('no_peers')}</td></tr>`;
                 }
+
+                refreshPeerDetails();
 
                 // Peer Metadata & Peek-Map Discovery Monitor
                 const peerMetas = data.peer_metas || [];
@@ -11289,8 +10689,9 @@
                     dupBadge.setAttribute('data-zero', conflicts.length === 0 ? 'true' : 'false');
                     renderDupConflicts(dupEl, conflicts);
                 }
-
+                updateDashboardStatus(true);
             } catch (e) {
+                updateDashboardStatus(false);
                 console.error("Fetch stats error:", e);
             } finally {
                 isFetchingStats = false;
@@ -12673,7 +12074,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                         const targetIp = (n.peer && (n.peer.tap_ip || n.peer.peer_id)) || n.id;
                         if (targetIp && targetIp !== 'self') {
                             setPingTarget(targetIp);
-                            showToast(`⚡ Double-clicked node: Triggering Ping to ${targetIp}...`, false);
+                            runPingDiagnostics();
                         }
                         break;
                     }
@@ -12787,7 +12188,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
         function computeTopologyLayout() {
             initTopologyCanvasEvents();
             const canvas = document.getElementById('topologyCanvas');
-            if (!canvas) return;
+            if (!canvas || !canvas.getClientRects().length) return;
             const container = canvas.parentElement;
             const rect = container.getBoundingClientRect();
             const cssW = rect.width || 800;
@@ -13214,12 +12615,12 @@ window.toggleSubnetRoute = async function(cidr, enable) {
         }
 
         function renderTopology(ts) {
-            topoRAFId = requestAnimationFrame(renderTopology);
-            // Skip work when tab is hidden to save CPU.
-            if (document.hidden) { topoLastFrameTs = ts; return; }
-
             const canvas = document.getElementById('topologyCanvas');
-            if (!canvas) return;
+            if (document.hidden || !canvas || !canvas.getClientRects().length) {
+                topoRAFId = null;
+                return;
+            }
+            topoRAFId = requestAnimationFrame(renderTopology);
             const ctx = canvas.getContext('2d');
             const lightT = document.documentElement.getAttribute('data-theme') === 'light';
 
@@ -13659,6 +13060,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
 
         // Kick off the 60fps render loop once.
         function startTopologyLoop() {
+            if (document.hidden || !document.getElementById('topologyCanvas').getClientRects().length) return;
             if (topoRAFId === null) topoRAFId = requestAnimationFrame(renderTopology);
         }
 
@@ -13688,7 +13090,11 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 }));
                 const json = await res.json();
                 if (json && json.success) {
-                    showToast('⚡ ' + (t('toast_static_added') || 'Static peer added and permanently registered in Peerstore!'), false);
+                    const fields = (json.restart_fields || []).join(', ');
+                    const hint = json.restart_required
+                        ? ' — ⚠️ ' + (t('cfg_restart_required') || 'Some settings apply only after a restart') + (fields ? ': ' + fields : '')
+                        : '';
+                    showToast(t('save_success') + hint, false, !!json.restart_required);
                     closeAddStaticPeerModal();
                     input.value = '';
                     fetchStats();
@@ -13698,58 +13104,6 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             } catch(e) {
                 showToast(`❌ ${t('toast_req_err') || 'Request error'}: ${e.message}`, true);
             }
-        }
-
-        async function openPeerDiagnosticsModal(peerID) {
-            const m = document.getElementById('peerDiagnosticsModal');
-            if (!m) return;
-            m.classList.add('active');
-            m.style.display = 'flex';
-
-            const title = document.getElementById('diagModalTitle');
-            const content = document.getElementById('diagModalContent');
-            title.innerText = `⚡ Diagnostics for ${peerID.substring(0, 16)}...`;
-            content.innerHTML = `<div style="text-align:center; padding:30px;"><div style="color:var(--accent-cyan); font-weight:bold; font-size:1.1rem; margin-bottom:8px;">${t('probing_pathways_title')}</div><div style="color:var(--text-secondary); font-size:0.85rem;">${t('probing_pathways_desc')}</div></div>`;
-
-            try {
-                const res = await fetch('/api/multiaddr-test', withAuth({
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ peer_id: peerID })
-                }));
-                const results = await res.json();
-                if (Array.isArray(results) && results.length > 0) {
-                    let html = `<div style="margin-bottom:12px; font-weight:600; color:var(--accent-cyan);">Discovered Multiaddr Pathways (${results.length}):</div>`;
-                    html += `<div style="display:flex; flex-direction:column; gap:8px;">`;
-                    results.forEach(r => {
-                        const statusColor = r.reachable ? '#34d399' : '#f87171';
-                        const isRelay = r.addr.includes('/p2p-circuit');
-                        const tag = isRelay ? '🔀 Circuit Relay' : (r.is_active ? '🟢 Active Path' : '⚡ Candidate');
-                        html += `
-                            <div style="background:var(--surface-fill); padding:10px 14px; border-radius:8px; border:1px solid var(--glass-fill-strong); display:flex; justify-content:space-between; align-items:center;">
-                                <div style="font-family:monospace; font-size:0.82rem; word-break:break-all; flex:1; margin-right:12px;">
-                                    <span style="color:${statusColor}; font-weight:bold;">[${tag}]</span> ${escapeHTML(r.addr)}
-                                </div>
-                                <div style="display:flex; align-items:center; gap:10px;">
-                                    <span style="font-weight:bold; color:${r.reachable ? 'var(--success)' : 'var(--text-secondary)'};">${r.reachable ? r.rtt_ms + ' ms' : 'Unreachable'}</span>
-                                    <button class="btn-glass" style="padding:2px 8px; font-size:0.75rem;" data-onclick="testSingleMultiaddrEcho(${attrStr(peerID)}, ${attrStr(r.addr)})">${t('test_echo')}</button>
-                                </div>
-                            </div>
-                        `;
-                    });
-                    html += `</div>`;
-                    content.innerHTML = html;
-                } else {
-                    content.innerHTML = `<div style="color:var(--danger); text-align:center; padding:20px;">No multiaddr candidate paths returned for peer.</div>`;
-                }
-            } catch(e) {
-                content.innerHTML = `<div style="color:var(--danger); text-align:center; padding:20px;">Diagnostics request failed: ${e.message}</div>`;
-            }
-        }
-
-        function closePeerDiagnosticsModal() {
-            const m = document.getElementById('peerDiagnosticsModal');
-            if (m) { m.classList.remove('active'); m.style.display = 'none'; }
         }
 
         // ---- Packet Capture (pcap) WebUI logic ----
@@ -13834,6 +13188,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             useFallback: false,
 
             connect() {
+                if (document.hidden || currentDashboardPage() !== 'diagnostics' || !document.getElementById('captureDetails').open) return;
                 if (this.ws || this.connecting) return;
                 if (typeof WebSocket === 'undefined') {
                     // Old browsers: straight to polling fallback.
@@ -13882,9 +13237,17 @@ window.toggleSubnetRoute = async function(cidr, enable) {
 
             disconnect() {
                 this.status = 'off';
+                this.connecting = false;
                 if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
                 if (this.pollTimer)   { clearInterval(this.pollTimer); this.pollTimer = null; }
-                if (this.ws) { try { this.ws.close(); } catch (e) {} this.ws = null; }
+                if (this.ws) {
+                    // A late close/open event from the old socket must not replace
+                    // the connection created when the user returns to this page.
+                    const old = this.ws;
+                    this.ws = null;
+                    old.onopen = old.onmessage = old.onerror = old.onclose = null;
+                    try { old.close(); } catch (e) {}
+                }
                 this._updateUI();
             },
 
@@ -13991,6 +13354,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             useFallback: false,
 
             connect() {
+                if (document.hidden || currentDashboardPage() !== 'diagnostics' || !document.getElementById('logsDetails').open) return;
                 if (this.ws || this.connecting) return;
                 if (typeof WebSocket === 'undefined') {
                     // Old browsers: straight to polling fallback.
@@ -14037,9 +13401,17 @@ window.toggleSubnetRoute = async function(cidr, enable) {
 
             disconnect() {
                 this.status = 'off';
+                this.connecting = false;
                 if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
                 if (this.pollTimer)   { clearInterval(this.pollTimer); this.pollTimer = null; }
-                if (this.ws) { try { this.ws.close(); } catch (e) {} this.ws = null; }
+                if (this.ws) {
+                    // A late close/open event from the old socket must not replace
+                    // the connection created when the user returns to this page.
+                    const old = this.ws;
+                    this.ws = null;
+                    old.onopen = old.onmessage = old.onerror = old.onclose = null;
+                    try { old.close(); } catch (e) {}
+                }
                 this._updateUI();
             },
 
@@ -14576,18 +13948,13 @@ window.toggleSubnetRoute = async function(cidr, enable) {
         const _exposed = {
             // Settings modal
             openConfigModal, closeConfigModal, saveConfigModal,
-            // ACL editor & test
-            openACLEditor, closeACLEditor, saveACLEditor,
-            openACLTestModal: openACLTestModal, closeACLTest, runACLTest,
+            // Unified settings ACL editor
             addACLRuleRow, deleteACLRuleRow, updateACLRuleItem, moveACLRuleItem,
-            addEditorACLRule, deleteEditorACLRule, updateEditorACLRuleItem,
-            moveEditorACLRule, applyACLTemplate,
             // Peer / peer-action modals
             openMultiaddrModal, closeMultiaddrModal, testPeerMultiaddrs,
             openPcapModal, closePcapModal, copyPcapHex, pcapToggle, pcapClear,
             openPeerEncModal, closePeerEncModal, copyPeerEncField,
             openAddStaticPeerModal, closeAddStaticPeerModal, submitAddStaticPeer,
-            openPeerDiagnosticsModal, closePeerDiagnosticsModal,
             // Exit / Route / SpeedTest / Share
             openLoginModal, closeLoginModal, submitLogin,
             openSpeedTestModal, closeSpeedTestModal, runSpeedTest,
@@ -14597,7 +13964,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             onObfsModeChange,
             addCfgListItem, delCfgListItem, moveCfgListItem,
             // Stats / logs / topology toolbar
-            fetchStats, setLanguage,
+            fetchStats, setLanguage, selectDashboardPage,
             resetTopologyZoom, autoFitTopology: autoFitTopologyIfNeeded,
             selectTopoFilter, selectTopoNode, clearTopoSelection,
             copySecFingerprint,
@@ -14940,45 +14307,53 @@ window.toggleSubnetRoute = async function(cidr, enable) {
         updateLogFilterUI();
         updateLogPauseUI();
         setInterval(fetchStats, 2000);
-        setInterval(pcapRefreshState, 1500);
-
-        // Packet frames and the live log are now streamed over WebSockets.
-        // pcapStream.connect() / logStream.connect() are idempotent and
-        // self-healing; each falls back to its legacy HTTP poller automatically
-        // if six reconnect attempts fail.
-        pcapStream.connect();
-        // Logs stream incrementally (only NEW lines are sent) instead of the
-        // old full-refetch-every-2.5s poll; fetchLogs() remains the HTTP
-        // fallback used by logStream once the WebSocket gives up.
-        logStream.connect();
+        setInterval(() => {
+            if (!document.hidden && currentDashboardPage() === 'diagnostics' && document.getElementById('captureDetails').open) pcapRefreshState();
+        }, 1500);
         // Show the login gate up-front when no token is stored, instead of
         // waiting for the first 401. The stored token (if any) is pre-filled.
         if (!getAuthToken()) {
             openLoginModal();
         }
 
-        // ACL card toolbar buttons (open editor / test rule).
-        const _aclEditBtn = document.getElementById('aclEditBtn');
-        if (_aclEditBtn) _aclEditBtn.addEventListener('click', () => { try { addACLRuleRow(); } catch (_) {} openACLEditor(); });
-        const _aclTestBtn = document.getElementById('aclTestBtn');
-        if (_aclTestBtn) _aclTestBtn.addEventListener('click', openACLTestModal);
-
-        fetchStats();
-        pcapRefreshState();
-        startTopologyLoop();   // continuous 60fps particle animation
-        document.addEventListener('visibilitychange', function () {
-            // Restart the rAF loop when returning to the tab.
-            if (!document.hidden && topoRAFId === null) startTopologyLoop();
-            // Browsers will close backgrounded sockets after a while; when the
-            // user returns, force-reconnect the packet stream so subsequent
-            // captures show up immediately rather than after the dead socket
-            // is finally garbage-collected.
-            if (!document.hidden) pcapStream.connect();
-            // Browsers also close backgrounded log sockets; force-reconnect on
-            // return so new log lines show up immediately.
-            if (!document.hidden) logStream.connect();
+        // Restore bookmarked pages and keep the tab controls keyboard accessible.
+        selectDashboardPage(location.hash.slice(1), false);
+        window.addEventListener('hashchange', () => selectDashboardPage(location.hash.slice(1), false));
+        document.querySelector('.dashboard-tabs').addEventListener('keydown', event => {
+            const current = dashboardPages.indexOf(currentDashboardPage());
+            let next;
+            if (event.key === 'ArrowRight') next = (current + 1) % dashboardPages.length;
+            if (event.key === 'ArrowLeft') next = (current + dashboardPages.length - 1) % dashboardPages.length;
+            if (event.key === 'Home') next = 0;
+            if (event.key === 'End') next = dashboardPages.length - 1;
+            if (next === undefined) return;
+            event.preventDefault();
+            selectDashboardPage(dashboardPages[next]);
+            document.getElementById('dashboard-tab-' + dashboardPages[next]).focus();
         });
-        fetchLogs();
+        document.querySelectorAll('.dashboard-details').forEach(details => {
+            details.addEventListener('toggle', () => {
+                if (details.open) requestAnimationFrame(redrawDashboardCharts);
+                if (details.id === 'logsDetails' || details.id === 'captureDetails') syncDiagnosticStreams();
+                if (details.id === 'topologyDetails') {
+                    if (details.open) startTopologyLoop();
+                    else if (topoRAFId !== null) { cancelAnimationFrame(topoRAFId); topoRAFId = null; }
+                }
+            });
+        });
+        document.getElementById('peerDetailsModal').addEventListener('keydown', event => {
+            if (event.key === 'Escape') { event.preventDefault(); closePeerDetails(); }
+            if (event.key !== 'Tab') return;
+            const buttons = [...event.currentTarget.querySelectorAll('button, a[href]')]
+                .filter(el => el.getClientRects().length && !el.disabled);
+            if (!buttons.length) return;
+            const first = buttons[0], last = buttons[buttons.length - 1];
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+            if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+        });
+        document.addEventListener('visibilitychange', function () {
+            selectDashboardPage(currentDashboardPage(), false);
+        });
         window.addEventListener('resize', function() {
             drawTopologyMesh();
             if (bwChartState.history.length) drawBandwidthChart(bwChartState.history);

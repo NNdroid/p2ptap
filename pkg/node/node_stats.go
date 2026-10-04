@@ -310,7 +310,9 @@ func (n *Node) updateWebCollectorState() {
 			nodeName = "p2ptap-node"
 		}
 	}
-	n.Collector.SetNodeInfo(nodeName, n.Host.ID().String(), src.TapIP, src.TapIPv6, src.TransportStrategy)
+	// Strategy is fixed in the dispatcher at construction. A WebUI snapshot
+	// may contain a saved strategy awaiting restart, which is not active yet.
+	n.Collector.SetNodeInfo(nodeName, n.Host.ID().String(), src.TapIP, src.TapIPv6, n.Config.TransportStrategy)
 	n.Collector.SetTAPSelfTest(func() map[string]interface{} {
 		if n.TAP == nil {
 			return map[string]interface{}{"available": false, "detail": "TAP device is nil"}
@@ -341,25 +343,9 @@ func (n *Node) updateWebCollectorState() {
 	peersDTO := make([]observer.PeerInfoDTO, 0)
 	allActivePeers := n.getAllPeersForMetaSync()
 
-	// Record the real elapsed interval ONCE for the whole snapshot. All peers
-	// share the same sampling window (the time between two consecutive
-	// updateWebCollectorState calls, ~10s). If we updated lastPeerSpeedCalc
-	// inside the per-peer loop, every peer after the first would see an
-	// interval of ~0s and report a wildly inflated bytes/sec value.
-	n.lastPeerSpeedMu.Lock()
 	nowCalc := time.Now()
-	var intervalSec float64
-	if !n.lastPeerSpeedCalc.IsZero() {
-		intervalSec = nowCalc.Sub(n.lastPeerSpeedCalc).Seconds()
-	}
-	n.lastPeerSpeedCalc = nowCalc
-	n.lastPeerSpeedMu.Unlock()
-	// Convert unanswered real TAP/ICMP requests into loss samples before the
-	// snapshot is built. Successful replies are recorded immediately on RX.
+	n.samplePeerSpeeds(allActivePeers, nowCalc)
 	n.expireTapICMPEchoRequests(nowCalc)
-	if intervalSec <= 0 {
-		intervalSec = 10.0 // default ticker interval on first call
-	}
 
 	// Use one routing-table view for the whole WebUI snapshot so different peer
 	// rows cannot reflect different route generations.
@@ -485,49 +471,6 @@ func (n *Node) updateWebCollectorState() {
 			version = meta.Version
 			isExitNode = meta.IsExitNode
 			exitNAT = meta.ExitNAT
-			if time.Since(meta.LastSync) < 45*time.Second {
-				// Use locally tracked TAP-payload counters for accurate tx/rx
-				// speed (Ethernet bytes sent TO / received FROM this peer).
-				// Fall back to remote-reported metadata if local counters are
-				// unavailable (e.g. metadata-only peer with no active stream).
-				var txV, rxV *atomic.Uint64
-				if v, ok := n.peerTxBytes.Load(pID); ok {
-					txV = v.(*atomic.Uint64)
-				}
-				if v, ok := n.peerRxBytes.Load(pID); ok {
-					rxV = v.(*atomic.Uint64)
-				}
-				curTx := uint64(0)
-				curRx := uint64(0)
-				if txV != nil {
-					curTx = txV.Load()
-				}
-				if rxV != nil {
-					curRx = rxV.Load()
-				}
-
-				n.perPeerBytesMu.Lock()
-				lastTx := n.perPeerLastTx[pID]
-				lastRx := n.perPeerLastRx[pID]
-				n.perPeerLastTx[pID] = curTx
-				n.perPeerLastRx[pID] = curRx
-
-				// Divide by the REAL elapsed interval captured once at the start of
-				// this snapshot (see above). intervalSec is shared by all peers and
-				// reflects the true time between two updateWebCollectorState calls.
-				if curTx >= lastTx {
-					n.perPeerTxSpeed[pID] = uint64(float64(curTx-lastTx) / intervalSec)
-				}
-				if curRx >= lastRx {
-					n.perPeerRxSpeed[pID] = uint64(float64(curRx-lastRx) / intervalSec)
-				}
-				peerTxSpd = n.perPeerTxSpeed[pID]
-				peerRxSpd = n.perPeerRxSpeed[pID]
-				n.perPeerBytesMu.Unlock()
-			} else {
-				peerTxSpd = 0
-				peerRxSpd = 0
-			}
 			peerTotalTx = meta.TotalTx
 			peerTotalRx = meta.TotalRx
 			if meta.UptimeSec > 0 {
@@ -539,6 +482,8 @@ func (n *Node) updateWebCollectorState() {
 				}
 			}
 		}
+
+		peerTxSpd, peerRxSpd = n.getPeerSpeed(pID)
 
 		// WebUI link quality comes only from completed probes. Routing's initial
 		// positive edge cost is deliberately kept separate so an unknown link can
@@ -776,6 +721,9 @@ func (n *Node) updateWebCollectorState() {
 			RxSpeed:           peerRxSpd,
 			TotalTx:           peerTotalTx,
 			TotalRx:           peerTotalRx,
+			LinkTotalTx:       loadPeerPayloadBytes(&n.peerTxBytes, pID),
+			LinkTotalRx:       loadPeerPayloadBytes(&n.peerRxBytes, pID),
+			LinkSpeedMeasured: n.peerSpeedMeasured(pID),
 			TapIP:             tapIP,
 			TapIPv6:           tapIPv6,
 			OSArch:            osArch,
@@ -1181,6 +1129,57 @@ func (n *Node) updateWebCollectorState() {
 	n.Collector.UpdateActiveStreams(streamsDTO)
 
 	log.Debug("Web collector updated: %d active peers, %d MACs, %d ARP entries, %d IP entries, %d routes, %d subnets, %d channels, %d streams", len(peersDTO), len(macDTO), len(arpDTO), len(ipDTO), len(routesDTO), len(subnetDTOs), len(channelsDTO), len(streamsDTO))
+}
+
+// Counters are independent of remote metadata and its refresh deadline.
+// A peer that has never exchanged payload has a measured local total of zero.
+func loadPeerPayloadBytes(counters *sync.Map, id peer.ID) uint64 {
+	if value, ok := counters.Load(id); ok {
+		return value.(*atomic.Uint64).Load()
+	}
+	return 0
+}
+
+// JNI, the web UI and the background ticker share one sampling baseline.
+// Frequent reads reuse the last rate rather than consuming tiny delta windows.
+func (n *Node) samplePeerSpeeds(peers []peer.ID, now time.Time) {
+	n.lastPeerSpeedMu.Lock()
+	defer n.lastPeerSpeedMu.Unlock()
+	previous := n.lastPeerSpeedCalc
+	elapsed := now.Sub(previous).Seconds()
+	if !previous.IsZero() && elapsed < 0.2 {
+		return
+	}
+	n.perPeerBytesMu.Lock()
+	defer n.perPeerBytesMu.Unlock()
+	for _, id := range peers {
+		tx := loadPeerPayloadBytes(&n.peerTxBytes, id)
+		rx := loadPeerPayloadBytes(&n.peerRxBytes, id)
+		lastTx, hadTx := n.perPeerLastTx[id]
+		lastRx, hadRx := n.perPeerLastRx[id]
+		if !previous.IsZero() && hadTx && hadRx {
+			if tx >= lastTx {
+				n.perPeerTxSpeed[id] = uint64(float64(tx-lastTx) / elapsed)
+			} else {
+				n.perPeerTxSpeed[id] = 0
+			}
+			if rx >= lastRx {
+				n.perPeerRxSpeed[id] = uint64(float64(rx-lastRx) / elapsed)
+			} else {
+				n.perPeerRxSpeed[id] = 0
+			}
+		}
+		n.perPeerLastTx[id] = tx
+		n.perPeerLastRx[id] = rx
+	}
+	n.lastPeerSpeedCalc = now
+}
+
+func (n *Node) peerSpeedMeasured(id peer.ID) bool {
+	n.perPeerBytesMu.RLock()
+	defer n.perPeerBytesMu.RUnlock()
+	_, ok := n.perPeerTxSpeed[id]
+	return ok
 }
 
 func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDTO, []observer.ProtocolStreamDTO) {

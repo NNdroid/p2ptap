@@ -1620,9 +1620,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			return node.ForceSeqSync(peerIDStr)
 		},
 		AddStaticPeer: func(multiaddrStr string) error {
-			ma, err := multiaddr.NewMultiaddr(multiaddrStr)
+			normalized, err := config.NormalizePeerAddress(multiaddrStr)
 			if err != nil {
-				return fmt.Errorf("invalid multiaddr: %w", err)
+				return err
+			}
+			ma, err := multiaddr.NewMultiaddr(normalized)
+			if err != nil {
+				return err
 			}
 			info, err := peer.AddrInfoFromP2pAddr(ma)
 			if err != nil {

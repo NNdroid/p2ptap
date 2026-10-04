@@ -362,6 +362,15 @@ func (c *Config) Validate() error {
 	if c.TransportStrategy != "best_path" && c.TransportStrategy != "redundant" && c.TransportStrategy != "fallback" {
 		return fmt.Errorf("unsupported transport_strategy '%s' (must be 'best_path', 'redundant', or 'fallback')", c.TransportStrategy)
 	}
+	staticPeers, err := normalizePeerAddresses("static_peers", c.StaticPeers)
+	if err != nil {
+		return err
+	}
+	bootstrapPeers, err := normalizePeerAddresses("bootstrap_peers", c.BootstrapPeers)
+	if err != nil {
+		return err
+	}
+	c.StaticPeers, c.BootstrapPeers = staticPeers, bootstrapPeers
 	validModes := map[string]bool{"fixed": true, "block": true, "random": true, "dynamic": true, "auto": true}
 	if c.Obfuscation.Mode != "" && !validModes[c.Obfuscation.Mode] {
 		return fmt.Errorf("unsupported obfuscation mode '%s' (must be fixed/block/random/dynamic/auto)", c.Obfuscation.Mode)
