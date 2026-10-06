@@ -73,8 +73,12 @@ export ANDROID_NDK_HOME
 VERSION="$(bash "$SCRIPT_DIR/get_version.sh" "${P2PTAP_VERSION:-}")"
 BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 GIT_COMMIT="$( (git rev-parse HEAD 2>/dev/null || echo 'unknown') | head -1)"
+# -checklinkname=0 must live inside -ldflags (below), not in GOFLAGS: gomobile
+# emits -ldflags as an explicit `go build` argument, which overrides the same
+# flag supplied via GOFLAGS, so a GOFLAGS-only workaround never reaches the
+# linker. github.com/wlynxg/anet (pulled in by pion/transport/v3) //go:linkname's
+# into net.zoneCache, which the Go 1.23+ linker rejects as "invalid reference".
 VER_FLAGS="-checklinkname=0 -X p2ptap/pkg/version.Version=$VERSION -X p2ptap/pkg/version.BuildTime=$BUILD_TIME -X p2ptap/pkg/version.GitCommit=$GIT_COMMIT"
-export GOFLAGS="-ldflags=-checklinkname=0"
 
 # ---- Sanity checks ----
 if ! command -v gomobile >/dev/null 2>&1; then
