@@ -3473,6 +3473,17 @@ func (n *Node) pushPeerEncryption() {
 	}
 }
 
+const (
+	// Per-step caps for Node.Close. They are additive, so keep the sum small:
+	// the Android VpnService blocks its single lifecycle thread (and with it
+	// the stop button and the notification) for the whole of Close.
+	teardownTAPTimeout     = 3 * time.Second
+	teardownWebTimeout     = 2 * time.Second
+	teardownHostTimeout    = 5 * time.Second
+	teardownPoolsTimeout   = 2 * time.Second
+	teardownWorkersTimeout = 5 * time.Second
+)
+
 func (n *Node) Close() error {
 	// Close may be reached from several paths (signal handler, tray exit, web
 	// shutdown). Guard so the underlying TAP/Host closers run exactly once.
@@ -3506,49 +3517,74 @@ func (n *Node) Close() error {
 
 	n.stopRoamWatcher()
 
-	// Each teardown step is bounded by a timeout so a blocking Close (notably
-	// libp2p's Host.Close, which can hang on Windows while QUIC connections
-	// are still draining) cannot keep the process alive after the user exits
-	// the tray. Without this guard the main UI goroutine stalls in Close() and
-	// never reaches PostQuitMessage, leaving p2ptap-tray.exe running.
-	closeWithTimeout := func(name string, fn func() error) {
+	// Each teardown step is bounded so a blocking Close (notably libp2p's
+	// Host.Close, which can hang on Windows while QUIC connections are still
+	// draining) cannot keep the process alive after the user exits the tray,
+	// and — more importantly for Android — cannot wedge the VpnService: the
+	// engine holds its global mutex for the whole of this function, so every
+	// second here is a second the stop button, the notification and every
+	// stats query stay stuck. The caps are deliberately small and ADDITIVE;
+	// they used to be 8s each across eight steps, a ~64s tail.
+	closeWithTimeout := func(name string, timeout time.Duration, fn func() error) {
 		done := make(chan struct{})
 		go func() { _ = fn(); close(done) }()
 		select {
 		case <-done:
-		case <-time.After(8 * time.Second):
-			log.Warn("Close step %q timed out after 8s, forcing shutdown", name)
+		case <-time.After(timeout):
+			log.Warn("Close step %q timed out after %s, forcing shutdown", name, timeout)
 		}
 	}
-	if n.WebSrv != nil {
-		closeWithTimeout("web", n.WebSrv.Close)
-	}
-	// TAP is closed FIRST — deliberately, and now safely: closing the device
-	// is what unblocks the tap read loop (MemTAP/utun-style readers block in
-	// Read with no deadline until the device closes; waiting for them via
-	// wg.Wait instead would burn the full force-shutdown timeout on every
-	// test Close). The write-into-a-destroyed-device races this ordering used
-	// to create (NULL Wintun session → native crash; handle-reuse on the
-	// TAP-Win32 driver) are eliminated at the device layer itself: Wintun and
-	// WindowsTAP now carry a closed flag and every I/O path refuses once it is
-	// set (deviceState / closed), so a late tapWrite from a stream handler
-	// still draining after this point simply returns an error — the pre-fix
-	// behaviour on every other platform, minus the undefined driver calls.
+
+	// TAP is closed FIRST: on Android closing the tunnel fd is what tears the
+	// VPN interface down, so the interface must not wait behind the WebUI
+	// teardown. It is safe — closing the device also unblocks the tap read
+	// loop (device-style readers block in Read with no deadline until the
+	// device closes), and the write-into-a-destroyed-device races this
+	// ordering used to create (NULL Wintun session → native crash; handle
+	// reuse on TAP-Win32) are eliminated at the device layer: Wintun and
+	// WindowsTAP carry a closed flag and every I/O path refuses once it is
+	// set, so a late tapWrite from a stream handler still draining after this
+	// point simply returns an error.
 	if n.TAP != nil {
-		closeWithTimeout("tap", n.TAP.Close)
+		closeWithTimeout("tap", teardownTAPTimeout, n.TAP.Close)
 	}
-	closeWithTimeout("host", n.Host.Close)
-	// These teardown steps close cached control streams (relay pool + the
-	// lsa/meta/echo pools). Invalidate now self-heals a parked stream owner
-	// (bounded peer-mutex wait + force close — the deadlock that hung Android
-	// stop on "STOPPING"), but keep the same 8s cap discipline as the other
-	// steps so a future blocking primitive can never resurrect an unbounded
-	// Close: a hung Stop() on Android wedges the whole lifecycle executor and
-	// every Go mutex caller (Start/IsRunning/metrics) behind it.
-	closeWithTimeout("relaypool", func() error { n.relayPool.shutdown(); return nil })
-	closeWithTimeout("lsapool", func() error { n.lsaPool.InvalidateAll(); return nil })
-	closeWithTimeout("metapool", func() error { n.metaPool.InvalidateAll(); return nil })
-	closeWithTimeout("echopool", func() error { n.echoPool.InvalidateAll(); return nil })
+	if n.WebSrv != nil {
+		closeWithTimeout("web", teardownWebTimeout, n.WebSrv.Close)
+	}
+	closeWithTimeout("host", teardownHostTimeout, n.Host.Close)
+
+	// The four control-stream pools are independent of each other, so tear them
+	// down in parallel: each can burn its whole cap per parked peer (a stream
+	// owner blocked in ReadFrame holding the peer mutex), which is what made
+	// Android stop take tens of seconds serially. Invalidate still self-heals
+	// the parked owner — bounded peer-mutex wait plus force close — and every
+	// step remains bounded so a future blocking primitive cannot resurrect an
+	// unbounded Close.
+	poolsDone := make(chan struct{})
+	go func() {
+		defer close(poolsDone)
+		steps := []func() error{
+			func() error { n.relayPool.shutdown(); return nil },
+			func() error { n.lsaPool.InvalidateAll(); return nil },
+			func() error { n.metaPool.InvalidateAll(); return nil },
+			func() error { n.echoPool.InvalidateAll(); return nil },
+		}
+		var poolWG sync.WaitGroup
+		poolWG.Add(len(steps))
+		for _, step := range steps {
+			go func(fn func() error) {
+				defer poolWG.Done()
+				_ = fn()
+			}(step)
+		}
+		poolWG.Wait()
+	}()
+	select {
+	case <-poolsDone:
+	case <-time.After(teardownPoolsTimeout):
+		log.Warn("Close step %q timed out after %s, forcing shutdown", "control pools", teardownPoolsTimeout)
+	}
+
 	// Wait for all worker goroutines (stream readers, dispatch loops, etc.) to
 	// exit. Bound it with a timeout: if a stream reader is stuck in ReadFrame
 	// after the host was force-closed, we must not block shutdown forever.
@@ -3559,8 +3595,8 @@ func (n *Node) Close() error {
 	go func() { n.wg.Wait(); close(wgDone) }()
 	select {
 	case <-wgDone:
-	case <-time.After(8 * time.Second):
-		log.Warn("Waiting for worker goroutines timed out after 8s, forcing shutdown")
+	case <-time.After(teardownWorkersTimeout):
+		log.Warn("Waiting for worker goroutines timed out after %s, forcing shutdown", teardownWorkersTimeout)
 	}
 	log.Info("Node stopped")
 	return nil

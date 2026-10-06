@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -180,6 +181,12 @@ var (
 	stateListenerMu sync.RWMutex
 	stateListener   StateListener
 	metricsCancel   context.CancelFunc
+	// stopping is published before the teardown starts so IsRunning() reports a
+	// shutting-down node as not running immediately. node.Close() takes several
+	// seconds while mu is held, and the Android service would otherwise keep
+	// reporting "running" (tile active, WebUI button enabled) for the entire
+	// teardown.
+	stopping atomic.Bool
 )
 
 // SetStateListener registers the real-time event & metrics callback.
@@ -374,11 +381,16 @@ func metricsLoop(ctx context.Context, n *node.Node, collector *web.StatsCollecto
 // ORDERING GUARANTEE (Android lifecycle contract): Stop() is fully synchronous.
 // n.Close() runs to completion — including every multi-second timeout phase —
 // while mu is held, and instance is cleared plus the IDLE callback fired only
-// AFTER that. A concurrently blocked IsRunning()/Start()/GetStatsJSON() caller
-// therefore unblocks to observe a fully released engine: no half-closed libp2p
-// Host, TUN fd or WebUI port can ever be observed as "running", and a queued
-// Start() (the Android service serializes lifecycle commands on a single
-// executor) cannot race the teardown for ports or devices.
+// AFTER that. A concurrently blocked Start()/GetStatsJSON() caller therefore
+// unblocks to observe a fully released engine: no half-closed libp2p Host, TUN
+// fd or WebUI port can ever be observed as "running", and a queued Start() (the
+// Android service serializes lifecycle commands on a single executor) cannot
+// race the teardown for ports or devices.
+//
+// IsRunning() is deliberately exempt from that wait: it returns false as soon
+// as teardown begins (see stopping), so the Android service and its quick
+// settings tile react immediately instead of appearing live for the whole
+// teardown. Stop returns only once the device is really released.
 func Stop() error {
 	mu.Lock()
 	n := instance
@@ -393,11 +405,13 @@ func Stop() error {
 		return nil
 	}
 
+	stopping.Store(true)
 	err := n.Close()
 	if instance == n {
 		instance = nil
 		activeCollector = nil
 	}
+	stopping.Store(false)
 	mu.Unlock()
 
 	stateListenerMu.RLock()
@@ -409,8 +423,14 @@ func Stop() error {
 	return err
 }
 
-// IsRunning reports whether the P2P TAP node is currently active.
+// IsRunning reports whether the P2P TAP node is currently active. It answers
+// without taking mu while a teardown is in flight, so a stopping node is never
+// reported as live — the teardown takes several seconds and mu is held the
+// whole time.
 func IsRunning() bool {
+	if stopping.Load() {
+		return false
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	return instance != nil
