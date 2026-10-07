@@ -99,6 +99,7 @@ type StatsCollector struct {
 	// conflict set pushed by the node for dashboard display.
 	DuplicateIPConflicts []observer.DuplicateIPConflictDTO
 	speedHistory         []SpeedSampleDTO
+	done                 chan struct{}
 
 	// peerSeqState holds per-peer sequence tracking, keyed by peer.ID string.
 	// It is a sync.Map so the high-frequency datapath writers (RecordTxSeq /
@@ -401,7 +402,7 @@ func (s *StatsCollector) PeekPeerID(peerIDStr string) (string, bool) {
 }
 
 func NewStatsCollector() *StatsCollector {
-	return &StatsCollector{
+	s := &StatsCollector{
 		ActivePeers:          make([]PeerInfoDTO, 0),
 		MACTable:             make([]MACInfoDTO, 0),
 		Pcap:                 NewPacketCapture(20000, ""),
@@ -415,7 +416,30 @@ func NewStatsCollector() *StatsCollector {
 		ListenAddrs:          make([]string, 0),
 		StartTime:            time.Now(),
 		lastSpeedCalc:        time.Now(),
+		done:                 make(chan struct{}),
 	}
+	go s.speedTicker()
+	return s
+}
+
+// speedTicker calls tickSpeed every 2 s so speedHistory stays warm even when
+// no WebUI client is polling. Without it the chart is empty on first open
+// because tickSpeed is only invoked from GetResponse, which is UI-driven.
+func (s *StatsCollector) speedTicker() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.tickSpeed(time.Now())
+		case <-s.done:
+			return
+		}
+	}
+}
+
+func (s *StatsCollector) Stop() {
+	close(s.done)
 }
 
 func (s *StatsCollector) RecordSent(bytes int) {
