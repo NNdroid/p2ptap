@@ -144,10 +144,12 @@ echo "========================================================="
 echo "  AAR build complete: $AAR"
 ls -lh "$AAR"
 
-# Sync to Android app libs directory if present
-ANDROID_APP_LIBS="/e/AndroidStudioProjects/p2ptap/app/libs"
-if [ -d "$ANDROID_APP_LIBS" ]; then
-  cp "$AAR" "$ANDROID_APP_LIBS/p2ptap.aar"
-  echo "  Synced to: $ANDROID_APP_LIBS/p2ptap.aar"
+# Sync to the Android app's core/libs if the caller told us where it is.
+# Not hardcoded: this script runs from a separate Go repo, so the Android
+# checkout path is machine-specific. Set P2PTAP_ANDROID_APP=/path/to/android/repo
+# to enable. CI (android-ci.yml, release.yml) handles the copy on its own.
+if [ -n "${P2PTAP_ANDROID_APP:-}" ] && [ -d "$P2PTAP_ANDROID_APP/core/libs" ]; then
+  cp "$AAR" "$P2PTAP_ANDROID_APP/core/libs/p2ptap.aar"
+  echo "  Synced to: $P2PTAP_ANDROID_APP/core/libs/p2ptap.aar"
 fi
 echo "========================================================="
