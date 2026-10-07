@@ -56,6 +56,30 @@ var (
 	interfaceProvider   InterfaceProvider
 )
 
+// metricsInterval is the push cadence of the live stats callbacks; the Android
+// service treats it as a heartbeat, so it must stay well under the staleness
+// threshold on that side.
+const metricsInterval = 1 * time.Second
+
+// statsRefreshEvery controls how often metricsTick rebuilds the peer DTOs
+// via UpdateWebCollectorState(). That call re-parses every bootstrap/static
+// multiaddr, re-installs the TAP self-test closure and re-derives connection
+// signals for every peer — expensive work that is wasted when the peer set
+// hasn't changed. Speed and packet counters are always fresh from
+// GetResponse(), so only the peer rows go stale, and by at most this many
+// seconds. The pull path (GetStatsJSON) still calls UpdateWebCollectorState
+// unconditionally because its caller is pulling on demand.
+const statsRefreshEvery = 5
+
+// metricsBackoff is applied per consecutive failed tick after the loop recovers
+// from a panic, multiplied by the failure streak and capped at
+// metricsBackoffMaxSteps so a wedged node is retried at a sane rate without the
+// counters stalling for long.
+const (
+	metricsBackoff         = 1 * time.Second
+	metricsBackoffMaxSteps = 30
+)
+
 // InterfaceProvider supplies local network interface IP addresses from Android Java runtime.
 type InterfaceProvider interface {
 	GetInterfaceAddresses() string // returns JSON array of IP strings e.g. ["192.168.1.100", "2408:..."]
@@ -187,6 +211,11 @@ var (
 	// reporting "running" (tile active, WebUI button enabled) for the entire
 	// teardown.
 	stopping atomic.Bool
+	// statsTickCounter counts metrics ticks so metricsTick can refresh the
+	// peer DTOs at a slower cadence than the 1 Hz heartbeat. It is not reset
+	// between sessions because the counter is only used for modulo arithmetic
+	// against a small constant.
+	statsTickCounter int64
 )
 
 // SetStateListener registers the real-time event & metrics callback.
@@ -314,22 +343,48 @@ func Start(cfgJSON string, tunFd int) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	metricsCancel = cancel
 
-	stateListenerMu.RLock()
-	sl := stateListener
-	stateListenerMu.RUnlock()
-	if sl != nil {
-		sl.OnStateChange("RUNNING", "Node started successfully")
-	}
+	emitStateChange("RUNNING", "Node started successfully")
 
 	go metricsLoop(ctx, n, collector)
 
 	return nil
 }
 
+// metricsLoop is the only goroutine that pushes live stats to the Android
+// service over JNI. It runs exactly once per Start(), and nothing restarts it
+// on the app side, so it must be crash-proof: a Java exception raised inside
+// the OnMetricsUpdate callback surfaces to Go as a panic on this goroutine,
+// and without a recover() here the phone's traffic counters would freeze with
+// the node still forwarding and nothing left to tell the app about it.
+//
+// A panic that escapes metricsTick is recovered, reported to the app as an ERROR
+// state so the user sees it, and the loop is re-spawned, so a single crash can
+// never permanently silence the counters. Backoff against repeated bad ticks
+// lives in metricsLoopInner, where it is capped at metricsBackoffMaxSteps.
 func metricsLoop(ctx context.Context, n *node.Node, collector *web.StatsCollector) {
-	ticker := time.NewTicker(1 * time.Second)
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		log.Error("android: metrics loop aborted by panic: %v", r)
+		emitStateChange("ERROR", fmt.Sprintf("live traffic reporting failed: %v", r))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(metricsBackoff):
+		}
+		metricsLoop(ctx, n, collector)
+	}()
+
+	metricsLoopInner(ctx, n, collector)
+}
+
+func metricsLoopInner(ctx context.Context, n *node.Node, collector *web.StatsCollector) {
+	ticker := time.NewTicker(metricsInterval)
 	defer ticker.Stop()
 
+	failStreak := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -342,37 +397,106 @@ func metricsLoop(ctx context.Context, n *node.Node, collector *web.StatsCollecto
 				return
 			}
 
-			stateListenerMu.RLock()
-			sl := stateListener
-			stateListenerMu.RUnlock()
-			if sl == nil {
+			if metricsTick(n, collector) {
+				failStreak = 0
 				continue
 			}
-
-			n.UpdateWebCollectorState()
-
-			resp := collector.GetResponse()
-			totTx := int64(resp.PacketStats.BytesSent)
-			totRx := int64(resp.PacketStats.BytesRecv)
-			txSpd := int64(resp.Speed.TxBytesPerSec)
-			rxSpd := int64(resp.Speed.RxBytesPerSec)
-
-			var directCount, relayCount int32
-			for _, p := range resp.ActivePeers {
-				if p.ConnState == "relay_ok" || (p.ConnState == "ok" && p.IsRelayed) {
-					relayCount++
-				} else if p.ConnState == "ok" && !p.IsRelayed {
-					directCount++
-				}
+			failStreak++
+			if failStreak == 5 {
+				emitStateChange("ERROR", "live traffic reporting stalled; reconnecting")
 			}
-			// Active means a verified healthy direct or relay data path. The
-			// ActivePeers DTO also carries known/connecting/unreachable rows for
-			// diagnostics, so len(ActivePeers) is not a truthful active count.
-			totalPeers := directCount + relayCount
-
-			sl.OnMetricsUpdate(totalPeers, directCount, relayCount, txSpd, rxSpd, totTx, totRx)
+			// An occasional bad tick is normal; only a sustained failure is one
+			// worth backing off for, and the backoff is capped so a slow phone
+			// still gets fresh counters within a few seconds.
+			backoff := metricsBackoff * time.Duration(min(failStreak, metricsBackoffMaxSteps))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
 		}
 	}
+}
+
+// metricsTick pushes one batch of live stats to the Android service. It reports
+// false when the tick panicked and the caller should back off before retrying.
+// It never lets a panic escape: anything in the collector, the node, or the JNI
+// callback can throw, and the loop has to survive all of it.
+func metricsTick(n *node.Node, collector *web.StatsCollector) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("android: metrics tick panicked: %v", r)
+		}
+	}()
+
+	stateListenerMu.RLock()
+	sl := stateListener
+	stateListenerMu.RUnlock()
+	if sl == nil {
+		return true
+	}
+
+	// Always fetch fresh speed and packet counters from the collector. Only
+	// rebuild the (expensive) peer DTOs every statsRefreshEvery ticks — the
+	// cached peer rows are good enough for the in-between heartbeats.
+	resp := collector.GetResponse()
+
+	tick := atomic.AddInt64(&statsTickCounter, 1)
+	if tick%statsRefreshEvery == 1 {
+		n.UpdateWebCollectorState()
+		resp = collector.GetResponse()
+	}
+	totTx := int64(resp.PacketStats.BytesSent)
+	totRx := int64(resp.PacketStats.BytesRecv)
+	txSpd := int64(resp.Speed.TxBytesPerSec)
+	rxSpd := int64(resp.Speed.RxBytesPerSec)
+
+	var directCount, relayCount int32
+	for _, p := range resp.ActivePeers {
+		if p.ConnState == "relay_ok" || (p.ConnState == "ok" && p.IsRelayed) {
+			relayCount++
+		} else if p.ConnState == "ok" && !p.IsRelayed {
+			directCount++
+		}
+	}
+	// Active means a verified healthy direct or relay data path. The
+	// ActivePeers DTO also carries known/connecting/unreachable rows for
+	// diagnostics, so len(ActivePeers) is not a truthful active count.
+	totalPeers := directCount + relayCount
+
+	return emitMetricsUpdate(sl, totalPeers, directCount, relayCount, txSpd, rxSpd, totTx, totRx)
+}
+
+// emitStateChange calls the Android state listener without ever letting a Java
+// exception propagate: gomobile converts it into a panic on the calling goroutine,
+// and neither the metrics loop nor Stop() should die because of a callback.
+func emitStateChange(state, message string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("android: state callback panicked: %v", r)
+		}
+	}()
+	stateListenerMu.RLock()
+	sl := stateListener
+	stateListenerMu.RUnlock()
+	if sl != nil {
+		sl.OnStateChange(state, message)
+	}
+}
+
+// emitMetricsUpdate calls the Android metrics listener and reports whether the
+// batch actually arrived. A Java exception is swallowed here so it cannot take
+// down the caller, but the tick has to know the batch never landed.
+func emitMetricsUpdate(sl StateListener, peerCount, direct, relay int32, txSpeed, rxSpeed, totalTx, totalRx int64) (delivered bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("android: metrics callback panicked: %v", r)
+			delivered = false
+		}
+	}()
+	delivered = true
+	sl.OnMetricsUpdate(peerCount, direct, relay, txSpeed, rxSpeed, totalTx, totalRx)
+	return delivered
 }
 
 // Stop shuts down the running node and releases the TUN fd. It is safe to call
@@ -414,12 +538,7 @@ func Stop() error {
 	stopping.Store(false)
 	mu.Unlock()
 
-	stateListenerMu.RLock()
-	sl := stateListener
-	stateListenerMu.RUnlock()
-	if sl != nil {
-		sl.OnStateChange("IDLE", "Node stopped")
-	}
+	emitStateChange("IDLE", "Node stopped")
 	return err
 }
 
@@ -472,20 +591,53 @@ func GetMultiaddrs() string {
 
 // GetStatsJSON returns a JSON string containing the full StatsResponse
 // including active peers, traffic, packet counters, and security status.
+//
+// A wedged or half-torn-down node can panic while reading the collector, and
+// without this guard that panic would reach the Android thread that called in
+// and take it down with it. Callers must already be prepared for "{}", which
+// is what this returns when the engine has nothing to report.
 func GetStatsJSON() string {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("android: stats read panicked: %v", r)
+		}
+	}()
+	return getStatsJSONLocked()
+}
+
+func getStatsJSONLocked() (out string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("android: stats read panicked: %v", r)
+			out = "{}"
+		}
+	}()
+	// Collect the snapshot under mu so Stop() cannot race with a mid-read
+	// node. GetResponse returns a value copy, so json.Marshal below is safe
+	// outside the lock and Stop() can finish its multi-second n.Close()
+	// while marshaling is in progress.
 	mu.Lock()
-	defer mu.Unlock()
 	if instance != nil {
 		instance.UpdateWebCollectorState()
 	}
+	var resp web.StatsResponse
+	hasResp := false
 	if activeCollector != nil {
-		resp := activeCollector.GetResponse()
+		resp = activeCollector.GetResponse()
+		hasResp = true
+	}
+	mu.Unlock()
+
+	if hasResp {
 		data, err := json.Marshal(resp)
 		if err == nil {
-			return string(data)
+			out = string(data)
 		}
 	}
-	return "{}"
+	if out == "" {
+		out = "{}"
+	}
+	return out
 }
 
 // GetPeerIDFromKey loads or generates the persistent identity key from keyPath

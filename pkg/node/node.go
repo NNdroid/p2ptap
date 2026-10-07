@@ -1274,7 +1274,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	log.Info("libp2p host created, PeerID: %s", h.ID().String())
 
 	// Initialize Kademlia DHT for Peer discovery
-	kdht, err := dht.New(ctx, h)
+	kdht, err := dht.New(h)
 	if err != nil {
 		log.Warn("DHT init error: %v", err)
 	} else {

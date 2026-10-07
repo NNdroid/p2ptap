@@ -1,8 +1,8 @@
 # 本地补丁清单（vendored go-libp2p）
 
-本目录通过 `go.mod` 的 `replace github.com/libp2p/go-libp2p v0.49.0 => ./pkg/go-libp2p`
-以源码形式参与构建。基线为上游 **v0.49.0**（2026-07-28 发布，当前最新版），
-在此之上维护了以下 4 处本地补丁。升级到未来版本（v0.50+）时，需要把这份清单
+本目录通过 `go.mod` 的 `replace github.com/libp2p/go-libp2p v0.50.0 => ./pkg/go-libp2p`
+以源码形式参与构建。基线为上游 **v0.50.0**（2026-08-12 发布，当前最新版），
+在此之上维护了以下 7 处本地补丁。升级到未来版本（v0.51+）时，需要把这份清单
 中的补丁重新应用到新基线。
 
 ## 1. `p2p/host/basic/addrs_manager.go` — Android 接口地址提供者
@@ -88,7 +88,7 @@
 ## 与上游 diff 的方法
 
 ```bash
-UP=$(go env GOMODCACHE)/github.com/libp2p/go-libp2p@v0.49.0
+UP=$(go env GOMODCACHE)/github.com/libp2p/go-libp2p@v0.50.0
 diff -rq "$UP" pkg/go-libp2p --exclude=".git"
 ```
 

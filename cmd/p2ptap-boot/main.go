@@ -1086,7 +1086,7 @@ func main() {
 	}
 
 	// 1. Enable Kademlia DHT in Server Mode
-	kdht, err := dht.New(ctx, h, dht.Mode(dht.ModeServer))
+	kdht, err := dht.New(h, dht.Mode(dht.ModeServer))
 	if err != nil {
 		fmt.Printf("Error starting DHT server: %v\n", err)
 	} else {
