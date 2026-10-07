@@ -136,7 +136,7 @@ func (n *Node) relayOnlyDirectUpgradeLoop() {
 // to a relay-only peer using its stored or DHT-rediscovered direct addresses.
 func (n *Node) attemptDirectUpgrade(pid peer.ID) {
 	// Direct candidates: peerstore addrs minus loopback minus circuit addrs.
-	addrs := filterLoopbackAddrs(n.Host.Peerstore().Addrs(pid))
+	addrs := filterUndialableAddrs(n.Host.Peerstore().Addrs(pid))
 	direct := make([]multiaddr.Multiaddr, 0, len(addrs))
 	for _, a := range addrs {
 		if !strings.Contains(a.String(), "/p2p-circuit") {
@@ -149,7 +149,7 @@ func (n *Node) attemptDirectUpgrade(pid peer.ID) {
 		info, err := n.DHT.FindPeer(ctx, pid)
 		cancel()
 		if err == nil {
-			for _, a := range filterLoopbackAddrs(info.Addrs) {
+			for _, a := range filterUndialableAddrs(info.Addrs) {
 				if !strings.Contains(a.String(), "/p2p-circuit") {
 					direct = append(direct, a)
 				}
@@ -351,7 +351,7 @@ func (n *Node) reconnectPeer(pid peer.ID) {
 	n.clearSwarmBackoff(pid)
 
 	// Get stored addresses from peerstore, dropping loopback (127.0.0.0/8, ::1)
-	addrs := filterLoopbackAddrs(n.Host.Peerstore().Addrs(pid))
+	addrs := filterUndialableAddrs(n.Host.Peerstore().Addrs(pid))
 
 	// Always synthesize fresh relay circuit addresses from any connected bootstrap relay
 	// alongside direct addresses. This ensures NAT'd peers that cannot be dialed directly
@@ -520,7 +520,7 @@ func (n *Node) triggerOnDemandConnect(pid peer.ID) {
 			n.triggerPeerRekey(pid)
 		} else {
 			// Not connected, attempt parallel dial with stored addrs + synthesized relay circuit addrs
-			addrs := filterLoopbackAddrs(n.Host.Peerstore().Addrs(pid))
+			addrs := filterUndialableAddrs(n.Host.Peerstore().Addrs(pid))
 			if relayAddrs := n.SynthesizeRelayCircuitAddrs(pid); len(relayAddrs) > 0 {
 				addrs = append(addrs, relayAddrs...)
 				n.Host.Peerstore().AddAddrs(pid, relayAddrs, peerstore.AddressTTL)
@@ -920,6 +920,11 @@ func prioritizeMultiaddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 		if err != nil || ip.IsLoopback() {
 			continue
 		}
+		// Drop overlay (TAP/mesh) addresses — dialing them routes through
+		// our own tunnel, creating a libp2p-over-TAP recursion loop.
+		if isOverlayMultiaddr(a) {
+			continue
+		}
 		s := a.String()
 		score := 0
 		isV6 := ip.To4() == nil
@@ -969,7 +974,7 @@ func prioritizeMultiaddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 // and causing a libp2p transport conflict/disconnect.
 func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType string) error {
 	// Filter loopback addresses and prioritize high-success direct multiaddrs (IPv6/QUIC first)
-	pi.Addrs = prioritizeMultiaddrs(filterLoopbackAddrs(pi.Addrs))
+	pi.Addrs = prioritizeMultiaddrs(filterUndialableAddrs(pi.Addrs))
 
 	// Aggressive: Clear any dial backoff and refresh multiaddrs in Peerstore.
 	// NOTE: we intentionally do NOT ClearAddrs here. Clearing would discard

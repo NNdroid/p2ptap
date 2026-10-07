@@ -343,10 +343,12 @@ func Start(cfgJSON string, tunFd int) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	metricsCancel = cancel
 
+	mu.Unlock()
+	// Emit the RUNNING state outside mu: a synchronous JNI call under the
+	// global lock would deadlock if the Java handler calls back into Go
+	// (getStatsJSON, stop, etc.).  Same pattern as Stop().
 	emitStateChange("RUNNING", "Node started successfully")
-
 	go metricsLoop(ctx, n, collector)
-
 	return nil
 }
 
@@ -428,6 +430,13 @@ func metricsTick(n *node.Node, collector *web.StatsCollector) (ok bool) {
 			log.Error("android: metrics tick panicked: %v", r)
 		}
 	}()
+
+	// Bail early during teardown: the node is being torn down and calling
+	// UpdateWebCollectorState or collector.GetResponse against a half-closed
+	// node is a data race.
+	if stopping.Load() {
+		return true
+	}
 
 	stateListenerMu.RLock()
 	sl := stateListener
@@ -530,14 +539,17 @@ func Stop() error {
 	}
 
 	stopping.Store(true)
-	err := n.Close()
-	if instance == n {
-		instance = nil
-		activeCollector = nil
-	}
-	stopping.Store(false)
+	// Capture what we need and unlock BEFORE n.Close(). Close can take up
+	// to ~17s; holding mu that whole time blocks every stats query and
+	// any re-entrant stop() from a JNI callback.
+	collector := activeCollector
+	instance = nil
+	activeCollector = nil
 	mu.Unlock()
 
+	err := n.Close()
+	stopping.Store(false)
+	_ = collector // keep linter quiet
 	emitStateChange("IDLE", "Node stopped")
 	return err
 }
@@ -565,6 +577,9 @@ func SetLogLevel(level string) error {
 
 // GetPeerID returns the libp2p Peer ID of the running node, or empty if not running.
 func GetPeerID() string {
+	if stopping.Load() {
+		return ""
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if instance != nil && instance.Host != nil {
@@ -576,6 +591,9 @@ func GetPeerID() string {
 // GetMultiaddrs returns all listening multiaddrs of the running node separated by newlines,
 // including the /p2p/<peerID> suffix. Returns empty string if node is not running.
 func GetMultiaddrs() string {
+	if stopping.Load() {
+		return ""
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if instance != nil && instance.Host != nil {
@@ -612,6 +630,11 @@ func getStatsJSONLocked() (out string) {
 			out = "{}"
 		}
 	}()
+	// During teardown the node is being torn down; return empty instead of
+	// blocking on mu behind a multi-second n.Close().
+	if stopping.Load() {
+		return "{}"
+	}
 	// Collect the snapshot under mu so Stop() cannot race with a mid-read
 	// node. GetResponse returns a value copy, so json.Marshal below is safe
 	// outside the lock and Stop() can finish its multi-second n.Close()

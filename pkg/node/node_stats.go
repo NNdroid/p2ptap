@@ -574,7 +574,7 @@ func (n *Node) updateWebCollectorState() {
 			addrMap[addr] = true
 			allAddrs = append(allAddrs, addr)
 		}
-		for _, a := range filterLoopbackAddrs(n.Host.Peerstore().Addrs(pID)) {
+		for _, a := range filterUndialableAddrs(n.Host.Peerstore().Addrs(pID)) {
 			s := a.String()
 			if activeBase != "" && s == activeBase {
 				// Same endpoint as the active addr, just missing the /p2p/<id> suffix.
@@ -1590,7 +1590,7 @@ func (n *Node) TestMultiaddrLatency(targetStr string) []observer.MultiaddrTestRe
 	// only reachable on THIS host, so listing/dialing them is meaningless and
 	// would mislead the operator. This is the receive-side guard that mirrors
 	// the broadcast-side filter in AddrsFactory.
-	peerstoreAddrs := filterLoopbackAddrs(n.Host.Peerstore().Addrs(pID))
+	peerstoreAddrs := filterUndialableAddrs(n.Host.Peerstore().Addrs(pID))
 
 	// Collect all unique multiaddrs: peerstore + current active connection + candidates.
 	seen := make(map[string]bool)

@@ -987,7 +987,10 @@ func expandListenAddr(addr multiaddr.Multiaddr) []multiaddr.Multiaddr {
 		expanded = append(expanded, newAddr)
 	}
 	if len(expanded) == 0 {
-		return []multiaddr.Multiaddr{addr}
+		// No physical NIC found: do NOT fall back to the wildcard address.
+		// libp2p resolves wildcards against ALL interfaces, including the
+		// TAP device, which would advertise fd00::/8 overlay addresses.
+		return nil
 	}
 	return expanded
 }
@@ -1077,6 +1080,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			}
 			return addrs
 		}),
+		libp2p.ConnectionGater(&overlayConnGater{}),
 	}
 
 	// Reachability: by default let AutoNAT auto-detect. A node with a public IP
@@ -1487,7 +1491,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			}
 		}
 		for _, pID := range h.Peerstore().Peers() {
-			for _, a := range filterLoopbackAddrs(h.Peerstore().Addrs(pID)) {
+			for _, a := range filterUndialableAddrs(h.Peerstore().Addrs(pID)) {
 				if ip, err := manet.ToIP(a); err == nil {
 					addIP(ip)
 				}
@@ -1532,7 +1536,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				return nil
 			}
 			var ips []string
-			for _, a := range filterLoopbackAddrs(h.Peerstore().Addrs(pid)) {
+			for _, a := range filterUndialableAddrs(h.Peerstore().Addrs(pid)) {
 				multiaddr.ForEach(a, func(c multiaddr.Component) bool {
 					if c.Protocol().Code == multiaddr.P_IP4 || c.Protocol().Code == multiaddr.P_IP6 {
 						ips = append(ips, c.Value())
@@ -3597,6 +3601,21 @@ func (n *Node) Close() error {
 	case <-wgDone:
 	case <-time.After(teardownWorkersTimeout):
 		log.Warn("Waiting for worker goroutines timed out after %s, forcing shutdown", teardownWorkersTimeout)
+	}
+	// Stop the stats collector's speed ticker so it doesn't keep ticking
+	// on a dead collector. Safe to call multiple times; idempotent.
+	if n.Collector != nil {
+		type stoppable interface{ Stop() }
+		if sc, ok := n.Collector.(stoppable); ok {
+			sc.Stop()
+		}
+	}
+	// Stop the interceptor's session sweeper goroutine.
+	type closable interface{ Close() error }
+	if n.Interceptor != nil {
+		if cf, ok := n.Interceptor.(closable); ok {
+			_ = cf.Close()
+		}
 	}
 	log.Info("Node stopped")
 	return nil

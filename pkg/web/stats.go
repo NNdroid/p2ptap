@@ -713,6 +713,11 @@ func (s *StatsCollector) GetResponse() StatsResponse {
 	// Roll throughput counters forward (brief write lock, mutations only).
 	s.tickSpeed(time.Now())
 
+	// Fetch ACL stats BEFORE the RLock: GetACLStats takes the same mutex,
+	// and a nested RLock on the same goroutine would deadlock if a writer
+	// holds the lock in between.
+	aclStats := s.GetACLStats()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -905,7 +910,7 @@ func (s *StatsCollector) GetResponse() StatsResponse {
 		Security:             s.Security,
 		System:               sysHealth,
 		SeqStats:             seqStats,
-		ACL:                  s.GetACLStats(),
+		ACL:                  aclStats,
 		Speed:                SpeedStatsDTO{TxBytesPerSec: txSpd, RxBytesPerSec: rxSpd},
 		SpeedHistory:         historyCopy,
 		SubnetRoutes:         subnetRoutes,

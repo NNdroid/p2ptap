@@ -406,6 +406,11 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 
 	// API Endpoint: /api/stats
 	mux.HandleFunc("/api/stats", s.authRequired(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rr := recover(); rr != nil {
+				http.Error(w, `{"error":"stats panic"}`, http.StatusInternalServerError)
+			}
+		}()
 		resp := collector.GetResponse()
 		writeJSON(w, resp)
 	}))

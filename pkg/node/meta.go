@@ -910,7 +910,7 @@ func (n *Node) considerDiscoveredBoot(pID peer.ID) {
 	}
 
 	if n.Host.Network().Connectedness(pID) != network.Connected {
-		addrs := filterLoopbackAddrs(n.Host.Peerstore().Addrs(pID))
+		addrs := filterUndialableAddrs(n.Host.Peerstore().Addrs(pID))
 		if len(addrs) == 0 {
 			// No usable endpoint yet; drop the marker so a later announcement
 			// carrying addresses can retry.
@@ -948,7 +948,7 @@ func (n *Node) considerDiscoveredPeer(pID peer.ID) {
 	if n.Host.Network().Connectedness(pID) == network.Connected {
 		return
 	}
-	addrs := filterLoopbackAddrs(n.Host.Peerstore().Addrs(pID))
+	addrs := filterUndialableAddrs(n.Host.Peerstore().Addrs(pID))
 	if relayAddrs := n.SynthesizeRelayCircuitAddrs(pID); len(relayAddrs) > 0 {
 		addrs = append(addrs, relayAddrs...)
 		n.Host.Peerstore().AddAddrs(pID, relayAddrs, peerstore.AddressTTL)
@@ -983,7 +983,7 @@ func (n *Node) localPeekMapNodeInfo() PeekMapNodeInfo {
 		// Publish our endpoints so peers that learn about us indirectly (through
 		// a boot, or across a federated boot backbone) can actually dial us.
 		// Loopback is not stripped here: the peerstore is a knowledge base and
-		// the dial paths already drop loopback (filterLoopbackAddrs), so
+		// the dial paths already drop loopback (filterUndialableAddrs), so
 		// filtering twice would only make single-machine setups untestable.
 		Addrs:    multiaddrsToStrings(n.Host.Addrs()),
 		ObfsAlgo: c.Obfuscation.Algorithm,

@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/libp2p/go-libp2p/core/control"
 	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multiaddr"
@@ -421,30 +423,36 @@ func IsVirtualIP(webUIIPStr, tapIPStr string) bool {
 
 func isTapMultiaddr(a multiaddr.Multiaddr, tapIPv4, tapIPv6, webUIPv4, webUIPv6 string) bool {
 	if ip4Str, err := a.ValueForProtocol(multiaddr.P_IP4); err == nil && ip4Str != "" {
-		if tapIPv4 != "" {
-			cleanTapIPv4, _, _ := strings.Cut(tapIPv4, "/")
-			if ip4Str == cleanTapIPv4 {
-				return true
+		ip4 := net.ParseIP(ip4Str)
+		if ip4 != nil {
+			if tapIPv4 != "" {
+				_, tapCIDR4, err := net.ParseCIDR(tapIPv4)
+				if err == nil && tapCIDR4.Contains(ip4) {
+					return true
+				}
 			}
-		}
-		if webUIPv4 != "" && webUIPv4 != "0.0.0.0" && webUIPv4 != "127.0.0.1" && webUIPv4 != "auto" {
-			cleanWebUIPv4, _, _ := strings.Cut(webUIPv4, "/")
-			if ip4Str == cleanWebUIPv4 {
-				return true
+			if webUIPv4 != "" && webUIPv4 != "0.0.0.0" && webUIPv4 != "127.0.0.1" && webUIPv4 != "auto" {
+				cleanWebUIPv4, _, _ := strings.Cut(webUIPv4, "/")
+				if ip4Str == cleanWebUIPv4 {
+					return true
+				}
 			}
 		}
 	}
 	if ip6Str, err := a.ValueForProtocol(multiaddr.P_IP6); err == nil && ip6Str != "" {
-		if tapIPv6 != "" {
-			cleanTapIPv6, _, _ := strings.Cut(tapIPv6, "/")
-			if ip6Str == cleanTapIPv6 {
-				return true
+		ip6 := net.ParseIP(ip6Str)
+		if ip6 != nil {
+			if tapIPv6 != "" {
+				_, tapCIDR6, err := net.ParseCIDR(tapIPv6)
+				if err == nil && tapCIDR6.Contains(ip6) {
+					return true
+				}
 			}
-		}
-		if webUIPv6 != "" && webUIPv6 != "::" && webUIPv6 != "auto" {
-			cleanWebUIPv6, _, _ := strings.Cut(webUIPv6, "/")
-			if ip6Str == cleanWebUIPv6 {
-				return true
+			if webUIPv6 != "" && webUIPv6 != "::" && webUIPv6 != "auto" {
+				cleanWebUIPv6, _, _ := strings.Cut(webUIPv6, "/")
+				if ip6Str == cleanWebUIPv6 {
+					return true
+				}
 			}
 		}
 	}
@@ -499,6 +507,65 @@ func filterLoopbackAddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 		filtered = append(filtered, a)
 	}
 	return filtered
+}
+
+// isOverlayMultiaddr reports whether the multiaddr's IP falls inside p2ptap's
+// TAP/mesh overlay ranges (10.0.0.0/8, 172.16.0.0/12, fd00::/8).  These
+// addresses are routed through the virtual TAP tunnel; dialing them directly
+// creates a libp2p-over-TAP-over-libp2p recursion loop.
+func isOverlayMultiaddr(a multiaddr.Multiaddr) bool {
+	ip, err := manet.ToIP(a)
+	if err != nil {
+		return false
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4[0] == 10 || (ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31)
+	}
+	if ip16 := ip.To16(); ip16 != nil {
+		return ip16[0] == 0xfd
+	}
+	return false
+}
+
+// filterUndialableAddrs drops loopback AND overlay multiaddrs.  It is the
+// receive-side counterpart to filterAdvertisedAddrs: even if a peer
+// advertises a TAP-local address (because its AddrsFactory is not deployed
+// or its peerstore carries a stale entry), we must never dial it — that
+// would route the connection back through our own tunnel.
+func filterUndialableAddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
+	if len(addrs) == 0 {
+		return addrs
+	}
+	filtered := make([]multiaddr.Multiaddr, 0, len(addrs))
+	for _, a := range addrs {
+		if manet.IsIPLoopback(a) {
+			continue
+		}
+		if isOverlayMultiaddr(a) {
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	return filtered
+}
+
+// overlayConnGater is a libp2p.ConnectionGater that rejects any dial to an
+// overlay (TAP/mesh) address — 10.0.0.0/8, 172.16.0.0/12, fd00::/8.  Without
+// this, libp2p's internal dial paths (DHT, AutoRelay, DCUtR, hole punching)
+// would happily connect to a peer's TAP address, routing traffic back
+// through our own tunnel and creating a recursion loop.
+type overlayConnGater struct{}
+
+func (g *overlayConnGater) InterceptPeerDial(peer.ID) bool                         { return true }
+func (g *overlayConnGater) InterceptAddrDial(pid peer.ID, a multiaddr.Multiaddr) bool {
+	return !isOverlayMultiaddr(a)
+}
+func (g *overlayConnGater) InterceptAccept(cm network.ConnMultiaddrs) bool          { return true }
+func (g *overlayConnGater) InterceptSecured(network.Direction, peer.ID, network.ConnMultiaddrs) bool {
+	return true
+}
+func (g *overlayConnGater) InterceptUpgraded(network.Conn) (bool, control.DisconnectReason) {
+	return true, 0
 }
 
 func (n *Node) isLocalWebUIVirtualPacket(payload []byte) bool {

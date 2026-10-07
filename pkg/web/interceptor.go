@@ -142,6 +142,8 @@ type TAPInterceptor struct {
 	htmlDashboard []byte
 	bufferPool    sync.Pool
 	workerPool    *httpWorkerPool // bounded goroutine pool for HTTP request processing
+	done          chan struct{}    // closed on Close() to stop background goroutines
+	closeOnce     sync.Once
 }
 
 func NewTAPInterceptor(virtualIP4Str string, virtualIP6Str string, port int, collector *StatsCollector, cfg *config.Config, configPath string) *TAPInterceptor {
@@ -174,7 +176,8 @@ func NewTAPInterceptor(virtualIP4Str string, virtualIP6Str string, port int, col
 		collector:     collector,
 		configPath:    configPath,
 		htmlDashboard: htmlData,
-		workerPool:    newHTTPWorkerPool(8),
+		workerPool:    newHTTPWorkerPool(16),
+		done:          make(chan struct{}),
 		bufferPool: sync.Pool{
 			New: func() interface{} {
 				b := make([]byte, 16384)
@@ -1322,14 +1325,27 @@ func (it *TAPInterceptor) cleanStaleSessionsLoop() {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		nowSec := time.Now().Unix()
-		it.sessions.Range(func(key, value interface{}) bool {
-			sess := value.(*tcpSession)
-			if nowSec-atomic.LoadInt64(&sess.lastActive) > 30 {
-				it.dropSession(key.(string))
-			}
-			return true
-		})
+	for {
+		select {
+		case <-it.done:
+			return
+		case <-ticker.C:
+			nowSec := time.Now().Unix()
+			it.sessions.Range(func(key, value interface{}) bool {
+				sess := value.(*tcpSession)
+				if nowSec-atomic.LoadInt64(&sess.lastActive) > 30 {
+					it.dropSession(key.(string))
+				}
+				return true
+			})
+		}
 	}
+}
+
+// Close stops the interceptor's background goroutines.
+func (it *TAPInterceptor) Close() error {
+	it.closeOnce.Do(func() {
+		close(it.done)
+	})
+	return nil
 }
