@@ -1,17 +1,17 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=p2ptap
-PKG_VERSION:=1.0.20261006.68
+PKG_VERSION:=1.0.20261007.77
 # Keep the complete upstream version in the binary; APK metadata is numeric.
-P2PTAP_VERSION:=v1.0.20261006.68-de1efb4
-P2PTAP_GIT_COMMIT:=de1efb40c7ba8e398a5b6637a1b50af6863a2ca5
+P2PTAP_VERSION:=v1.0.20261007.77-a27726a
+P2PTAP_GIT_COMMIT:=a27726af6f4b7819d398ec57648a347952ce637c
 # SDKs without a Git checkout receive this value through the build scripts.
 P2PTAP_PKG_RELEASE?=$(shell git rev-list --count HEAD 2>/dev/null)
-PKG_RELEASE:=68
+PKG_RELEASE:=77
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/NNdroid/p2ptap.git
-PKG_SOURCE_VERSION:=de1efb40c7ba8e398a5b6637a1b50af6863a2ca5
+PKG_SOURCE_VERSION:=a27726af6f4b7819d398ec57648a347952ce637c
 PKG_MIRROR_HASH:=skip
 
 PKG_MAINTAINER:=p2ptap developers
