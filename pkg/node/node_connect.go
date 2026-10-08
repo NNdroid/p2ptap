@@ -205,16 +205,27 @@ func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 	// Compute auth token: SHA-256("p2ptap-relay-auth:" + PSK)
 	token := sha256.Sum256([]byte("p2ptap-relay-auth:" + n.Config.PSK))
 
+	// Set a read deadline BEFORE any read. Without this, if the boot accepts
+	// the stream but never replies (stale boot, mid-restart), the goroutine
+	// hangs forever while holding relayAuthInProgress[pID] — which permanently
+	// suppresses every future auth attempt for that boot. The 5s deadline is
+	// generous: auth completes in milliseconds on a healthy boot.
+	_ = s.SetReadDeadline(time.Now().Add(5 * time.Second))
+
 	// Send 32-byte auth token, then our version/capability record. An OLD boot
 	// simply ignores the trailing record; a NEW boot reads it and replies with
 	// its own record so we can reject envelope/commit mismatches up-front
 	// (the historical 0x8000 "proto field len 32768" silent-corruption bug).
 	if _, err := s.Write(token[:]); err != nil {
-		log.Debug("Relay auth write failed for peer %s: %v", peerID.String(), err)
+		log.Warn("Relay auth write failed for peer %s: %v", peerID.String(), err)
 		return false
 	}
 	if err := version.CurrentRecord().WriteRecord(s); err != nil {
-		log.Debug("Relay auth version write failed for peer %s: %v", peerID.String(), err)
+		if !isRefresh {
+			log.Warn("Relay auth version write failed for peer %s: %v", peerID.String(), err)
+		} else {
+			log.Debug("Relay auth version write failed for peer %s (refresh): %v", peerID.String(), err)
+		}
 		return false
 	}
 	// 32-byte token (+ a small version record). Attribute to the Auth channel so
@@ -838,7 +849,10 @@ func (n *Node) pingPongProbePeer(pid peer.ID) {
 
 // dialLimiter caps concurrent in-flight dials so a discovery/mDNS burst cannot
 // turn into a connection storm (each dial also connects to every bootstrap relay).
-var dialLimiter = make(chan struct{}, 16)
+// 32 concurrent dials (up from 16) lets a DHT round that surfaces ~100 peers
+// drain in ~10s instead of ~40s. Each dial still races direct vs relay under
+// a 10s deadline, and the dialingDone coalescing guard drops duplicates.
+var dialLimiter = make(chan struct{}, 32)
 
 // directRaceGracePeriod is how long dialInParallel keeps waiting for the direct
 // dial after the relay race has already succeeded. Relay circuits usually win
@@ -1263,6 +1277,7 @@ func (n *Node) ensureRelayAuth(pi peer.AddrInfo) {
 	}()
 
 	if !n.authenticateWithRelay(pi.ID, false) {
+		log.Warn("PSK auth with bootstrap %s failed — relay access and discovery denied, boot-relay uplink NOT opened", pi.ID.ShortString())
 		// PSK mismatch (or transport failure): do not open the boot-relay
 		// uplink — the boot would drop our frames anyway.
 		return
