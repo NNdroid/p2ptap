@@ -130,26 +130,32 @@ func (s *bootRelayCtrlStream) Read(p []byte) (int, error) {
 			return n, nil
 		}
 		var timerCh <-chan time.Time
+		var timer *time.Timer
 		if !s.readDeadline.IsZero() {
 			d := time.Until(s.readDeadline)
 			if d <= 0 {
 				s.mu.Unlock()
 				return 0, errBootRelayCtrlDeadline
 			}
-			t := time.NewTimer(d)
-			defer t.Stop()
-			timerCh = t.C
+			timer = time.NewTimer(d)
+			timerCh = timer.C
 		}
 		ch := s.readCh
 		closeCh := s.closeCh
 		s.mu.Unlock()
 		select {
 		case frame := <-ch:
+			if timer != nil {
+				timer.Stop()
+			}
 			s.mu.Lock()
 			s.readBuf = frame
 			s.mu.Unlock()
 			// loop to hand bytes to the caller
 		case <-closeCh:
+			if timer != nil {
+				timer.Stop()
+			}
 			// re-check closed/readBuf at loop top
 		case <-timerCh:
 			return 0, errBootRelayCtrlDeadline
