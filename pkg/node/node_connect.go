@@ -503,7 +503,12 @@ func (n *Node) triggerThrottledReconnect(pid peer.ID) {
 
 	log.Warn("Send failure to peer %s detected, triggering automatic hole-punching / reconnection...", pid.String())
 	n.Dispatcher.RemovePeer(pid)
-	n.reconnectPeer(pid)
+	// reconnectPeer performs several synchronous libp2p operations (ClosePeer,
+	// Clear backoff, SynthesizeRelayCircuitAddrs) that hold internal network
+	// locks. Running it in the dispatch worker would block that worker for the
+	// duration, starving healthy peers. The 5s cooldown above bounds the
+	// goroutine count to one per peer per 5s.
+	go n.reconnectPeer(pid)
 }
 
 // triggerOnDemandConnect triggers active connection or re-keying when egress traffic

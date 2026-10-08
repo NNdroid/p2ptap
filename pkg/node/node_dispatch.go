@@ -46,11 +46,11 @@ const dispatchDropWarnThreshold = 10
 // Absorb short scheduler/GC stalls before dropping a bounded queue's payload.
 // The previous 5ms grace lost frames during otherwise healthy bulk flows.
 // Sustained congestion still has a finite wait and cannot grow queue memory.
-const dispatchBurstGrace = 25 * time.Millisecond
+const dispatchBurstGrace = 100 * time.Millisecond
 
 // Peer-egress stall circuit-breaker.
 //
-// A stream write to a wedged/slow peer blocks for the full 5s write deadline
+// A stream write to a wedged/slow peer blocks for the full 2.5s write deadline
 // (see writeFragsToStreams). dispatchWorkerCount == NumCPU, so a handful of
 // wedged peers can pin EVERY worker and stall egress for perfectly healthy
 // peers — the failure looks like "the whole mesh went slow" when only one link
@@ -265,7 +265,9 @@ func (n *Node) dispatchWorker(id int) {
 						data := batch[0]
 						origLen := tasks[0].origLen
 						owned := tasks[0].owned
-						if err := n.Dispatcher.SendToPeer(n.ctx, target, data); err != nil {
+						uctx, ucancel := context.WithTimeout(n.ctx, 3*time.Second)
+						if err := n.Dispatcher.SendToPeer(uctx, target, data); err != nil {
+							ucancel()
 							// A write deadline hit means the link is wedged:
 							// arm the stall breaker so the NEXT queued frame for
 							// this peer does not cost another worker the full
@@ -277,12 +279,14 @@ func (n *Node) dispatchWorker(id int) {
 						} else {
 							n.Collector.RecordSent(origLen)
 						}
+						ucancel()
 						if owned {
 							releaseFrameBuf(data)
 						}
 						batch[0] = nil
 					} else {
-						if err := n.Dispatcher.SendBatchToPeer(n.ctx, target, batch); err != nil {
+						uctx, ucancel := context.WithTimeout(n.ctx, 3*time.Second)
+						if err := n.Dispatcher.SendBatchToPeer(uctx, target, batch); err != nil {
 							n.notePeerSendError(target, err)
 							log.Debug("Tx batched unicast send error to peer %s (n=%d): %v",
 								target.String(), len(batch), err)
@@ -292,14 +296,15 @@ func (n *Node) dispatchWorker(id int) {
 								n.Collector.RecordSent(t.origLen)
 							}
 						}
-						for i, t := range tasks {
-							if t.owned {
-								releaseFrameBuf(batch[i])
-							}
-							batch[i] = nil
+					ucancel()
+					for i, t := range tasks {
+						if t.owned {
+							releaseFrameBuf(batch[i])
 						}
+						batch[i] = nil
 					}
-				case 1: // broadcast — executed directly by worker
+					}
+					case 1: // broadcast — executed directly by worker
 					// Broadcast fans out one L2 frame to N peers; count TX once per task.
 					if len(tasks) == 1 {
 						data := tasks[0].data
@@ -341,7 +346,10 @@ func (n *Node) dispatchWorker(id int) {
 									releaseFrameBuf(t.data)
 								}
 							},
-							// onFail: non-blocking fallback to direct unicast
+							// onFail: non-blocking fallback to direct unicast,
+							// rate-limited by relayFallbackSem so a single
+							// drainAll (up to 128 jobs) cannot spawn 128
+							// concurrent SendToPeer goroutines.
 							func() {
 								if n.peerStalled(t.target) {
 									if owned {
@@ -349,16 +357,24 @@ func (n *Node) dispatchWorker(id int) {
 									}
 									return
 								}
-								go func() {
-									ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
-									defer cancel()
-									if derr := n.Dispatcher.SendToPeer(ctx, t.target, t.data); derr == nil {
-										n.Collector.RecordSent(t.origLen)
-									}
+								select {
+								case n.relayFallbackSem <- struct{}{}:
+									go func() {
+										<-n.relayFallbackSem
+										ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
+										defer cancel()
+										if derr := n.Dispatcher.SendToPeer(ctx, t.target, t.data); derr == nil {
+											n.Collector.RecordSent(t.origLen)
+										}
+										if owned {
+											releaseFrameBuf(t.data)
+										}
+									}()
+								default:
 									if owned {
 										releaseFrameBuf(t.data)
 									}
-								}()
+								}
 							},
 						)
 					}
@@ -477,22 +493,30 @@ func (n *Node) sendDispatchTask(task dispatchTask) {
 				}
 			},
 			func() {
-				if n.peerStalled(task.target) {
-					if owned {
-						releaseFrameBuf(task.data)
-					}
-					return
+			if n.peerStalled(task.target) {
+				if owned {
+					releaseFrameBuf(task.data)
 				}
-				go func() {
-					ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
-					defer cancel()
-					if derr := n.Dispatcher.SendToPeer(ctx, task.target, task.data); derr == nil {
-						n.Collector.RecordSent(task.origLen)
-					}
+				return
+			}
+				select {
+				case n.relayFallbackSem <- struct{}{}:
+					go func() {
+						<-n.relayFallbackSem
+						ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
+						defer cancel()
+						if derr := n.Dispatcher.SendToPeer(ctx, task.target, task.data); derr == nil {
+							n.Collector.RecordSent(task.origLen)
+						}
+						if owned {
+							releaseFrameBuf(task.data)
+						}
+					}()
+				default:
 					if owned {
 						releaseFrameBuf(task.data)
 					}
-				}()
+				}
 			},
 		)
 	}

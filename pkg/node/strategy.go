@@ -96,6 +96,13 @@ func (ps *PeerStreams) rebuildLocked() {
 func (ps *PeerStreams) AddStream(transportName string, s network.Stream) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	// A concurrent openStream may produce a new stream for the same transport
+	// while the old one is still open (and still has a read goroutine).
+	// Closing the old stream here prevents leaked streams and goroutines that
+	// accumulate during connection churn.
+	if old, ok := ps.streams[transportName]; ok && old != s {
+		old.Close()
+	}
 	ps.streams[transportName] = s
 	ps.rebuildLocked()
 	log.Debug("Stream registered for peer %s via %s (total: %d streams)", ps.peerID.String(), transportName, len(ps.streams))
@@ -215,7 +222,11 @@ func (sd *StrategyDispatcher) GetOrCreatePeerStreams(pID peer.ID) *PeerStreams {
 // outgoingStreamHandler (handleStream), which processes inbound frames.
 func (sd *StrategyDispatcher) PrimeStream(pID peer.ID) {
 	go func() {
-		ps, s, err := sd.openStream(context.Background(), pID)
+		ctx := context.Background()
+		if sd.node != nil {
+			ctx = sd.node.ctx
+		}
+		ps, s, err := sd.openStream(ctx, pID)
 		if err != nil {
 			log.Debug("PrimeStream to peer %s failed (will open lazily on first frame): %v", pID.ShortString(), err)
 			return
@@ -1179,15 +1190,32 @@ func collectBroadcastPeers(sd *StrategyDispatcher) map[peer.ID]bool {
 	self := sd.h.ID()
 
 	// Phase 1: peers that already have active P2P streams.
+	// Copy the peer set under peersMu, then check Connectedness OUTSIDE the
+	// lock — libp2p's Connectedness acquires its own network lock, and holding
+	// peersMu across that call creates a peersMu→network lock order that blocks
+	// every unicast SendToPeer (GetPeerStreams / GetOrCreatePeerStreams /
+	// RemovePeer) during broadcast storms (ARP/NDP floods are common in VPNs).
 	sd.peersMu.Lock()
+	mapCopy := make([]peer.ID, 0, len(sd.peerMap))
 	for pID := range sd.peerMap {
+		mapCopy = append(mapCopy, pID)
+	}
+	sd.peersMu.Unlock()
+	var stalePeers []peer.ID
+	for _, pID := range mapCopy {
 		if sd.h.Network().Connectedness(pID) == network.Connected {
 			peerIDs[pID] = true
 		} else {
-			delete(sd.peerMap, pID)
+			stalePeers = append(stalePeers, pID)
 		}
 	}
-	sd.peersMu.Unlock()
+	if len(stalePeers) > 0 {
+		sd.peersMu.Lock()
+		for _, pID := range stalePeers {
+			delete(sd.peerMap, pID)
+		}
+		sd.peersMu.Unlock()
+	}
 
 	// Phase 2: peers that are connected but haven't opened a stream yet,
 	// provided they support the P2P TAP protocol (excludes bootstrap/crawlers).

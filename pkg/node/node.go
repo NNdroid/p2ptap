@@ -185,6 +185,12 @@ type Node struct {
 	// in the TAP-to-P2P forwarding path (was root cause of 75% ICMP packet loss).
 	dispatchCh        chan dispatchTask
 	dispatchDropCount uint64 // atomic: number of frames dropped due to full channel
+	// relayFallbackSem bounds concurrent relay-onFail fallback goroutines.
+	// A single drainAll can trigger up to relayPoolMaxQueue (128) onFail calls,
+	// each of which would otherwise spawn an unbounded goroutine that calls
+	// SendToPeer. Four concurrent fallbacks is enough to cover normal burst
+	// recovery without starving dispatch workers; excess frames are dropped.
+	relayFallbackSem chan struct{}
 
 	// ACL hit/drop counters — see acl_stats.go. nil when the firewall is
 	// disabled (NewNodeWithTAP always initialises one for consistency, but
@@ -1367,6 +1373,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		directConnected:     make(map[peer.ID]bool),
 		aclStats:            newACLStats(),
 		dispatchCh:          make(chan dispatchTask, 8192), // bounded buffer: 8192 frames for high-throughput scaling
+		relayFallbackSem:    make(chan struct{}, 4),       // bounds concurrent relay fallback goroutines
 		tapWriteCh:          make(chan tapWriteJob, 2048),  // pooled overlay->TAP write queue (~4 MiB at 2K/frame)
 		urgentWriteCh:       make(chan []byte, 64),         // urgent TAP-inject queue (diagnostics)
 		urgentDispatchCh:    make(chan dispatchTask, 64),   // urgent SEND queue (symmetric to receive)

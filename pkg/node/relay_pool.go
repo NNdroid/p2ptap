@@ -462,7 +462,13 @@ func (rc *relayConn) ensureStream(backoff *time.Duration) bool {
 			continue
 		}
 
-		s, err := rc.host.NewStream(rc.ctx, rc.peer, OverlayRelayProtocolID)
+		// Cap the NewStream call at 3s. Without a deadline, libp2p falls
+		// back to its default of 15s, which blocks this writeLoop goroutine
+		// (and every queued frame for this hop) for the full dial timeout
+		// on each reconnect attempt.
+		nsCtx, nsCancel := context.WithTimeout(rc.ctx, 3*time.Second)
+		s, err := rc.host.NewStream(nsCtx, rc.peer, OverlayRelayProtocolID)
+		nsCancel()
 		if err == nil {
 			rc.mu.Lock()
 			rc.stream = s
