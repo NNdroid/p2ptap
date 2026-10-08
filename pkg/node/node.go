@@ -1901,6 +1901,14 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 					node.metaPool.Invalidate(pID)
 					node.echoPool.Invalidate(pID)
 				}
+
+				// Prime the application-level ProtocolID stream so the first
+				// TAP frame never blocks on a lazy NewStream (100ms-3s). The
+				// stream is opened in the background; if it fails, the first
+				// frame falls back to the lazy openStream path.
+				if !node.isBootstrapPeer(pID) {
+					node.Dispatcher.PrimeStream(pID)
+				}
 			}
 
 			// ── Bootstrap peer: PSK auth then peek-map. Stop here. ──────────

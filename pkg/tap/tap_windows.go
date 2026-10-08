@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -622,19 +621,28 @@ func (w *WindowsTAPDevice) ConfigureIP(ipCIDR string, ipv6CIDR string) error {
 		ipif6.WeakHostSend = true
 		_ = ipif6.Set()
 	}
-	_ = exec.Command("netsh", "interface", "ipv4", "set", "interface", "name="+w.name, "metric=1", "forwarding=enabled", "weakhostreceive=enabled", "weakhostsend=enabled").Run()
-	_ = exec.Command("netsh", "interface", "ipv6", "set", "interface", "name="+w.name, "metric=1", "forwarding=enabled", "weakhostreceive=enabled", "weakhostsend=enabled").Run()
 
-	// Ensure IPv4 subnet route is explicitly added so Windows knows to reach same-subnet peers via TAP
+	// Batch all netsh commands into a single process (netsh /f script.txt)
+	// instead of spawning N separate subprocesses.
+	var netshCmds []string
+	netshCmds = append(netshCmds,
+		fmt.Sprintf("interface ipv4 set interface name=%s metric=1 forwarding=enabled weakhostreceive=enabled weakhostsend=enabled", w.name),
+		fmt.Sprintf("interface ipv6 set interface name=%s metric=1 forwarding=enabled weakhostreceive=enabled weakhostsend=enabled", w.name),
+	)
 	if ipCIDR != "" {
 		if ip, ipNet, err := net.ParseCIDR(ipCIDR); err == nil {
 			networkIP := ip.Mask(ipNet.Mask)
 			prefixLen, _ := ipNet.Mask.Size()
 			routePrefix := fmt.Sprintf("%s/%d", networkIP.String(), prefixLen)
-			winTapLog.Info("Adding IPv4 subnet route %s on Windows TAP '%s' via netsh...", routePrefix, w.name)
-			_ = exec.Command("netsh", "interface", "ipv4", "delete", "route", routePrefix, "interface="+w.name).Run()
-			_ = exec.Command("netsh", "interface", "ipv4", "add", "route", routePrefix, "interface="+w.name, "metric=1", "publish=yes").Run()
+			winTapLog.Info("Adding IPv4 subnet route %s on Windows TAP '%s'...", routePrefix, w.name)
+			netshCmds = append(netshCmds,
+				fmt.Sprintf("interface ipv4 delete route %s interface=%s", routePrefix, w.name),
+				fmt.Sprintf("interface ipv4 add route %s interface=%s metric=1 publish=yes", routePrefix, w.name),
+			)
 		}
+	}
+	if err := batchNetsh(netshCmds...); err != nil {
+		winTapLog.Warn("batchNetsh (interface/route) failed: %v", err)
 	}
 
 	winTapLog.Info("Windows TAP '%s' configured: IPv4=%s IPv6=%s", w.name, ipCIDR, ipv6CIDR)
@@ -646,9 +654,11 @@ func addWindowsFirewallRule(name string, isIPv6 bool) {
 	if isIPv6 {
 		proto = "icmpv6"
 	}
-	// Always run netsh deletion and addition with profile=any to ensure Public/Private/Domain allow
-	_ = exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+name).Run()
-	_ = exec.Command("netsh", "advfirewall", "firewall", "add", "rule", "name="+name, "dir=in", "action=allow", "protocol="+proto, "profile=any").Run()
+	// Batch the two netsh commands into a single process.
+	_ = batchNetsh(
+		fmt.Sprintf("advfirewall firewall delete rule name=%s", name),
+		fmt.Sprintf("advfirewall firewall add rule name=%s dir=in action=allow protocol=%s profile=any", name, proto),
+	)
 
 	ole.CoInitialize(0)
 	defer ole.CoUninitialize()

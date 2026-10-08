@@ -5,6 +5,7 @@ package tap
 import (
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -26,6 +27,37 @@ func runNetsh(args ...string) error {
 		return fmt.Errorf("netsh %s: %w", strings.Join(args, " "), err)
 	}
 	return fmt.Errorf("netsh %s: %w: %s", strings.Join(args, " "), err, detail)
+}
+
+// batchNetsh runs multiple netsh subcommands in a SINGLE process using
+// `netsh /f script.txt`. Each line is one netsh command (without the "netsh"
+// prefix). This eliminates N-1 subprocess spawns that would otherwise add
+// hundreds of milliseconds to TAP setup on Windows.
+func batchNetsh(commands ...string) error {
+	if len(commands) == 0 {
+		return nil
+	}
+	content := strings.Join(commands, "\n")
+	f, err := os.CreateTemp("", "p2ptap-netsh-*.txt")
+	if err != nil {
+		return fmt.Errorf("batchNetsh create temp file: %w", err)
+	}
+	path := f.Name()
+	defer os.Remove(path)
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		return fmt.Errorf("batchNetsh write temp file: %w", err)
+	}
+	f.Close()
+	out, err := exec.Command("netsh", "/f", path).CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	detail := strings.TrimSpace(string(out))
+	if detail == "" {
+		return fmt.Errorf("batchNetsh: %w", err)
+	}
+	return fmt.Errorf("batchNetsh: %w: %s", err, detail)
 }
 
 // waitForWindowsInterfaceAddress waits until the address is observable on the
@@ -64,6 +96,6 @@ func waitForWindowsInterfaceAddress(ifName, ipStr string) error {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("Windows did not install %s on interface %q within %s: %w", expected, ifName, windowsAddressSettleTimeout, lastErr)
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 	}
 }

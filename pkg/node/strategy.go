@@ -209,6 +209,22 @@ func (sd *StrategyDispatcher) GetOrCreatePeerStreams(pID peer.ID) *PeerStreams {
 	return ps
 }
 
+// PrimeStream opens a ProtocolID stream to a peer in the background so the
+// first TAP frame never waits on a lazy NewStream. Called from ConnectedF.
+// If a stream is already open, this is a no-op. The stream is read by
+// outgoingStreamHandler (handleStream), which processes inbound frames.
+func (sd *StrategyDispatcher) PrimeStream(pID peer.ID) {
+	go func() {
+		ps, s, err := sd.openStream(context.Background(), pID)
+		if err != nil {
+			log.Debug("PrimeStream to peer %s failed (will open lazily on first frame): %v", pID.ShortString(), err)
+			return
+		}
+		_ = ps // already registered by openStream
+		_ = s  // already handled by outgoingStreamHandler
+	}()
+}
+
 func (sd *StrategyDispatcher) RegisterStream(pID peer.ID, transportName string, s network.Stream) {
 	ps := sd.GetOrCreatePeerStreams(pID)
 	ps.AddStream(transportName, s)

@@ -444,7 +444,7 @@ func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, pack
 			}
 			// Direct-path fallback copy MUST stay the PLAINTEXT packed frame;
 			// SendToPeer applies its own per-peer seal.
-			fallbackCopy := make([]byte, len(packedCopy))
+			fallbackCopy := acquireFrameBuf(len(packedCopy))
 			copy(fallbackCopy, packedCopy)
 			n.dispatchNonblocking(dispatchTask{
 				kind:      2,
@@ -453,6 +453,7 @@ func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, pack
 				data:      fallbackCopy,
 				relayData: sealed,
 				origLen:   readN,
+				owned:     true,
 			})
 			releaseFrameBuf(packedCopy)
 			return
@@ -843,7 +844,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 			// here made that fallback double-encrypt it, and the destination — which
 			// opens exactly once — dropped every such frame. Taking the copy BEFORE
 			// any sealing keeps the two paths independent and correct.
-			fallbackCopy := make([]byte, totalLen)
+			fallbackCopy := acquireFrameBuf(totalLen)
 			copy(fallbackCopy, packedCopy)
 
 			// END-TO-END seal: the inner payload is encrypted for targetPeer so the
@@ -859,6 +860,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 					log.Warn("Tx overlay relay: end-to-end seal for %s failed: %v (frame dropped rather than sent in plaintext)",
 						targetPeer.String(), eerr)
 					releaseFrameBuf(packedCopy)
+					releaseFrameBuf(fallbackCopy)
 					return true
 				}
 				inner = enc
@@ -875,6 +877,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 					dstMAC:  dstMAC,
 					data:    fallbackCopy,
 					origLen: readN,
+					owned:   true,
 				})
 			} else if sealed, serr := n.sealRelayEnvelopeForHop(route.NextHop, relayBuf); serr != nil {
 				log.Warn("Tx overlay relay: hop seal via %s failed: %v; dispatching plaintext packed fallback", route.NextHop.String(), serr)
@@ -884,6 +887,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 					dstMAC:  dstMAC,
 					data:    fallbackCopy,
 					origLen: readN,
+					owned:   true,
 				})
 			} else {
 				n.dispatchNonblocking(dispatchTask{
@@ -893,6 +897,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 					data:      fallbackCopy,
 					relayData: sealed,
 					origLen:   readN,
+					owned:     true,
 				})
 			}
 			// packedCopy is still the ORIGINAL pooled slice (the seals above wrote

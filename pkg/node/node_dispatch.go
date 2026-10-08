@@ -329,6 +329,7 @@ func (n *Node) dispatchWorker(id int) {
 				case 2: // relay — persistent pool per relayHop (eliminates per-frame stream open)
 					for _, t := range tasks {
 						t := t
+						owned := t.owned
 						n.relayPool.Submit(t.relayHop, t.relayData,
 							// onSent: track one logical TAP payload at the origin.
 							// Relay envelope and encryption bytes stay in protocol
@@ -336,10 +337,16 @@ func (n *Node) dispatchWorker(id int) {
 							func() {
 								n.recordPeerTxBytes(t.target, t.origLen)
 								n.Collector.RecordSent(t.origLen)
+								if owned {
+									releaseFrameBuf(t.data)
+								}
 							},
 							// onFail: non-blocking fallback to direct unicast
 							func() {
 								if n.peerStalled(t.target) {
+									if owned {
+										releaseFrameBuf(t.data)
+									}
 									return
 								}
 								go func() {
@@ -347,6 +354,9 @@ func (n *Node) dispatchWorker(id int) {
 									defer cancel()
 									if derr := n.Dispatcher.SendToPeer(ctx, t.target, t.data); derr == nil {
 										n.Collector.RecordSent(t.origLen)
+									}
+									if owned {
+										releaseFrameBuf(t.data)
 									}
 								}()
 							},
@@ -457,13 +467,20 @@ func (n *Node) sendDispatchTask(task dispatchTask) {
 			releaseFrameBuf(data)
 		}
 	case 2: // relay
+		owned := task.owned
 		n.relayPool.Submit(task.relayHop, task.relayData,
 			func() {
 				n.recordPeerTxBytes(task.target, task.origLen)
 				n.Collector.RecordSent(task.origLen)
+				if owned {
+					releaseFrameBuf(task.data)
+				}
 			},
 			func() {
 				if n.peerStalled(task.target) {
+					if owned {
+						releaseFrameBuf(task.data)
+					}
 					return
 				}
 				go func() {
@@ -471,6 +488,9 @@ func (n *Node) sendDispatchTask(task dispatchTask) {
 					defer cancel()
 					if derr := n.Dispatcher.SendToPeer(ctx, task.target, task.data); derr == nil {
 						n.Collector.RecordSent(task.origLen)
+					}
+					if owned {
+						releaseFrameBuf(task.data)
 					}
 				}()
 			},
