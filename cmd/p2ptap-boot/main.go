@@ -441,6 +441,11 @@ func (f *pskACLFilter) IsAuthenticated(p peer.ID) bool {
 // process of completing its PSK authentication stream (/p2ptap/auth/1.0.0).
 // This eliminates false-positive relay_denied races where a peer attempts to
 // reserve or connect milliseconds before the remote peer's auth stream finishes.
+//
+// With the auth-stall fix (handleAuthStream replies 0x01 before reading the
+// version record), authentication completes in milliseconds, so these waits
+// are short. The 200ms timeout is more than enough for the auth stream to
+// complete; longer timeouts only add latency to the relay hot path.
 func (f *pskACLFilter) waitForAuth(p peer.ID, timeout time.Duration) {
 	f.mu.RLock()
 	h := f.host
@@ -449,7 +454,7 @@ func (f *pskACLFilter) waitForAuth(p peer.ID, timeout time.Duration) {
 	if h != nil && h.Network().Connectedness(p) == network.Connected {
 		deadline := time.Now().Add(timeout)
 		for time.Now().Before(deadline) {
-			time.Sleep(40 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 			if f.IsAuthenticated(p) {
 				return
 			}
@@ -475,7 +480,7 @@ func (f *pskACLFilter) AllowReserve(p peer.ID, a multiaddr.Multiaddr) bool {
 		return true
 	}
 	if !f.IsAuthenticated(p) {
-		f.waitForAuth(p, 2*time.Second)
+		f.waitForAuth(p, 200*time.Millisecond)
 	}
 	authed := f.IsAuthenticated(p)
 	log.Debug("[acl] relay reserve %s for peer %s (addr: %s)", boolToAllow(authed), p.String(), a.String())
@@ -515,7 +520,7 @@ func (f *pskACLFilter) AllowConnect(src peer.ID, srcAddr multiaddr.Multiaddr, de
 
 	// 2. Check destination authentication (wait briefly if destination just connected and is handshaking)
 	if !f.IsAuthenticated(dest) {
-		f.waitForAuth(dest, 3*time.Second)
+		f.waitForAuth(dest, 500*time.Millisecond)
 	}
 	if !f.IsAuthenticated(dest) {
 		log.Debug("[acl] relay connect DENIED: dest=%s not authenticated (src=%s)", dest.String(), src.String())
@@ -1109,6 +1114,16 @@ func main() {
 	relayRes.MaxCircuits = 1024
 	relayRes.MaxReservationsPerPeer = 16
 	relayRes.MaxReservationsPerIP = 64
+	// MaxReservationsPerASN is silently left at libp2p's default of 32, which
+	// means all peers behind a single ISP ASN (office networks, CGNAT, mobile
+	// carriers) share a 32-slot pool. A boot serving many peers on one ISP
+	// exhausts this and denies reservations silently — the denial comes from
+	// libp2p's resource limiter, not pskACLFilter, so it doesn't appear in the
+	// WebUI alerts. Override with a generous value.
+	relayRes.MaxReservationsPerASN = 256
+	// BufferSize defaults to 2048 bytes per relayed connection, which throttles
+	// throughput on high-bandwidth links. Raise it for a dedicated relay.
+	relayRes.BufferSize = 8192
 	relayRes.Limit = &relay.RelayLimit{
 		Duration: 5 * time.Minute,
 		Data:     1 << 29, // 512 MiB per relay connection (↑ from 128MiB for better throughput)
@@ -1850,13 +1865,6 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 		return
 	}
 
-	// Best-effort read the peer's version/capability record. An OLD node sends
-	// only the 32-byte token and closes, so a short read means "unknown version"
-	// — we then authenticate without the extra compatibility gate (the node
-	// side does the same, so an old node never gets hard-rejected).
-	var nodeRec version.Record
-	_ = nodeRec.ReadRecord(s)
-
 	// Verify the token against each configured PSK with a constant-time compare
 	// so a mismatched PSK does not leak, byte-by-byte via timing, how much of the
 	// 32-byte hash matched.
@@ -1866,6 +1874,24 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 			if gSecurity != nil {
 				gSecurity.Auth.RecordSuccess(phyIP, remotePeer)
 			}
+			// Reply auth success FIRST, before reading the optional version
+			// record. The old code read the version record before replying,
+			// which meant a client that sends only the token (no version
+			// record) would block for the full 30-second read deadline before
+			// receiving its 0x01 success reply. This made auth appear to take
+			// 30 seconds and caused relay connection timeouts.
+			acl.AddAuthenticated(remotePeer, e.netID)
+			_, _ = s.Write([]byte{0x01}) // Auth success response
+
+			// Best-effort read the peer's version/capability record with a
+			// short timeout. An OLD node sends only the 32-byte token and
+			// closes, so a short read means "unknown version" — we then
+			// authenticate without the extra compatibility gate (the node
+			// side does the same, so an old node never gets hard-rejected).
+			_ = s.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+			var nodeRec version.Record
+			_ = nodeRec.ReadRecord(s)
+
 			// PSK matches — assess version/envelope compatibility. A plain build
 			// difference with an identical envelope is safe (Warn, allowed); only
 			// a genuinely incompatible envelope (no common version) is Danger,
@@ -1882,16 +1908,15 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 				if version.StrictVersionCheck {
 					bootAlerts.Add("error", "auth_version_mismatch", remotePeer.ShortString(),
 						fmt.Sprintf("Peer %s rejected: %s (peer commit=%s)", remotePeer.ShortString(), reason, nodeRec.Commit))
-					_, _ = s.Write([]byte{0x00}) // Auth failed response
+					_, _ = s.Write([]byte{0x00}) // Auth failed response (after success — client should already be done)
 					return
 				}
 				log.Warn("[auth] peer %s version incompatible but StrictVersionCheck=false — allowing: %s (peer commit=%s)",
 					remotePeer.String(), reason, nodeRec.Commit)
 			}
-			acl.AddAuthenticated(remotePeer, e.netID)
-			_, _ = s.Write([]byte{0x01}) // Auth success response
 			// Hand our version record back so the node can also verify (and so
 			// an old node harmlessly sees a closed stream after the 0x01).
+			_ = s.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			_ = version.CurrentRecord().WriteRecord(s)
 			log.Debug("[auth] peer %s authenticated for relay (net=%s)", remotePeer.String(), e.netID)
 			bootAlerts.Add("info", "auth_success", remotePeer.ShortString(), fmt.Sprintf("PSK authenticated successfully (network: net=%s)", e.netID))

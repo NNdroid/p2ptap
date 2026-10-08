@@ -12,6 +12,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"p2ptap/pkg/routing"
+	"p2ptap/pkg/version"
 )
 
 // --- relay-over-backbone integration test ----------------------------------
@@ -202,6 +203,10 @@ func connectRelayClient(t *testing.T, boot host.Host, psk string) *relayClient {
 	if _, err := as.Write(tok[:]); err != nil {
 		t.Fatalf("auth write token: %v", err)
 	}
+	// Write version record so the boot doesn't wait for the read timeout.
+	// Without this, the old code would stall for 30 seconds waiting for a
+	// record that was never sent, making the test take 90+ seconds.
+	_ = version.CurrentRecord().WriteRecord(as)
 	resp := make([]byte, 1)
 	if _, err := io.ReadFull(as, resp); err != nil {
 		t.Fatalf("auth read response: %v", err)
