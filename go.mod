@@ -10,6 +10,7 @@ require (
 	github.com/libp2p/go-libp2p-kad-dht v0.42.2
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/oschwald/geoip2-golang v1.13.0
+	github.com/pion/stun/v3 v3.1.5
 	github.com/pion/transport/v3 v3.1.1
 	github.com/quic-go/quic-go v0.63.0
 	github.com/vishvananda/netlink v1.3.1
@@ -91,7 +92,6 @@ require (
 	github.com/pion/sctp v1.8.39 // indirect
 	github.com/pion/sdp/v3 v3.0.18 // indirect
 	github.com/pion/srtp/v3 v3.0.6 // indirect
-	github.com/pion/stun/v3 v3.1.5 // indirect
 	github.com/pion/transport/v4 v4.0.2 // indirect
 	github.com/pion/turn/v4 v4.0.2 // indirect
 	github.com/pion/webrtc/v4 v4.1.2 // indirect

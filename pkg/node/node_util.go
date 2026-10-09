@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/libp2p/go-libp2p/core/control"
 	"github.com/libp2p/go-libp2p/core/crypto"
@@ -509,20 +510,48 @@ func filterLoopbackAddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 	return filtered
 }
 
-// isOverlayMultiaddr reports whether the multiaddr's IP falls inside p2ptap's
-// TAP/mesh overlay ranges (10.0.0.0/8, 172.16.0.0/12, fd00::/8).  These
-// addresses are routed through the virtual TAP tunnel; dialing them directly
-// creates a libp2p-over-TAP-over-libp2p recursion loop.
+// overlayCIDRs holds the TAP/mesh CIDR ranges derived from the node's config.
+// Only addresses inside these ranges are treated as overlay (TAP-routed); other
+// private/LAN addresses are NOT filtered, preserving direct LAN connectivity.
+var overlayCIDRs atomic.Pointer[[]*net.IPNet]
+
+func setOverlayCIDRs(tapIPv4, tapIPv6 string) {
+	cidrs := make([]*net.IPNet, 0, 2)
+	if tapIPv4 != "" {
+		if _, cidr, err := net.ParseCIDR(tapIPv4); err == nil {
+			cidrs = append(cidrs, cidr)
+		}
+	}
+	if tapIPv6 != "" {
+		if _, cidr, err := net.ParseCIDR(tapIPv6); err == nil {
+			cidrs = append(cidrs, cidr)
+		}
+	}
+	if len(cidrs) == 0 {
+		// Fallback: don't filter any overlay addresses.
+		return
+	}
+	overlayCIDRs.Store(&cidrs)
+}
+
+// isOverlayMultiaddr reports whether the multiaddr's IP falls inside the node's
+// configured TAP/mesh overlay CIDRs. These addresses are routed through the
+// virtual TAP tunnel; dialing them directly creates a recursion loop.
+// Only the node's own TAP CIDRs are matched — other private/LAN addresses
+// (e.g. a peer's 10.0.1.50/24 LAN when our TAP is 10.0.0.0/24) are NOT filtered.
 func isOverlayMultiaddr(a multiaddr.Multiaddr) bool {
 	ip, err := manet.ToIP(a)
 	if err != nil {
 		return false
 	}
-	if ip4 := ip.To4(); ip4 != nil {
-		return ip4[0] == 10 || (ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31)
+	ptr := overlayCIDRs.Load()
+	if ptr == nil {
+		return false
 	}
-	if ip16 := ip.To16(); ip16 != nil {
-		return ip16[0] == 0xfd
+	for _, cidr := range *ptr {
+		if cidr.Contains(ip) {
+			return true
+		}
 	}
 	return false
 }

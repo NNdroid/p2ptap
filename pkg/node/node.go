@@ -1076,12 +1076,16 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// within 5s (not 10s/30s), releasing the yamux send goroutine quickly.
 	yamuxOpt.ConnectionWriteTimeout = 5 * time.Second
 
+	setOverlayCIDRs(cfg.TapIP, cfg.TapIPv6)
+
 	opts := []libp2p.Option{
 		libp2p.Muxer("/yamux/1.0.0", &yamuxOpt),
 		libp2p.NATPortMap(),
 		libp2p.EnableNATService(),
 		libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 			filtered := filterAdvertisedAddrs(addrs, cfg.TapIP, cfg.TapIPv6, cfg.WebUI.ListenIP, cfg.WebUI.ListenIPv6)
+			// Inject STUN-discovered server-reflexive addresses for CGNAT nodes.
+			filtered = append(filtered, getSTUNReflexiveAddrs()...)
 			if len(filtered) > 0 {
 				return filtered
 			}
@@ -1139,16 +1143,19 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// Parse listen addrs according to enabled transport flags
 	var addrs []multiaddr.Multiaddr
 	for _, aStr := range cfg.ListenAddrs {
-		if !cfg.Transports.EnableQUICReuse && (containsSub(aStr, "quic-v1") || containsSub(aStr, "quic")) {
+		// WebTransport uses /quic-v1/webtransport, so check it before QUIC
+		// to avoid disabling QUIC silently killing WebTransport.
+		if containsSub(aStr, "webtransport") {
+			if !cfg.Transports.EnableWebTransport {
+				log.Debug("Skipping disabled WebTransport listen addr: %s", aStr)
+				continue
+			}
+		} else if !cfg.Transports.EnableQUICReuse && (containsSub(aStr, "quic-v1") || containsSub(aStr, "quic")) {
 			log.Debug("Skipping disabled QUIC listen addr: %s", aStr)
 			continue
 		}
 		if !cfg.Transports.EnableWebRTC && containsSub(aStr, "webrtc-direct") {
 			log.Debug("Skipping disabled WebRTC listen addr: %s", aStr)
-			continue
-		}
-		if !cfg.Transports.EnableWebTransport && containsSub(aStr, "webtransport") {
-			log.Debug("Skipping disabled WebTransport listen addr: %s", aStr)
 			continue
 		}
 		if !cfg.Transports.EnableTCPReuse && containsSub(aStr, "/tcp/") {
@@ -1175,20 +1182,18 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// gateway (exit node mode) the P2P control plane never loops back into the
 	// tunnel. This is the program-level "exclude all sockets from this process"
 	// mechanism that complements the per-endpoint host routes.
-	opts = append(opts, libp2p.Transport(tcpt.NewTCPTransport,
-		tcpt.WithDialerForAddr(func(raddr multiaddr.Multiaddr) (tcpt.ContextDialer, error) {
-			return &net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 15 * time.Second,
-				Control:   GetSocketControlHook(""),
-			}, nil
-		}),
-		// Pin TCP listen sockets to their interface (SO_BINDTODEVICE /
-		// IP_BOUND_IF) so inbound connections do not loop into the TAP tunnel
-		// under Exit Node. Combined with per-NIC listen addrs below this
-		// enables true multi-NIC inbound for the TCP transport.
-		tcpt.WithListenControl(listenerProtectControl),
-	))
+	if cfg.Transports.EnableTCPReuse {
+		opts = append(opts, libp2p.Transport(tcpt.NewTCPTransport,
+			tcpt.WithDialerForAddr(func(raddr multiaddr.Multiaddr) (tcpt.ContextDialer, error) {
+				return &net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 15 * time.Second,
+					Control:   GetSocketControlHook(""),
+				}, nil
+			}),
+			tcpt.WithListenControl(listenerProtectControl),
+		))
+	}
 
 	// TLS ClientHello SNI: one setting covers BOTH security paths — TLS-over-TCP
 	// (DefaultSecurity negotiates /tls/1.0.0 first) and QUIC — because both build
@@ -1207,23 +1212,25 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// QUIC sockets to the physical interface, again preventing them from looping
 	// back into the TAP tunnel when it becomes the default gateway. This is the
 	// same program-level exclusion as the TCP path above but applied to UDP.
-	opts = append(opts, libp2p.Transport(
-		func(key crypto.PrivKey, _ *quicreuse.ConnManager, psk pnet.PSK, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, transportOpts ...quict.Option) (tpt.Transport, error) {
-			var srk quic.StatelessResetKey
-			var tk quic.TokenGeneratorKey
-			if _, err := rand.Read(srk[:]); err != nil {
-				return nil, err
-			}
-			if _, err := rand.Read(tk[:]); err != nil {
-				return nil, err
-			}
-			cm, err := quicreuse.NewConnManager(srk, tk, quicreuse.OverrideListenUDP(ProtectedListenUDP))
-			if err != nil {
-				return nil, err
-			}
-			return quict.NewTransport(key, cm, psk, gater, rcmgr, transportOpts...)
-		},
-	))
+	if cfg.Transports.EnableQUICReuse {
+		opts = append(opts, libp2p.Transport(
+			func(key crypto.PrivKey, _ *quicreuse.ConnManager, psk pnet.PSK, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, transportOpts ...quict.Option) (tpt.Transport, error) {
+				var srk quic.StatelessResetKey
+				var tk quic.TokenGeneratorKey
+				if _, err := rand.Read(srk[:]); err != nil {
+					return nil, err
+				}
+				if _, err := rand.Read(tk[:]); err != nil {
+					return nil, err
+				}
+				cm, err := quicreuse.NewConnManager(srk, tk, quicreuse.OverrideListenUDP(ProtectedListenUDP))
+				if err != nil {
+					return nil, err
+				}
+				return quict.NewTransport(key, cm, psk, gater, rcmgr, transportOpts...)
+			},
+		))
+	}
 
 	// Socket protection for WebRTC (UDP): the ICE agent creates its own UDP
 	// sockets via a pion transport.Net. We inject a wrapper that binds every
@@ -1386,6 +1393,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		urgentWriteCh:       make(chan []byte, 128),         // urgent TAP-inject queue (diagnostics)
 		urgentDispatchCh:    make(chan dispatchTask, 128),  // urgent SEND queue (symmetric to receive)
 		probeReplyCh:        make(chan []byte, 8),          // TAP-probe echo-reply capture (see probeActive)
+		parsedListenAddrs:   addrs,                          // transport-filtered listen addrs for roam reconciliation
 		probeAckCh:          make(chan uint8, 4),           // TAP-probe peer-side ack (方案 B) + dst-IP flag
 		perPeerLastTx:       make(map[peer.ID]uint64),
 		perPeerLastRx:       make(map[peer.ID]uint64),
@@ -2251,6 +2259,10 @@ func (n *Node) Start() {
 	// reflected in WebUI/peer metadata as soon as libp2p has a verdict.
 	n.wg.Add(1)
 	go n.localReachabilityLoop()
+
+	// Discover server-reflexive addresses via STUN for CGNAT hole punching.
+	n.wg.Add(1)
+	n.startSTUNBinder(n.ctx)
 
 	// Connect to Bootstrap Peers with retry
 	for _, bStr := range n.Config.BootstrapPeers {

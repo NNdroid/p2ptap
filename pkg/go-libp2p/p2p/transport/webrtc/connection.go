@@ -226,6 +226,9 @@ func (c *connection) RemoteMultiaddr() ma.Multiaddr { return c.remoteMultiaddr }
 func (c *connection) Scope() network.ConnScope      { return c.scope }
 func (c *connection) Transport() tpt.Transport      { return c.transport }
 
+// IsWebRTC returns true, identifying this as a WebRTC connection.
+func (c *connection) IsWebRTC() bool { return true }
+
 func (c *connection) addStream(str *stream) error {
 	c.m.Lock()
 	defer c.m.Unlock()

@@ -96,7 +96,7 @@ const relayAuthProtocol = "/p2ptap/auth/1.0.0"
 func (n *Node) relayOnlyDirectUpgradeLoop() {
 	defer n.wg.Done()
 	interval := n.config().RelayUpgradeInterval
-	if interval < 30*time.Second || interval > 120*time.Second {
+	if interval < 5*time.Second || interval > 120*time.Second {
 		interval = 30 * time.Second
 	}
 	ticker := time.NewTicker(interval)
@@ -162,7 +162,7 @@ func (n *Node) attemptDirectUpgrade(pid peer.ID) {
 	n.Host.Peerstore().AddAddrs(pid, direct, peerstore.AddressTTL)
 
 	timeout := n.config().HolePunchTimeout
-	if timeout <= 0 || timeout > 30*time.Second {
+	if timeout <= 0 || timeout > 120*time.Second {
 		timeout = 15 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(n.ctx, timeout)
@@ -546,6 +546,10 @@ func (n *Node) triggerOnDemandConnect(pid peer.ID) {
 	}()
 }
 
+// WebRTCConn is implemented by WebRTC connections so the ping-pong handler
+// can detect WebRTC peers and reconnect faster (2s instead of 20s).
+type WebRTCConn interface{ IsWebRTC() bool }
+
 // PingPongKeepaliveInterval defines how often we send echo-based liveness probes.
 // Unified with the old HealthCheck loop, so 10s is plenty (was 5s) and halves the
 // probe frequency vs. the previous 5s+30s dual-storm.
@@ -553,7 +557,7 @@ const PingPongKeepaliveInterval = 10 * time.Second
 const pingPongStreamTimeout = 5 * time.Second // stream creation timeout
 const pingPongWriteTimeout = 4 * time.Second  // write "PING" timeout
 const pingPongReadTimeout = 6 * time.Second   // read echo timeout (supports WAN/jitter)
-const pingPongMaxFailures = 4
+const pingPongMaxFailures = 2
 const pingPongMaxConcurrent = 8 // max concurrent peer probes per tick
 
 // pingPongFailCounter returns pid's fail counter from the current published
@@ -845,9 +849,29 @@ func (n *Node) pingPongProbePeer(pid peer.ID) {
 		}
 		n.reconnectPeer(pid)
 		n.deletePingPongFailCount(pid)
+	} else if fc == 1 {
+		// WebRTC connections recover faster: reconnect immediately on first failure
+		// instead of waiting for 2 failures × 10s = 20s.
+		if n.hasWebRTCConn(pid) {
+			log.Debug("WebRTC ping-pong failed for %s — reconnecting immediately", pid.ShortString())
+			n.reconnectPeer(pid)
+			n.deletePingPongFailCount(pid)
+			return
+		}
+		log.Debug("Ping-pong failed for %s (%d/%d)", pid.String(), fc, pingPongMaxFailures)
 	} else {
 		log.Debug("Ping-pong failed for %s (%d/%d)", pid.String(), fc, pingPongMaxFailures)
 	}
+}
+
+// hasWebRTCConn returns true if pid has any WebRTC connections.
+func (n *Node) hasWebRTCConn(pid peer.ID) bool {
+	for _, conn := range n.Host.Network().ConnsToPeer(pid) {
+		if _, ok := conn.(WebRTCConn); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // dialLimiter caps concurrent in-flight dials so a discovery/mDNS burst cannot
@@ -862,7 +886,7 @@ var dialLimiter = make(chan struct{}, 32)
 // the raw race (the bootstrap hop is already connected) while NAT traversal
 // takes seconds; without this grace window every hole punch would be cancelled
 // mid-flight and peers would stay pinned to relay forever.
-const directRaceGracePeriod = 3 * time.Second
+const directRaceGracePeriod = 10 * time.Second
 
 // dialingMu guards dialingDone. A peer with an entry is already being dialed;
 // concurrent callers wait on the channel and reuse the result instead of
