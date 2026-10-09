@@ -1182,12 +1182,40 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			log.Warn("Invalid listen multiaddr '%s': %v", aStr, err)
 		}
 	}
+
+	// When no user-configured addresses survive (or none were configured at
+	// all), generate default wildcard listen addresses for ENABLED transports
+	// only.  Without this, libp2p falls back to its built-in defaults which
+	// include ALL protocols — so a disabled transport still gets listeners and
+	// Host.Addrs() reports addresses the user did not ask for.
+	if len(addrs) == 0 {
+		log.Debug("No user-configured listen addrs — generating defaults for enabled transports only")
+		for _, e := range []struct {
+			enabled bool
+			addrs   []string
+		}{
+			{cfg.Transports.EnableTCPReuse, []string{"/ip4/0.0.0.0/tcp/0", "/ip6/::/tcp/0"}},
+			{cfg.Transports.EnableQUICReuse, []string{"/ip4/0.0.0.0/udp/0/quic-v1", "/ip6/::/udp/0/quic-v1"}},
+			{cfg.Transports.EnableWebRTC, []string{"/ip4/0.0.0.0/udp/0/webrtc-direct", "/ip6/::/udp/0/webrtc-direct"}},
+			{cfg.Transports.EnableWebTransport, []string{"/ip4/0.0.0.0/udp/0/quic-v1/webtransport", "/ip6/::/udp/0/quic-v1/webtransport"}},
+		} {
+			if !e.enabled {
+				continue
+			}
+			for _, aStr := range e.addrs {
+				if ma, err := multiaddr.NewMultiaddr(aStr); err == nil {
+					addrs = append(addrs, expandListenAddr(ma)...)
+				}
+			}
+		}
+	}
+
 	if len(addrs) > 0 {
 		opts = append(opts, libp2p.ListenAddrs(addrs...))
 		log.Info("Configured %d listen addresses (physical-NIC expanded, %d skipped by transport gates)",
 			len(addrs), skippedAddrs)
 	} else {
-		log.Warn("No listen addresses configured after transport filtering (all %d addr(s) skipped)", skippedAddrs)
+		log.Warn("No listen addresses configured after transport filtering (all %d addr(s) skipped) — node will have no listeners", skippedAddrs)
 	}
 
 	// Use NullResourceManager to prevent stream limits from dropping high-rate TAP forwarding frames
