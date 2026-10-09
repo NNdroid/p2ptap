@@ -350,14 +350,15 @@ func Start(cfgJSON string, tunFd int) error {
 	}
 
 	mu.Lock()
-	defer mu.Unlock()
 	if instance != nil {
+		mu.Unlock()
 		closeDetachedTunFD(tunFd)
 		return errors.New("android: node already running; call Stop() and wait for it to return before Start()")
 	}
 
 	dev, err := tap.CreateTunTAPDevice(tunFd, cfg.TapName, cfg.TapMAC, cfg.MTU)
 	if err != nil {
+		mu.Unlock()
 		return fmt.Errorf("android: create TUN device: %w", err)
 	}
 
@@ -365,6 +366,7 @@ func Start(cfgJSON string, tunFd int) error {
 	n, err := node.NewNodeWithTAP(cfg, dev, collector)
 	if err != nil {
 		_ = dev.Close()
+		mu.Unlock()
 		return fmt.Errorf("android: create node: %w", err)
 	}
 	configStoreMu.RLock()
