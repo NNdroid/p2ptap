@@ -29,7 +29,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -217,6 +220,90 @@ var (
 	// against a small constant.
 	statsTickCounter int64
 )
+
+// --- Native crash capture ---
+//
+// Go runtime fatal errors (e.g. "sync: unlock of unlocked mutex") call
+// exit(2) directly — they bypass Java's UncaughtExceptionHandler entirely.
+// Native segfaults from cgo/JNI code likewise skip the Java handler.
+// SetCrashFilePath wires a crash file that the Android app reads on next
+// launch. Two mechanisms are used:
+//
+//  1. debug.SetCrashOutput redirects the Go runtime's fatal-error output
+//     (goroutine stacks, "fatal error: ..." lines) into the crash file.
+//     This catches Go runtime throws that recover() cannot stop.
+//
+//  2. A signal.Notify goroutine catches native signals (SIGSEGV, SIGABRT,
+//     SIGFPE, SIGBUS, SIGILL) that originate from C/C++ code reached through
+//     cgo or the JNI boundary. The handler writes the signal name and
+//     timestamp, then exits.
+//
+// The crash file is opened once with O_TRUNC and kept open for the process
+// lifetime; debug.SetCrashOutput holds a reference to the *os.File.
+
+var (
+	crashFileMu   sync.RWMutex
+	crashFilePath string
+	crashFile     *os.File
+)
+
+// SetCrashFilePath configures where native (Go runtime + cgo) crashes are
+// written. Call once from the Android Application.onCreate() before the
+// engine starts. An empty path disables capture.
+func SetCrashFilePath(path string) {
+	crashFileMu.Lock()
+	defer crashFileMu.Unlock()
+	if path == "" {
+		crashFilePath = ""
+		return
+	}
+	crashFilePath = path
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Warn("android: create crash dir: %v", err)
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Warn("android: open crash file %s: %v", path, err)
+		return
+	}
+	crashFile = f
+	// debug.SetCrashOutput duplicates f's fd internally, so the Go runtime
+	// keeps its own copy even if we close f later. We keep crashFile open
+	// for the signal handler to write native-crash info to the same file.
+	if err := debug.SetCrashOutput(f, debug.CrashOptions{}); err != nil {
+		log.Warn("android: SetCrashOutput: %v", err)
+	}
+
+	// Register a signal handler for native crashes that the Go runtime
+	// cannot catch on its own.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGSEGV, syscall.SIGABRT, syscall.SIGFPE,
+		syscall.SIGBUS, syscall.SIGILL)
+	go func() {
+		sig := <-sigCh
+		msg := fmt.Sprintf(
+			"P2PTap native crash: signal %v\nTime: %s\nVersion: %s\nGo version: %s\n",
+			sig, time.Now().UTC().Format(time.RFC3339Nano),
+			version.Full(), runtime.Version(),
+		)
+		crashFileMu.RLock()
+		cf := crashFile
+		crashFileMu.RUnlock()
+		if cf != nil {
+			_, _ = cf.WriteString(msg)
+			_ = cf.Sync()
+		}
+		os.Exit(1)
+	}()
+}
+
+// GetCrashFilePath returns the path of the crash file, if configured.
+func GetCrashFilePath() string {
+	crashFileMu.RLock()
+	defer crashFileMu.RUnlock()
+	return crashFilePath
+}
 
 // SetStateListener registers the real-time event & metrics callback.
 func SetStateListener(l StateListener) {
