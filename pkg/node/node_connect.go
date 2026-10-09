@@ -933,10 +933,18 @@ func prioritizeMultiaddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 		score int
 	}
 	scored := make([]scoredAddr, 0, len(addrs))
+	var passthrough []multiaddr.Multiaddr
 	for _, a := range addrs {
 		ip, err := manet.ToIP(a)
-		if err != nil || ip.IsLoopback() {
+		if err != nil {
+			// Non-IP addrs (dnsaddr, p2p-circuit) get score 0 but are
+			// preserved — dropping them would remove circuit addrs from the
+			// peerstore refresh, starving the relay race leg.
+			passthrough = append(passthrough, a)
 			continue
+		}
+		if ip.IsLoopback() {
+			continue // loopback is never dialable across machines
 		}
 		// Drop overlay (TAP/mesh) addresses — dialing them routes through
 		// our own tunnel, creating a libp2p-over-TAP recursion loop.
@@ -964,6 +972,8 @@ func prioritizeMultiaddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 		switch TransportOf(a) {
 		case "quic":
 			score += 30
+		case "webtransport":
+			score += 25
 		case "webrtc":
 			score += 20
 		case "tcp":
@@ -977,10 +987,11 @@ func prioritizeMultiaddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 		return scored[i].score > scored[j].score
 	})
 
-	res := make([]multiaddr.Multiaddr, len(scored))
+	res := make([]multiaddr.Multiaddr, len(scored), len(scored)+len(passthrough))
 	for i, sa := range scored {
 		res[i] = sa.addr
 	}
+	res = append(res, passthrough...)
 	return res
 }
 
@@ -1034,7 +1045,7 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 	// connection storm (each dial also connects to every bootstrap relay).
 	select {
 	case dialLimiter <- struct{}{}:
-		defer func() { <-dialLimiter }()
+		// Slot acquired; released below after the first race result.
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -1088,7 +1099,10 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 				}
 				return
 			}
-			// race and the relay-priority control path now use the exact same shape.
+			// Connect to all bootstrap relays in parallel — sequential connects
+			// burned up to 9s (3 boots × 3s) of the 15s HolePunchTimeout budget
+			// before SynthesizeRelayCircuitAddrs even ran.
+			var bootWg sync.WaitGroup
 			for _, bStr := range n.Config.BootstrapPeers {
 				bMA, berr := multiaddr.NewMultiaddr(bStr)
 				if berr != nil {
@@ -1099,11 +1113,16 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 					continue
 				}
 				if n.Host.Network().Connectedness(bInfo.ID) != network.Connected {
-					bCtx, bCancel := context.WithTimeout(relayCtx, 3*time.Second)
-					_ = n.Host.Connect(bCtx, *bInfo)
-					bCancel()
+					bootWg.Add(1)
+					go func(bi peer.AddrInfo) {
+						defer bootWg.Done()
+						bCtx, bCancel := context.WithTimeout(relayCtx, 3*time.Second)
+						_ = n.Host.Connect(bCtx, bi)
+						bCancel()
+					}(*bInfo)
 				}
 			}
+			bootWg.Wait()
 			// Single source of truth for circuit-addr composition (shared with
 			// openStreamViaRelay / reconnectPeer / LSA-meta path).
 			relayAddrs := n.SynthesizeRelayCircuitAddrs(pi.ID)
@@ -1184,8 +1203,17 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 	select {
 	case first = <-ch:
 	case <-ctx.Done():
+		<-dialLimiter // release slot on timeout
 		return ctx.Err()
 	}
+
+	// Release the dial-limiter slot immediately — we have a connection (or
+	// a definitive failure). Without this, a relay leg that wins in ~1s but a
+	// black-holed direct leg that holds until HolePunchTimeout would pin one
+	// of 32 slots for up to 10s, turning a 100-peer DHT round from ~3s into
+	// ~30s. The race goroutines are bounded by their own contexts; raceCancel
+	// below ensures they exit.
+	<-dialLimiter
 
 	if first.err == nil {
 		// DIRECT-FIRST preference: when the relay race won (it usually starts

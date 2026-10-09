@@ -31,6 +31,7 @@ import (
 	tpt "github.com/libp2p/go-libp2p/core/transport"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	yamux "github.com/libp2p/go-libp2p/p2p/muxer/yamux"
+	"github.com/libp2p/go-libp2p/p2p/net/swarm"
 	"github.com/libp2p/go-libp2p/p2p/protocol/holepunch"
 	p2ptls "github.com/libp2p/go-libp2p/p2p/security/tls"
 	quict "github.com/libp2p/go-libp2p/p2p/transport/quic"
@@ -1077,6 +1078,12 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 
 	opts := []libp2p.Option{
 		libp2p.Muxer("/yamux/1.0.0", &yamuxOpt),
+		// NoDelayDialRanker: our dialInParallel already does its own
+		// prioritization and race. The default DialRanker re-sorts addresses
+		// (WebRTC last, 1s delay) and adds 250ms stagger between QUIC addrs,
+		// undoing all of our scoring. NoDelay preserves our order and dials
+		// all addrs simultaneously.
+		libp2p.SwarmOpts(swarm.WithDialRanker(swarm.NoDelayDialRanker)),
 		libp2p.NATPortMap(),
 		libp2p.EnableNATService(),
 		libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {

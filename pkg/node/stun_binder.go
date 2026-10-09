@@ -120,7 +120,10 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 		}
 		successes++
 
-		ma, err := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/udp/%d", addr.IP.String(), addr.Port))
+		// Append /quic-v1 so the address is actually dialable: bare /udp/N
+		// matches no transport CanDial predicate and would be silently
+		// dropped by filterKnownUndialables on the receiving peer.
+		ma, err := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/udp/%d/quic-v1", addr.IP.String(), addr.Port))
 		if err != nil {
 			failures++
 			log.Debug("Failed to create multiaddr for STUN result %v: %v", addr, err)
