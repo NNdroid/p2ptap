@@ -544,20 +544,19 @@ func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte,
 		targetSize = blocks*blockSize + randomJitter(p.jitterRange)
 	case "dynamic":
 		overhead := HeaderLen + len(payload)
-		// Scale padding proportionally to payload size, capped at 4× overhead.
-		// This prevents extreme waste: an 86-byte ICMPv6 packet should not
-		// balloon to 500-1500 bytes (6-17× overhead). Instead it would be
-		// ~100-400 bytes, still providing traffic analysis resistance.
-		idealTarget := overhead * 4
-		if idealTarget < p.minSize {
-			idealTarget = p.minSize
-		}
-		if idealTarget > p.maxSize {
-			idealTarget = p.maxSize
-		}
-		targetSize = randomBetween(overhead, idealTarget)
+		// Fill to maxSize to minimize fragmentation: every frame occupies the
+		// full MTU-sized obfuscation slot regardless of payload size. This
+		// eliminates per-packet fragmentation on the wire (each obfuscated frame
+		// fits in a single QUIC/UDP datagram) and makes all packets the same
+		// size class, which is stronger for traffic analysis resistance.
+		targetSize = randomBetween(overhead, p.maxSize)
 	default: // "random" or auto
-		targetSize = randomBetween(64, p.fixedSize) + randomJitter(p.jitterRange)
+		overhead := HeaderLen + len(payload)
+		low := p.minSize
+		if low < overhead {
+			low = overhead
+		}
+		targetSize = randomBetween(low, p.fixedSize) + randomJitter(p.jitterRange)
 	}
 
 	// The payload is written in the CLEAR here. Per-peer encryption is applied
@@ -654,20 +653,12 @@ func blockBound(payloadLen, block, jitter int) int {
 	return blocks*block + jitter
 }
 
-// dynamicBound mirrors packStandard's "dynamic" branch: idealTarget is 4x
-// overhead clamped to [MinSize, MaxSize], and the final targetSize is
-// randomBetween(overhead, idealTarget) with a hard floor at overhead. So the
-// maximum is simply the larger of overhead and the clamped ideal.
+// dynamicBound mirrors packStandard's "dynamic" branch: targetSize is
+// randomBetween(overhead, maxSize), so the maximum is simply the larger of
+// overhead and maxSize.
 func dynamicBound(payloadLen, minS, maxS int) int {
 	overhead := HeaderLen + payloadLen
-	ideal := overhead * 4
-	if ideal < minS {
-		ideal = minS
-	}
-	if ideal > maxS {
-		ideal = maxS
-	}
-	return max(overhead, ideal)
+	return max(overhead, maxS)
 }
 
 // clampFrameSize mirrors Pack's own final guards: never below the bare overhead
