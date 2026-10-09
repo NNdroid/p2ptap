@@ -327,7 +327,7 @@ func (t *transport) Listen(laddr ma.Multiaddr) (tpt.Listener, error) {
 		return nil, errors.New("static TLS config not supported on WebTransport")
 	}
 	tlsConf := t.staticTLSConf.Clone()
-	if tlsConf == nil {
+	if t.staticTLSConf == nil {
 		tlsConf = &tls.Config{GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
 			return t.certManager.GetConfig(), nil
 		}}
