@@ -865,7 +865,8 @@ func isBroadcastOrMulticastMAC(mac net.HardwareAddr) bool {
 }
 
 type mdnsNotifee struct {
-	h host.Host
+	h    host.Host
+	node *Node
 }
 
 func (m *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
@@ -879,6 +880,16 @@ func (m *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	}
 	log.Info("mDNS discovered local LAN peer %s, connecting...", pi.ID.String())
 	go func(info peer.AddrInfo) {
+		if m.node != nil {
+			// Use dialInParallel to get relay fallback, backoff, and coalescing.
+			if err := m.node.dialInParallel(m.node.ctx, info, "mdns"); err != nil {
+				log.Debug("mDNS connect to peer %s failed: %v", info.ID.String(), err)
+			} else {
+				log.Info("mDNS connected to peer %s successfully", info.ID.String())
+			}
+			return
+		}
+		// Fallback: raw Host.Connect if node not yet initialized (startup race).
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := m.h.Connect(ctx, info); err != nil {
@@ -1093,10 +1104,11 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				log.Debug("AddrFactory: injecting %d STUN server-reflexive addr(s): %v", len(stunAddrs), stunAddrs)
 				filtered = append(filtered, stunAddrs...)
 			}
-			if len(filtered) > 0 {
-				return filtered
-			}
-			return addrs
+			// Always return the filtered set — libp2p tolerates an empty list
+			// (the node simply has no direct addresses to advertise). Returning
+			// the unfiltered `addrs` as a fallback would leak loopback/TAP-local
+			// addresses to the DHT, creating dial failures for remote peers.
+			return filtered
 		}),
 		libp2p.ConnectionGater(&overlayConnGater{}),
 	}
@@ -1374,14 +1386,25 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	if err != nil {
 		log.Warn("DHT init error: %v", err)
 	} else {
-		_ = kdht.Bootstrap(ctx)
-		log.Debug("DHT bootstrapped")
+		// Retry bootstrap with exponential backoff: the first attempt often fails
+		// because bootstrap peers haven't been connected yet (DialRanker needs time).
+		// libp2p's Bootstrap() returns an error if it can't reach any bootstrap peer,
+		// but subsequent attempts succeed once connections are established.
+		bootstrapCtx, bootstrapCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer bootstrapCancel()
+		bootstrapErr := retryBootstrap(bootstrapCtx, kdht)
+		if bootstrapErr != nil {
+			log.Warn("DHT bootstrap failed after retries: %v (discovery will still work via mDNS/static peers)", bootstrapErr)
+		} else {
+			log.Info("DHT bootstrapped successfully")
+		}
 	}
 
 	// Initialize mDNS LAN Auto-Discovery if enabled
+	var mdnsN *mdnsNotifee
 	if cfg.EnableMDNS {
-		notifee := &mdnsNotifee{h: h}
-		s := mdns.NewMdnsService(h, "_p2ptap-discovery._udp.local", notifee)
+		mdnsN = &mdnsNotifee{h: h}
+		s := mdns.NewMdnsService(h, "_p2ptap-discovery._udp.local", mdnsN)
 		if err := s.Start(); err != nil {
 			log.Debug("mDNS LAN discovery not active: %v (multicast unavailable, WAN/P2P routing unaffected)", err)
 		} else {
@@ -2185,6 +2208,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			}
 		}
 	}()
+
+	// Wire the mDNS notifee to the fully-constructed Node so HandlePeerFound can
+	// call dialInParallel (relay fallback, backoff, coalescing) instead of raw
+	// Host.Connect.
+	if mdnsN != nil {
+		mdnsN.node = node
+	}
 
 	return node, nil
 }

@@ -250,9 +250,11 @@ func DefaultConfig() *Config {
 			"/ip6/::/tcp/0",
 		},
 		BootstrapPeers: []string{
-			"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTmoXMY5PeBKyy1EicV2g7HQ1b18423b",
-			"/dnsaddr/bootstrap.libp2p.io/p2p/QmSbdrpLzdJ7oJkLZSgCj9QcYwqZBhRt8F4kNqY5vLpWjH",
-			"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2ezMq8nHpEtbU8K2JkL2UW5eobZywcPNTep8a3mDw",
+			"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
+			"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+			"/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
+			"/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+			"/dnsaddr/bootstrap.libp2p.io/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ",
 		},
 		StaticPeers: []string{},
 		// On by default: a node that is told about a federated boot cannot reach

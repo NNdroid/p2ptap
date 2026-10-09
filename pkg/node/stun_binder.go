@@ -143,11 +143,36 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 	log.Debug("STUN bind cycle completed in %v: %d success, %d failure(s)", elapsed, successes, failures)
 
 	if len(discovered) > 0 {
+		// Partial-failure resilience: if some STUN servers failed, union the
+		// newly discovered addresses with the previous cycle's addresses (dedup).
+		// A transient failure on one server should not discard addresses learned
+		// from other servers. All-success replaces the set cleanly.
+		var merged []multiaddr.Multiaddr
+		if failures > 0 && len(prevAddrs) > 0 {
+			seen := make(map[string]bool)
+			for _, a := range discovered {
+				if !seen[a.String()] {
+					merged = append(merged, a)
+					seen[a.String()] = true
+				}
+			}
+			for _, a := range prevAddrs {
+				if !seen[a.String()] {
+					merged = append(merged, a)
+					seen[a.String()] = true
+				}
+			}
+			log.Debug("STUN partial failure (%d/%d): keeping %d prev addr(s) + %d new = %d total",
+				failures, successes+failures, len(prevAddrs), len(discovered), len(merged))
+		} else {
+			merged = discovered
+		}
+
 		// Check if addresses changed from previous cycle
-		addrsChanged := len(prevAddrs) != len(discovered)
+		addrsChanged := len(prevAddrs) != len(merged)
 		if !addrsChanged {
-			for i := range discovered {
-				if i < len(prevAddrs) && prevAddrs[i].String() != discovered[i].String() {
+			for i := range merged {
+				if i < len(prevAddrs) && prevAddrs[i].String() != merged[i].String() {
 					addrsChanged = true
 					break
 				}
@@ -155,11 +180,11 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 		}
 
 		if addrsChanged {
-			log.Info("STUN server-reflexive addresses UPDATED: %v", discovered)
+			log.Info("STUN server-reflexive addresses UPDATED: %v", merged)
 		} else {
-			log.Debug("STUN server-reflexive addresses unchanged: %v", discovered)
+			log.Debug("STUN server-reflexive addresses unchanged: %v", merged)
 		}
-		setSTUNReflexiveAddrs(discovered)
+		setSTUNReflexiveAddrs(merged)
 	} else {
 		// Network blip: keep the last-known-good addresses rather than clearing
 		// them. A transient STUN failure (timeout, DNS hiccup) should not remove
@@ -180,7 +205,7 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 func stunQuery(ctx context.Context, server string) (net.UDPAddr, error) {
 	startTime := time.Now()
 
-	serverAddr, err := normalizeSTUNServer(server)
+	serverAddr, err := normalizeSTUNServer(ctx, server)
 	if err != nil {
 		return net.UDPAddr{}, fmt.Errorf("normalize STUN server %q: %w", server, err)
 	}
@@ -281,7 +306,9 @@ func stunQuery(ctx context.Context, server string) (net.UDPAddr, error) {
 }
 
 // normalizeSTUNServer converts various STUN server formats to a UDP address.
-func normalizeSTUNServer(s string) (net.UDPAddr, error) {
+// Resolves hostnames via DNS so that multiaddr entries like "/udp/stun.l.google.com/19302"
+// work correctly (net.ParseIP does not resolve hostnames).
+func normalizeSTUNServer(ctx context.Context, s string) (net.UDPAddr, error) {
 	original := s
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "/udp/")
@@ -298,14 +325,35 @@ func normalizeSTUNServer(s string) (net.UDPAddr, error) {
 		if portNum == 0 {
 			portNum = 3478
 		}
-		log.Debug("STUN server normalized: %q -> %s:%d", original, host, portNum)
-		return net.UDPAddr{IP: net.ParseIP(host), Port: portNum}, nil
+		ip, err := resolveIP(ctx, host)
+		if err != nil {
+			return net.UDPAddr{}, fmt.Errorf("cannot resolve STUN host %q: %w", host, err)
+		}
+		log.Debug("STUN server normalized: %q -> %s:%d", original, ip.String(), portNum)
+		return net.UDPAddr{IP: ip, Port: portNum}, nil
 	}
 
 	port := 3478
 	if strings.Contains(s, "google.com") {
 		port = 19302
 	}
-	log.Debug("STUN server normalized: %q -> %s:%d (hostname-based)", original, s, port)
-	return net.UDPAddr{IP: net.ParseIP(s), Port: port}, nil
+	ip, err := resolveIP(ctx, s)
+	if err != nil {
+		return net.UDPAddr{}, fmt.Errorf("cannot resolve STUN host %q: %w", s, err)
+	}
+	log.Debug("STUN server normalized: %q -> %s:%d", original, ip.String(), port)
+	return net.UDPAddr{IP: ip, Port: port}, nil
+}
+
+// resolveIP returns the IP address for a host string, using DNS resolution if
+// the host is not already an IP literal. Uses context-aware LookupIPAddr.
+func resolveIP(ctx context.Context, host string) (net.IP, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip, nil
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(addrs) == 0 {
+		return nil, fmt.Errorf("no IP addresses for %q: %v", host, err)
+	}
+	return addrs[0].IP, nil
 }

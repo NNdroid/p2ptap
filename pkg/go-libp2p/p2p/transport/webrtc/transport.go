@@ -219,9 +219,11 @@ func New(privKey ic.PrivKey, psk pnet.PSK, gater connmgr.ConnectionGater, rcmgr 
 		for _, srv := range transport.stunServers {
 			var url string
 			if strings.HasPrefix(srv, "/udp/") {
-				// Convert "/udp/host/port" to "stun:host:port"
+				// Convert "/udp/host/port" to "stun:host:port" — replace the
+				// multiaddr / separator with a colon so pion's URL parser gets
+				// a valid host:port pair instead of host/path.
 				srv = strings.TrimPrefix(srv, "/udp/")
-				url = "stun:" + srv
+				url = "stun:" + strings.Replace(srv, "/", ":", 1)
 			} else if strings.HasPrefix(srv, "stun:") {
 				url = srv
 			} else if !strings.Contains(srv, ":") {

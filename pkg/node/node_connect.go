@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
@@ -25,6 +26,35 @@ import (
 
 	"p2ptap/pkg/version"
 )
+
+// retryBootstrap retries DHT bootstrap with exponential backoff. The first attempt
+// often fails because bootstrap peer connections haven't been established yet
+// (the DialRanker needs time to connect to dnsaddr peers). Subsequent attempts
+// succeed once those connections are up. Returns nil on first success.
+func retryBootstrap(ctx context.Context, kdht *dht.IpfsDHT) error {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := kdht.Bootstrap(ctx); err != nil {
+			lastErr = err
+			log.Debug("DHT bootstrap attempt %d/%d failed: %v", attempt, maxAttempts, err)
+			if attempt < maxAttempts {
+				delay := time.Duration(2*(attempt)) * time.Second // 2s, 4s
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(delay):
+				}
+			}
+			continue
+		}
+		if attempt > 1 {
+			log.Info("DHT bootstrap succeeded on attempt %d", attempt)
+		}
+		return nil
+	}
+	return lastErr
+}
 
 func (n *Node) connectWithRetry(pi peer.AddrInfo, peerType string, baseDelay time.Duration, maxRetries int) {
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -49,8 +79,11 @@ func (n *Node) connectWithRetry(pi peer.AddrInfo, peerType string, baseDelay tim
 				delay = 60 * time.Second
 			}
 			// Add jitter (0-25% of delay) to de-synchronize concurrent retries.
-			jitter := time.Duration(rand.Int63n(int64(delay/4)))
-			delay += jitter
+			// Guard against baseDelay=0 which would make delay=0 and rand.Int63n(0) panic.
+			if delay > 0 {
+				jitter := time.Duration(rand.Int63n(int64(delay/4)))
+				delay += jitter
+			}
 			log.Debug("%s peer %s connect failed (attempt %d): %v, retrying in %v", peerType, pi.ID.String(), attempt, err, delay)
 			select {
 			case <-n.ctx.Done():
@@ -1028,9 +1061,12 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 	// addresses the peerstore already learned via DHT/mDNS/relay, forcing future
 	// dials to fall back to relays or re-discover. AddAddrs merges and refreshes
 	// TTL, which is exactly what we want across reconnect attempts.
-	n.clearSwarmBackoff(pi.ID)
 	if len(pi.Addrs) > 0 {
-		n.Host.Peerstore().AddAddrs(pi.ID, pi.Addrs, 2*time.Hour)
+		// Only clear backoff when we have real addresses to dial. Unconditionally
+		// clearing on every dial (including retry loops) neutralizes libp2p's
+		// exponential backoff and causes thundering-herd against unresponsive peers.
+		n.clearSwarmBackoff(pi.ID)
+		n.Host.Peerstore().AddAddrs(pi.ID, pi.Addrs, peerstore.AddressTTL)
 	}
 
 	// Coalesce concurrent dials to the same peer. If a dial is already in flight,
