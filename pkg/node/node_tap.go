@@ -137,11 +137,17 @@ func (n *Node) tapReadLoopPoll(buf []byte) {
 	}
 }
 
-// linuxTAPDrainBatchSize is benchmark-selected for the epoll path. A 256-frame
-// burst needs two epoll wake/drain cycles at 128 versus eight at 32; the
-// stage2 benchmark showed ~1.7% lower median drain time while avoiding the
-// higher variance observed at 256. Non-epoll fallback polling stays at 32.
-const linuxTAPDrainBatchSize = 128
+// linuxTAPDrainBatchSize is the per-epoll-wake drain cap. With edge-triggered
+// epoll (EPOLLET) the kernel only re-notifies when NEW data arrives after the
+// previous drain completed, so a partially-drained queue would be invisible to
+// the next epoll_wait — the remaining frames would be stuck until an unrelated
+// new frame triggered another event. This cap must therefore be large enough to
+// absorb the entire kernel TAP receive backlog (typically 1000-4096 frames).
+// 4096 provides headroom for even a 10 Gbps sustained burst while still
+// bounding worst-case drain latency. The ErrReadTimeout break on EAGAIN already
+// exits immediately when the queue is empty, so the cap only matters for
+// pathological sustained-load scenarios.
+const linuxTAPDrainBatchSize = 4096
 
 // drainTapBatch reads up to linuxTAPDrainBatchSize frames from TAP in a tight
 // loop, calling processTapFrame for each. It expects the fd to be readable
@@ -321,8 +327,16 @@ func (n *Node) recordRelayedTapDelivery(srcPeer peer.ID, payload []byte) {
 // tapWriteLoop is the single normal data-plane writer. Multiple libp2p receive
 // handlers enqueue owned buffers and immediately return to reading streams;
 // only this goroutine waits on the native TAP syscall in steady state.
+//
+// It batch-drains up to 32 jobs per channel wake (same pattern as dispatchWorker)
+// so a burst of incoming frames costs one channel receive + one goroutine wakeup
+// rather than 32. Each frame still gets its own TAP.Write syscall (the kernel
+// TAP driver processes one frame per write), but the channel overhead — the more
+// expensive operation in the Go scheduler — is amortised.
 func (n *Node) tapWriteLoop() {
 	defer n.wg.Done()
+	// Reuse a worker-local batch slot to avoid per-batch allocation.
+	var batch [32]tapWriteJob
 	for {
 		select {
 		case <-n.ctx.Done():
@@ -337,9 +351,26 @@ func (n *Node) tapWriteLoop() {
 					return
 				}
 			}
-		case job := <-n.tapWriteCh:
-			nn, err := n.tapWrite(job.data)
-			n.finishTapWriteJob(job, nn, err)
+		case firstJob := <-n.tapWriteCh:
+			// Batch drain: collect up to 32 pending jobs.
+			batch[0] = firstJob
+			count := 1
+		drainLoop:
+			for i := 1; i < 32; i++ {
+				select {
+				case j := <-n.tapWriteCh:
+					batch[i] = j
+					count = i + 1
+				default:
+					break drainLoop
+				}
+			}
+			// Write all collected jobs.
+			for i := 0; i < count; i++ {
+				nn, err := n.tapWrite(batch[i].data)
+				n.finishTapWriteJob(batch[i], nn, err)
+				batch[i] = tapWriteJob{} // release references
+			}
 		}
 	}
 }

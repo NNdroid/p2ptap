@@ -2285,10 +2285,6 @@ func restartRequiredFields(old, new *config.Config) []string {
 	// so (node_name still updates the local display live via the collector,
 	// but peer-anchored identity — meta/peek-map/LSA — keeps the boot value).
 	add("node_name", old.NodeName != new.NodeName)
-	add("accept_advertised_subnets", old.AcceptAdvertisedSubnets != new.AcceptAdvertisedSubnets)
-	add("allowed_subnet_peers", !stringSliceEqual(old.AllowedSubnetPeers, new.AllowedSubnetPeers))
-	add("discover_boot_mesh", old.DiscoverBootMesh != new.DiscoverBootMesh)
-	add("hole_punch_timeout", old.HolePunchTimeout != new.HolePunchTimeout)
 	return out
 }
 

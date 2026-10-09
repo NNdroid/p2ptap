@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	mrand "math/rand/v2"
@@ -94,6 +95,10 @@ type WebRTCTransport struct {
 
 	listenUDP func(network string, laddr *net.UDPAddr) (net.PacketConn, error)
 
+	// stunServers is a list of STUN server URLs for ICE candidate gathering.
+	// Empty means no STUN servers (ICE relies on host/server-reflexive candidates only).
+	stunServers []string
+
 	// dialerVersion picks which WebRTC Direct handshake to use when dialing: 1
 	// uses v1 (SDP munging), 2 uses v2 (no munging; the client password rides in
 	// the server ufrag). New defaults it to 1, and WithDialerVersion only accepts
@@ -117,6 +122,16 @@ type Option func(*WebRTCTransport) error
 func WithNet(net pionnet.Net) Option {
 	return func(t *WebRTCTransport) error {
 		t.customNet = net
+		return nil
+	}
+}
+
+// WithSTUNServers configures STUN servers for ICE candidate gathering.
+// URLs should be in the format "stun:host:port" or "/udp/host/port".
+// Empty means no STUN servers (ICE relies on host/server-reflexive candidates only).
+func WithSTUNServers(servers []string) Option {
+	return func(t *WebRTCTransport) error {
+		t.stunServers = servers
 		return nil
 	}
 }
@@ -197,6 +212,29 @@ func New(privKey ic.PrivKey, psk pnet.PSK, gater connmgr.ConnectionGater, rcmgr 
 		if err := opt(transport); err != nil {
 			return nil, err
 		}
+	}
+	// Add STUN servers for ICE candidate gathering if configured via WithSTUNServers.
+	// Convert multiaddr format ("/udp/host/port") to pion format ("stun:host:port").
+	if len(transport.stunServers) > 0 {
+		for _, srv := range transport.stunServers {
+			var url string
+			if strings.HasPrefix(srv, "/udp/") {
+				// Convert "/udp/host/port" to "stun:host:port"
+				srv = strings.TrimPrefix(srv, "/udp/")
+				url = "stun:" + srv
+			} else if strings.HasPrefix(srv, "stun:") {
+				url = srv
+			} else if !strings.Contains(srv, ":") {
+				// Bare hostname, assume default STUN port
+				url = "stun:" + srv + ":19302"
+			} else {
+				url = "stun:" + srv
+			}
+			config.ICEServers = append(config.ICEServers, webrtc.ICEServer{
+				URLs: []string{url},
+			})
+		}
+		transport.webrtcConfig = config
 	}
 	return transport, nil
 }

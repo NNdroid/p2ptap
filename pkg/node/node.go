@@ -31,6 +31,7 @@ import (
 	tpt "github.com/libp2p/go-libp2p/core/transport"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	yamux "github.com/libp2p/go-libp2p/p2p/muxer/yamux"
+	"github.com/libp2p/go-libp2p/p2p/protocol/holepunch"
 	p2ptls "github.com/libp2p/go-libp2p/p2p/security/tls"
 	quict "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	quicreuse "github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
@@ -1110,7 +1111,9 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	} else {
 		opts = append(opts,
 			libp2p.EnableRelay(),
-			libp2p.EnableHolePunching(),
+			libp2p.EnableHolePunching(
+				holepunch.DirectDialTimeout(cfg.HolePunchTimeout),
+			),
 		)
 		// Enable AutoRelay with bootstrap peers as static relay servers
 		if len(bootstrapRelays) > 0 {
@@ -1236,7 +1239,12 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				if err != nil {
 					return nil, err
 				}
-				return webrtc.New(key, psk, gater, rcmgr, ProtectedListenUDP, append(transportOpts, webrtc.WithNet(protectedNet))...)
+				allOpts := append(transportOpts, webrtc.WithNet(protectedNet))
+				if len(cfg.StunServers) > 0 {
+					allOpts = append(allOpts, webrtc.WithSTUNServers(cfg.StunServers))
+					log.Info("WebRTC configured with %d STUN server(s)", len(cfg.StunServers))
+				}
+				return webrtc.New(key, psk, gater, rcmgr, ProtectedListenUDP, allOpts...)
 			},
 		))
 		log.Info("WebRTC transport registered (socket-protected)")
@@ -1372,11 +1380,11 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		tapICMPEchoPending:  make(map[tapICMPEchoKey]time.Time),
 		directConnected:     make(map[peer.ID]bool),
 		aclStats:            newACLStats(),
-		dispatchCh:          make(chan dispatchTask, 8192), // bounded buffer: 8192 frames for high-throughput scaling
-		relayFallbackSem:    make(chan struct{}, 4),       // bounds concurrent relay fallback goroutines
-		tapWriteCh:          make(chan tapWriteJob, 2048),  // pooled overlay->TAP write queue (~4 MiB at 2K/frame)
-		urgentWriteCh:       make(chan []byte, 64),         // urgent TAP-inject queue (diagnostics)
-		urgentDispatchCh:    make(chan dispatchTask, 64),   // urgent SEND queue (symmetric to receive)
+		dispatchCh:          make(chan dispatchTask, 16384), // 16K frames: EPOLLET edge-triggered drain needs larger headroom
+		relayFallbackSem:    make(chan struct{}, 8),        // bounds concurrent relay fallback goroutines
+		tapWriteCh:          make(chan tapWriteJob, 4096),  // pooled overlay->TAP write queue (~8 MiB at 2K/frame)
+		urgentWriteCh:       make(chan []byte, 128),         // urgent TAP-inject queue (diagnostics)
+		urgentDispatchCh:    make(chan dispatchTask, 128),  // urgent SEND queue (symmetric to receive)
 		probeReplyCh:        make(chan []byte, 8),          // TAP-probe echo-reply capture (see probeActive)
 		probeAckCh:          make(chan uint8, 4),           // TAP-probe peer-side ack (方案 B) + dst-IP flag
 		perPeerLastTx:       make(map[peer.ID]uint64),

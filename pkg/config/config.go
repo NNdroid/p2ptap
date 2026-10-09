@@ -201,6 +201,16 @@ type Config struct {
 	// peers can dial them directly instead of always going through a relay.
 	// Enable only when AutoNAT is known to be unreliable in your network.
 	ForcePrivateReachability bool `json:"force_private_reachability"`
+	// StunServers is a list of STUN server multiaddrs for WebRTC ICE candidate
+	// gathering. Format: "/udp/stun.l.google.com/19302" or "stun:stun.l.google.com:19302".
+	// Empty means no STUN servers (ICE relies on host/server-reflexive candidates only).
+	// Adding reachable STUN servers significantly improves hole-punching success rate
+	// for WebRTC connections by providing server-reflexive candidates.
+	StunServers []string `json:"stun_servers"`
+	// RelayUpgradeInterval controls how often relay-only peers are retried for a
+	// direct connection upgrade. Default: 30s. Shorter intervals improve direct
+	// connection recovery speed but increase background dial activity.
+	RelayUpgradeInterval time.Duration `json:"relay_upgrade_interval"`
 }
 
 // DefaultConfig returns a sane default configuration
@@ -228,7 +238,7 @@ func DefaultConfig() *Config {
 	}
 
 	return &Config{
-		HolePunchTimeout: 10 * time.Second,
+		HolePunchTimeout: 15 * time.Second,
 		ListenAddrs: []string{
 			"/ip4/0.0.0.0/udp/0/quic-v1",
 			"/ip6/::/udp/0/quic-v1",
@@ -241,6 +251,8 @@ func DefaultConfig() *Config {
 		},
 		BootstrapPeers: []string{
 			"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTmoXMY5PeBKyy1EicV2g7HQ1b18423b",
+			"/dnsaddr/bootstrap.libp2p.io/p2p/QmSbdrpLzdJ7oJkLZSgCj9QcYwqZBhRt8F4kNqY5vLpWjH",
+			"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2ezMq8nHpEtbU8K2JkL2UW5eobZywcPNTep8a3mDw",
 		},
 		StaticPeers: []string{},
 		// On by default: a node that is told about a federated boot cannot reach
@@ -272,6 +284,11 @@ func DefaultConfig() *Config {
 		DriverType:        "auto", // TAP first, Wintun fallback on Windows
 		NodeKeyFile:       "node.key",
 		PSK:               "",
+		StunServers: []string{
+			"/udp/stun.l.google.com/19302",
+			"/udp/stun1.l.google.com/19302",
+		},
+		RelayUpgradeInterval: 30 * time.Second,
 		Obfuscation: ObfuscationConfig{
 			Enable:               true,
 			Mode:                 "random",

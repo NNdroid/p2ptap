@@ -191,6 +191,18 @@ type ConfigStore interface {
 	SaveConfig(cfgJSON string) error
 }
 
+// LogCallback is implemented by the Android app to receive structured log
+// entries with the correct android.util.Log priority. Without this, every Go
+// log line goes through stderr→logcat and arrives at a single indistinguishable
+// level, so INFO messages show up as ERROR in the viewer.
+type LogCallback interface {
+	// OnLog is invoked for every log entry that passes the global level filter.
+	// priority is an android.util.Log constant (VERBOSE=2, DEBUG=3, INFO=4,
+	// WARN=5, ERROR=6). module is the logger's module name (e.g. "node",
+	// "Android"). message is the fully-formatted log line.
+	OnLog(priority int32, module string, message string)
+}
+
 var configStoreMu sync.RWMutex
 var configStore ConfigStore
 
@@ -310,6 +322,19 @@ func SetStateListener(l StateListener) {
 	stateListenerMu.Lock()
 	defer stateListenerMu.Unlock()
 	stateListener = l
+}
+
+// SetLogCallback registers the structured log callback. Passing nil removes
+// the callback and restores the stderr-only path. Call before Start() so
+// early boot messages are not lost.
+func SetLogCallback(cb LogCallback) {
+	if cb == nil {
+		logger.SetLogCallback(nil)
+		return
+	}
+	logger.SetLogCallback(func(priority int, module, message string) {
+		cb.OnLog(int32(priority), module, message)
+	})
 }
 
 // SetProtector registers the Android VpnService socket protector. It MUST be
@@ -664,6 +689,43 @@ func SetLogLevel(level string) error {
 	return nil
 }
 
+// ApplyHotReload parses cfgJSON and hot-reloads the running node's Go-engine
+// configuration without tearing down the TUN device or the P2P engine. It
+// publishes the new config atomically (so the data plane observes it race-free)
+// and triggers runtime side-effects (obfuscation packer update, exit-node NAT
+// re-apply, peer re-announce).
+//
+// Fields that affect the Android VpnService (TAP IP, MTU, routes, DNS,
+// session name) are NOT applied here — they require a full VPN restart.
+func ApplyHotReload(cfgJSON string) error {
+	cfg, err := parseConfig(cfgJSON)
+	if err != nil {
+		return err
+	}
+
+	mu.Lock()
+	n := instance
+	collector := activeCollector
+	mu.Unlock()
+
+	if n == nil {
+		return errors.New("android: node not running")
+	}
+
+	// Update collector display state (mirrors web/server.go config save handler).
+	if collector != nil {
+		collector.NodeName = cfg.NodeName
+		collector.ExitNode.Enable = cfg.ExitNode.Enable
+		collector.ExitNode.NATMasquerade = cfg.ExitNode.NATMasquerade
+		collector.ExitNode.WANInterface = cfg.ExitNode.WANInterface
+		if collector.OnConfigReload != nil {
+			collector.OnConfigReload(cfg)
+		}
+	}
+
+	return nil
+}
+
 // GetPeerID returns the libp2p Peer ID of the running node, or empty if not running.
 func GetPeerID() string {
 	if stopping.Load() {
@@ -897,6 +959,10 @@ func (a *P2PTap) SetStateListener(l StateListener) {
 	SetStateListener(l)
 }
 
+func (a *P2PTap) SetLogCallback(cb LogCallback) {
+	SetLogCallback(cb)
+}
+
 func (a *P2PTap) Start(cfgJSON string, tunFd int) error {
 	return Start(cfgJSON, tunFd)
 }
@@ -911,6 +977,10 @@ func (a *P2PTap) IsRunning() bool {
 
 func (a *P2PTap) SetLogLevel(level string) error {
 	return SetLogLevel(level)
+}
+
+func (a *P2PTap) ApplyHotReload(cfgJSON string) error {
+	return ApplyHotReload(cfgJSON)
 }
 
 func (a *P2PTap) GetPeerID() string {

@@ -88,20 +88,18 @@ func (n *Node) rediscoverPeer(pid peer.ID) {
 
 const relayAuthProtocol = "/p2ptap/auth/1.0.0"
 
-// relayOnlyDirectUpgradeInterval is how often relayOnlyDirectUpgradeLoop
-// retries a DIRECT (force-direct, circuit-excluded) dial for peers currently
-// pinned to a relay. A peer whose first connection lost the dial race (or whose
-// hole punch was cancelled mid-flight) gets a fresh NAT traversal attempt on
-// every tick instead of staying on relay forever.
-const relayOnlyDirectUpgradeInterval = 45 * time.Second
-
 // relayOnlyDirectUpgradeLoop periodically attempts to upgrade relay-only peers
 // to a direct connection. It is the recovery path for the "pinned to relay"
 // state: once a direct connection succeeds, the ConnectedF handler calls
 // clearRelayOnlyPeer and the Router link flips from LinkCircuit to LinkDirect.
+// The retry interval is configurable via Config.RelayUpgradeInterval (default 30s).
 func (n *Node) relayOnlyDirectUpgradeLoop() {
 	defer n.wg.Done()
-	ticker := time.NewTicker(relayOnlyDirectUpgradeInterval)
+	interval := n.config().RelayUpgradeInterval
+	if interval < 30*time.Second || interval > 120*time.Second {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -163,9 +161,9 @@ func (n *Node) attemptDirectUpgrade(pid peer.ID) {
 	direct = prioritizeMultiaddrs(direct)
 	n.Host.Peerstore().AddAddrs(pid, direct, peerstore.AddressTTL)
 
-	timeout := n.Config.HolePunchTimeout
-	if timeout <= 0 || timeout > 10*time.Second {
-		timeout = 10 * time.Second
+	timeout := n.config().HolePunchTimeout
+	if timeout <= 0 || timeout > 30*time.Second {
+		timeout = 15 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(n.ctx, timeout)
 	defer cancel()
@@ -1055,7 +1053,7 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 	// AddressTTL) would otherwise be raced by the swarm inside this very call, so
 	// a fast circuit win would be misreported as "connected via direct".
 	go func() {
-		directCtx, cancel := context.WithTimeout(raceCtx, n.Config.HolePunchTimeout)
+		directCtx, cancel := context.WithTimeout(raceCtx, n.config().HolePunchTimeout)
 
 		defer cancel()
 		err := n.Host.Connect(network.WithForceDirectDial(directCtx, "p2ptap-direct-race"), pi)
@@ -1076,7 +1074,7 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 	relayLaunched := false
 	if !localOnly {
 		// Prepare a context for the relay race with configurable timeout
-		relayCtx, relayCancel := context.WithTimeout(raceCtx, n.Config.HolePunchTimeout)
+		relayCtx, relayCancel := context.WithTimeout(raceCtx, n.config().HolePunchTimeout)
 		defer relayCancel()
 
 		// Relay path needs more time: connect to relay (1.5s) + auth (2s) + circuit connect

@@ -885,7 +885,7 @@ const maxDiscoveredBoots = 8
 // that shared anchor and makes both mechanisms work across clusters without the
 // boot having to forward data frames.
 func (n *Node) considerDiscoveredBoot(pID peer.ID) {
-	if pID == n.Host.ID() || !n.Config.DiscoverBootMesh {
+	if pID == n.Host.ID() || !n.config().DiscoverBootMesh {
 		return
 	}
 	// Already ours (configured) — the normal bootstrap path owns it.
@@ -1171,7 +1171,7 @@ func (n *Node) publishPeekMapSelf() {
 }
 
 func (n *Node) processSubnetRoutes(remotePeer peer.ID, tapIPv4, tapIPv6 string, subnets []string) {
-	if remotePeer == n.Host.ID() || len(subnets) == 0 || !n.Config.AcceptAdvertisedSubnets {
+	if remotePeer == n.Host.ID() || len(subnets) == 0 || !n.config().AcceptAdvertisedSubnets {
 		return
 	}
 
@@ -1243,6 +1243,7 @@ func (n *Node) reconcileSubnetRoutes() {
 	if n.Gateway == nil {
 		return
 	}
+	cfg := n.config()
 	validSubnets := make(map[string]string)
 	n.peerMeta.Range(func(key, value interface{}) bool {
 		pID := key.(peer.ID)
@@ -1252,8 +1253,8 @@ func (n *Node) reconcileSubnetRoutes() {
 		meta := value.(PeerMeta)
 
 		isAllowed := false
-		if n.Config.AcceptAdvertisedSubnets {
-			for _, p := range n.Config.AllowedSubnetPeers {
+		if cfg.AcceptAdvertisedSubnets {
+			for _, p := range cfg.AllowedSubnetPeers {
 				if p == "*" || p == pID.String() {
 					isAllowed = true
 					break

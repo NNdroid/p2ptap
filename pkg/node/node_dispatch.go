@@ -44,9 +44,11 @@ func defaultDispatchWorkerCount() int {
 const dispatchDropWarnThreshold = 10
 
 // Absorb short scheduler/GC stalls before dropping a bounded queue's payload.
-// The previous 5ms grace lost frames during otherwise healthy bulk flows.
+// 200ms covers typical GC stop-the-world pauses (up to 100ms for large heaps)
+// plus the epoll wake latency on a loaded system. The previous 5ms lost frames
+// during otherwise healthy bulk flows; 100ms still dropped under heavy GC.
 // Sustained congestion still has a finite wait and cannot grow queue memory.
-const dispatchBurstGrace = 100 * time.Millisecond
+const dispatchBurstGrace = 200 * time.Millisecond
 
 // Peer-egress stall circuit-breaker.
 //
@@ -199,29 +201,29 @@ func (n *Node) dispatchWorker(id int) {
 			}
 		}
 	}()
-	// Batch-drain grouping is REUSED across wake-ups. A busy worker wakes up
-	// thousands of times per second, and the old code allocated a fresh map
-	// (plus one slice per key) on every single one — steady, pointless GC
-	// pressure on the egress hot path. Keys are bounded by (peer count × kind),
-	// so keeping them and truncating their slices costs nothing.
-	batches := make(map[batchTasksKey][]dispatchTask, 4)
-	// Reuse one worker-local view for the at-most-32 drained tasks.
-	// This removes per-group [][]byte allocations from the hot path.
-	var batchScratch [32][]byte
-	for {
-		select {
-		case <-n.ctx.Done():
-			return
-		case task := <-n.dispatchCh:
-			// Batch drain: collect up to 32 pending tasks grouped by target.
-			for k, v := range batches {
-				batches[k] = v[:0] // keep capacity, drop the previous contents
-			}
-			batches[batchTasksKey{kind: task.kind, target: task.target}] =
-				append(batches[batchTasksKey{kind: task.kind, target: task.target}], task)
+		// Batch-drain grouping is REUSED across wake-ups. A busy worker wakes up
+		// thousands of times per second, and the old code allocated a fresh map
+		// (plus one slice per key) on every single one — steady, pointless GC
+		// pressure on the egress hot path. Keys are bounded by (peer count × kind),
+		// so keeping them and truncating their slices costs nothing.
+		batches := make(map[batchTasksKey][]dispatchTask, 4)
+		// Reuse one worker-local view for the at-most-64 drained tasks.
+		// This removes per-group [][]byte allocations from the hot path.
+		var batchScratch [64][]byte
+		for {
+			select {
+			case <-n.ctx.Done():
+				return
+			case task := <-n.dispatchCh:
+				// Batch drain: collect up to 64 pending tasks grouped by target.
+				for k, v := range batches {
+					batches[k] = v[:0] // keep capacity, drop the previous contents
+				}
+				batches[batchTasksKey{kind: task.kind, target: task.target}] =
+					append(batches[batchTasksKey{kind: task.kind, target: task.target}], task)
 
-		drainLoop:
-			for i := 0; i < 31; i++ {
+			drainLoop:
+				for i := 0; i < 63; i++ {
 				select {
 				case t := <-n.dispatchCh:
 					key := batchTasksKey{kind: t.kind, target: t.target}

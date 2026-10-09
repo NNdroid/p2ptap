@@ -946,8 +946,8 @@ func (n *Node) updateWebCollectorState() {
 			status := "Pending Authorization"
 			if n.isSubnetManuallyAuthorized(sub) {
 				status = "Active (Authorized)"
-			} else if n.Config.AcceptAdvertisedSubnets {
-				for _, allowed := range n.Config.AllowedSubnetPeers {
+			} else if src.AcceptAdvertisedSubnets {
+				for _, allowed := range src.AllowedSubnetPeers {
 					if allowed == "*" || allowed == pID.String() {
 						status = "Active (Authorized)"
 						break

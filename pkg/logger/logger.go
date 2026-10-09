@@ -19,6 +19,31 @@ const (
 	LevelError
 )
 
+// Android log priority constants, used by the callback bridge so callers
+// can map Go levels without importing android.util.Log.
+const (
+	AndroidLogVerbose = 2
+	AndroidLogDebug   = 3
+	AndroidLogInfo    = 4
+	AndroidLogWarn    = 5
+	AndroidLogError   = 6
+)
+
+// logToAndroidPriority maps a Go log level to the corresponding
+// android.util.Log priority code.
+func logToAndroidPriority(level Level) int {
+	switch level {
+	case LevelDebug:
+		return AndroidLogDebug
+	case LevelInfo:
+		return AndroidLogInfo
+	case LevelWarn:
+		return AndroidLogWarn
+	default:
+		return AndroidLogError
+	}
+}
+
 var levelNames = map[Level]string{
 	LevelDebug: "DEBUG",
 	LevelInfo:  "INFO",
@@ -43,10 +68,39 @@ type Logger struct {
 	colorize bool
 }
 
+// LogCallback is invoked for every log entry that passes the level filter.
+// It receives the Android log priority code, the module name, and the
+// formatted message. Set once from the platform bridge (e.g. Android JNI);
+// nil means "no callback installed".
+//
+// The callback runs on the logging goroutine and must not block: it is a
+// JNI boundary crossing, so a stuck handler would stall every subsequent log
+// call. Android's Log.i/d/w/e are safe to call from any thread.
+type LogCallback func(priority int, module, message string)
+
 var (
 	globalLevel atomic.Int32
 	colorize    atomic.Bool
+
+	logCallbackMu sync.RWMutex
+	logCallback   LogCallback
 )
+
+// SetLogCallback installs or removes the global log callback.
+// Passing nil removes the callback. Thread-safe.
+func SetLogCallback(cb LogCallback) {
+	logCallbackMu.Lock()
+	logCallback = cb
+	logCallbackMu.Unlock()
+}
+
+// getLogCallback returns the current callback under RLock, or nil.
+func getLogCallback() LogCallback {
+	logCallbackMu.RLock()
+	cb := logCallback
+	logCallbackMu.RUnlock()
+	return cb
+}
 
 func init() {
 	globalLevel.Store(int32(LevelInfo))
@@ -270,6 +324,15 @@ func (l *Logger) log(level Level, format string, args ...interface{}) {
 		Module:    l.module,
 		Message:   msg,
 	})
+
+	// Invoke the platform callback (JNI bridge) BEFORE the stderr write so a
+	// blocked callback cannot leave a half-written line on stderr. The callback
+	// carries the Android log priority so the receiver can call Log.i/d/w/e
+	// with the correct level — the stderr→logcat path alone cannot distinguish
+	// Go log levels.
+	if cb := getLogCallback(); cb != nil {
+		cb(logToAndroidPriority(level), l.module, msg)
+	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -353,8 +353,10 @@ func NewEpollPoller(dev TAPDevice) (*EpollPoller, error) {
 	tapFd := int(lt.file.Fd())
 	wakeFd := lt.eventFd
 
-	// Register TAP fd for readability
-	ev := unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(tapFd)}
+	// Register TAP fd for readability (edge-triggered: wake only on new
+	// events rather than once per queued frame, cutting epoll syscall count
+	// from O(frames) to O(bursts) under load).
+	ev := unix.EpollEvent{Events: unix.EPOLLIN | unix.EPOLLET, Fd: int32(tapFd)}
 	if err := unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, tapFd, &ev); err != nil {
 		unix.Close(epfd)
 		return nil, fmt.Errorf("epoll_ctl add tap fd: %w", err)
