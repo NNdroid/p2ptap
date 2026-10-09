@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -104,7 +105,7 @@ type relayConn struct {
 // message because the concrete error type is a generic instantiation that
 // varies across libp2p versions.
 func isProtocolUnsupported(err error) bool {
-	return err != nil && containsSub(err.Error(), "protocols not supported")
+	return err != nil && strings.Contains(err.Error(), "protocols not supported")
 }
 
 // isP2ptapBootPeer reports whether hop is a p2ptap-boot server (which serves

@@ -23,6 +23,7 @@ import (
 	"p2ptap/pkg/bootweb"
 	"p2ptap/pkg/logger"
 	"p2ptap/pkg/meta"
+	"p2ptap/pkg/node"
 	"p2ptap/pkg/routing"
 	"p2ptap/pkg/version"
 
@@ -147,21 +148,6 @@ type bootNodeInfo struct {
 	IsBoot bool `json:"is_boot"`
 }
 
-// hostAddrStrings renders a host's current listen/observed addrs for the wire.
-func hostAddrStrings(h host.Host) []string {
-	addrs := h.Addrs()
-	if len(addrs) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(addrs))
-	for _, a := range addrs {
-		if a == nil {
-			continue
-		}
-		out = append(out, a.String())
-	}
-	return out
-}
 
 // peekMapHub is a stateless pub/sub router: it rebroadcasts every frame from
 // one client to all other connected clients. It holds no node data.
@@ -325,7 +311,7 @@ func (h *peekMapHub) publishBootInfo(self host.Host, nodeName, version string) {
 		Arch:        runtime.GOARCH,
 		Version:     version,
 		HopDistance: 0,
-		Addrs:       hostAddrStrings(self),
+		Addrs:       node.MultiaddrsToStrings(self.Addrs()),
 		IsBoot:      true,
 	}
 	payload, err := json.Marshal(info)
@@ -1273,14 +1259,18 @@ func main() {
 			gPeerConnectTimes.Store(pID, time.Now())
 			// Determine transport name for the alert message.
 			transportName := "TCP"
-			if strings.Contains(maStr, "quic") {
+			switch node.TransportOf(conn.RemoteMultiaddr()) {
+			case "quic":
 				transportName = "QUIC"
-			} else if strings.Contains(maStr, "webrtc") {
+			case "webrtc":
 				transportName = "WebRTC"
-			} else if strings.Contains(maStr, "webtransport") {
+			case "webtransport":
 				transportName = "WebTransport"
 			}
-			phyIP := extractIPFromMultiaddrStr(maStr)
+			phyIP := ""
+			if ip := node.ExtractIP(conn.RemoteMultiaddr()); ip != nil {
+				phyIP = ip.String()
+			}
 			bootAlerts.Add("info", "peer_connect", pID.ShortString(),
 				fmt.Sprintf("Peer connected: %s via %s (%s)", pID.ShortString(), transportName, phyIP))
 			// Trigger initial ping probe to immediately measure RTT.
@@ -1564,8 +1554,10 @@ func (p *bootDataProviderImpl) GetGeoNodes() []bootweb.GeoNodeDTO {
 		if len(conns) == 0 {
 			continue
 		}
-		maStr := conns[0].RemoteMultiaddr().String()
-		phyIP := extractIPFromMultiaddrStr(maStr)
+		phyIP := ""
+		if ip := node.ExtractIP(conns[0].RemoteMultiaddr()); ip != nil {
+			phyIP = ip.String()
+		}
 		lat, lon, country, city := p.geoIP.Lookup(phyIP)
 		if lat == 0 && lon == 0 {
 			continue
@@ -1608,8 +1600,14 @@ func (p *bootDataProviderImpl) GetGeoArcs() []bootweb.GeoArcDTO {
 		if len(srcConns) == 0 || len(dstConns) == 0 {
 			continue
 		}
-		srcIP := extractIPFromMultiaddrStr(srcConns[0].RemoteMultiaddr().String())
-		dstIP := extractIPFromMultiaddrStr(dstConns[0].RemoteMultiaddr().String())
+		srcIP := ""
+		if ip := node.ExtractIP(srcConns[0].RemoteMultiaddr()); ip != nil {
+			srcIP = ip.String()
+		}
+		dstIP := ""
+		if ip := node.ExtractIP(dstConns[0].RemoteMultiaddr()); ip != nil {
+			dstIP = ip.String()
+		}
 		srcLat, srcLon, _, _ := p.geoIP.Lookup(srcIP)
 		dstLat, dstLon, _, _ := p.geoIP.Lookup(dstIP)
 		if (srcLat == 0 && srcLon == 0) || (dstLat == 0 && dstLon == 0) {
@@ -1714,15 +1712,6 @@ func (p *bootDataProviderImpl) GetConfigSummary() bootweb.ConfigSummaryDTO {
 	}
 }
 
-func extractIPFromMultiaddrStr(maStr string) string {
-	parts := strings.Split(maStr, "/")
-	for i, p := range parts {
-		if (p == "ip4" || p == "ip6") && i+1 < len(parts) {
-			return parts[i+1]
-		}
-	}
-	return ""
-}
 
 // computePSKHash derives a 32-byte authentication token from PSK using SHA-256
 // seqSyncMsg mirrors the JSON wire format used by pkg/node's seqsync protocol.
@@ -1841,7 +1830,10 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 	_ = s.SetReadDeadline(time.Now().Add(30 * time.Second))
 
 	remotePeer := s.Conn().RemotePeer()
-	phyIP := extractIPFromMultiaddrStr(s.Conn().RemoteMultiaddr().String())
+	phyIP := ""
+	if ip := node.ExtractIP(s.Conn().RemoteMultiaddr()); ip != nil {
+		phyIP = ip.String()
+	}
 	log.Debug("[auth] incoming PSK auth request from %s via %s", remotePeer.String(), s.Conn().RemoteMultiaddr().String())
 
 	// 1. Check if the IP or Peer ID is currently in a temporary ban state due to brute force
@@ -2322,7 +2314,7 @@ func runMeshUplink(ctx context.Context, h host.Host, hub *peekMapHub, info peer.
 		HopDistance: 0,
 		// Endpoints + the boot marker are what let the REMOTE cluster's clients
 		// attach to us, giving both clusters a shared relay anchor.
-		Addrs:  hostAddrStrings(h),
+		Addrs:  node.MultiaddrsToStrings(h.Addrs()),
 		IsBoot: true,
 	}
 	if payload, merr := json.Marshal(selfInfo); merr == nil {

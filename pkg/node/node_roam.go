@@ -3,7 +3,6 @@ package node
 import (
 	"context"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -112,15 +111,14 @@ func reconcileRoam(ls listenerStore, base []multiaddr.Multiaddr) bool {
 func diffListeners(desired, current []multiaddr.Multiaddr) (toAdd, toRemove []multiaddr.Multiaddr) {
 	curByKey := make(map[string]multiaddr.Multiaddr, len(current))
 	for _, c := range current {
-		cStr := c.String()
-		if strings.Contains(cStr, "p2p-circuit") {
+		if IsCircuitRelay(c) {
 			continue
 		}
-		curByKey[normKey(c)] = c
+		curByKey[ListenAddrKey(c)] = c
 	}
 	desKeys := make(map[string]bool, len(desired))
 	for _, d := range desired {
-		k := normKey(d)
+		k := ListenAddrKey(d)
 		desKeys[k] = true
 		if _, ok := curByKey[k]; !ok {
 			toAdd = append(toAdd, d)
@@ -134,23 +132,6 @@ func diffListeners(desired, current []multiaddr.Multiaddr) (toAdd, toRemove []mu
 	return toAdd, toRemove
 }
 
-// normKey canonicalizes a listen multiaddr for comparison by zeroing its port,
-// so a desired (port 0) address matches a bound (real-port) one on the same
-// NIC + transport. It walks the multiaddr string: for a tcp/udp component the
-// following token is the port, which we replace with 0.
-func normKey(a multiaddr.Multiaddr) string {
-	parts := strings.Split(a.String(), "/")
-	out := make([]string, 0, len(parts))
-	for i := 0; i < len(parts); i++ {
-		p := parts[i]
-		out = append(out, p)
-		if (p == "tcp" || p == "udp") && i+1 < len(parts) {
-			out = append(out, "0")
-			i++ // skip the original port value
-		}
-	}
-	return strings.Join(out, "/")
-}
 
 func parseListenAddrs(strs []string) []multiaddr.Multiaddr {
 	out := make([]multiaddr.Multiaddr, 0, len(strs))

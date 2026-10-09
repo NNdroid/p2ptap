@@ -894,29 +894,6 @@ const directRaceGracePeriod = 10 * time.Second
 var dialingMu sync.Mutex
 var dialingDone = make(map[peer.ID]chan struct{})
 
-// isLocalAddr reports whether a multiaddr points at a LAN/loopback/link-local
-// address — i.e. one that is directly reachable without a relay hop.
-func isLocalAddr(a multiaddr.Multiaddr) bool {
-	ip, err := manet.ToIP(a)
-	if err != nil {
-		return false
-	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
-}
-
-// allAddrsLocal reports whether every address is locally reachable. An empty
-// slice is treated as "not local" so we still attempt the relay fallback.
-func allAddrsLocal(addrs []multiaddr.Multiaddr) bool {
-	if len(addrs) == 0 {
-		return false
-	}
-	for _, a := range addrs {
-		if !isLocalAddr(a) {
-			return false
-		}
-	}
-	return true
-}
 
 // allAddrsLoopback reports whether every address is loopback — i.e. the peer is
 // ourselves. It is intentionally stricter than allAddrsLocal: private/ULA
@@ -966,7 +943,6 @@ func prioritizeMultiaddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 		if isOverlayMultiaddr(a) {
 			continue
 		}
-		s := a.String()
 		score := 0
 		isV6 := ip.To4() == nil
 		isPrivate := ip.IsPrivate() || ip.IsLinkLocalUnicast()
@@ -985,11 +961,12 @@ func prioritizeMultiaddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 			}
 		}
 
-		if strings.Contains(s, "/quic-v1") || strings.Contains(s, "/quic") {
+		switch TransportOf(a) {
+		case "quic":
 			score += 30
-		} else if strings.Contains(s, "/webrtc-direct") {
+		case "webrtc":
 			score += 20
-		} else if strings.Contains(s, "/tcp/") {
+		case "tcp":
 			score += 10
 		}
 

@@ -26,13 +26,13 @@ func TestNormKey(t *testing.T) {
 		{"/ip6/fe80::1/tcp/9000", "/ip6/fe80::1/tcp/0"},
 	}
 	for _, c := range cases {
-		if got := normKey(mustMaddr(t, c.in)); got != c.want {
-			t.Fatalf("normKey(%q) = %q, want %q", c.in, got, c.want)
+		if got := ListenAddrKey(mustMaddr(t, c.in)); got != c.want {
+			t.Fatalf("ListenAddrKey(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 	// Same NIC+transport, different ports -> equal keys, so a port-0 desired
 	// address matches a real-port bound one.
-	if normKey(mustMaddr(t, "/ip4/10.0.0.5/tcp/4001")) != normKey(mustMaddr(t, "/ip4/10.0.0.5/tcp/1234")) {
+	if ListenAddrKey(mustMaddr(t, "/ip4/10.0.0.5/tcp/4001")) != ListenAddrKey(mustMaddr(t, "/ip4/10.0.0.5/tcp/1234")) {
 		t.Fatal("expected equal keys for same NIC/transport, different ports")
 	}
 }
@@ -99,11 +99,11 @@ func (f *fakeListenerStore) CloseListenAddrs(addrs ...multiaddr.Multiaddr) {
 	f.removed = append(f.removed, addrs)
 	drop := map[string]bool{}
 	for _, a := range addrs {
-		drop[normKey(a)] = true
+		drop[ListenAddrKey(a)] = true
 	}
 	keep := f.current[:0]
 	for _, c := range f.current {
-		if !drop[normKey(c)] {
+		if !drop[ListenAddrKey(c)] {
 			keep = append(keep, c)
 		}
 	}

@@ -362,19 +362,19 @@ func (n *Node) updateWebCollectorState() {
 			// Iterate ALL connections to detect mixed direct+relay scenarios.
 			// A peer could have a direct TCP connection AND a relay fallback simultaneously.
 			for _, c := range n.Host.Network().ConnsToPeer(pID) {
-				a := c.RemoteMultiaddr().String()
-				if strings.Contains(a, "/p2p-circuit") {
+				ma := c.RemoteMultiaddr()
+				if IsCircuitRelay(ma) {
 					if addr == "unknown" {
-						addr = a
+						addr = ma.String()
 					}
 				} else {
-					addr = a // prefer direct address for display
-					// Detect transport protocol from the direct connection
-					if strings.Contains(a, "/quic") {
+					addr = ma.String() // prefer direct address for display
+					switch TransportOf(ma) {
+					case "quic":
 						transport = "QUIC"
-					} else if strings.Contains(a, "/webrtc") {
+					case "webrtc":
 						transport = "WebRTC"
-					} else if strings.Contains(a, "/tcp") {
+					case "tcp":
 						transport = "TCP"
 					}
 				}
@@ -913,7 +913,7 @@ func (n *Node) updateWebCollectorState() {
 
 	listenAddrsStrs := make([]string, 0)
 	for _, a := range n.Host.Addrs() {
-		listenAddrsStrs = append(listenAddrsStrs, fmt.Sprintf("%s/p2p/%s", a, n.Host.ID().String()))
+		listenAddrsStrs = append(listenAddrsStrs, WithPeerID(a, n.Host.ID()))
 	}
 	n.Collector.UpdateListenAddrs(listenAddrsStrs)
 
@@ -1216,19 +1216,23 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	inboundCounts := make(map[string]int)
 	outboundCounts := make(map[string]int)
 
-	for _, conn := range n.Host.Network().Conns() {
-		remotePeer := conn.RemotePeer()
-		remoteAddr := conn.RemoteMultiaddr().String()
-		transport := "P2P"
-		if strings.Contains(remoteAddr, "/quic") {
-			transport = "QUIC"
-		} else if strings.Contains(remoteAddr, "/webrtc") {
-			transport = "WebRTC"
-		} else if strings.Contains(remoteAddr, "/tcp") {
-			transport = "TCP"
-		} else if strings.Contains(remoteAddr, "/p2p-circuit") {
-			transport = "Circuit Relay"
-		}
+		for _, conn := range n.Host.Network().Conns() {
+			remotePeer := conn.RemotePeer()
+			ma := conn.RemoteMultiaddr()
+			remoteAddr := ma.String()
+			transport := "P2P"
+			if IsCircuitRelay(ma) {
+				transport = "Circuit Relay"
+			} else {
+				switch TransportOf(ma) {
+				case "quic":
+					transport = "QUIC"
+				case "webrtc":
+					transport = "WebRTC"
+				case "tcp":
+					transport = "TCP"
+				}
+			}
 
 		peerName := n.relayHopLabel(remotePeer)
 

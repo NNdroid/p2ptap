@@ -488,27 +488,6 @@ func filterAdvertisedAddrs(addrs []multiaddr.Multiaddr, tapIP, tapIPv6, webUILis
 	return filtered
 }
 
-// filterLoopbackAddrs drops any loopback multiaddr (127.0.0.0/8 or ::1) from a
-// slice of peer addresses. This is the RECEIVE-side guard that complements
-// filterAdvertisedAddrs (the broadcast-side guard): even if a remote peer
-// advertises a loopback address (because its own AddrsFactory fix is not
-// deployed yet, or its peerstore still carries a stale entry), we must never
-// surface it in the WebUI nor attempt to dial it from this node — connecting
-// to 127.0.0.1 / ::1 always targets THIS host, never the peer, so such
-// addresses are meaningless for reachability.
-func filterLoopbackAddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
-	if len(addrs) == 0 {
-		return addrs
-	}
-	filtered := make([]multiaddr.Multiaddr, 0, len(addrs))
-	for _, a := range addrs {
-		if manet.IsIPLoopback(a) {
-			continue
-		}
-		filtered = append(filtered, a)
-	}
-	return filtered
-}
 
 // overlayCIDRs holds the TAP/mesh CIDR ranges derived from the node's config.
 // Only addresses inside these ranges are treated as overlay (TAP-routed); other
@@ -1089,7 +1068,3 @@ const (
 	BootRelayProtocolID protocol.ID = "/p2ptap/boot-relay/1.0.0"
 )
 
-// containsSub reports whether substr is within s.
-func containsSub(s, substr string) bool {
-	return strings.Contains(s, substr)
-}

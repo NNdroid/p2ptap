@@ -63,12 +63,14 @@ func (n *Node) DiagnoseLink(multiaddrStr string) *observer.LinkDiagnosis {
 	}
 
 	// transport detection (for the raw socket probe hint)
-	switch {
-	case strings.Contains(multiaddrStr, "quic"):
+	switch TransportOf(maAddr) {
+	case "quic":
 		diag.Transport = "quic-v1"
-	case strings.Contains(multiaddrStr, "ws"):
-		diag.Transport = "websocket"
-	case strings.Contains(multiaddrStr, "tcp"):
+	case "webtransport":
+		diag.Transport = "webtransport"
+	case "webrtc":
+		diag.Transport = "webrtc"
+	case "tcp":
 		diag.Transport = "tcp"
 	default:
 		diag.Transport = "unknown"

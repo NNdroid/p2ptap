@@ -934,18 +934,10 @@ func physicalNICIPs() ([]net.IP, error) {
 	return out, nil
 }
 
-// replaceIPInMultiaddr returns a copy of addr with its ip4/ip6 component value
-// replaced by newIP, leaving the rest of the multiaddr (port, transport, ...)
-// intact.
+// replaceIPInMultiaddr returns a copy of addr with its ip4/ip6 component
+// replaced by newIP, using the component-level API (not string splitting).
 func replaceIPInMultiaddr(addr multiaddr.Multiaddr, newIP string) (multiaddr.Multiaddr, error) {
-	parts := strings.Split(addr.String(), "/")
-	for i := 1; i < len(parts)-1; i += 2 {
-		if parts[i] == "ip4" || parts[i] == "ip6" {
-			parts[i+1] = newIP
-			break
-		}
-	}
-	return multiaddr.NewMultiaddr(strings.Join(parts, "/"))
+	return ReplaceIPInMultiaddr(addr, newIP)
 }
 
 // expandListenAddr expands a listen multiaddr whose IP component is the
@@ -1148,32 +1140,38 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		}
 	}
 
-	// Parse listen addrs according to enabled transport flags
+	// Parse listen addrs according to enabled transport flags.
+	// transportFromStr uses protocol codes, not string matching, so
+	// WebTransport (/udp/N/quic-v1/webtransport) is correctly identified
+	// as "webtransport" rather than "quic".
 	var addrs []multiaddr.Multiaddr
 	skippedAddrs := 0
 	for _, aStr := range cfg.ListenAddrs {
-		// WebTransport uses /quic-v1/webtransport, so check it before QUIC
-		// to avoid disabling QUIC silently killing WebTransport.
-		if containsSub(aStr, "webtransport") {
+		switch transportFromStr(aStr) {
+		case "webtransport":
 			if !cfg.Transports.EnableWebTransport {
 				log.Debug("Skipping disabled WebTransport listen addr: %s", aStr)
 				skippedAddrs++
 				continue
 			}
-		} else if !cfg.Transports.EnableQUICReuse && (containsSub(aStr, "quic-v1") || containsSub(aStr, "quic")) {
-			log.Debug("Skipping disabled QUIC listen addr: %s", aStr)
-			skippedAddrs++
-			continue
-		}
-		if !cfg.Transports.EnableWebRTC && containsSub(aStr, "webrtc-direct") {
-			log.Debug("Skipping disabled WebRTC listen addr: %s", aStr)
-			skippedAddrs++
-			continue
-		}
-		if !cfg.Transports.EnableTCPReuse && containsSub(aStr, "/tcp/") {
-			log.Debug("Skipping disabled TCP listen addr: %s", aStr)
-			skippedAddrs++
-			continue
+		case "quic":
+			if !cfg.Transports.EnableQUICReuse {
+				log.Debug("Skipping disabled QUIC listen addr: %s", aStr)
+				skippedAddrs++
+				continue
+			}
+		case "webrtc":
+			if !cfg.Transports.EnableWebRTC {
+				log.Debug("Skipping disabled WebRTC listen addr: %s", aStr)
+				skippedAddrs++
+				continue
+			}
+		case "tcp":
+			if !cfg.Transports.EnableTCPReuse {
+				log.Debug("Skipping disabled TCP listen addr: %s", aStr)
+				skippedAddrs++
+				continue
+			}
 		}
 		ma, err := multiaddr.NewMultiaddr(aStr)
 		if err == nil {
@@ -1926,7 +1924,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		ConnectedF: func(netw network.Network, conn network.Conn) {
 			pID := conn.RemotePeer()
 			addrStr := conn.RemoteMultiaddr().String()
-			isCircuitRelay := strings.Contains(addrStr, "/p2p-circuit")
+			isCircuitRelay := IsCircuitRelay(conn.RemoteMultiaddr())
 
 			// Stamp a new monotonically increasing connection generation so any
 			// in-flight DisconnectedF debounce goroutine will not purge this peer.
@@ -1944,9 +1942,9 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			}
 
 			if isCircuitRelay {
-				relayID := relayPeerIDOf(addrStr)
-				if relayID != "" {
-					log.Info("Peer connected via CIRCUIT RELAY: %s via relay %s (ma=%s)", pID.String(), relayID, addrStr)
+				relayIDs := RelayPeerIDs(conn.RemoteMultiaddr())
+				if len(relayIDs) > 1 {
+					log.Info("Peer connected via CIRCUIT RELAY: %s via relay %s (ma=%s)", pID.String(), relayIDs[0].String(), addrStr)
 				} else {
 					log.Info("Peer connected via CIRCUIT RELAY: %s (ma=%s)", pID.String(), addrStr)
 				}
@@ -2494,31 +2492,6 @@ func (n *Node) isPeerReady(p peer.ID) bool {
 	return false
 }
 
-// relayPeerIDOf extracts the relay peer ID from a circuit-relay multiaddr
-// string. A relayed connection's remote multiaddr looks like:
-//
-//	/ip4/<relayIP>/tcp/<port>/p2p/<relayPeerID>/p2p-circuit/p2p/<destPeerID>
-//
-// so the relay ID is the p2p component immediately preceding "/p2p-circuit".
-// Returns "" if the address is not a circuit-relay address or the relay ID
-// cannot be located. Used for diagnostics so the WebUI/logs can name WHICH
-// relay a peer is being auto-relayed through (the cause of hidden high latency).
-func relayPeerIDOf(addrStr string) string {
-	const probe = "/p2p-circuit"
-	idx := strings.Index(addrStr, probe)
-	if idx < 0 {
-		return ""
-	}
-	prefix := addrStr[:idx]
-	const p2pTag = "/p2p/"
-	j := strings.LastIndex(prefix, p2pTag)
-	if j < 0 {
-		return ""
-	}
-	relayID := prefix[j+len(p2pTag):]
-	// Trim a trailing slash just in case the relay addr had no destination peer.
-	return strings.TrimSuffix(relayID, "/")
-}
 
 // peerHasCircuitRelayConn reports whether the given peer currently has at least
 // one live connection via a circuit-relay path. This is used to shorten retry

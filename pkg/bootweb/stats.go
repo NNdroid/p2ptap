@@ -1,7 +1,6 @@
 package bootweb
 
 import (
-	"fmt"
 	"runtime"
 	"strings"
 	"sync"
@@ -11,7 +10,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
-	manet "github.com/multiformats/go-multiaddr/net"
+	"p2ptap/pkg/node"
 	"p2ptap/pkg/version"
 )
 
@@ -316,7 +315,7 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 	listenAddrs := make([]string, 0)
 	if h != nil {
 		for _, a := range h.Addrs() {
-			listenAddrs = append(listenAddrs, fmt.Sprintf("%s/p2p/%s", a.String(), h.ID()))
+			listenAddrs = append(listenAddrs, node.WithPeerID(a, h.ID()))
 		}
 	}
 
@@ -382,19 +381,18 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 				c := conns[0]
 				ma := c.RemoteMultiaddr()
 				remoteAddrStr = ma.String()
-				if ip, err := manet.ToIP(ma); err == nil {
+				if ip := node.ExtractIP(ma); ip != nil {
 					physicalIP = ip.String()
-				} else {
-					physicalIP = extractIPFromMultiaddr(remoteAddrStr)
 				}
 
-				if strings.Contains(remoteAddrStr, "quic") {
+				switch node.TransportOf(ma) {
+				case "quic":
 					transport = "QUIC"
-				} else if strings.Contains(remoteAddrStr, "webrtc") {
+				case "webrtc":
 					transport = "WebRTC"
-				} else if strings.Contains(remoteAddrStr, "webtransport") {
+				case "webtransport":
 					transport = "WebTransport"
-				} else if strings.Contains(remoteAddrStr, "tcp") {
+				case "tcp":
 					transport = "TCP"
 				}
 
@@ -551,12 +549,3 @@ func formatShortPeerID(pid peer.ID) string {
 	return s[:7] + "..." + s[len(s)-6:]
 }
 
-func extractIPFromMultiaddr(maStr string) string {
-	parts := strings.Split(maStr, "/")
-	for i, p := range parts {
-		if (p == "ip4" || p == "ip6") && i+1 < len(parts) {
-			return parts[i+1]
-		}
-	}
-	return ""
-}

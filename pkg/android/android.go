@@ -748,10 +748,10 @@ func GetMultiaddrs() string {
 	mu.Lock()
 	defer mu.Unlock()
 	if instance != nil && instance.Host != nil {
-		pid := instance.Host.ID().String()
+		pid := instance.Host.ID()
 		var addrs []string
 		for _, a := range instance.Host.Addrs() {
-			addrs = append(addrs, fmt.Sprintf("%s/p2p/%s", a.String(), pid))
+			addrs = append(addrs, node.WithPeerID(a, pid))
 		}
 		return strings.Join(addrs, "\n")
 	}

@@ -985,26 +985,12 @@ func (n *Node) localPeekMapNodeInfo() PeekMapNodeInfo {
 		// Loopback is not stripped here: the peerstore is a knowledge base and
 		// the dial paths already drop loopback (filterUndialableAddrs), so
 		// filtering twice would only make single-machine setups untestable.
-		Addrs:    multiaddrsToStrings(n.Host.Addrs()),
+		Addrs:    MultiaddrsToStrings(n.Host.Addrs()),
 		ObfsAlgo: c.Obfuscation.Algorithm,
 		ObfsMode: c.Obfuscation.Mode,
 	}
 }
 
-// multiaddrsToStrings renders multiaddrs for the peek-map wire format.
-func multiaddrsToStrings(addrs []multiaddr.Multiaddr) []string {
-	if len(addrs) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(addrs))
-	for _, a := range addrs {
-		if a == nil {
-			continue
-		}
-		out = append(out, a.String())
-	}
-	return out
-}
 
 type peekMapStreamWrapper struct {
 	mu sync.Mutex
