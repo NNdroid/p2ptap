@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"sort"
 	"strings"
@@ -40,10 +41,16 @@ func (n *Node) connectWithRetry(pi peer.AddrInfo, peerType string, baseDelay tim
 		err := n.dialInParallel(n.ctx, pi, peerType)
 
 		if err != nil {
-			delay := baseDelay * time.Duration(attempt)
+			// Exponential backoff with jitter: base * 2^(attempt-1) + random[0, base/4]
+			// This prevents thundering-herd when many peers fail simultaneously
+			// and caps total retry window for bootstrap/static (3 attempts).
+			delay := baseDelay * time.Duration(1<<uint(attempt-1))
 			if delay > 60*time.Second {
 				delay = 60 * time.Second
 			}
+			// Add jitter (0-25% of delay) to de-synchronize concurrent retries.
+			jitter := time.Duration(rand.Int63n(int64(delay/4)))
+			delay += jitter
 			log.Debug("%s peer %s connect failed (attempt %d): %v, retrying in %v", peerType, pi.ID.String(), attempt, err, delay)
 			select {
 			case <-n.ctx.Done():
@@ -114,18 +121,29 @@ func (n *Node) relayOnlyDirectUpgradeLoop() {
 			}
 			n.relayOnlyMu.RUnlock()
 
+			// Parallel upgrades with a bounded semaphore: each attemptDirectUpgrade
+			// can take ~23s (8s DHT + 15s dial), so a serial loop of N peers can
+			// exceed the 30s tick interval. Cap at 4 concurrent to avoid dial storms.
+			const maxConcurrent = 4
+			sem := make(chan struct{}, maxConcurrent)
+			var wg sync.WaitGroup
 			for _, pid := range relayOnly {
 				if pid == n.Host.ID() || n.isBootstrapPeer(pid) {
 					continue
 				}
 				if n.isDirectlyConnected(pid) {
-					// Already direct (ConnectedF may not have flipped the mark
-					// yet); clear the stale relay-only flag ourselves.
 					n.clearRelayOnlyPeer(pid)
 					continue
 				}
-				n.attemptDirectUpgrade(pid)
+				wg.Add(1)
+				sem <- struct{}{}
+				go func(pid peer.ID) {
+					defer wg.Done()
+					defer func() { <-sem }()
+					n.attemptDirectUpgrade(pid)
+				}(pid)
 			}
+			wg.Wait()
 		}
 	}
 }

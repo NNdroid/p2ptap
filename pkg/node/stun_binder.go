@@ -123,7 +123,13 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 		// Append /quic-v1 so the address is actually dialable: bare /udp/N
 		// matches no transport CanDial predicate and would be silently
 		// dropped by filterKnownUndialables on the receiving peer.
-		ma, err := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/udp/%d/quic-v1", addr.IP.String(), addr.Port))
+		// Use the correct IP family prefix — STUN may return IPv6 addresses
+		// (e.g. on a dual-stack or pure-IPv6 network).
+		ipPrefix := "/ip4/"
+		if addr.IP.To4() == nil {
+			ipPrefix = "/ip6/"
+		}
+		ma, err := multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/udp/%d/quic-v1", ipPrefix, addr.IP.String(), addr.Port))
 		if err != nil {
 			failures++
 			log.Debug("Failed to create multiaddr for STUN result %v: %v", addr, err)
@@ -155,11 +161,15 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 		}
 		setSTUNReflexiveAddrs(discovered)
 	} else {
+		// Network blip: keep the last-known-good addresses rather than clearing
+		// them. A transient STUN failure (timeout, DNS hiccup) should not remove
+		// all advertised reflexive addresses for 3 minutes. They will be refreshed
+		// on the next successful cycle; if the network truly changed, the peer
+		// connections will drop anyway and trigger reconnect.
 		if len(prevAddrs) > 0 {
-			log.Debug("STUN bind cycle produced no results, clearing %d previous address(es)", len(prevAddrs))
-			setSTUNReflexiveAddrs(nil)
+			log.Warn("STUN bind cycle produced no results — keeping %d previous address(es) (last-known-good)", len(prevAddrs))
 		} else {
-			log.Debug("STUN bind cycle produced no results (no previous addresses to clear)")
+			log.Debug("STUN bind cycle produced no results (no previous addresses to keep)")
 		}
 	}
 
