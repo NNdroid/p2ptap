@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"hash/crc32"
 	"math"
 	randv2 "math/rand/v2"
 	"sync"
@@ -16,37 +17,11 @@ import (
 
 var log = logger.New("Obfuscate")
 
-// crc32Of is a tiny dependency-free CRC32 (IEEE) used only for the 20-bit
-// source-hash field of structured SeqIDs. We avoid importing hash/crc32's
-// table setup on the hot path by using the built-in.
+// crc32Of wraps hash/crc32.ChecksumIEEE for the 16-bit source-hash field
+// of structured SeqIDs. Called once at startup (SetSourceIdentity), never
+// on the packet hot path.
 func crc32Of(b []byte) uint32 {
-	table := crc32IEEETable()
-	var crc uint32 = 0xFFFFFFFF
-	for _, ch := range b {
-		crc = table[(crc^uint32(ch))&0xFF] ^ (crc >> 8)
-	}
-	return crc ^ 0xFFFFFFFF
-}
-
-var crc32TableOnce bool
-var crc32TableMem [256]uint32
-
-func crc32IEEETable() *[256]uint32 {
-	if !crc32TableOnce {
-		for i := 0; i < 256; i++ {
-			crc := uint32(i)
-			for j := 0; j < 8; j++ {
-				if crc&1 == 1 {
-					crc = (crc >> 1) ^ 0xEDB88320
-				} else {
-					crc >>= 1
-				}
-			}
-			crc32TableMem[i] = crc
-		}
-		crc32TableOnce = true
-	}
-	return &crc32TableMem
+	return crc32.ChecksumIEEE(b)
 }
 
 const (
@@ -465,9 +440,9 @@ func (fp *FramePacker) publishParamsLocked() {
 	fp.params.Store(&p)
 }
 
-func (fp *FramePacker) snapshotParams() packerParams {
+func (fp *FramePacker) snapshotParams() *packerParams {
 	if p := fp.params.Load(); p != nil {
-		return *p
+		return p
 	}
 
 	// Support zero-value / struct-literal FramePackers used by tests and legacy
@@ -475,11 +450,11 @@ func (fp *FramePacker) snapshotParams() packerParams {
 	fp.mu.Lock()
 	defer fp.mu.Unlock()
 	if p := fp.params.Load(); p != nil {
-		return *p
+		return p
 	}
 	fp.applyDefaults()
 	fp.publishParamsLocked()
-	return *fp.params.Load()
+	return fp.params.Load()
 }
 
 func (fp *FramePacker) Pack(seqID uint64, payload []byte, outBuf []byte) (int, error) {
@@ -522,28 +497,25 @@ func (fp *FramePacker) Pack(seqID uint64, payload []byte, outBuf []byte) (int, e
 //
 // p carries the immutable parameter snapshot taken by Pack. Reading the exported
 // fields directly here would race with UpdateConfig and could mix generations.
-func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte, mode string, p packerParams) (int, error) {
-	// Determine target total frame size
+func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte, mode string, p *packerParams) (int, error) {
+	overhead := HeaderLen + len(payload)
 	var targetSize int
 	switch mode {
 	case "none":
-		targetSize = HeaderLen + len(payload)
+		targetSize = overhead
 	case "fixed":
 		targetSize = p.fixedSize + randomJitter(p.jitterRange)
 	case "block":
-
 		blockSize := p.blockSize
 		if blockSize <= 0 {
 			blockSize = 256
 		}
-		overhead := HeaderLen + len(payload)
 		blocks := overhead / blockSize
 		if overhead%blockSize != 0 {
 			blocks++
 		}
 		targetSize = blocks*blockSize + randomJitter(p.jitterRange)
 	case "dynamic":
-		overhead := HeaderLen + len(payload)
 		// Fill to maxSize to minimize fragmentation: every frame occupies the
 		// full MTU-sized obfuscation slot regardless of payload size. This
 		// eliminates per-packet fragmentation on the wire (each obfuscated frame
@@ -551,7 +523,6 @@ func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte,
 		// size class, which is stronger for traffic analysis resistance.
 		targetSize = randomBetween(overhead, p.maxSize)
 	default: // "random" or auto
-		overhead := HeaderLen + len(payload)
 		low := p.minSize
 		if low < overhead {
 			low = overhead
@@ -559,14 +530,6 @@ func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte,
 		targetSize = randomBetween(low, p.fixedSize) + randomJitter(p.jitterRange)
 	}
 
-	// The payload is written in the CLEAR here. Per-peer encryption is applied
-	// later by the Node send path (encryptForPeer) using the negotiated
-	// per-peer cipher, so a single Pack() result can be fanned out to many
-	// peers, each encrypted with its own key. ObfType records the algorithm so
-	// the receiver knows which cipher to use.
-	sealed := payload
-
-	overhead := HeaderLen + len(sealed)
 	if targetSize < overhead {
 		targetSize = overhead
 	}
@@ -577,21 +540,25 @@ func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte,
 		return 0, ErrBufferTooSmall
 	}
 
-	paddingLen := uint16(targetSize - HeaderLen - len(sealed))
+	paddingLen := uint16(targetSize - overhead)
 
 	// Write header (v2 includes the ObfType byte at offset 10).
 	binary.BigEndian.PutUint16(outBuf[0:2], uint16(FrameMagic))
 	binary.BigEndian.PutUint64(outBuf[2:10], uint64(seqID))
 	outBuf[10] = byte(fp.algo.Load())
-	binary.BigEndian.PutUint16(outBuf[11:13], uint16(len(sealed)))
+	binary.BigEndian.PutUint16(outBuf[11:13], uint16(len(payload)))
 	binary.BigEndian.PutUint16(outBuf[13:15], paddingLen)
 
-	// Copy sealed payload
-	copy(outBuf[HeaderLen:], sealed)
+	// Copy payload. It is written in the CLEAR here — per-peer encryption is
+	// applied later by the Node send path (encryptForPeer) using the negotiated
+	// per-peer cipher, so a single Pack() result can be fanned out to many
+	// peers, each encrypted with its own key. ObfType records the algorithm so
+	// the receiver knows which cipher to use.
+	copy(outBuf[HeaderLen:], payload)
 
 	// Fill padding with random bytes
 	if paddingLen > 0 {
-		fillRandom(outBuf[HeaderLen+len(sealed) : targetSize])
+		fillRandom(outBuf[HeaderLen+len(payload) : targetSize])
 	}
 
 	return targetSize, nil
@@ -761,11 +728,6 @@ func (fp *FramePacker) SetSendAlgo(algo byte) {
 	fp.algo.Store(uint32(algo))
 }
 
-// headerLenOf returns the fixed header length of a v2 frame.
-func headerLenOf(frame []byte) int {
-	return HeaderLen
-}
-
 // obfNonceFromHeader derives the 12-byte AEAD nonce for a packed frame from its
 // IMMUTABLE header bytes. Seal (EncryptPayloadRegion) and Open
 // (DecryptPayloadRegion / UnpackWith) MUST all use exactly this derivation so
@@ -827,7 +789,7 @@ func EncryptPayloadRegionInto(dst, frame []byte, cipher ObfCipher) ([]byte, erro
 		out := append(dst[:0], frame...)
 		return out, nil
 	}
-	hLen := headerLenOf(frame)
+	hLen := HeaderLen
 	if len(frame) < hLen {
 		return nil, ErrFrameCorrupted
 	}
@@ -888,7 +850,7 @@ func DecryptPayloadRegionInto(dst, frame []byte, cipher ObfCipher) ([]byte, erro
 		copy(out, frame)
 		return out, nil
 	}
-	hLen := headerLenOf(frame)
+	hLen := HeaderLen
 	if len(frame) < hLen {
 		return nil, ErrFrameCorrupted
 	}
@@ -896,7 +858,7 @@ func DecryptPayloadRegionInto(dst, frame []byte, cipher ObfCipher) ([]byte, erro
 	if hLen+pLen > len(frame) {
 		return nil, ErrFrameCorrupted
 	}
-	// Nonce derived from immutable header bytes (see EncryptPayloadRegion).
+	// Nonc derived from immutable header bytes (see EncryptPayloadRegion).
 	nonce := obfNonceFromHeader(frame)
 	seqID := binary.BigEndian.Uint64(frame[2:10])
 
