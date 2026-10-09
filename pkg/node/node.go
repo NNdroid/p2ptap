@@ -1078,14 +1078,22 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 
 	setOverlayCIDRs(cfg.TapIP, cfg.TapIPv6)
 
+	log.Info("Transport config: TCP=%v QUIC=%v WebRTC=%v WebTransport=%v DisableRelay=%v",
+		cfg.Transports.EnableTCPReuse, cfg.Transports.EnableQUICReuse,
+		cfg.Transports.EnableWebRTC, cfg.Transports.EnableWebTransport,
+		cfg.Transports.DisableRelay)
+
 	opts := []libp2p.Option{
 		libp2p.Muxer("/yamux/1.0.0", &yamuxOpt),
 		libp2p.NATPortMap(),
 		libp2p.EnableNATService(),
 		libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 			filtered := filterAdvertisedAddrs(addrs, cfg.TapIP, cfg.TapIPv6, cfg.WebUI.ListenIP, cfg.WebUI.ListenIPv6)
-			// Inject STUN-discovered server-reflexive addresses for CGNAT nodes.
-			filtered = append(filtered, getSTUNReflexiveAddrs()...)
+			stunAddrs := getSTUNReflexiveAddrs()
+			if len(stunAddrs) > 0 {
+				log.Debug("AddrFactory: injecting %d STUN server-reflexive addr(s): %v", len(stunAddrs), stunAddrs)
+				filtered = append(filtered, stunAddrs...)
+			}
 			if len(filtered) > 0 {
 				return filtered
 			}
@@ -1142,24 +1150,29 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 
 	// Parse listen addrs according to enabled transport flags
 	var addrs []multiaddr.Multiaddr
+	skippedAddrs := 0
 	for _, aStr := range cfg.ListenAddrs {
 		// WebTransport uses /quic-v1/webtransport, so check it before QUIC
 		// to avoid disabling QUIC silently killing WebTransport.
 		if containsSub(aStr, "webtransport") {
 			if !cfg.Transports.EnableWebTransport {
 				log.Debug("Skipping disabled WebTransport listen addr: %s", aStr)
+				skippedAddrs++
 				continue
 			}
 		} else if !cfg.Transports.EnableQUICReuse && (containsSub(aStr, "quic-v1") || containsSub(aStr, "quic")) {
 			log.Debug("Skipping disabled QUIC listen addr: %s", aStr)
+			skippedAddrs++
 			continue
 		}
 		if !cfg.Transports.EnableWebRTC && containsSub(aStr, "webrtc-direct") {
 			log.Debug("Skipping disabled WebRTC listen addr: %s", aStr)
+			skippedAddrs++
 			continue
 		}
 		if !cfg.Transports.EnableTCPReuse && containsSub(aStr, "/tcp/") {
 			log.Debug("Skipping disabled TCP listen addr: %s", aStr)
+			skippedAddrs++
 			continue
 		}
 		ma, err := multiaddr.NewMultiaddr(aStr)
@@ -1171,7 +1184,10 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	}
 	if len(addrs) > 0 {
 		opts = append(opts, libp2p.ListenAddrs(addrs...))
-		log.Debug("Configured %d listen addresses (physical-NIC expanded)", len(addrs))
+		log.Info("Configured %d listen addresses (physical-NIC expanded, %d skipped by transport gates)",
+			len(addrs), skippedAddrs)
+	} else {
+		log.Warn("No listen addresses configured after transport filtering (all %d addr(s) skipped)", skippedAddrs)
 	}
 
 	// Use NullResourceManager to prevent stream limits from dropping high-rate TAP forwarding frames
@@ -1193,6 +1209,9 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			}),
 			tcpt.WithListenControl(listenerProtectControl),
 		))
+		log.Info("TCP transport registered (socket-protected)")
+	} else {
+		log.Info("TCP transport DISABLED — no /tcp/ listeners will be created, no /tcp/ dialing")
 	}
 
 	// TLS ClientHello SNI: one setting covers BOTH security paths — TLS-over-TCP
@@ -1230,6 +1249,9 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				return quict.NewTransport(key, cm, psk, gater, rcmgr, transportOpts...)
 			},
 		))
+		log.Info("QUIC transport registered (socket-protected)")
+	} else {
+		log.Info("QUIC transport DISABLED — no /quic-v1/ listeners, no QUIC hole-punching")
 	}
 
 	// Socket protection for WebRTC (UDP): the ICE agent creates its own UDP
@@ -1255,6 +1277,8 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			},
 		))
 		log.Info("WebRTC transport registered (socket-protected)")
+	} else {
+		log.Info("WebRTC transport DISABLED — no /webrtc-direct/ listeners")
 	}
 
 	// Socket protection for WebTransport (QUIC-over-HTTP/3): it reuses the same
@@ -1281,6 +1305,8 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			},
 		))
 		log.Info("WebTransport transport registered (socket-protected)")
+	} else {
+		log.Info("WebTransport transport DISABLED — no /webtransport/ listeners")
 	}
 
 	h, err := libp2p.New(opts...)
@@ -1297,6 +1323,18 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		return nil, fmt.Errorf("failed to create libp2p host: %w", err)
 	}
 	log.Info("libp2p host created, PeerID: %s", h.ID().String())
+
+	// Log actual listen addresses the host is bound to (confirms transport gating worked).
+	hostAddrs := h.Addrs()
+	var listenParts []string
+	for _, a := range hostAddrs {
+		listenParts = append(listenParts, a.String())
+	}
+	if len(listenParts) > 0 {
+		log.Info("Host listening on %d address(es): %v", len(listenParts), listenParts)
+	} else {
+		log.Warn("Host has no listen addresses — check transport flags and listen addr config")
+	}
 
 	// Initialize Kademlia DHT for Peer discovery
 	kdht, err := dht.New(h)
