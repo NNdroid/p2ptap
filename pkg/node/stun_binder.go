@@ -25,6 +25,44 @@ func stunAttrNames(msg *stun.Message) string {
 	return strings.Join(parts, ", ")
 }
 
+// ── NAT Type Detection ───────────────────────────────────────────────────────
+
+// NAT types inferred from STUN responses. Used to decide whether TURN relay
+// is needed: open/cone NATs can hole-punch directly, symmetric NATs cannot.
+const (
+	natOpen      int32 = iota // No NAT — direct connectivity, skip TURN
+	natCone                   // Cone NAT — hole punching works, skip TURN
+	natSymmetric              // Symmetric NAT — hole punching fails, need TURN
+	natUnknown                // Unknown — need TURN as fallback
+)
+
+// detectedNATType stores the last detected NAT type from STUN responses.
+// Default is natUnknown, which means TURN is always attempted (safe fallback).
+var detectedNATType atomic.Int32
+
+// getNATType returns the currently detected NAT type.
+func getNATType() int32 {
+	return detectedNATType.Load()
+}
+
+// setNATType stores a detected NAT type.
+func setNATType(t int32) {
+	detectedNATType.Store(t)
+}
+
+// needsTURN returns true if the detected NAT type requires TURN relay.
+func needsTURN() bool {
+	t := detectedNATType.Load()
+	return t == natSymmetric || t == natUnknown
+}
+
+// stunSuccessThreshold defines how many UDP/TCP successes per cycle are
+// sufficient to stop dispatching further STUN queries.
+const (
+	udpSuccessThreshold = 3
+	tcpSuccessThreshold = 2
+)
+
 // stunReflexiveAddrs holds the UDP server-reflexive addresses discovered via STUN.
 var stunReflexiveAddrs atomic.Pointer[[]multiaddr.Multiaddr]
 
@@ -65,6 +103,10 @@ func getTCPStunReflexiveAddrs() []multiaddr.Multiaddr {
 
 // startSTUNBinder periodically binds to configured STUN servers to discover the
 // node's server-reflexive addresses via UDP and TCP STUN (RFC 7675).
+//
+// Rebind interval is adaptive: when addresses change, the interval shrinks to
+// 30s to converge quickly. When addresses are stable for 3+ consecutive cycles,
+// the interval expands to 10 minutes to save resources.
 func (n *Node) startSTUNBinder(ctx context.Context) {
 	servers := n.config().StunServers
 	if len(servers) == 0 {
@@ -85,25 +127,84 @@ func (n *Node) startSTUNBinder(ctx context.Context) {
 			log.Debug("STUN binder initial bind failed: %v", err)
 		}
 
-		const rebindInterval = 3 * time.Minute
-		ticker := time.NewTicker(rebindInterval)
-		defer ticker.Stop()
-
-		log.Debug("STUN binder: periodic rebind interval set to %v", rebindInterval)
-
+		// Adaptive rebind: track consecutive stable cycles to decide interval.
+		stableCycles := 0
 		for {
+			interval := adaptiveRebindInterval(stableCycles)
+			log.Debug("STUN binder: next rebind in %v (stable cycles: %d)", interval, stableCycles)
+
 			select {
 			case <-bindCtx.Done():
 				log.Debug("STUN binder stopped")
 				return
-			case <-ticker.C:
-				log.Debug("STUN binder: periodic rebind triggered")
-				if err := n.stunBindOnce(bindCtx); err != nil {
-					log.Debug("STUN binder periodic bind failed: %v", err)
-				}
+			case <-time.After(interval):
+			}
+
+			log.Debug("STUN binder: periodic rebind triggered")
+			changed := n.stunBindOnceChecked(bindCtx)
+			if changed {
+				stableCycles = 0
+			} else {
+				stableCycles++
 			}
 		}
 	}()
+}
+
+// adaptiveRebindInterval returns the rebind delay based on consecutive stable cycles.
+func adaptiveRebindInterval(stableCycles int) time.Duration {
+	switch {
+	case stableCycles == 0:
+		// Addresses just changed — converge quickly.
+		return 30 * time.Second
+	case stableCycles >= 3:
+		// Stable for 3+ cycles — minimize overhead.
+		return 10 * time.Minute
+	case stableCycles >= 1:
+		return 2 * time.Minute
+	default:
+		return 3 * time.Minute
+	}
+}
+
+// stunBindOnceChecked runs a STUN bind cycle and reports whether addresses changed.
+func (n *Node) stunBindOnceChecked(ctx context.Context) bool {
+	prevUDP := getSTUNReflexiveAddrs()
+	prevTCP := getTCPStunReflexiveAddrs()
+
+	if err := n.stunBindOnce(ctx); err != nil {
+		log.Debug("STUN binder periodic bind failed: %v", err)
+		return false
+	}
+
+	// Compare before/after to detect changes.
+	newUDP := getSTUNReflexiveAddrs()
+	newTCP := getTCPStunReflexiveAddrs()
+	changed := !equalAddrs(prevUDP, newUDP) || !equalAddrs(prevTCP, newTCP)
+	if changed {
+		log.Info("STUN addresses changed — rebind interval will shrink to 30s")
+	}
+	return changed
+}
+
+// equalAddrs checks if two multiaddr slices contain the same addresses.
+func equalAddrs(a, b []multiaddr.Multiaddr) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	seen := make(map[string]bool, len(a))
+	for _, addr := range a {
+		seen[addr.String()] = true
+	}
+	for _, addr := range b {
+		if !seen[addr.String()] {
+			return false
+		}
+	}
+	return true
 }
 
 func (n *Node) stunBindOnce(ctx context.Context) error {
@@ -137,6 +238,18 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 			log.Debug("STUN bind cycle aborted: cycle timeout reached")
 			break
 		}
+
+		// Early termination: once we have enough successes for both UDP and
+		// TCP, stop dispatching further servers. Most networks have at least
+		// one responsive STUN server in the first few entries.
+		mu.Lock()
+		if udpSuccesses >= udpSuccessThreshold && tcpSuccesses >= tcpSuccessThreshold {
+			mu.Unlock()
+			log.Debug("STUN early termination: %d UDP + %d TCP successes, skipping remaining %d server(s)",
+				udpSuccesses, tcpSuccesses, len(servers))
+			break
+		}
+		mu.Unlock()
 
 		select {
 		case sem <- struct{}{}:
@@ -488,14 +601,21 @@ func sendSTUNBindingRequest(conn *net.UDPConn, localAddr *net.UDPAddr) (net.UDPA
 
 	result := net.UDPAddr{IP: xa.IP, Port: xa.Port}
 
-	// NAT type inference
+	// NAT type inference — stored globally so the TURN binder can decide
+	// whether relay allocation is needed. With a single-server STUN test,
+	// we can only distinguish open, cone (port preserved), and unknown.
+	// Port-changed is ambiguous (could be cone or symmetric), so we use
+	// natUnknown to conservatively keep TURN enabled.
 	if localAddr.IP.Equal(result.IP) {
 		log.Debug("STUN NAT type: open internet (no NAT) — server-reflexive == local address")
+		setNATType(natOpen)
 	} else if localAddr.Port == result.Port {
 		log.Debug("STUN NAT type: restricted cone NAT (port preserved, IP changed)")
+		setNATType(natCone)
 	} else {
-		log.Debug("STUN NAT type: restricted full-cone NAT (port changed: local=%d, reflexive=%d)",
+		log.Debug("STUN NAT type: unknown — port changed (local=%d, reflexive=%d), may be symmetric",
 			localAddr.Port, result.Port)
+		setNATType(natUnknown)
 	}
 
 	return result, nil

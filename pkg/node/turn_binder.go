@@ -177,6 +177,12 @@ func parseTurnURL(s string) (*turnConfig, error) {
 }
 
 // startTURNBinder periodically allocates TURN relay addresses.
+//
+// NAT-type-aware: if the STUN binder detected an open or cone NAT, TURN is
+// skipped entirely — hole punching works without relay. TURN is only
+// allocated for symmetric NAT or unknown type (the safe fallback).
+// The NAT type is re-checked each cycle, so if the network changes, the
+// binder adapts automatically.
 func (n *Node) startTURNBinder(ctx context.Context) {
 	go func() {
 		defer n.wg.Done()
@@ -186,12 +192,13 @@ func (n *Node) startTURNBinder(ctx context.Context) {
 			log.Debug("TURN binder stopped")
 		}()
 
-		// Delay initial allocation to let the node finish bootstrapping and
-		// avoid log spam from servers that require authentication.
+		// Delay initial allocation to let the STUN binder finish its first
+		// cycle (which sets the NAT type) and avoid log spam from servers
+		// that require authentication.
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(10 * time.Second):
+		case <-time.After(15 * time.Second):
 		}
 
 		ticker := time.NewTicker(5 * time.Minute)
@@ -207,6 +214,23 @@ func (n *Node) startTURNBinder(ctx context.Context) {
 			default:
 			}
 
+			// Skip TURN if the NAT type doesn't need it — open/cone NATs
+			// can hole-punch directly, saving relay resources.
+			if !needsTURN() {
+				log.Debug("TURN bind cycle skipped: NAT type is %s (no relay needed)", natTypeName(detectedNATType.Load()))
+				// Clean up any existing TURN relays since they're no longer needed.
+				removeAllTURNClients()
+				removeAllTURNRelayConns()
+				setTURNRelayAddrs(nil)
+				select {
+				case <-ctx.Done():
+					return
+				case <-permTicker.C:
+				case <-ticker.C:
+				}
+				continue
+			}
+
 			if err := n.turnBindOnce(ctx); err != nil {
 				log.Warn("TURN bind cycle failed: %v", err)
 			}
@@ -220,6 +244,20 @@ func (n *Node) startTURNBinder(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// natTypeName returns a human-readable NAT type name for logging.
+func natTypeName(t int32) string {
+	switch t {
+	case natOpen:
+		return "open-internet"
+	case natCone:
+		return "cone"
+	case natSymmetric:
+		return "symmetric"
+	default:
+		return "unknown"
+	}
 }
 
 func (n *Node) turnBindOnce(ctx context.Context) error {
@@ -428,40 +466,15 @@ func (n *Node) refreshTURNPermissions() {
 	}
 }
 
-// collectPeerAddresses gathers known peer addresses for TURN permission creation.
+// collectPeerAddresses gathers addresses of CURRENTLY CONNECTED peers for
+// TURN permission creation. Only peers with an active connection are included
+// — peers in the peerstore that are disconnected are excluded, saving
+// unnecessary TURN permission messages and relay bandwidth.
 func (n *Node) collectPeerAddresses() []net.Addr {
-	cfg := n.config()
 	addrs := make([]net.Addr, 0, 16)
 	seen := make(map[string]bool)
 
-	// Bootstrap peers
-	for _, bStr := range cfg.BootstrapPeers {
-		ma, err := multiaddr.NewMultiaddr(bStr)
-		if err != nil {
-			continue
-		}
-		addr := extractIPFromMultiaddr(ma)
-		if addr != nil && !seen[addr.String()] {
-			seen[addr.String()] = true
-			addrs = append(addrs, addr)
-		}
-	}
-
-	// Static peers
-	for _, bStr := range cfg.StaticPeers {
-		ma, err := multiaddr.NewMultiaddr(bStr)
-		if err != nil {
-			continue
-		}
-		addr := extractIPFromMultiaddr(ma)
-		if addr != nil && !seen[addr.String()] {
-			seen[addr.String()] = true
-			addrs = append(addrs, addr)
-		}
-	}
-
-	// Peerstore
-	for _, pid := range n.Host.Peerstore().Peers() {
+	for _, pid := range n.Host.Network().Peers() {
 		for _, ma := range n.Host.Peerstore().Addrs(pid) {
 			addr := extractIPFromMultiaddr(ma)
 			if addr != nil && !seen[addr.String()] {

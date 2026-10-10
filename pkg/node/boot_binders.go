@@ -42,8 +42,10 @@ func GetTURNRelayAddrs() []multiaddr.Multiaddr {
 // p2ptap-boot) that don't have a Node instance but need NAT traversal.
 //
 // The binder queries all servers concurrently (max 10 concurrent), with a
-// 5-second timeout per query and a 90-second global cycle timeout. It
-// rebinds every 3 minutes to pick up IP address changes.
+// 5-second timeout per query and a 90-second global cycle timeout.
+//
+// Rebind interval is adaptive: 30s after a change, 2min after 1 stable
+// cycle, 10min after 3+ stable cycles.
 func StartBootSTUNBinder(ctx context.Context, servers []string) {
 	if len(servers) == 0 {
 		log.Debug("Boot STUN binder: no servers configured, skipping")
@@ -59,18 +61,28 @@ func StartBootSTUNBinder(ctx context.Context, servers []string) {
 			log.Debug("Boot STUN initial bind failed: %v", err)
 		}
 
-		const rebindInterval = 3 * time.Minute
-		ticker := time.NewTicker(rebindInterval)
-		defer ticker.Stop()
-
+		stableCycles := 0
 		for {
+			interval := adaptiveRebindInterval(stableCycles)
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				if err := bootSTUNBindOnce(ctx, servers); err != nil {
-					log.Debug("Boot STUN periodic bind failed: %v", err)
-				}
+			case <-time.After(interval):
+			}
+
+			prevUDP := getSTUNReflexiveAddrs()
+			prevTCP := getTCPStunReflexiveAddrs()
+
+			if err := bootSTUNBindOnce(ctx, servers); err != nil {
+				log.Debug("Boot STUN periodic bind failed: %v", err)
+			}
+
+			newUDP := getSTUNReflexiveAddrs()
+			newTCP := getTCPStunReflexiveAddrs()
+			if !equalAddrs(prevUDP, newUDP) || !equalAddrs(prevTCP, newTCP) {
+				stableCycles = 0
+			} else {
+				stableCycles++
 			}
 		}
 	}()
@@ -80,8 +92,9 @@ func StartBootSTUNBinder(ctx context.Context, servers []string) {
 // allocates TURN relay ports. The relay addresses are published via the
 // host's peerstore and available through GetTURNRelayAddrs().
 //
-// TURN allocations are refreshed every 5 minutes, and TURN permissions
-// are refreshed every 60 seconds for connected peers.
+// NAT-type-aware: if the STUN binder detected an open or cone NAT, TURN is
+// skipped entirely — hole punching works without relay. TURN is only
+// allocated for symmetric NAT or unknown type.
 func StartBootTURNBinder(ctx context.Context, h host.Host, servers []string) {
 	if len(servers) == 0 {
 		log.Debug("Boot TURN binder: no servers configured, skipping")
@@ -97,11 +110,12 @@ func StartBootTURNBinder(ctx context.Context, h host.Host, servers []string) {
 			log.Debug("Boot TURN binder stopped")
 		}()
 
-		// Delay initial allocation to let the host finish bootstrapping.
+		// Delay initial allocation to let the STUN binder finish its first
+		// cycle (which sets the NAT type).
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(10 * time.Second):
+		case <-time.After(15 * time.Second):
 		}
 
 		ticker := time.NewTicker(5 * time.Minute)
@@ -115,6 +129,21 @@ func StartBootTURNBinder(ctx context.Context, h host.Host, servers []string) {
 			case <-ctx.Done():
 				return
 			default:
+			}
+
+			// Skip TURN if the NAT type doesn't need it.
+			if !needsTURN() {
+				log.Debug("Boot TURN bind cycle skipped: NAT type is %s (no relay needed)", natTypeName(detectedNATType.Load()))
+				removeAllTURNClients()
+				removeAllTURNRelayConns()
+				setTURNRelayAddrs(nil)
+				select {
+				case <-ctx.Done():
+					return
+				case <-permTicker.C:
+				case <-ticker.C:
+				}
+				continue
 			}
 
 			if err := bootTURNBindOnce(ctx, h, servers); err != nil {
@@ -150,12 +179,20 @@ func bootSTUNBindOnce(ctx context.Context, servers []string) error {
 
 	var udpDiscovered []multiaddr.Multiaddr
 	var tcpDiscovered []multiaddr.Multiaddr
-	var udpFailures, tcpFailures int
+	var udpSuccesses, tcpSuccesses, udpFailures, tcpFailures int
 
 	for _, server := range servers {
 		if cycleCtx.Err() != nil {
 			break
 		}
+
+		// Early termination: stop dispatching once we have enough successes.
+		if udpSuccesses >= udpSuccessThreshold && tcpSuccesses >= tcpSuccessThreshold {
+			log.Debug("Boot STUN early termination: sufficient successes (udp=%d, tcp=%d)",
+				udpSuccesses, tcpSuccesses)
+			break
+		}
+
 		select {
 		case sem <- struct{}{}:
 		case <-cycleCtx.Done():
@@ -218,8 +255,10 @@ func bootSTUNBindOnce(ctx context.Context, servers []string) error {
 				mu.Lock()
 				if isTCP {
 					tcpDiscovered = append(tcpDiscovered, ma)
+					tcpSuccesses++
 				} else {
 					udpDiscovered = append(udpDiscovered, ma)
+					udpSuccesses++
 				}
 				mu.Unlock()
 			}
