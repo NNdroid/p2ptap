@@ -153,7 +153,7 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 				return
 			}
 
-			serverAddr, isTCP, err := normalizeSTUNServer(cycleCtx, server)
+			serverAddrs, isTCP, err := normalizeSTUNServer(cycleCtx, server)
 			if err != nil {
 				mu.Lock()
 				if isTCP {
@@ -165,50 +165,56 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 				return
 			}
 
-			addr, err := stunQuery(cycleCtx, server, serverAddr, isTCP)
-			if err != nil {
-				mu.Lock()
+			for _, serverAddr := range serverAddrs {
+				if cycleCtx.Err() != nil {
+					return
+				}
+
+				addr, err := stunQuery(cycleCtx, server, serverAddr, isTCP)
+				if err != nil {
+					mu.Lock()
+					if isTCP {
+						tcpFailures++
+					} else {
+						udpFailures++
+					}
+					mu.Unlock()
+					return
+				}
+
+				ipPrefix := "/ip4/"
+				if addr.IP.To4() == nil {
+					ipPrefix = "/ip6/"
+				}
+
+				var ma multiaddr.Multiaddr
 				if isTCP {
-					tcpFailures++
+					ma, err = multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/tcp/%d", ipPrefix, addr.IP.String(), addr.Port))
+					if err != nil {
+						mu.Lock()
+						tcpFailures++
+						mu.Unlock()
+						return
+					}
+					mu.Lock()
+					tcpSuccesses++
+					tcpDiscovered = append(tcpDiscovered, ma)
+					mu.Unlock()
 				} else {
-					udpFailures++
-				}
-				mu.Unlock()
-				return
-			}
-
-			ipPrefix := "/ip4/"
-			if addr.IP.To4() == nil {
-				ipPrefix = "/ip6/"
-			}
-
-			var ma multiaddr.Multiaddr
-			if isTCP {
-				ma, err = multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/tcp/%d", ipPrefix, addr.IP.String(), addr.Port))
-				if err != nil {
+					ma, err = multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/udp/%d/quic-v1", ipPrefix, addr.IP.String(), addr.Port))
+					if err != nil {
+						mu.Lock()
+						udpFailures++
+						mu.Unlock()
+						return
+					}
 					mu.Lock()
-					tcpFailures++
+					udpSuccesses++
+					udpDiscovered = append(udpDiscovered, ma)
 					mu.Unlock()
-					return
 				}
-				mu.Lock()
-				tcpSuccesses++
-				tcpDiscovered = append(tcpDiscovered, ma)
-				mu.Unlock()
-			} else {
-				ma, err = multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/udp/%d/quic-v1", ipPrefix, addr.IP.String(), addr.Port))
-				if err != nil {
-					mu.Lock()
-					udpFailures++
-					mu.Unlock()
-					return
-				}
-				mu.Lock()
-				udpSuccesses++
-				udpDiscovered = append(udpDiscovered, ma)
-				mu.Unlock()
+				log.Debug("STUN discovered server-reflexive address: %s (via %s, tcp=%v)", ma.String(), server, isTCP)
 			}
-			log.Debug("STUN discovered server-reflexive address: %s (via %s, tcp=%v)", ma.String(), server, isTCP)
 		}(server)
 	}
 
@@ -335,9 +341,9 @@ func mergeAndStoreTCPSTUNAddrs(newAddrs, prevAddrs []multiaddr.Multiaddr, failur
 	setTCPStunReflexiveAddrs(merged)
 }
 
-// normalizeSTUNServer parses a STUN server string and returns the resolved address.
-// Returns (net.Addr, isTCP, error). isTCP is true if the server is a TCP STUN server.
-func normalizeSTUNServer(ctx context.Context, s string) (net.Addr, bool, error) {
+// normalizeSTUNServer parses a STUN server string and returns resolved addresses
+// for all IP versions (IPv4 + IPv6). Returns (addrs, isTCP, error).
+func normalizeSTUNServer(ctx context.Context, s string) ([]net.Addr, bool, error) {
 	original := s
 	s = strings.TrimSpace(s)
 
@@ -367,15 +373,20 @@ func normalizeSTUNServer(ctx context.Context, s string) (net.Addr, bool, error) 
 		if portNum == 0 {
 			portNum = 3478
 		}
-		ip, err := resolveIP(ctx, host)
+		ips, err := resolveIPs(ctx, host)
 		if err != nil {
 			return nil, isTCP, fmt.Errorf("cannot resolve STUN host %q: %w", host, err)
 		}
-		log.Debug("STUN server normalized: %q -> %s:%d (tcp=%v)", original, ip.String(), portNum, isTCP)
-		if isTCP {
-			return &net.TCPAddr{IP: ip, Port: portNum}, isTCP, nil
+		addrs := make([]net.Addr, len(ips))
+		for i, ip := range ips {
+			log.Debug("STUN server normalized: %q -> %s:%d (tcp=%v)", original, ip.String(), portNum, isTCP)
+			if isTCP {
+				addrs[i] = &net.TCPAddr{IP: ip, Port: portNum}
+			} else {
+				addrs[i] = &net.UDPAddr{IP: ip, Port: portNum}
+			}
 		}
-		return &net.UDPAddr{IP: ip, Port: portNum}, isTCP, nil
+		return addrs, isTCP, nil
 	}
 
 	// No port specified, use default
@@ -383,15 +394,20 @@ func normalizeSTUNServer(ctx context.Context, s string) (net.Addr, bool, error) 
 	if strings.Contains(s, "google.com") {
 		port = 19302
 	}
-	ip, err := resolveIP(ctx, s)
+	ips, err := resolveIPs(ctx, s)
 	if err != nil {
 		return nil, isTCP, fmt.Errorf("cannot resolve STUN host %q: %w", s, err)
 	}
-	log.Debug("STUN server normalized: %q -> %s:%d (tcp=%v)", original, ip.String(), port, isTCP)
-	if isTCP {
-		return &net.TCPAddr{IP: ip, Port: port}, isTCP, nil
+	addrs := make([]net.Addr, len(ips))
+	for i, ip := range ips {
+		log.Debug("STUN server normalized: %q -> %s:%d (tcp=%v)", original, ip.String(), port, isTCP)
+		if isTCP {
+			addrs[i] = &net.TCPAddr{IP: ip, Port: port}
+		} else {
+			addrs[i] = &net.UDPAddr{IP: ip, Port: port}
+		}
 	}
-	return &net.UDPAddr{IP: ip, Port: port}, isTCP, nil
+	return addrs, isTCP, nil
 }
 
 // stunQuery sends a STUN Binding Request and returns the server-reflexive address.
@@ -618,13 +634,22 @@ func readFull(conn *net.TCPConn, buf []byte) error {
 
 // resolveIP returns the IP address for a host string, using DNS resolution if
 // the host is not already an IP literal.
-func resolveIP(ctx context.Context, host string) (net.IP, error) {
+// resolveIPs returns all resolved IP addresses for a host (IPv4 + IPv6).
+func resolveIPs(ctx context.Context, host string) ([]net.IP, error) {
 	if ip := net.ParseIP(host); ip != nil {
-		return ip, nil
+		return []net.IP{ip}, nil
 	}
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil || len(addrs) == 0 {
 		return nil, fmt.Errorf("no IP addresses for %q: %v", host, err)
 	}
-	return addrs[0].IP, nil
+	seen := make(map[string]bool)
+	var ips []net.IP
+	for _, a := range addrs {
+		if !seen[a.IP.String()] {
+			seen[a.IP.String()] = true
+			ips = append(ips, a.IP)
+		}
+	}
+	return ips, nil
 }
