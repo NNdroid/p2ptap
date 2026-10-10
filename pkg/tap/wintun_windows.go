@@ -69,18 +69,26 @@ type WintunTAPDevice struct {
 // the driver layer), while ConfigureIP mutates localMAC IN PLACE and SetMAC
 // replaces the slice. ok=false means the device is closed (or not yet ready)
 // and the caller must abort the operation.
-func (w *WintunTAPDevice) deviceState() (sess WintunSessionHandle, mac [6]byte, ip net.IP, ok bool) {
+func (w *WintunTAPDevice) deviceState() (sess WintunSessionHandle, mac [6]byte, ip, webUI net.IP, ok bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed || w.session == 0 || len(w.localMAC) < 6 {
-		return 0, mac, nil, false
+		return 0, mac, nil, nil, false
 	}
 	copy(mac[:], w.localMAC)
 	if w.localIP != nil {
-		ip = make(net.IP, len(w.localIP))
-		copy(ip, w.localIP)
+		ip = cloneIP(w.localIP)
 	}
-	return w.session, mac, ip, true
+	if w.webUIIP != nil {
+		webUI = cloneIP(w.webUIIP)
+	}
+	return w.session, mac, ip, webUI, true
+}
+
+func cloneIP(p net.IP) net.IP {
+	c := make(net.IP, len(p))
+	copy(c, p)
+	return c
 }
 
 func isWintunAvailable() bool {
@@ -341,7 +349,7 @@ func (w *WintunTAPDevice) Read(b []byte) (int, error) {
 		// session between iterations, in which case deviceState reports !ok
 		// and we abort (the reader loop exits via the already-cancelled node
 		// context anyway — this guard covers the force-shutdown window).
-		sess, macSnap, _, devOK := w.deviceState()
+		sess, macSnap, _, _, devOK := w.deviceState()
 		if !devOK {
 			return 0, fmt.Errorf("wintun device closed")
 		}
@@ -475,7 +483,7 @@ func (w *WintunTAPDevice) Write(b []byte) (int, error) {
 
 	// Session snapshot + closed guard (see deviceState). The ARP/NA branches
 	// below delegate to helpers that take their own snapshot.
-	sess, _, _, devOK := w.deviceState()
+	sess, _, _, _, devOK := w.deviceState()
 	if !devOK {
 		return 0, fmt.Errorf("wintun device closed")
 	}
@@ -570,7 +578,9 @@ func (w *WintunTAPDevice) SetWebUIIP(ipStr string) {
 	}
 	cleanIP := strings.Split(ipStr, "/")[0]
 	if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 {
+		w.mu.Lock()
 		w.webUIIP = ip.To4()
+		w.mu.Unlock()
 		// Clean up any OS interface address for WebUI virtual IP so ipconfig remains 100% clean
 		_ = exec.Command("netsh", "interface", "ipv4", "delete", "address", "name="+w.name, "address="+cleanIP).Run()
 	}
@@ -580,7 +590,7 @@ func (w *WintunTAPDevice) handleProxyARP(frame []byte) {
 	if len(frame) < 42 {
 		return
 	}
-	_, macSnap, localIP, devOK := w.deviceState()
+	_, macSnap, localIP, webUI, devOK := w.deviceState()
 	if !devOK {
 		return
 	}
@@ -606,7 +616,7 @@ func (w *WintunTAPDevice) handleProxyARP(frame []byte) {
 	// Record sender's MAC
 	w.recordMAC(senderIP.String(), senderMAC)
 
-	isWebUITarget := (len(w.webUIIP) == 4 && targetIP.Equal(w.webUIIP)) || (len(targetIP) == 4 && targetIP[3] == 254)
+	isWebUITarget := len(webUI) == 4 && targetIP.Equal(webUI)
 	isLocalTarget := localIP != nil && targetIP.Equal(localIP)
 	isFromLocalOS := senderMAC.String() == net.HardwareAddr(macSnap[:]).String() || (localIP != nil && senderIP.Equal(localIP))
 
@@ -686,7 +696,7 @@ func (w *WintunTAPDevice) injectARPPayloadToWintun(arpPayload []byte) {
 	}
 
 	packetLen := uint32(len(arpPayload))
-	injSess, _, _, injOK := w.deviceState()
+	injSess, _, _, _, injOK := w.deviceState()
 	if !injOK {
 		return
 	}
@@ -713,7 +723,7 @@ func (w *WintunTAPDevice) handleIPv6NDP(packetData []byte) {
 	if len(packetData) < 64 {
 		return
 	}
-	_, macSnap, localIP, devOK := w.deviceState()
+	_, macSnap, localIP, webUI, devOK := w.deviceState()
 	if !devOK {
 		return
 	}
@@ -725,7 +735,7 @@ func (w *WintunTAPDevice) handleIPv6NDP(packetData []byte) {
 	targetIPv6 := net.IP(packetData[48:64])
 
 	var replyMAC net.HardwareAddr
-	if len(w.webUIIP) == 16 && targetIPv6.Equal(w.webUIIP) {
+	if len(webUI) == 16 && targetIPv6.Equal(webUI) {
 		replyMAC = net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x02, 0x54}
 	} else if localIP != nil && targetIPv6.Equal(localIP) {
 		replyMAC = net.HardwareAddr(macSnap[:])

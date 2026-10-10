@@ -16,6 +16,11 @@ import (
 // reload must not tear a decision).
 func (n *Node) config() *config.Config { return n.configPtr.Load() }
 
+// CurrentConfig returns the current atomic configuration snapshot (the one the
+// data plane reads). Unlike the exported Config field — which is the immutable
+// construction-time baseline — this reflects any runtime hot-reload.
+func (n *Node) CurrentConfig() *config.Config { return n.configPtr.Load() }
+
 // SetConfig atomically publishes a new configuration snapshot. It is the single
 // write path for runtime hot-reload (WebUI save). Only the atomic snapshot is
 // written; the exported Config field is intentionally left pointing at the

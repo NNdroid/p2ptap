@@ -714,11 +714,6 @@ func SetLogLevel(level string) error {
 // Fields that affect the Android VpnService (TAP IP, MTU, routes, DNS,
 // session name) are NOT applied here — they require a full VPN restart.
 func ApplyHotReload(cfgJSON string) error {
-	cfg, err := parseConfig(cfgJSON)
-	if err != nil {
-		return err
-	}
-
 	mu.Lock()
 	n := instance
 	collector := activeCollector
@@ -728,19 +723,83 @@ func ApplyHotReload(cfgJSON string) error {
 		return errors.New("android: node not running")
 	}
 
+	// Start from the running config, not defaults, so omitted fields are
+	// preserved. Starting from DefaultConfig() and unmarshalling over it
+	// silently replaces every absent field (PSK, STUN servers, ACL,
+	// transport strategy, etc.) with its default — ApplyHotReload("{}")
+	// on a PSK-secured node would publish an unencrypted config.
+	cfg := n.CurrentConfig()
+	candidate := config.DefaultConfig()
+	if cfgJSON != "" {
+		if err := json.Unmarshal([]byte(cfgJSON), candidate); err != nil {
+			return fmt.Errorf("android: invalid config JSON: %w", err)
+		}
+	}
+	mergeHotReload(candidate, cfg)
+	if err := candidate.Validate(); err != nil {
+		return fmt.Errorf("android: invalid config: %w", err)
+	}
+	if candidate.ExitNode.Enable {
+		return errors.New("android: exit node server is not supported on this build")
+	}
+
 	// Update collector display state (mirrors web/server.go config save handler).
 	if collector != nil {
-		collector.UpdateDisplayState(cfg.NodeName, web.ExitNodeInfoDTO{
-			Enable:       cfg.ExitNode.Enable,
-			NATMasquerade: cfg.ExitNode.NATMasquerade,
-			WANInterface:  cfg.ExitNode.WANInterface,
+		collector.UpdateDisplayState(candidate.NodeName, web.ExitNodeInfoDTO{
+			Enable:        candidate.ExitNode.Enable,
+			NATMasquerade: candidate.ExitNode.NATMasquerade,
+			WANInterface:  candidate.ExitNode.WANInterface,
 		})
 		if collector.OnConfigReload != nil {
-			collector.OnConfigReload(cfg)
+			collector.OnConfigReload(candidate)
 		}
 	}
 
 	return nil
+}
+
+// mergeHotReload copies non-zero fields from the incoming candidate into the
+// running config, mirroring the zero-preserving merge the WebUI handler uses.
+// bool fields are excluded because they have no neutral zero value — DiscoverBootMesh
+// defaults to true and ForcePrivateReachability to false, so a missing key is
+// indistinguishable from an explicit false.
+func mergeHotReload(dst *config.Config, src *config.Config) {
+	if dst.NodeName == "" {
+		dst.NodeName = src.NodeName
+	}
+	if dst.TapIP == "" {
+		dst.TapIP = src.TapIP
+	}
+	if dst.TapIPv6 == "" {
+		dst.TapIPv6 = src.TapIPv6
+	}
+	if dst.MTU == 0 {
+		dst.MTU = src.MTU
+	}
+	if dst.PSK == "" {
+		dst.PSK = src.PSK
+	}
+	if dst.NodeKeyFile == "" {
+		dst.NodeKeyFile = src.NodeKeyFile
+	}
+	if len(dst.ListenAddrs) == 0 {
+		dst.ListenAddrs = src.ListenAddrs
+	}
+	if len(dst.StunServers) == 0 {
+		dst.StunServers = src.StunServers
+	}
+	if len(dst.TurnServers) == 0 {
+		dst.TurnServers = src.TurnServers
+	}
+	if dst.HolePunchTimeout == 0 {
+		dst.HolePunchTimeout = src.HolePunchTimeout
+	}
+	if dst.RelayUpgradeInterval == 0 {
+		dst.RelayUpgradeInterval = src.RelayUpgradeInterval
+	}
+	if dst.TransportStrategy == "" {
+		dst.TransportStrategy = src.TransportStrategy
+	}
 }
 
 // GetPeerID returns the libp2p Peer ID of the running node, or empty if not running.
