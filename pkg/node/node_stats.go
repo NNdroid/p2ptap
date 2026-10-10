@@ -372,6 +372,8 @@ func (n *Node) updateWebCollectorState() {
 					switch TransportOf(ma) {
 					case "quic":
 						transport = "QUIC"
+					case "webtransport":
+						transport = "WebTransport"
 					case "webrtc":
 						transport = "WebRTC"
 					case "tcp":
