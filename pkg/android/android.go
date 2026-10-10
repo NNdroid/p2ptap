@@ -670,6 +670,7 @@ func Stop() error {
 	mu.Unlock()
 
 	defer stopping.Store(false)
+	var err error
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
