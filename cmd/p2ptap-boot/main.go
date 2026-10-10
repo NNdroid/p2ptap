@@ -1583,7 +1583,14 @@ func main() {
 		if err := webServer.Start(); err != nil {
 			fmt.Printf("Warning: Failed to start WebUI server on %s: %v\n", cfg.WebUI.Listen, err)
 		} else {
-			fmt.Printf("[+] WebUI Dashboard started on http://%s (Token: %s)\n", webServer.GetListenAddr(), webServer.GetAuthToken())
+			fmt.Fprintf(os.Stderr, "[+] WebUI Dashboard started on http://%s\n", webServer.GetListenAddr())
+			// Only print the auto-generated token — a user-specified token is
+			// already known and printing it to logs leaks it to anyone with
+			// read access to the process stdout/stderr (e.g. systemd journal,
+			// container log drivers).
+			if cfg.WebUI.AuthToken == "" {
+				fmt.Fprintf(os.Stderr, "    Token (auto-generated, store securely): %s\n", webServer.GetAuthToken())
+			}
 		}
 	}
 
@@ -2173,7 +2180,8 @@ func printBootstrapBanner(h host.Host, name string, pskEnabled bool, webServer *
 		fmt.Println(" Relay Access      : OPEN (no PSK — use --psk to restrict)")
 	}
 	if webServer != nil {
-		fmt.Printf(" WebUI Dashboard   : http://%s (Token: %s)\n", webServer.GetListenAddr(), webServer.GetAuthToken())
+		fmt.Printf(" WebUI Dashboard   : http://%s\n", webServer.GetListenAddr())
+		// Token is already printed at startup; avoid repeating it in the banner.
 	}
 	relayLimits := []string{
 		"MaxReservations=1024", "MaxCircuits=1024",

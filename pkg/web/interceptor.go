@@ -1145,6 +1145,15 @@ func isHTTPRequestComplete(buf []byte) bool {
 		}
 	}
 
+	// Guard against negative Content-Length (e.g. "Content-Length: -1"): a
+	// negative value would make totalRequired smaller than bodyIdx+sepLen,
+	// causing this function to return true prematurely — the interceptor would
+	// then extract a truncated body, potentially desynchronising the session
+	// and allowing request smuggling.
+	if contentLen < 0 {
+		contentLen = 0
+	}
+
 	totalRequired := bodyIdx + sepLen + contentLen
 	return len(buf) >= totalRequired
 }

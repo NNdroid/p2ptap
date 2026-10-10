@@ -605,6 +605,21 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid config: web_ui.pcap_max_rate_per_sec: %d must be >= 0", c.WebUI.PcapMaxRatePerSec)
 	}
 
+	// --- Secret entropy: PSK and auth_token must have sufficient length and
+	// character diversity. A trivially guessable PSK ("1234", "password") lets
+	// any eavesdropper join the mesh and decrypt traffic; a weak auth_token
+	// lets anyone control the WebUI. ---
+	if c.PSK != "" {
+		if err := validateSecretEntropy("psk", c.PSK, 16, 32); err != nil {
+			return err
+		}
+	}
+	if c.WebUI.AuthToken != "" {
+		if err := validateSecretEntropy("web_ui.auth_token", c.WebUI.AuthToken, 16, 128); err != nil {
+			return err
+		}
+	}
+
 	// --- Exit node ---
 	if c.ExitNode.WANInterface != "" && c.ExitNode.WANInterface != "auto" {
 		if err := validateInterfaceName("exit_node.wan_interface", c.ExitNode.WANInterface); err != nil {
@@ -719,6 +734,43 @@ func (c *Config) Validate() error {
 }
 
 // --- Validation helpers ---
+
+// validateSecretEntropy checks that a secret (PSK, auth_token) has at least
+// minLen characters and at most maxLen, and contains at least 2 distinct
+// character classes (lowercase, uppercase, digit, punctuation). A single
+// class (e.g. "aaaa", "1111") is trivially guessable and must be rejected.
+func validateSecretEntropy(field, secret string, minLen, maxLen int) error {
+	if len(secret) < minLen {
+		return fmt.Errorf("invalid config: %s: %d characters is below the %d-character minimum for adequate entropy", field, len(secret), minLen)
+	}
+	if len(secret) > maxLen {
+		return fmt.Errorf("invalid config: %s: %d characters exceeds the %d-character maximum", field, len(secret), maxLen)
+	}
+	classes := 0
+	for _, ch := range secret {
+		if ch >= 'a' && ch <= 'z' {
+			classes |= 0x1
+		} else if ch >= 'A' && ch <= 'Z' {
+			classes |= 0x2
+		} else if ch >= '0' && ch <= '9' {
+			classes |= 0x4
+		} else {
+			classes |= 0x8 // punctuation / symbols
+		}
+	}
+	// Count bits set in classes — need at least 2 distinct classes.
+	if bitsSet := func(x int) int {
+		n := 0
+		for x > 0 {
+			n++
+			x &= x - 1
+		}
+		return n
+	}(classes); bitsSet < 2 {
+		return fmt.Errorf("invalid config: %s: secret uses only one character class (lowercase/uppercase/digit/symbol); include at least two for adequate entropy", field)
+	}
+	return nil
+}
 
 // validateCIDR checks that s is a valid CIDR and optionally that it matches
 // the expected IP family. When rejectHostBits is true, host bits being set

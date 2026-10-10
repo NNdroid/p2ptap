@@ -405,7 +405,10 @@ func (gm *GatewayManager) SetExitNode(peerID string, exitTapIPv4 string, exitTap
 			return fmt.Errorf("failed to add IPv6 default route via TAP exit node: %w", err)
 		}
 	}
-	// If target peer is specified but bare IPs were omitted (e.g. Android client activating by Peer ID)
+	// If target peer is specified but bare IPs were omitted (e.g. Android client activating by Peer ID),
+	// try to parse the peer ID as a bare IP address. If it is not a valid IP, return an error
+	// rather than silently substituting a magic address — that would hijack the default route to
+	// either a non-existent peer (network outage) or an unrelated peer (traffic theft).
 	if exitTapIPv4 == "" && exitTapIPv6 == "" {
 		if peerID != "" {
 			if ip := net.ParseIP(peerID); ip != nil {
@@ -415,7 +418,7 @@ func (gm *GatewayManager) SetExitNode(peerID string, exitTapIPv4 string, exitTap
 					exitTapIPv6 = peerID
 				}
 			} else {
-				exitTapIPv4 = "10.0.0.1"
+				return fmt.Errorf("cannot activate exit node for peer %q: no TAP IP provided and peer ID is not a bare IP address; resolve the peer's TAP IP from LSA/peer metadata first", peerID)
 			}
 		} else {
 			return fmt.Errorf("exit node requires at least one gateway IP (IPv4 or IPv6)")

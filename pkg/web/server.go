@@ -211,10 +211,13 @@ func (s *Server) writePeerNotResolvable(w http.ResponseWriter, input, op string)
 }
 
 // generateToken returns a cryptographically random hex token.
+// If crypto/rand is unavailable the process panics — a predictable fallback
+// token (e.g. time.Now().UnixNano()) would be guessable by any attacker who
+// can approximate the server's uptime, which is a severe security regression.
 func generateToken() string {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+		panic(fmt.Sprintf("generateToken: crypto/rand failed: %v", err))
 	}
 	return hex.EncodeToString(b)
 }
@@ -1395,6 +1398,14 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 		cidr, _ := raw["cidr"].(string)
 		if cidr == "" {
 			writeError(w, http.StatusBadRequest, "missing or empty cidr field")
+			return
+		}
+		// Validate CIDR before passing to the gateway manager — an unvalidated
+		// CIDR like "0.0.0.0/0" or "not-a-cidr" would cause net.ParseCIDR to
+		// fail inside AddSubnetRoute/ToggleSubnetRoute, potentially leaving
+		// stale OS routes or silently no-op'ing.
+		if _, _, perr := net.ParseCIDR(cidr); perr != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid cidr %q: %v", cidr, perr))
 			return
 		}
 
