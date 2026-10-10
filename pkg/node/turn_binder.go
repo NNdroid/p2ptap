@@ -55,6 +55,12 @@ func getTURNRelayConn(key string) (net.PacketConn, bool) {
 	return conn, ok
 }
 
+// GetTURNRelayConn returns the TURN relay PacketConn for a relay address string.
+// Used by the boot server's QUIC transport to listen on TURN relay addresses.
+func GetTURNRelayConn(key string) (net.PacketConn, bool) {
+	return getTURNRelayConn(key)
+}
+
 func removeTURNRelayConn(key string) {
 	turnRelayConns.Lock()
 	delete(turnRelayConns.m, key)

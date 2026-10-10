@@ -418,19 +418,30 @@ func bootAllocateTURNRelay(ctx context.Context, serverURL string) ([]multiaddr.M
 
 	var relayIP string
 	var relayPort string
+	var ipPrefix string
 	if udpAddr, ok := relayAddr.(*net.UDPAddr); ok {
 		relayIP = udpAddr.IP.String()
 		relayPort = strconv.Itoa(udpAddr.Port)
+		if udpAddr.IP.To4() == nil {
+			ipPrefix = "/ip6/"
+		} else {
+			ipPrefix = "/ip4/"
+		}
 	} else if tcpAddr, ok := relayAddr.(*net.TCPAddr); ok {
 		relayIP = tcpAddr.IP.String()
 		relayPort = strconv.Itoa(tcpAddr.Port)
+		if tcpAddr.IP.To4() == nil {
+			ipPrefix = "/ip6/"
+		} else {
+			ipPrefix = "/ip4/"
+		}
 	} else {
 		client.Close()
 		conn.Close()
 		return nil, fmt.Errorf("unexpected relay address type: %T", relayAddr)
 	}
 
-	ma, err := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/udp/%s/quic-v1", relayIP, relayPort))
+	ma, err := multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/udp/%s/quic-v1", ipPrefix, relayIP, relayPort))
 	if err != nil {
 		client.Close()
 		conn.Close()

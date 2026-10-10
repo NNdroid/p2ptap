@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	mathrand "math/rand/v2"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -40,8 +41,11 @@ import (
 	tpt "github.com/libp2p/go-libp2p/core/transport"
 	connmgr "github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
+	quict "github.com/libp2p/go-libp2p/p2p/transport/quic"
+	quicreuse "github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	webrtc "github.com/libp2p/go-libp2p/p2p/transport/webrtc"
 	"github.com/multiformats/go-multiaddr"
+	quic "github.com/quic-go/quic-go"
 )
 
 var log = logger.New("Boot")
@@ -1094,6 +1098,37 @@ func main() {
 			},
 		))
 	}
+
+	// QUIC transport with TURN relay override: when the QUIC ConnManager
+	// creates a UDP socket for a TURN relay address, return the pre-allocated
+	// relay PacketConn instead of creating a new socket (which would fail
+	// because the relay address is not a local address). Without this
+	// override the boot server advertises TURN relay addresses via
+	// AddrsFactory but peers can never actually connect to them via QUIC.
+	hostOpts = append(hostOpts, libp2p.Transport(
+		func(key crypto.PrivKey, _ *quicreuse.ConnManager, psk pnet.PSK, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, transportOpts ...quict.Option) (tpt.Transport, error) {
+			var srk quic.StatelessResetKey
+			var tk quic.TokenGeneratorKey
+			if _, err := rand.Read(srk[:]); err != nil {
+				return nil, err
+			}
+			if _, err := rand.Read(tk[:]); err != nil {
+				return nil, err
+			}
+			cm, err := quicreuse.NewConnManager(srk, tk, quicreuse.OverrideListenUDP(func(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
+				if conn, ok := node.GetTURNRelayConn(laddr.String()); ok {
+					log.Debug("QUIC ConnManager: using TURN relay connection for %s", laddr.String())
+					return conn, nil
+				}
+				return net.ListenUDP(network, laddr)
+			}))
+			if err != nil {
+				return nil, err
+			}
+			return quict.NewTransport(key, cm, psk, gater, rcmgr, transportOpts...)
+		},
+	))
+	log.Info("QUIC transport registered (with TURN relay support)")
 
 	// AddrsFactory: filter loopback and append STUN/TURN reflexive + relay
 	// addresses so peers behind NAT can reach this boot server.
