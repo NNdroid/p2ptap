@@ -229,15 +229,16 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 // mergeAndStoreSTUNAddrs merges newly discovered addresses with previous ones (dedup).
 func mergeAndStoreSTUNAddrs(newAddrs, prevAddrs []multiaddr.Multiaddr, failures int) {
 	var merged []multiaddr.Multiaddr
+	seen := make(map[string]bool)
+
 	if failures > 0 && len(prevAddrs) > 0 {
-		seen := make(map[string]bool)
-		for _, a := range newAddrs {
+		for _, a := range prevAddrs {
 			if !seen[a.String()] {
 				merged = append(merged, a)
 				seen[a.String()] = true
 			}
 		}
-		for _, a := range prevAddrs {
+		for _, a := range newAddrs {
 			if !seen[a.String()] {
 				merged = append(merged, a)
 				seen[a.String()] = true
@@ -246,7 +247,12 @@ func mergeAndStoreSTUNAddrs(newAddrs, prevAddrs []multiaddr.Multiaddr, failures 
 		log.Debug("STUN partial failure (%d failures): keeping %d prev + %d new = %d total",
 			failures, len(prevAddrs), len(newAddrs), len(merged))
 	} else {
-		merged = newAddrs
+		for _, a := range newAddrs {
+			if !seen[a.String()] {
+				merged = append(merged, a)
+				seen[a.String()] = true
+			}
+		}
 	}
 
 	if len(merged) > 0 {
@@ -276,25 +282,17 @@ func mergeAndStoreSTUNAddrs(newAddrs, prevAddrs []multiaddr.Multiaddr, failures 
 
 // mergeAndStoreTCPSTUNAddrs merges TCP STUN addresses with previous ones (dedup).
 func mergeAndStoreTCPSTUNAddrs(newAddrs, prevAddrs []multiaddr.Multiaddr, failures int) {
-	if len(newAddrs) == 0 {
-		if len(prevAddrs) > 0 {
-			log.Warn("TCP STUN bind cycle produced no results — keeping %d previous address(es)", len(prevAddrs))
-		} else {
-			log.Debug("TCP STUN bind cycle produced no results")
-		}
-		return
-	}
-
 	var merged []multiaddr.Multiaddr
+	seen := make(map[string]bool)
+
 	if failures > 0 && len(prevAddrs) > 0 {
-		seen := make(map[string]bool)
-		for _, a := range newAddrs {
+		for _, a := range prevAddrs {
 			if !seen[a.String()] {
 				merged = append(merged, a)
 				seen[a.String()] = true
 			}
 		}
-		for _, a := range prevAddrs {
+		for _, a := range newAddrs {
 			if !seen[a.String()] {
 				merged = append(merged, a)
 				seen[a.String()] = true
@@ -303,7 +301,21 @@ func mergeAndStoreTCPSTUNAddrs(newAddrs, prevAddrs []multiaddr.Multiaddr, failur
 		log.Debug("TCP STUN partial failure (%d failures): keeping %d prev + %d new = %d total",
 			failures, len(prevAddrs), len(newAddrs), len(merged))
 	} else {
-		merged = newAddrs
+		for _, a := range newAddrs {
+			if !seen[a.String()] {
+				merged = append(merged, a)
+				seen[a.String()] = true
+			}
+		}
+	}
+
+	if len(merged) == 0 {
+		if len(prevAddrs) > 0 {
+			log.Warn("TCP STUN bind cycle produced no results — keeping %d previous address(es)", len(prevAddrs))
+		} else {
+			log.Debug("TCP STUN bind cycle produced no results")
+		}
+		return
 	}
 
 	addrsChanged := len(prevAddrs) != len(merged)
@@ -474,7 +486,7 @@ func sendSTUNBindingRequest(conn *net.UDPConn, localAddr *net.UDPAddr) (net.UDPA
 		return net.UDPAddr{}, fmt.Errorf("read STUN response: %w", err)
 	}
 
-	log.Debug("STUN query: received %d bytes response in", n)
+	log.Debug("STUN query: received %d bytes response", n)
 
 	resp := &stun.Message{Raw: buf[:n]}
 	if err := resp.Decode(); err != nil {

@@ -133,8 +133,8 @@ func parseTurnURL(s string) (*turnConfig, error) {
 			serverAddr = raw[:idx]
 		} else {
 			serverAddr = raw
+		}
 	}
-}
 
 	if serverAddr == "" {
 		return nil, fmt.Errorf("TURN URL %q: missing server address", s)
@@ -325,8 +325,13 @@ func (n *Node) allocateTURNRelay(ctx context.Context, serverURL string) ([]multi
 	}
 
 	// Build multiaddr with correct IP family prefix and /quic-v1 suffix
+	udpRelay, ok := relayAddr.(*net.UDPAddr)
+	if !ok {
+		client.Close()
+		return nil, fmt.Errorf("unexpected relay address type %T (expected *net.UDPAddr)", relayAddr)
+	}
 	ipPrefix := "/ip4/"
-	if relayAddr.(*net.UDPAddr).IP.To4() == nil {
+	if udpRelay.IP.To4() == nil {
 		ipPrefix = "/ip6/"
 	}
 	ma, err := multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/udp/%s/quic-v1", ipPrefix, relayIP, relayPort))
