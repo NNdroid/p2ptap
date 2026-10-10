@@ -29,14 +29,18 @@ import (
 
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	libp2pconnmgr "github.com/libp2p/go-libp2p/core/connmgr"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
+	"github.com/libp2p/go-libp2p/core/pnet"
 	"github.com/libp2p/go-libp2p/core/protocol"
+	tpt "github.com/libp2p/go-libp2p/core/transport"
 	connmgr "github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
+	webrtc "github.com/libp2p/go-libp2p/p2p/transport/webrtc"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -1061,7 +1065,11 @@ func main() {
 		fmt.Printf("Error building connection manager: %v\n", err)
 		os.Exit(1)
 	}
-	h, err := libp2p.New(
+	// WebRTC transport with STUN/TURN servers — replaces the stock WebRTC
+	// transport so ICE candidate gathering uses the configured servers.
+	// Boot has no TAP interface, so we pass through the injected
+	// ListenUDPFn (unlike the mesh node which binds to a protected socket).
+	hostOpts := []libp2p.Option{
 		libp2p.Identity(privKey),
 		libp2p.ListenAddrs(mAddrs...),
 		libp2p.ConnectionManager(cm),
@@ -1069,11 +1077,68 @@ func main() {
 		libp2p.EnableNATService(),
 		libp2p.EnableRelay(),
 		libp2p.EnableHolePunching(),
-		libp2p.ForceReachabilityPublic(),
-	)
+	}
+	if len(cfg.StunServers) > 0 || len(cfg.TurnServers) > 0 {
+		hostOpts = append(hostOpts, libp2p.Transport(
+			func(key crypto.PrivKey, psk pnet.PSK, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, ludp webrtc.ListenUDPFn, transportOpts ...webrtc.Option) (tpt.Transport, error) {
+				allOpts := transportOpts
+				if len(cfg.StunServers) > 0 {
+					allOpts = append(allOpts, webrtc.WithSTUNServers(cfg.StunServers))
+					log.Info("WebRTC configured with %d STUN server(s)", len(cfg.StunServers))
+				}
+				if len(cfg.TurnServers) > 0 {
+					allOpts = append(allOpts, webrtc.WithTURNServers(cfg.TurnServers))
+					log.Info("WebRTC configured with %d TURN server(s)", len(cfg.TurnServers))
+				}
+				return webrtc.New(key, psk, gater, rcmgr, ludp, allOpts...)
+			},
+		))
+	}
+
+	// AddrsFactory: filter loopback and append STUN/TURN reflexive + relay
+	// addresses so peers behind NAT can reach this boot server.
+	hostOpts = append(hostOpts, libp2p.AddrsFactory(
+		func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
+			// Drop loopback — it's never useful for external peers.
+			filtered := make([]multiaddr.Multiaddr, 0, len(addrs)+8)
+			for _, a := range addrs {
+				if v, _ := a.ValueForProtocol(multiaddr.P_IP4); v == "127.0.0.1" {
+					continue
+				}
+				if v, _ := a.ValueForProtocol(multiaddr.P_IP6); v == "::1" {
+					continue
+				}
+				filtered = append(filtered, a)
+			}
+			// Append STUN-discovered reflexive addresses (UDP + TCP).
+			if stunAddrs := node.GetSTUNReflexiveAddrs(); len(stunAddrs) > 0 {
+				filtered = append(filtered, stunAddrs...)
+			}
+			if tcpStunAddrs := node.GetTCPStunReflexiveAddrs(); len(tcpStunAddrs) > 0 {
+				filtered = append(filtered, tcpStunAddrs...)
+			}
+			// Append TURN relay addresses.
+			if turnAddrs := node.GetTURNRelayAddrs(); len(turnAddrs) > 0 {
+				filtered = append(filtered, turnAddrs...)
+			}
+			return filtered
+		},
+	))
+
+	h, err := libp2p.New(hostOpts...)
 	if err != nil {
 		fmt.Printf("Error starting bootstrap host: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Start STUN/TURN binders — these discover the boot server's reflexive
+	// addresses so peers behind NAT can reach it. The AddrsFactory above
+	// reads from the package-level atomics that these binders populate.
+	if len(cfg.StunServers) > 0 {
+		node.StartBootSTUNBinder(ctx, cfg.StunServers)
+	}
+	if len(cfg.TurnServers) > 0 {
+		node.StartBootTURNBinder(ctx, h, cfg.TurnServers)
 	}
 
 	// 1. Enable Kademlia DHT in Server Mode

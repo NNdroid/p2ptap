@@ -32,6 +32,13 @@ type BootConfig struct {
 	LogLevel    string      `json:"log_level"`    // debug | info | warn | error
 	GeoIPPath   string      `json:"geoip_path"`   // path to GeoLite2-City.mmdb (optional, defaults to "GeoLite2-City.mmdb")
 	WebUI       WebUIConfig `json:"web_ui"`       // optional embedded WebUI dashboard
+
+	// STUN/TURN servers for NAT traversal. When a boot server is behind NAT,
+	// these allow it to discover its public IP via STUN and allocate relay
+	// ports via TURN so mesh peers can always reach it.
+	// See pkg/config.DefaultConfig for the full server list.
+	StunServers []string `json:"stun_servers,omitempty"`
+	TurnServers []string `json:"turn_servers,omitempty"`
 }
 
 // DefaultBootConfig returns the configuration used on first run / when fields
@@ -58,6 +65,26 @@ func DefaultBootConfig() *BootConfig {
 			Enable:    true,
 			Listen:    "0.0.0.0:8080",
 			AuthToken: "",
+		},
+		// STUN/TURN defaults — a curated subset of the client's list.
+		// Boot servers need fewer fallbacks since they are typically
+		// deployed on stable infrastructure, but STUN is essential
+		// for discovering the public IP behind NAT.
+		StunServers: []string{
+			"/udp/turn.cloudflare.com/3478",
+			"/udp/stun.cloudflare.com/3478",
+			"/udp/stun.l.google.com/19302",
+			"/udp/stun1.l.google.com/19302",
+			"/udp/stun2.l.google.com/19302",
+			"/tcp/turn.cloudflare.com/80",
+			"/tcp/stun.cloudflare.com/3478",
+		},
+		TurnServers: []string{
+			"turn:turn.cloud-rtc.com:80",
+			"turn:w1.xirsys.com:3478",
+			"turn:u1.xirsys.com:3478",
+			"turn:relay1.expressturn.com:3478",
+			"turn:global.turn.twilio.com:3478",
 		},
 	}
 }
