@@ -1104,10 +1104,16 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				log.Debug("AddrFactory: injecting %d STUN server-reflexive addr(s): %v", len(stunAddrs), stunAddrs)
 				filtered = append(filtered, stunAddrs...)
 			}
-			// Always return the filtered set — libp2p tolerates an empty list
-			// (the node simply has no direct addresses to advertise). Returning
-			// the unfiltered `addrs` as a fallback would leak loopback/TAP-local
-			// addresses to the DHT, creating dial failures for remote peers.
+			tcpStunAddrs := getTCPStunReflexiveAddrs()
+			if len(tcpStunAddrs) > 0 {
+				log.Debug("AddrFactory: injecting %d TCP STUN server-reflexive addr(s): %v", len(tcpStunAddrs), tcpStunAddrs)
+				filtered = append(filtered, tcpStunAddrs...)
+			}
+			turnAddrs := getTURNRelayAddrs()
+			if len(turnAddrs) > 0 {
+				log.Debug("AddrFactory: injecting %d TURN relay addr(s): %v", len(turnAddrs), turnAddrs)
+				filtered = append(filtered, turnAddrs...)
+			}
 			return filtered
 		}),
 		libp2p.ConnectionGater(&overlayConnGater{}),
@@ -1287,7 +1293,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				if _, err := rand.Read(tk[:]); err != nil {
 					return nil, err
 				}
-				cm, err := quicreuse.NewConnManager(srk, tk, quicreuse.OverrideListenUDP(ProtectedListenUDP))
+				cm, err := quicreuse.NewConnManager(srk, tk, quicreuse.OverrideListenUDP(func(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
+					if conn, ok := getTURNRelayConn(laddr.String()); ok {
+						log.Debug("QUIC ConnManager: using TURN relay connection for %s", laddr.String())
+						return conn, nil
+					}
+					return ProtectedListenUDP(network, laddr)
+				}))
 				if err != nil {
 					return nil, err
 				}
@@ -1318,6 +1330,10 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 					allOpts = append(allOpts, webrtc.WithSTUNServers(cfg.StunServers))
 					log.Info("WebRTC configured with %d STUN server(s)", len(cfg.StunServers))
 				}
+				if len(cfg.TurnServers) > 0 {
+					allOpts = append(allOpts, webrtc.WithTURNServers(cfg.TurnServers))
+					log.Info("WebRTC configured with %d TURN server(s)", len(cfg.TurnServers))
+				}
 				return webrtc.New(key, psk, gater, rcmgr, ProtectedListenUDP, allOpts...)
 			},
 		))
@@ -1342,7 +1358,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				if _, err := rand.Read(tk[:]); err != nil {
 					return nil, err
 				}
-				cm, err := quicreuse.NewConnManager(srk, tk, quicreuse.OverrideListenUDP(ProtectedListenUDP))
+				cm, err := quicreuse.NewConnManager(srk, tk, quicreuse.OverrideListenUDP(func(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
+					if conn, ok := getTURNRelayConn(laddr.String()); ok {
+						log.Debug("QUIC ConnManager: using TURN relay connection for %s", laddr.String())
+						return conn, nil
+					}
+					return ProtectedListenUDP(network, laddr)
+				}))
 				if err != nil {
 					return nil, err
 				}
@@ -2364,6 +2386,12 @@ func (n *Node) Start() {
 	// Discover server-reflexive addresses via STUN for CGNAT hole punching.
 	n.wg.Add(1)
 	n.startSTUNBinder(n.ctx)
+
+	// Allocate TURN relay addresses for NAT traversal fallback.
+	if len(n.config().TurnServers) > 0 {
+		n.wg.Add(1)
+		n.startTURNBinder(n.ctx)
+	}
 
 	// Connect to Bootstrap Peers with retry
 	for _, bStr := range n.Config.BootstrapPeers {
