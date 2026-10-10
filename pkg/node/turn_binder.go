@@ -108,6 +108,31 @@ func removeAllTURNClients() {
 	turnClients.Unlock()
 }
 
+// removeTURNClientsNotIn removes TURN clients for servers not in the keep set.
+// Used to clean up old clients after a successful allocation cycle.
+func removeTURNClientsNotIn(keepServers map[string]bool) {
+	turnClients.Lock()
+	for key, client := range turnClients.m {
+		if !keepServers[key] {
+			client.Close()
+			delete(turnClients.m, key)
+		}
+	}
+	turnClients.Unlock()
+}
+
+// removeTURNRelayConnsNotIn removes relay connections not in the keep set.
+func removeTURNRelayConnsNotIn(keepKeys map[string]bool) {
+	turnRelayConns.Lock()
+	for key, conn := range turnRelayConns.m {
+		if !keepKeys[key] {
+			conn.Close()
+			delete(turnRelayConns.m, key)
+		}
+	}
+	turnRelayConns.Unlock()
+}
+
 // turnConfig holds parsed TURN server configuration.
 type turnConfig struct {
 	ServerAddr string
@@ -161,15 +186,25 @@ func (n *Node) startTURNBinder(ctx context.Context) {
 			log.Debug("TURN binder stopped")
 		}()
 
+		// Delay initial allocation to let the node finish bootstrapping and
+		// avoid log spam from servers that require authentication.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Second):
+		}
+
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
+
+		permTicker := time.NewTicker(60 * time.Second)
+		defer permTicker.Stop()
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				// Run immediately on first tick
 			}
 
 			if err := n.turnBindOnce(ctx); err != nil {
@@ -179,6 +214,8 @@ func (n *Node) startTURNBinder(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
+			case <-permTicker.C:
+				n.refreshTURNPermissions()
 			case <-ticker.C:
 			}
 		}
@@ -193,18 +230,13 @@ func (n *Node) turnBindOnce(ctx context.Context) error {
 
 	startTime := time.Now()
 
-	// Clean up ALL old relay clients and connections before allocating new ones.
-	// This refreshes TURN leases and prevents stale relay addresses from being
-	// advertised or listened on.
-	removeAllTURNClients()
-	removeAllTURNRelayConns()
-
 	const maxConcurrent = 5
 	sem := make(chan struct{}, maxConcurrent)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var discovered []multiaddr.Multiaddr
 	var successes, failures int
+	successServers := make(map[string]bool)
 
 	for _, server := range servers {
 		select {
@@ -226,7 +258,11 @@ func (n *Node) turnBindOnce(ctx context.Context) error {
 
 			log.Debug("TURN allocating from %s", server)
 
-			relayAddrs, err := n.allocateTURNRelay(ctx, server)
+			// Per-server timeout so one slow server cannot stall the cycle.
+			allocationCtx, allocCancel := context.WithTimeout(ctx, 30*time.Second)
+			defer allocCancel()
+
+			relayAddrs, err := n.allocateTURNRelay(allocationCtx, server)
 			if err != nil {
 				mu.Lock()
 				failures++
@@ -237,6 +273,7 @@ func (n *Node) turnBindOnce(ctx context.Context) error {
 			mu.Lock()
 			successes++
 			discovered = append(discovered, relayAddrs...)
+			successServers[server] = true
 			mu.Unlock()
 		}(server)
 	}
@@ -247,6 +284,21 @@ func (n *Node) turnBindOnce(ctx context.Context) error {
 	log.Debug("TURN bind cycle completed in %v: %d success, %d failure(s)", elapsed, successes, failures)
 
 	if len(discovered) > 0 {
+		// Two-phase commit: new relays are already in the global maps (added
+		// by allocateTURNRelay). Now clean up old clients/conns that are no
+		// longer needed, keeping previous relays alive if all new allocations
+		// failed (handled in the else branch below).
+		removeTURNClientsNotIn(successServers)
+
+		// Build a set of keep-keys from the new relay addresses
+		keepConnKeys := make(map[string]bool, len(discovered))
+		for _, ma := range discovered {
+			if addr, err := manet.ToNetAddr(ma); err == nil {
+				keepConnKeys[addr.String()] = true
+			}
+		}
+		removeTURNRelayConnsNotIn(keepConnKeys)
+
 		log.Info("TURN relay addresses UPDATED: %v", discovered)
 		setTURNRelayAddrs(discovered)
 
@@ -259,9 +311,6 @@ func (n *Node) turnBindOnce(ctx context.Context) error {
 				}
 			}(ma)
 		}
-
-		// Create permissions for known peers on all allocated relays
-		go n.refreshTURNPermissions()
 	} else {
 		prevAddrs := getTURNRelayAddrs()
 		if len(prevAddrs) > 0 {
@@ -381,11 +430,12 @@ func (n *Node) refreshTURNPermissions() {
 
 // collectPeerAddresses gathers known peer addresses for TURN permission creation.
 func (n *Node) collectPeerAddresses() []net.Addr {
+	cfg := n.config()
 	addrs := make([]net.Addr, 0, 16)
 	seen := make(map[string]bool)
 
 	// Bootstrap peers
-	for _, bStr := range n.Config.BootstrapPeers {
+	for _, bStr := range cfg.BootstrapPeers {
 		ma, err := multiaddr.NewMultiaddr(bStr)
 		if err != nil {
 			continue
@@ -398,7 +448,7 @@ func (n *Node) collectPeerAddresses() []net.Addr {
 	}
 
 	// Static peers
-	for _, bStr := range n.Config.StaticPeers {
+	for _, bStr := range cfg.StaticPeers {
 		ma, err := multiaddr.NewMultiaddr(bStr)
 		if err != nil {
 			continue

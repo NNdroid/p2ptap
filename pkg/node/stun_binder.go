@@ -179,7 +179,7 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 						udpFailures++
 					}
 					mu.Unlock()
-					return
+					continue
 				}
 
 				ipPrefix := "/ip4/"
@@ -189,24 +189,30 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 
 				var ma multiaddr.Multiaddr
 				if isTCP {
-					ma, err = multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/tcp/%d", ipPrefix, addr.IP.String(), addr.Port))
+					// TCP STUN gives us our public IP, but the port is the
+					// ephemeral TCP source port — NOT a listening port.
+					// Peers can't dial it. Use port 0 so libp2p's DCUtR
+					// handles port selection during hole punching.
+					ma, err = multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/tcp/0", ipPrefix, addr.IP.String()))
 					if err != nil {
 						mu.Lock()
 						tcpFailures++
 						mu.Unlock()
-						return
+						continue
 					}
 					mu.Lock()
 					tcpSuccesses++
 					tcpDiscovered = append(tcpDiscovered, ma)
 					mu.Unlock()
 				} else {
+					// UDP STUN gives us the exact IP:port our NAT maps to —
+					// peers can send UDP packets there directly.
 					ma, err = multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/udp/%d/quic-v1", ipPrefix, addr.IP.String(), addr.Port))
 					if err != nil {
 						mu.Lock()
 						udpFailures++
 						mu.Unlock()
-						return
+						continue
 					}
 					mu.Lock()
 					udpSuccesses++
@@ -232,62 +238,21 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 	return nil
 }
 
-// mergeAndStoreSTUNAddrs merges newly discovered addresses with previous ones (dedup).
+// mergeAndStoreSTUNAddrs merges newly discovered addresses with previous ones,
+// deduplicates, and stores the result. If all queries failed and there are
+// previous addresses, the old set is kept unchanged.
 func mergeAndStoreSTUNAddrs(newAddrs, prevAddrs []multiaddr.Multiaddr, failures int) {
-	var merged []multiaddr.Multiaddr
-	seen := make(map[string]bool)
-
-	if failures > 0 && len(prevAddrs) > 0 {
-		for _, a := range prevAddrs {
-			if !seen[a.String()] {
-				merged = append(merged, a)
-				seen[a.String()] = true
-			}
-		}
-		for _, a := range newAddrs {
-			if !seen[a.String()] {
-				merged = append(merged, a)
-				seen[a.String()] = true
-			}
-		}
-		log.Debug("STUN partial failure (%d failures): keeping %d prev + %d new = %d total",
-			failures, len(prevAddrs), len(newAddrs), len(merged))
-	} else {
-		for _, a := range newAddrs {
-			if !seen[a.String()] {
-				merged = append(merged, a)
-				seen[a.String()] = true
-			}
-		}
-	}
-
-	if len(merged) > 0 {
-		addrsChanged := len(prevAddrs) != len(merged)
-		if !addrsChanged {
-			for i := range merged {
-				if i < len(prevAddrs) && prevAddrs[i].String() != merged[i].String() {
-					addrsChanged = true
-					break
-				}
-			}
-		}
-		if addrsChanged {
-			log.Info("UDP STUN server-reflexive addresses UPDATED: %v", merged)
-		} else {
-			log.Debug("UDP STUN server-reflexive addresses unchanged: %v", merged)
-		}
-		setSTUNReflexiveAddrs(merged)
-	} else {
-		if len(prevAddrs) > 0 {
-			log.Warn("STUN bind cycle produced no UDP results — keeping %d previous address(es)", len(prevAddrs))
-		} else {
-			log.Debug("STUN bind cycle produced no UDP results")
-		}
-	}
+	mergeAndStoreSTUNHelper("UDP STUN", newAddrs, prevAddrs, failures, setSTUNReflexiveAddrs)
 }
 
-// mergeAndStoreTCPSTUNAddrs merges TCP STUN addresses with previous ones (dedup).
+// mergeAndStoreTCPSTUNAddrs merges TCP STUN addresses with previous ones.
 func mergeAndStoreTCPSTUNAddrs(newAddrs, prevAddrs []multiaddr.Multiaddr, failures int) {
+	mergeAndStoreSTUNHelper("TCP STUN", newAddrs, prevAddrs, failures, setTCPStunReflexiveAddrs)
+}
+
+// mergeAndStoreSTUNHelper is the shared merge/dedup/store logic for both UDP
+// and TCP STUN address sets.
+func mergeAndStoreSTUNHelper(label string, newAddrs, prevAddrs []multiaddr.Multiaddr, failures int, set func([]multiaddr.Multiaddr)) {
 	var merged []multiaddr.Multiaddr
 	seen := make(map[string]bool)
 
@@ -304,8 +269,8 @@ func mergeAndStoreTCPSTUNAddrs(newAddrs, prevAddrs []multiaddr.Multiaddr, failur
 				seen[a.String()] = true
 			}
 		}
-		log.Debug("TCP STUN partial failure (%d failures): keeping %d prev + %d new = %d total",
-			failures, len(prevAddrs), len(newAddrs), len(merged))
+		log.Debug("%s partial failure (%d failures): keeping %d prev + %d new = %d total",
+			label, failures, len(prevAddrs), len(newAddrs), len(merged))
 	} else {
 		for _, a := range newAddrs {
 			if !seen[a.String()] {
@@ -317,9 +282,9 @@ func mergeAndStoreTCPSTUNAddrs(newAddrs, prevAddrs []multiaddr.Multiaddr, failur
 
 	if len(merged) == 0 {
 		if len(prevAddrs) > 0 {
-			log.Warn("TCP STUN bind cycle produced no results — keeping %d previous address(es)", len(prevAddrs))
+			log.Warn("%s bind cycle produced no results — keeping %d previous address(es)", label, len(prevAddrs))
 		} else {
-			log.Debug("TCP STUN bind cycle produced no results")
+			log.Debug("%s bind cycle produced no results", label)
 		}
 		return
 	}
@@ -334,11 +299,11 @@ func mergeAndStoreTCPSTUNAddrs(newAddrs, prevAddrs []multiaddr.Multiaddr, failur
 		}
 	}
 	if addrsChanged {
-		log.Info("TCP STUN server-reflexive addresses UPDATED: %v", merged)
+		log.Info("%s server-reflexive addresses UPDATED: %v", label, merged)
 	} else {
-		log.Debug("TCP STUN server-reflexive addresses unchanged: %v", merged)
+		log.Debug("%s server-reflexive addresses unchanged: %v", label, merged)
 	}
-	setTCPStunReflexiveAddrs(merged)
+	set(merged)
 }
 
 // normalizeSTUNServer parses a STUN server string and returns resolved addresses
@@ -391,9 +356,6 @@ func normalizeSTUNServer(ctx context.Context, s string) ([]net.Addr, bool, error
 
 	// No port specified, use default
 	port := 3478
-	if strings.Contains(s, "google.com") {
-		port = 19302
-	}
 	ips, err := resolveIPs(ctx, s)
 	if err != nil {
 		return nil, isTCP, fmt.Errorf("cannot resolve STUN host %q: %w", s, err)
