@@ -186,10 +186,14 @@ func bootSTUNBindOnce(ctx context.Context, servers []string) error {
 			break
 		}
 
-		// Early termination: stop dispatching once we have enough successes.
-		if udpSuccesses >= udpSuccessThreshold && tcpSuccesses >= tcpSuccessThreshold {
-			log.Debug("Boot STUN early termination: sufficient successes (udp=%d, tcp=%d)",
-				udpSuccesses, tcpSuccesses)
+		// Early termination: stop dispatching once we have enough successes
+		// on EITHER transport (some deployments have no TCP STUN).
+		mu.Lock()
+		earlyStop := udpSuccesses >= udpSuccessThreshold || tcpSuccesses >= tcpSuccessThreshold
+		udpN, tcpN := udpSuccesses, tcpSuccesses
+		mu.Unlock()
+		if earlyStop {
+			log.Debug("Boot STUN early termination: sufficient successes (udp=%d, tcp=%d)", udpN, tcpN)
 			break
 		}
 
@@ -376,7 +380,13 @@ func bootAllocateTURNRelay(ctx context.Context, serverURL string) ([]multiaddr.M
 		return nil, fmt.Errorf("parse TURN URL: %w", err)
 	}
 
+	conn, err := net.ListenPacket("udp4", "0.0.0.0:0")
+	if err != nil {
+		return nil, fmt.Errorf("create TURN control conn: %w", err)
+	}
+
 	turnCfg := turn.ClientConfig{
+		Conn:           conn,
 		LoggerFactory:  logging.NewDefaultLoggerFactory(),
 		STUNServerAddr: cfg.ServerAddr,
 		TURNServerAddr: cfg.ServerAddr,
@@ -386,17 +396,20 @@ func bootAllocateTURNRelay(ctx context.Context, serverURL string) ([]multiaddr.M
 
 	client, err := turn.NewClient(&turnCfg)
 	if err != nil {
+		conn.Close()
 		return nil, fmt.Errorf("create TURN client: %w", err)
 	}
 
 	if err := client.Listen(); err != nil {
 		client.Close()
+		conn.Close()
 		return nil, fmt.Errorf("TURN listener: %w", err)
 	}
 
 	relay, err := client.Allocate()
 	if err != nil {
 		client.Close()
+		conn.Close()
 		return nil, fmt.Errorf("TURN allocation: %w", err)
 	}
 
@@ -413,16 +426,18 @@ func bootAllocateTURNRelay(ctx context.Context, serverURL string) ([]multiaddr.M
 		relayPort = strconv.Itoa(tcpAddr.Port)
 	} else {
 		client.Close()
+		conn.Close()
 		return nil, fmt.Errorf("unexpected relay address type: %T", relayAddr)
 	}
 
 	ma, err := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/udp/%s/quic-v1", relayIP, relayPort))
 	if err != nil {
 		client.Close()
+		conn.Close()
 		return nil, fmt.Errorf("build relay multiaddr: %w", err)
 	}
 
-	addTURNClient(serverURL, client)
+	addTURNClient(serverURL, client, conn)
 	addTURNRelayConn(relayAddrStr, relay)
 
 	return []multiaddr.Multiaddr{ma}, nil

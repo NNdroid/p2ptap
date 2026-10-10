@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -39,6 +40,10 @@ const (
 // detectedNATType stores the last detected NAT type from STUN responses.
 // Default is natUnknown, which means TURN is always attempted (safe fallback).
 var detectedNATType atomic.Int32
+
+func init() {
+	detectedNATType.Store(natUnknown)
+}
 
 // getNATType returns the currently detected NAT type.
 func getNATType() int32 {
@@ -239,11 +244,11 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 			break
 		}
 
-		// Early termination: once we have enough successes for both UDP and
-		// TCP, stop dispatching further servers. Most networks have at least
-		// one responsive STUN server in the first few entries.
+		// Early termination: once we have enough successes on EITHER transport,
+		// stop dispatching further servers. Some deployments have no TCP STUN
+		// servers, so requiring both would prevent early termination.
 		mu.Lock()
-		if udpSuccesses >= udpSuccessThreshold && tcpSuccesses >= tcpSuccessThreshold {
+		if udpSuccesses >= udpSuccessThreshold || tcpSuccesses >= tcpSuccessThreshold {
 			mu.Unlock()
 			log.Debug("STUN early termination: %d UDP + %d TCP successes, skipping remaining %d server(s)",
 				udpSuccesses, tcpSuccesses, len(servers))
@@ -404,8 +409,12 @@ func mergeAndStoreSTUNHelper(label string, newAddrs, prevAddrs []multiaddr.Multi
 
 	addrsChanged := len(prevAddrs) != len(merged)
 	if !addrsChanged {
-		for i := range merged {
-			if i < len(prevAddrs) && prevAddrs[i].String() != merged[i].String() {
+		prevSet := make(map[string]struct{}, len(prevAddrs))
+		for _, a := range prevAddrs {
+			prevSet[a.String()] = struct{}{}
+		}
+		for _, a := range merged {
+			if _, ok := prevSet[a.String()]; !ok {
 				addrsChanged = true
 				break
 			}
@@ -510,7 +519,7 @@ func stunQueryUDP(ctx context.Context, server string, serverAddr net.Addr) (net.
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
 	log.Debug("UDP STUN query: connected to %s via local socket %s", sa.String(), localAddr.String())
 
-	addr, err := sendSTUNBindingRequest(conn, localAddr)
+	addr, err := sendSTUNBindingRequest(ctx, conn, localAddr)
 	if err != nil {
 		return net.UDPAddr{}, fmt.Errorf("UDP STUN query to %s: %w", sa.String(), err)
 	}
@@ -538,7 +547,7 @@ func stunQueryTCP(ctx context.Context, server string, serverAddr net.Addr) (net.
 	localAddr := conn.LocalAddr().(*net.TCPAddr)
 	log.Debug("TCP STUN query: connected to %s via local socket %s", sa.String(), localAddr.String())
 
-	addr, err := sendSTUNBindingRequestTCP(conn, localAddr)
+	addr, err := sendSTUNBindingRequestTCP(ctx, conn, localAddr)
 	if err != nil {
 		return net.UDPAddr{}, fmt.Errorf("TCP STUN query to %s: %w", sa.String(), err)
 	}
@@ -550,8 +559,18 @@ func stunQueryTCP(ctx context.Context, server string, serverAddr net.Addr) (net.
 	return addr, nil
 }
 
+// stunDeadline returns the effective deadline for a STUN operation, respecting
+// the caller's context deadline (if earlier than 5s).
+func stunDeadline(ctx context.Context) time.Time {
+	fallback := time.Now().Add(5 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(fallback) {
+		return d
+	}
+	return fallback
+}
+
 // sendSTUNBindingRequest sends a UDP STUN Binding Request and parses the response.
-func sendSTUNBindingRequest(conn *net.UDPConn, localAddr *net.UDPAddr) (net.UDPAddr, error) {
+func sendSTUNBindingRequest(ctx context.Context, conn *net.UDPConn, localAddr *net.UDPAddr) (net.UDPAddr, error) {
 	msg := stun.New()
 	msg.Type = stun.BindingRequest
 	if err := msg.NewTransactionID(); err != nil {
@@ -560,14 +579,14 @@ func sendSTUNBindingRequest(conn *net.UDPConn, localAddr *net.UDPAddr) (net.UDPA
 	log.Debug("STUN query: sending Binding Request (txID=%x)", msg.TransactionID[:4])
 	msg.Encode()
 
-	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetWriteDeadline(stunDeadline(ctx)); err != nil {
 		return net.UDPAddr{}, err
 	}
 	if _, err := conn.Write(msg.Raw); err != nil {
 		return net.UDPAddr{}, fmt.Errorf("send STUN request: %w", err)
 	}
 
-	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetReadDeadline(stunDeadline(ctx)); err != nil {
 		return net.UDPAddr{}, err
 	}
 
@@ -594,6 +613,12 @@ func sendSTUNBindingRequest(conn *net.UDPConn, localAddr *net.UDPAddr) (net.UDPA
 		return net.UDPAddr{}, fmt.Errorf("unexpected STUN response type %s: %s", resp.Type, errMsg)
 	}
 
+	// Validate transaction ID to reject spoofed or stale responses.
+	if !bytes.Equal(resp.TransactionID[:], msg.TransactionID[:]) {
+		return net.UDPAddr{}, fmt.Errorf("STUN transaction ID mismatch: expected %x, got %x",
+			msg.TransactionID[:4], resp.TransactionID[:4])
+	}
+
 	var xa stun.XORMappedAddress
 	if err := xa.GetFrom(resp); err != nil {
 		return net.UDPAddr{}, fmt.Errorf("missing XOR-MAPPED-ADDRESS: %w", err)
@@ -602,20 +627,23 @@ func sendSTUNBindingRequest(conn *net.UDPConn, localAddr *net.UDPAddr) (net.UDPA
 	result := net.UDPAddr{IP: xa.IP, Port: xa.Port}
 
 	// NAT type inference — stored globally so the TURN binder can decide
-	// whether relay allocation is needed. With a single-server STUN test,
-	// we can only distinguish open, cone (port preserved), and unknown.
-	// Port-changed is ambiguous (could be cone or symmetric), so we use
-	// natUnknown to conservatively keep TURN enabled.
-	if localAddr.IP.Equal(result.IP) {
-		log.Debug("STUN NAT type: open internet (no NAT) — server-reflexive == local address")
-		setNATType(natOpen)
-	} else if localAddr.Port == result.Port {
-		log.Debug("STUN NAT type: restricted cone NAT (port preserved, IP changed)")
-		setNATType(natCone)
-	} else {
-		log.Debug("STUN NAT type: unknown — port changed (local=%d, reflexive=%d), may be symmetric",
-			localAddr.Port, result.Port)
-		setNATType(natUnknown)
+	// whether relay allocation is needed. Only set once (first successful
+	// query wins) to avoid races across concurrent goroutines. With a
+	// single-server STUN test, we can only distinguish open, cone (port
+	// preserved), and unknown. Port-changed is ambiguous (could be cone
+	// or symmetric), so we use natUnknown to conservatively keep TURN.
+	if detectedNATType.Load() == natUnknown {
+		if localAddr.IP.Equal(result.IP) {
+			log.Debug("STUN NAT type: open internet (no NAT) — server-reflexive == local address")
+			setNATType(natOpen)
+		} else if localAddr.Port == result.Port {
+			log.Debug("STUN NAT type: restricted cone NAT (port preserved, IP changed)")
+			setNATType(natCone)
+		} else {
+			log.Debug("STUN NAT type: unknown — port changed (local=%d, reflexive=%d), may be symmetric",
+				localAddr.Port, result.Port)
+			// Stay natUnknown — port-changed is ambiguous.
+		}
 	}
 
 	return result, nil
@@ -623,7 +651,7 @@ func sendSTUNBindingRequest(conn *net.UDPConn, localAddr *net.UDPAddr) (net.UDPA
 
 // sendSTUNBindingRequestTCP sends a TCP STUN Binding Request with RFC 7675 framing.
 // TCP STUN uses a 2-byte big-endian length prefix before each message.
-func sendSTUNBindingRequestTCP(conn *net.TCPConn, localAddr *net.TCPAddr) (net.UDPAddr, error) {
+func sendSTUNBindingRequestTCP(ctx context.Context, conn *net.TCPConn, localAddr *net.TCPAddr) (net.UDPAddr, error) {
 	msg := stun.New()
 	msg.Type = stun.BindingRequest
 	if err := msg.NewTransactionID(); err != nil {
@@ -636,7 +664,7 @@ func sendSTUNBindingRequestTCP(conn *net.TCPConn, localAddr *net.TCPAddr) (net.U
 	lenBuf := make([]byte, 2)
 	binary.BigEndian.PutUint16(lenBuf, uint16(len(msg.Raw)))
 
-	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetWriteDeadline(stunDeadline(ctx)); err != nil {
 		return net.UDPAddr{}, err
 	}
 	if _, err := conn.Write(lenBuf); err != nil {
@@ -646,7 +674,7 @@ func sendSTUNBindingRequestTCP(conn *net.TCPConn, localAddr *net.TCPAddr) (net.U
 		return net.UDPAddr{}, fmt.Errorf("write STUN request: %w", err)
 	}
 
-	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetReadDeadline(stunDeadline(ctx)); err != nil {
 		return net.UDPAddr{}, err
 	}
 
@@ -672,6 +700,11 @@ func sendSTUNBindingRequestTCP(conn *net.TCPConn, localAddr *net.TCPAddr) (net.U
 
 	log.Debug("TCP STUN response: type=%s, txID=%x, attrs=[%s]",
 		resp.Type, resp.TransactionID[:4], stunAttrNames(resp))
+
+	if !bytes.Equal(resp.TransactionID[:], msg.TransactionID[:]) {
+		return net.UDPAddr{}, fmt.Errorf("STUN transaction ID mismatch: expected %x, got %x",
+			msg.TransactionID[:4], resp.TransactionID[:4])
+	}
 
 	if resp.Type != stun.BindingSuccess {
 		errMsg := "unknown"

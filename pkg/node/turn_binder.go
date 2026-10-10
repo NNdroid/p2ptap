@@ -76,10 +76,53 @@ var turnClients = struct {
 	m map[string]*turn.Client
 }{m: make(map[string]*turn.Client)}
 
-func addTURNClient(key string, client *turn.Client) {
+// turnClientConns maps server URL strings to their underlying PacketConn.
+// Pion v4's Client.Close() does not close the conn, so we track it separately.
+var turnClientConns = struct {
+	sync.RWMutex
+	m map[string]net.PacketConn
+}{m: make(map[string]net.PacketConn)}
+
+func addTURNClientConn(key string, conn net.PacketConn) {
+	turnClientConns.Lock()
+	turnClientConns.m[key] = conn
+	turnClientConns.Unlock()
+}
+
+func removeTURNClientConn(key string) {
+	turnClientConns.Lock()
+	if conn, ok := turnClientConns.m[key]; ok {
+		conn.Close()
+		delete(turnClientConns.m, key)
+	}
+	turnClientConns.Unlock()
+}
+
+func removeAllTURNClientConns() {
+	turnClientConns.Lock()
+	for k, conn := range turnClientConns.m {
+		conn.Close()
+		delete(turnClientConns.m, k)
+	}
+	turnClientConns.Unlock()
+}
+
+func removeTURNClientConnsNotIn(keepKeys map[string]bool) {
+	turnClientConns.Lock()
+	for k, conn := range turnClientConns.m {
+		if !keepKeys[k] {
+			conn.Close()
+			delete(turnClientConns.m, k)
+		}
+	}
+	turnClientConns.Unlock()
+}
+
+func addTURNClient(key string, client *turn.Client, conn net.PacketConn) {
 	turnClients.Lock()
 	turnClients.m[key] = client
 	turnClients.Unlock()
+	addTURNClientConn(key, conn)
 }
 
 func getTURNClient(key string) (*turn.Client, bool) {
@@ -97,6 +140,7 @@ func removeTURNClient(key string) {
 		delete(turnClients.m, key)
 	}
 	turnClients.Unlock()
+	removeTURNClientConn(key)
 }
 
 func removeAllTURNClients() {
@@ -106,6 +150,7 @@ func removeAllTURNClients() {
 		delete(turnClients.m, k)
 	}
 	turnClients.Unlock()
+	removeAllTURNClientConns()
 }
 
 // removeTURNClientsNotIn removes TURN clients for servers not in the keep set.
@@ -119,6 +164,7 @@ func removeTURNClientsNotIn(keepServers map[string]bool) {
 		}
 	}
 	turnClients.Unlock()
+	removeTURNClientConnsNotIn(keepServers)
 }
 
 // removeTURNRelayConnsNotIn removes relay connections not in the keep set.
@@ -370,8 +416,14 @@ func (n *Node) allocateTURNRelay(ctx context.Context, serverURL string) ([]multi
 		return nil, fmt.Errorf("parse TURN URL: %w", err)
 	}
 
-	// Build pion/turn config
+	// Build pion/turn config. Pion v4 requires a pre-created PacketConn.
+	conn, err := net.ListenPacket("udp4", "0.0.0.0:0")
+	if err != nil {
+		return nil, fmt.Errorf("create TURN control conn: %w", err)
+	}
+
 	turnCfg := turn.ClientConfig{
+		Conn:           conn,
 		LoggerFactory:  logging.NewDefaultLoggerFactory(),
 		STUNServerAddr: cfg.ServerAddr,
 		TURNServerAddr: cfg.ServerAddr,
@@ -381,17 +433,20 @@ func (n *Node) allocateTURNRelay(ctx context.Context, serverURL string) ([]multi
 
 	client, err := turn.NewClient(&turnCfg)
 	if err != nil {
+		conn.Close()
 		return nil, fmt.Errorf("create TURN client: %w", err)
 	}
 
 	if err := client.Listen(); err != nil {
 		client.Close()
+		conn.Close()
 		return nil, fmt.Errorf("TURN listener: %w", err)
 	}
 
 	relay, err := client.Allocate()
 	if err != nil {
 		client.Close()
+		conn.Close()
 		return nil, fmt.Errorf("TURN allocation: %w", err)
 	}
 
@@ -408,6 +463,7 @@ func (n *Node) allocateTURNRelay(ctx context.Context, serverURL string) ([]multi
 
 	if relayIP == "" || relayPort == "" {
 		client.Close()
+		conn.Close()
 		return nil, fmt.Errorf("failed to extract relay IP:port from %s", relayAddrStr)
 	}
 
@@ -415,6 +471,7 @@ func (n *Node) allocateTURNRelay(ctx context.Context, serverURL string) ([]multi
 	udpRelay, ok := relayAddr.(*net.UDPAddr)
 	if !ok {
 		client.Close()
+		conn.Close()
 		return nil, fmt.Errorf("unexpected relay address type %T (expected *net.UDPAddr)", relayAddr)
 	}
 	ipPrefix := "/ip4/"
@@ -424,6 +481,7 @@ func (n *Node) allocateTURNRelay(ctx context.Context, serverURL string) ([]multi
 	ma, err := multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/udp/%s/quic-v1", ipPrefix, relayIP, relayPort))
 	if err != nil {
 		client.Close()
+		conn.Close()
 		return nil, fmt.Errorf("build multiaddr: %w", err)
 	}
 
@@ -433,8 +491,8 @@ func (n *Node) allocateTURNRelay(ctx context.Context, serverURL string) ([]multi
 	// matching laddr.String() in the OverrideListenUDP callback
 	addTURNRelayConn(relayAddrStr, relay)
 
-	// Store client for permission refresh (keyed by server URL)
-	addTURNClient(serverURL, client)
+	// Store client and its control conn for permission refresh (keyed by server URL)
+	addTURNClient(serverURL, client, conn)
 
 	return []multiaddr.Multiaddr{ma}, nil
 }
