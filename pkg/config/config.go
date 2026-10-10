@@ -9,8 +9,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 // WebUIConfig defines Web Dashboard options
@@ -270,6 +275,7 @@ func DefaultConfig() *Config {
 			ListenIP:   "0.0.0.0",
 			ListenIPv6: "::",
 			Port:       80,
+			PcapSampleEvery: 1,
 		},
 		Transports: TransportsConfig{
 			EnableQUICReuse:    true,
@@ -457,119 +463,463 @@ func GenerateRandomMAC() string {
 	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", buf[0], buf[1], buf[2], buf[3], buf[4], buf[5])
 }
 
-// Validate checks the configuration for correctness
+// Validate checks the configuration for correctness. Error messages follow
+// the "invalid config: <field_name>: <details>" pattern so the Android UI can
+// extract the offending field name via regex and show a localized hint.
 func (c *Config) Validate() error {
-	if c.TapMAC == "" || c.TapMAC == "auto" {
-		c.TapMAC = GenerateRandomMAC()
+	// --- Identity / naming ---
+	if c.NodeName != "" && !validNodeName(c.NodeName) {
+		return fmt.Errorf("invalid config: node_name: '%s' is invalid (max %d chars, allowed: a-z A-Z 0-9 - _ . @ space)", c.NodeName, MaxNodeNameLen)
+	}
+	if c.TapName != "" {
+		if len(c.TapName) > 16 {
+			return fmt.Errorf("invalid config: tap_name: too long (max 16 chars), got %d", len(c.TapName))
+		}
+		if strings.ContainsAny(c.TapName, " \t\n") {
+			return fmt.Errorf("invalid config: tap_name: must not contain spaces in '%s'", c.TapName)
+		}
 	}
 
+	// --- TAP address (host addresses are expected, e.g. 10.0.0.1/24) ---
 	if c.TapIP != "" {
-		_, _, err := net.ParseCIDR(c.TapIP)
-		if err != nil {
-			return fmt.Errorf("invalid tap_ip CIDR format '%s': %w", c.TapIP, err)
+		if err := validateCIDR("tap_ip", c.TapIP, false, false); err != nil {
+			return err
 		}
 	}
 	if c.TapIPv6 != "" {
-		_, _, err := net.ParseCIDR(c.TapIPv6)
-		if err != nil {
-			return fmt.Errorf("invalid tap_ipv6 CIDR format '%s': %w", c.TapIPv6, err)
+		if err := validateCIDR("tap_ipv6", c.TapIPv6, true, false); err != nil {
+			return err
 		}
 	}
-	if c.TapMAC != "" {
+	if c.TapMAC == "" || c.TapMAC == "auto" {
+		c.TapMAC = GenerateRandomMAC()
+	} else {
 		mac, err := net.ParseMAC(c.TapMAC)
 		if err != nil || len(mac) != 6 {
-			return fmt.Errorf("invalid tap_mac '%s' (must be a 6-octet MAC address)", c.TapMAC)
+			return fmt.Errorf("invalid config: tap_mac: '%s' must be a 6-octet MAC address", c.TapMAC)
 		}
 	}
-	if c.TransportStrategy != "best_path" && c.TransportStrategy != "redundant" && c.TransportStrategy != "fallback" {
-		return fmt.Errorf("unsupported transport_strategy '%s' (must be 'best_path', 'redundant', or 'fallback')", c.TransportStrategy)
+
+	// --- Listen addresses ---
+	for i, addr := range c.ListenAddrs {
+		if addr == "" {
+			continue
+		}
+		if _, err := ma.NewMultiaddr(addr); err != nil {
+			return fmt.Errorf("invalid config: listen_addrs[%d]: '%s' is not a valid multiaddr", i, addr)
+		}
 	}
+
+	// --- Peers ---
 	staticPeers, err := normalizePeerAddresses("static_peers", c.StaticPeers)
 	if err != nil {
-		return err
+		return wrapPeerErr("static_peers", err)
 	}
 	bootstrapPeers, err := normalizePeerAddresses("bootstrap_peers", c.BootstrapPeers)
 	if err != nil {
-		return err
+		return wrapPeerErr("bootstrap_peers", err)
 	}
 	c.StaticPeers, c.BootstrapPeers = staticPeers, bootstrapPeers
-	validModes := map[string]bool{"fixed": true, "block": true, "random": true, "dynamic": true, "auto": true}
-	if c.Obfuscation.Mode != "" && !validModes[c.Obfuscation.Mode] {
-		return fmt.Errorf("unsupported obfuscation mode '%s' (must be fixed/block/random/dynamic/auto)", c.Obfuscation.Mode)
+
+	// --- Allowed subnet peers ---
+	for i, p := range c.AllowedSubnetPeers {
+		if p == "*" {
+			continue
+		}
+		if _, err := peer.Decode(p); err != nil {
+			return fmt.Errorf("invalid config: allowed_subnet_peers[%d]: '%s' is not a valid peer ID (use a peer ID or '*')", i, p)
+		}
 	}
-	if c.Obfuscation.Mode == "fixed" && c.Obfuscation.FixedSize <= 0 {
-		return errors.New("fixed_size must be > 0 when obfuscation mode is 'fixed'")
+
+	// --- Advertised subnets (must be network addresses, no host bits) ---
+	for i, sub := range c.AdvertisedSubnets {
+		if sub == "" {
+			continue
+		}
+		if err := validateCIDR("advertised_subnets", sub, false, true); err != nil {
+			return fmt.Errorf("invalid config: advertised_subnets[%d]: %v", i, err)
+		}
 	}
-	if c.Obfuscation.Mode == "block" && c.Obfuscation.BlockSize <= 0 {
-		return errors.New("block_size must be > 0 when obfuscation mode is 'block'")
+
+	// --- Transport strategy ---
+	if c.TransportStrategy != "best_path" && c.TransportStrategy != "redundant" && c.TransportStrategy != "fallback" {
+		return fmt.Errorf("invalid config: transport_strategy: '%s' must be 'best_path', 'redundant', or 'fallback'", c.TransportStrategy)
 	}
-	if c.Obfuscation.JitterRange < 0 {
-		return errors.New("jitter_range must be >= 0")
+
+	// --- Log level ---
+	if err := validateLogLevel("log_level", c.LogLevel); err != nil {
+		return err
 	}
-	if c.Obfuscation.MinSize > 0 && c.Obfuscation.MaxSize > 0 && c.Obfuscation.MinSize > c.Obfuscation.MaxSize {
-		return errors.New("min_size must be <= max_size")
+
+	// --- Node key file ---
+	if c.NodeKeyFile != "" && strings.ContainsAny(c.NodeKeyFile, "\x00") {
+		return fmt.Errorf("invalid config: node_key_file: must not contain null bytes")
 	}
-	if c.Obfuscation.MaxFragSize < 0 {
-		return errors.New("max_frag_size must be >= 0 (0 = auto)")
-	}
-	if c.Obfuscation.MaxFragSize > 1400 {
-		return errors.New("max_frag_size must be <= 1400")
-	}
-	switch c.Obfuscation.Algorithm {
-	case "", "auto", "none", "aes-gcm", "chacha20":
-	default:
-		return errors.New("obfuscation.algorithm must be one of: auto, none, aes-gcm, chacha20")
-	}
+
+	// --- MTU ---
 	if c.MTU <= 0 || c.MTU > 9000 {
 		c.MTU = 1500
 	}
+
+	// --- Driver type ---
 	if c.DriverType == "" {
 		c.DriverType = "auto"
 	}
 	if c.DriverType != "auto" && c.DriverType != "tap" && c.DriverType != "wintun" {
-		return fmt.Errorf("invalid driver_type '%s' (must be 'auto', 'tap', or 'wintun')", c.DriverType)
+		return fmt.Errorf("invalid config: driver_type: '%s' must be 'auto', 'tap', or 'wintun'", c.DriverType)
 	}
-	for _, sub := range c.AdvertisedSubnets {
-		if sub != "" {
-			if _, _, err := net.ParseCIDR(sub); err != nil {
-				return fmt.Errorf("invalid advertised_subnet CIDR format '%s': %w", sub, err)
-			}
+
+	// --- Transports ---
+	if err := validateRate("transports.tcp_brutal_rate", c.Transports.TCPBrutalRate); err != nil {
+		return err
+	}
+	if c.Transports.TLSServerName != "" {
+		if err := validateDNSName("transports.tls_server_name", c.Transports.TLSServerName); err != nil {
+			return err
 		}
 	}
-	if !validNodeName(c.NodeName) {
-		return fmt.Errorf("invalid node_name '%s' (max %d chars, allowed: a-z A-Z 0-9 - _ . @ space)", c.NodeName, MaxNodeNameLen)
+	if c.Transports.TLSSNISuffix != "" {
+		if err := validateDNSName("transports.tls_sni_suffix", c.Transports.TLSSNISuffix); err != nil {
+			return err
+		}
 	}
+
+	// --- WebUI ---
+	if c.WebUI.Port < 1 || c.WebUI.Port > 65535 {
+		return fmt.Errorf("invalid config: web_ui.port: %d must be between 1 and 65535", c.WebUI.Port)
+	}
+	if c.WebUI.ListenIP != "" {
+		if net.ParseIP(c.WebUI.ListenIP) == nil {
+			return fmt.Errorf("invalid config: web_ui.listen_ip: '%s' is not a valid IP address", c.WebUI.ListenIP)
+		}
+	}
+	if c.WebUI.ListenIPv6 != "" {
+		if net.ParseIP(c.WebUI.ListenIPv6) == nil {
+			return fmt.Errorf("invalid config: web_ui.listen_ipv6: '%s' is not a valid IP address", c.WebUI.ListenIPv6)
+		}
+	}
+	if c.WebUI.PcapSampleEvery < 1 {
+		return fmt.Errorf("invalid config: web_ui.pcap_sample_every: %d must be >= 1", c.WebUI.PcapSampleEvery)
+	}
+	if c.WebUI.PcapMaxRatePerSec < 0 {
+		return fmt.Errorf("invalid config: web_ui.pcap_max_rate_per_sec: %d must be >= 0", c.WebUI.PcapMaxRatePerSec)
+	}
+
+	// --- Exit node ---
+	if c.ExitNode.WANInterface != "" && c.ExitNode.WANInterface != "auto" {
+		if err := validateInterfaceName("exit_node.wan_interface", c.ExitNode.WANInterface); err != nil {
+			return err
+		}
+	}
+
+	// --- Obfuscation ---
+	validModes := map[string]bool{"fixed": true, "block": true, "random": true, "dynamic": true, "auto": true}
+	if c.Obfuscation.Mode != "" && !validModes[c.Obfuscation.Mode] {
+		return fmt.Errorf("invalid config: obfuscation.mode: '%s' must be fixed/block/random/dynamic/auto", c.Obfuscation.Mode)
+	}
+	if c.Obfuscation.Mode == "fixed" && c.Obfuscation.FixedSize <= 0 {
+		return fmt.Errorf("invalid config: obfuscation.fixed_size: must be > 0 when mode is 'fixed', got %d", c.Obfuscation.FixedSize)
+	}
+	if c.Obfuscation.Mode == "block" && c.Obfuscation.BlockSize <= 0 {
+		return fmt.Errorf("invalid config: obfuscation.block_size: must be > 0 when mode is 'block', got %d", c.Obfuscation.BlockSize)
+	}
+	if c.Obfuscation.JitterRange < 0 {
+		return fmt.Errorf("invalid config: obfuscation.jitter_range: %d must be >= 0", c.Obfuscation.JitterRange)
+	}
+	if c.Obfuscation.MinSize > 0 && c.Obfuscation.MaxSize > 0 && c.Obfuscation.MinSize > c.Obfuscation.MaxSize {
+		return fmt.Errorf("invalid config: obfuscation.min_size: %d must be <= max_size %d", c.Obfuscation.MinSize, c.Obfuscation.MaxSize)
+	}
+	if c.Obfuscation.MaxFragSize < 0 {
+		return fmt.Errorf("invalid config: obfuscation.max_frag_size: %d must be >= 0 (0 = auto)", c.Obfuscation.MaxFragSize)
+	}
+	if c.Obfuscation.MaxFragSize > 1400 {
+		return fmt.Errorf("invalid config: obfuscation.max_frag_size: %d must be <= 1400", c.Obfuscation.MaxFragSize)
+	}
+	if c.Obfuscation.MaxFragSize > 0 && c.Obfuscation.MaxFragSize < 256 {
+		return fmt.Errorf("invalid config: obfuscation.max_frag_size: %d must be >= 256 or 0 (auto)", c.Obfuscation.MaxFragSize)
+	}
+	switch c.Obfuscation.Algorithm {
+	case "", "auto", "none", "aes-gcm", "chacha20":
+	default:
+		return fmt.Errorf("invalid config: obfuscation.algorithm: '%s' must be one of: auto, none, aes-gcm, chacha20", c.Obfuscation.Algorithm)
+	}
+	if c.Obfuscation.AutoDetectInterval <= 0 {
+		c.Obfuscation.AutoDetectInterval = 30
+	}
+	if c.Obfuscation.AutoThresholdBytes <= 0 {
+		c.Obfuscation.AutoThresholdBytes = 65536
+	}
+	if c.Obfuscation.AutoDetectInterval > 3600 {
+		return fmt.Errorf("invalid config: obfuscation.auto_detect_interval: %d must be 1-3600 (seconds)", c.Obfuscation.AutoDetectInterval)
+	}
+	if c.Obfuscation.AutoThresholdBytes > 1048576 {
+		return fmt.Errorf("invalid config: obfuscation.auto_threshold_bytes: %d must be 1-1048576 (bytes)", c.Obfuscation.AutoThresholdBytes)
+	}
+
+	// --- ACL ---
 	if c.ACL.Enable {
 		if c.ACL.DefaultAction != "accept" && c.ACL.DefaultAction != "allow" && c.ACL.DefaultAction != "drop" && c.ACL.DefaultAction != "deny" {
-			return fmt.Errorf("invalid acl default_action '%s' (must be 'accept'/'allow' or 'drop'/'deny')", c.ACL.DefaultAction)
+			return fmt.Errorf("invalid config: acl.default_action: '%s' must be 'accept'/'allow' or 'drop'/'deny'", c.ACL.DefaultAction)
 		}
 		for i, r := range c.ACL.Rules {
 			act := strings.ToLower(r.Action)
 			if act != "accept" && act != "allow" && act != "drop" && act != "deny" {
-				return fmt.Errorf("invalid acl rule[%d] action '%s' (must be 'accept'/'allow' or 'drop'/'deny')", i, r.Action)
+				return fmt.Errorf("invalid config: acl.rules[%d].action: '%s' must be 'accept'/'allow' or 'drop'/'deny'", i, r.Action)
 			}
 			proto := strings.ToLower(r.Protocol)
 			if proto != "" && proto != "any" && proto != "tcp" && proto != "udp" && proto != "icmp" {
-				return fmt.Errorf("invalid acl rule[%d] protocol '%s' (must be 'tcp', 'udp', 'icmp', or 'any')", i, r.Protocol)
+				return fmt.Errorf("invalid config: acl.rules[%d].protocol: '%s' must be 'tcp', 'udp', 'icmp', or 'any'", i, r.Protocol)
 			}
 			dir := strings.ToLower(r.Direction)
 			if dir != "" && dir != "both" && dir != "inbound" && dir != "outbound" {
-				return fmt.Errorf("invalid acl rule[%d] direction '%s' (must be 'both', 'inbound', or 'outbound')", i, r.Direction)
+				return fmt.Errorf("invalid config: acl.rules[%d].direction: '%s' must be 'both', 'inbound', or 'outbound'", i, r.Direction)
 			}
 			if r.IPCIDR != "" && r.IPCIDR != "*" {
 				if _, _, err := net.ParseCIDR(r.IPCIDR); err != nil {
-					return fmt.Errorf("invalid acl rule[%d] ip_cidr '%s': %w", i, r.IPCIDR, err)
+					return fmt.Errorf("invalid config: acl.rules[%d].ip_cidr: '%s' is not a valid CIDR", i, r.IPCIDR)
 				}
+			}
+			if r.PeerID != "" && r.PeerID != "*" {
+				if _, err := peer.Decode(r.PeerID); err != nil {
+					return fmt.Errorf("invalid config: acl.rules[%d].peer_id: '%s' is not a valid peer ID (use a peer ID or '*')", i, r.PeerID)
+				}
+			}
+			if err := validatePortSpec(fmt.Sprintf("acl.rules[%d].port", i), r.Port); err != nil {
+				return err
 			}
 		}
 	}
+
+	// --- Durations ---
 	if c.HolePunchTimeout <= 0 || c.HolePunchTimeout > 120*time.Second {
 		c.HolePunchTimeout = 15 * time.Second
 	}
 	if c.RelayUpgradeInterval <= 0 {
 		c.RelayUpgradeInterval = 30 * time.Second
 	}
+
+	// --- STUN servers ---
+	for i, srv := range c.StunServers {
+		if err := validateSTUNServer(fmt.Sprintf("stun_servers[%d]", i), srv); err != nil {
+			return err
+		}
+	}
+
+	// --- TURN servers ---
+	for i, srv := range c.TurnServers {
+		if err := validateTURNServer(fmt.Sprintf("turn_servers[%d]", i), srv); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+// --- Validation helpers ---
+
+// validateCIDR checks that s is a valid CIDR and optionally that it matches
+// the expected IP family. When rejectHostBits is true, host bits being set
+// are rejected (e.g. "192.168.1.5/24" is invalid for a subnet advertisement
+// but is perfectly valid as a TAP host address).
+func validateCIDR(field, s string, wantIPv6 bool, rejectHostBits bool) error {
+	ip, ipnet, err := net.ParseCIDR(s)
+	if err != nil {
+		return fmt.Errorf("invalid config: %s: '%s' is not a valid CIDR (%v)", field, s, err)
+	}
+	if wantIPv6 {
+		if ip.To4() != nil {
+			return fmt.Errorf("invalid config: %s: '%s' is an IPv4 CIDR, expected IPv6", field, s)
+		}
+	} else {
+		if ip.To4() == nil {
+			return fmt.Errorf("invalid config: %s: '%s' is an IPv6 CIDR, expected IPv4", field, s)
+		}
+	}
+	if rejectHostBits {
+		ones, bits := ipnet.Mask.Size()
+		if bits == 32 && ones == 32 {
+			return fmt.Errorf("invalid config: %s: '%s' is a host address (/32), use a network CIDR like /24", field, s)
+		}
+		if bits == 128 && ones == 128 {
+			return fmt.Errorf("invalid config: %s: '%s' is a host address (/128), use a network CIDR like /64", field, s)
+		}
+		// Reject host bits being set (e.g. 192.168.1.5/24 has host bits)
+		if ip.Mask(ipnet.Mask).String() != ip.String() {
+			return fmt.Errorf("invalid config: %s: '%s' has host bits set, use the network address (e.g. '%s')", field, s, ipnet.IP.String())
+		}
+	}
+	return nil
+}
+
+func validateSTUNServer(field, server string) error {
+	s := strings.TrimSpace(server)
+	if s == "" {
+		return fmt.Errorf("invalid config: %s: empty server address", field)
+	}
+	// Strip transport prefix: /udp/, /tcp/, stun:, turn:, tcp:
+	if strings.HasPrefix(s, "/udp/") {
+		s = strings.TrimPrefix(s, "/udp/")
+	} else if strings.HasPrefix(s, "/tcp/") {
+		s = strings.TrimPrefix(s, "/tcp/")
+	} else if strings.HasPrefix(s, "stun:") {
+		s = strings.TrimPrefix(s, "stun:")
+	} else if strings.HasPrefix(s, "turn:") {
+		s = strings.TrimPrefix(s, "turn:")
+	} else if strings.HasPrefix(s, "tcp:") {
+		s = strings.TrimPrefix(s, "tcp:")
+	}
+	// Parse host:port
+	if idx := strings.LastIndex(s, ":"); idx >= 0 {
+		host := s[:idx]
+		portStr := s[idx+1:]
+		if host == "" {
+			return fmt.Errorf("invalid config: %s: empty host in '%s'", field, server)
+		}
+		p, err := strconv.Atoi(portStr)
+		if err != nil || p < 1 || p > 65535 {
+			return fmt.Errorf("invalid config: %s: invalid port in '%s' (must be 1-65535)", field, server)
+		}
+		return nil
+	}
+	// No port — accept bare host (defaults to 3478)
+	if s == "" {
+		return fmt.Errorf("invalid config: %s: empty host in '%s'", field, server)
+	}
+	return nil
+}
+
+func validateTURNServer(field, server string) error {
+	s := strings.TrimSpace(server)
+	if s == "" {
+		return fmt.Errorf("invalid config: %s: empty server address", field)
+	}
+	if !strings.HasPrefix(s, "turn:") {
+		return fmt.Errorf("invalid config: %s: '%s' must start with 'turn:'", field, server)
+	}
+	// Remove turn: prefix and query string for validation
+	s = strings.TrimPrefix(s, "turn:")
+	if idx := strings.Index(s, "?"); idx >= 0 {
+		s = s[:idx]
+	}
+	// Parse host:port
+	if idx := strings.LastIndex(s, ":"); idx >= 0 {
+		host := s[:idx]
+		portStr := s[idx+1:]
+		if host == "" {
+			return fmt.Errorf("invalid config: %s: empty host in '%s'", field, server)
+		}
+		p, err := strconv.Atoi(portStr)
+		if err != nil || p < 1 || p > 65535 {
+			return fmt.Errorf("invalid config: %s: invalid port in '%s' (must be 1-65535)", field, server)
+		}
+		return nil
+	}
+	// No port — accept bare host (defaults to 3478)
+	if s == "" {
+		return fmt.Errorf("invalid config: %s: empty host in '%s'", field, server)
+	}
+	return nil
+}
+
+func validateInterfaceName(field, name string) error {
+	if name == "" {
+		return fmt.Errorf("invalid config: %s: empty interface name", field)
+	}
+	if len(name) > 16 {
+		return fmt.Errorf("invalid config: %s: too long (max 16 chars), got %d", field, len(name))
+	}
+	for _, c := range name {
+		if !unicode.IsLetter(c) && !unicode.IsDigit(c) && c != '-' && c != '_' && c != '.' {
+			return fmt.Errorf("invalid config: %s: invalid character '%c' in '%s'", field, c, name)
+		}
+	}
+	return nil
+}
+
+func validateRate(field, rate string) error {
+	if rate == "" {
+		return nil // empty = disabled
+	}
+	for _, suffix := range []string{"Mbps", "Gbps", "Kbps", "bps"} {
+		if strings.HasSuffix(rate, suffix) {
+			numStr := strings.TrimSuffix(rate, suffix)
+			if numStr == "" {
+				return fmt.Errorf("invalid config: %s: missing value before '%s'", field, rate)
+			}
+			v, err := strconv.ParseFloat(numStr, 64)
+			if err != nil || v <= 0 {
+				return fmt.Errorf("invalid config: %s: '%s' must be a positive number like '100Mbps'", field, rate)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid config: %s: must end with 'Mbps', 'Gbps', 'Kbps', or 'bps', got '%s'", field, rate)
+}
+
+func validateDNSName(field, name string) error {
+	if name == "" {
+		return nil
+	}
+	if len(name) > 253 {
+		return fmt.Errorf("invalid config: %s: too long (max 253 chars)", field)
+	}
+	parts := strings.Split(name, ".")
+	for _, part := range parts {
+		if part == "" {
+			return fmt.Errorf("invalid config: %s: empty label in '%s'", field, name)
+		}
+		if len(part) > 63 {
+			return fmt.Errorf("invalid config: %s: label too long (max 63 chars) in '%s'", field, name)
+		}
+		// Must start and end with alphanumeric
+		for _, i := range []int{0, len(part) - 1} {
+			if !unicode.IsLetter(rune(part[i])) && !unicode.IsDigit(rune(part[i])) {
+				return fmt.Errorf("invalid config: %s: label must start and end with alphanumeric in '%s'", field, name)
+			}
+		}
+	}
+	return nil
+}
+
+func validateLogLevel(field, level string) error {
+	switch level {
+	case "", "debug", "info", "warn", "error":
+		return nil
+	default:
+		return fmt.Errorf("invalid config: %s: '%s' must be 'debug', 'info', 'warn', or 'error'", field, level)
+	}
+}
+
+// validatePortSpec validates an ACL port field: "0" (all), "80", or "8000-9000".
+func validatePortSpec(field, spec string) error {
+	if spec == "" || spec == "0" {
+		return nil
+	}
+	if strings.Contains(spec, "-") {
+		parts := strings.SplitN(spec, "-", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("invalid config: %s: invalid range format '%s' (use 'LOW-HIGH')", field, spec)
+		}
+		low, err1 := strconv.Atoi(parts[0])
+		high, err2 := strconv.Atoi(parts[1])
+		if err1 != nil || err2 != nil || low < 0 || low > 65535 || high < 0 || high > 65535 {
+			return fmt.Errorf("invalid config: %s: invalid range '%s' (ports must be 0-65535)", field, spec)
+		}
+		if low > high {
+			return fmt.Errorf("invalid config: %s: low bound %d > high bound %d in '%s'", field, low, high, spec)
+		}
+		return nil
+	}
+	p, err := strconv.Atoi(spec)
+	if err != nil || p < 0 || p > 65535 {
+		return fmt.Errorf("invalid config: %s: '%s' must be a port number 0-65535", field, spec)
+	}
+	return nil
+}
+
+// wrapPeerErr converts normalizePeerAddresses errors to the standard format.
+func wrapPeerErr(field string, err error) error {
+	return fmt.Errorf("invalid config: %s: %v", field, err)
 }
 
 // configFilePerm picks the on-disk permission for a config file: configs that
