@@ -158,9 +158,11 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 		// origin (cipher slot, dedup anchor, meta, MAC learning) — that may
 		// only happen for a claim made directly (origin == transport peer,
 		// authenticated by libp2p) or a claim endorsed by a PSK-holding first
-		// relay (see relay_ctrl_attest.go). Without this, any identity-only
-		// dial could run the inner handshake "as" a legitimate peer.
-		if hdr.Origin != remotePeer && !n.verifyRelayCtrlStamp(origPID, hdr.Target, protocol.ID(hdr.Proto), hdr.Stamp) {
+		// relay (see relay_ctrl_attest.go). In PSK-less mode there is no
+		// endorsement possible, so origin MUST equal the transport peer —
+		// otherwise any node could claim a foreign origin and commit cipher/
+		// dedup/meta state on the victim's behalf.
+		if hdr.Origin != remotePeer && (len(pskSaltBytes(n)) == 0 || !n.verifyRelayCtrlStamp(origPID, hdr.Target, protocol.ID(hdr.Proto), hdr.Stamp)) {
 			log.Warn("RelayCtrl: unverified origin claim %s from %s (proto %s) — dropping tunnel",
 				hdr.Origin, remotePeer, protocol.ID(hdr.Proto))
 			return
@@ -185,7 +187,7 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 	// Transit anti-spoof: forward only a directly-made claim (which we can
 	// endorse) or an already-endorsed tunnel — otherwise this node is an open
 	// relay for origin-forgery against downstream victims.
-	if hdr.Origin != remotePeer && !n.verifyRelayCtrlStamp(hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), hdr.Stamp) {
+	if hdr.Origin != remotePeer && (len(pskSaltBytes(n)) == 0 || !n.verifyRelayCtrlStamp(hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), hdr.Stamp)) {
 		log.Warn("RelayCtrl: transit refused — unverified origin claim %s from %s (target %s)",
 			hdr.Origin, remotePeer, hdr.Target)
 		return

@@ -32,6 +32,11 @@ const (
 	// the opportunistic flood-sweep drops exactly the entries the regular
 	// sweep would consider dead.
 	lsaStaleAge = 60 * time.Second
+	// maxLSASeqJump bounds how far a single LSA's sequence number may advance
+	// beyond the last seen value. Without this, an attacker can stamp
+	// Seq = MaxUint64 on a known origin, permanently poisoning the seqMap so
+	// every legitimate LSA is rejected and the origin vanishes from the graph.
+	maxLSASeqJump = 1000
 )
 
 type LinkStatePayload struct {
@@ -367,12 +372,25 @@ func (r *Router) ProcessLSA(lsa *LinkStatePayload) bool {
 		return false
 	}
 
+	// Clamp TTL to [0, DefaultLSATTL]: an attacker setting ttl:6 bypasses the
+	// first-hop origin check (which keys on exact equality with DefaultLSATTL),
+	// and ttl:2147483647 never decays — every hop re-forwards, saturating the
+	// mesh with flood traffic. Negative TTLs are dropped entirely.
+	if lsa.TTL < 0 || lsa.TTL > DefaultLSATTL {
+		return false
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Ignore stale or duplicate LSA sequence numbers
-	if lastSeq, ok := r.seqMap[originID]; ok && lsa.Seq <= lastSeq {
-		return false
+	// Ignore stale or duplicate LSA sequence numbers. Also reject absurd
+	// forward jumps (Seq > lastSeq + maxSeqJump) which poison the seqMap with
+	// MaxUint64, causing every subsequent legitimate LSA to be rejected forever
+	// and the origin to vanish from the topology.
+	if lastSeq, ok := r.seqMap[originID]; ok {
+		if lsa.Seq <= lastSeq || lsa.Seq > lastSeq+maxLSASeqJump {
+			return false
+		}
 	}
 
 	// Hostile-flood caps: LSAs arrive from any authenticated mesh member and

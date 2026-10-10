@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // checkACL wraps MatchACL and records accept/drop counters + per-rule hits.
@@ -47,6 +49,27 @@ func (n *Node) checkACL(frame []byte, peerID string, isTx bool) bool {
 		Dir:    dir,
 	})
 	return false
+}
+
+// checkRelayTransitACL evaluates whether the relay node should forward a relay
+// envelope from srcPeer to finalDst. ACL is enforced at the final hop's local
+// evaluation, but a relay node that skips ACL entirely lets a blocked peer use
+// a third-party relay as a bounce — reaching any peer whose final-hop ACL is
+// permissive, while bypassing per-peer rate limits and path pinning. This check
+// runs at the relay node and denies forwarding if the ACL would have denied the
+// frame locally.
+func (n *Node) checkRelayTransitACL(srcPeer, finalDst peer.ID) bool {
+	c := n.config()
+	if c == nil || !c.ACL.Enable {
+		return true // ACL disabled — fast path
+	}
+	// Build a synthetic "any protocol" inbound frame check: we don't have the
+	// actual frame payload at the relay node, so we check the peer pair against
+	// the ACL rules without protocol/port filters. A peer blocked by a generic
+	// peer_id rule will be denied here; protocol/port-specific rules only apply
+	// at the final hop where the frame is visible.
+	allowed, _ := MatchACL(&c.ACL, nil, srcPeer.String(), false)
+	return allowed
 }
 
 // ACLStatsSnapshotDTO is the JSON shape returned to the WebUI. Defined here

@@ -712,6 +712,17 @@ func (n *Node) handleLSAStream(s network.Stream) {
 		// (e.g. circuit-relay sub-stream dial timeouts). lsa.Origin is the identity
 		// owner even when this LSA arrived via forwarding.
 		//
+		// TTL clamping: an attacker sets ttl:6 to bypass the first-hop origin check
+		// below (which keys on exact equality with DefaultLSATTL), then
+		// applyPeerMetaFromLSA runs with a forged origin — learning MACs, writing
+		// GARP/NA into the local TAP, and injecting topology edges under any
+		// claimed identity. Clamp to [0, DefaultLSATTL] so the origin check is
+		// the only gate. Negative TTLs are dropped (they would never reach TTL 1
+		// for forwarding, but they also carry no useful state).
+		if lsa.TTL < 0 || lsa.TTL > routing.DefaultLSATTL {
+			continue
+		}
+
 		// First-hop verification: an LSA with TTL == DefaultLSATTL was minted by
 		// the sender, so lsa.Origin MUST equal the transport peer. Without this
 		// check, an attacker injects topology edges under any claimed origin
@@ -1030,8 +1041,16 @@ func (n *Node) handleRelayStream(s network.Stream) {
 			continue
 		}
 
-		// Destination is another peer: forward frame if TTL > 1
+		// Destination is another peer: forward frame if TTL > 1.
+		// ACL check: the relay node evaluates the ACL on the (srcPeer → finalDst)
+		// pair before forwarding, so a peer blocked from reaching a target by
+		// local ACL cannot use a third-party relay as a bypass.
 		if ttl > 1 {
+			if !n.checkRelayTransitACL(srcPeer, finalDst) {
+				log.Debug("Relay forward denied by ACL: %s → %s (via %s, ttl=%d)",
+					srcPeer.String(), finalDst.String(), remotePeer.String(), ttl)
+				continue
+			}
 			nextHop := finalDst
 			if route, ok := n.overlayRoute(finalDst, int(ttl)-1, remotePeer); ok {
 				nextHop = route.NextHop
@@ -1213,8 +1232,13 @@ func (n *Node) isTapProbeRequest(payload []byte) (peer.ID, uint64, bool) {
 	if pidLen <= 0 || len(icmpPayload) < 3+pidLen+8 {
 		return "", 0, false
 	}
-	pid := peer.ID(icmpPayload[3 : 3+pidLen])
-	if pid == "" {
+	// Validate the claimed prober ID — a raw byte slice cast to peer.ID
+	// without decoding would let an attacker specify arbitrary strings that
+	// happen to resolve in the peerstore, causing the node to open control
+	// streams toward uncontrolled addresses.
+	rawPID := icmpPayload[3 : 3+pidLen]
+	pid, err := peer.Decode(string(rawPID))
+	if err != nil || pid == "" {
 		return "", 0, false
 	}
 	tok := binary.BigEndian.Uint64(icmpPayload[3+pidLen : 3+pidLen+8])

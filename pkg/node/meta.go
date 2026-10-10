@@ -99,11 +99,11 @@ func (n *Node) handleMetaStream(s network.Stream) {
 							setter.RegisterIPMAC(cleanv6, payload.TapMAC)
 						}
 					}
-					if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 && n.TAP != nil {
+					if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 && n.TAP != nil && n.isOverlayIP(ip) {
 						garpFrame := tap.BuildARPReplyFrame(hw, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, ip, ip)
 						_, _ = n.tapWrite(garpFrame)
 					}
-					if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil && n.TAP != nil {
+					if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil && n.TAP != nil && n.isOverlayIP(ip6) {
 						naFrame := tap.BuildIPv6NeighborAdvertisementFrame(hw, ip6)
 						if len(naFrame) > 0 {
 							_, _ = n.tapWrite(naFrame)
@@ -420,11 +420,11 @@ func (n *Node) handleMetaResponse(remotePeer peer.ID, respData []byte) {
 	if n.TAP == nil {
 		return
 	}
-	if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 {
+	if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 && n.isOverlayIP(ip) {
 		garpFrame := tap.BuildARPReplyFrame(hw, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, ip, ip)
 		_, _ = n.tapWrite(garpFrame)
 	}
-	if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil {
+	if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil && n.isOverlayIP(ip6) {
 		naFrame := tap.BuildIPv6NeighborAdvertisementFrame(hw, ip6)
 		if len(naFrame) > 0 {
 			_, _ = n.tapWrite(naFrame)
@@ -502,16 +502,53 @@ func (n *Node) applyPeerMetaFromLSA(remotePeer peer.ID, lsa routing.LinkStatePay
 	if n.TAP == nil {
 		return
 	}
-	if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 {
+	if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 && n.isOverlayIP(ip) {
 		garpFrame := tap.BuildARPReplyFrame(hw, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, ip, ip)
 		_, _ = n.tapWrite(garpFrame)
 	}
-	if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil {
+	if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil && n.isOverlayIP(ip6) {
 		naFrame := tap.BuildIPv6NeighborAdvertisementFrame(hw, ip6)
 		if len(naFrame) > 0 {
 			_, _ = n.tapWrite(naFrame)
 		}
 	}
+}
+
+// isOverlayIP returns true if ip is within the node's configured overlay
+// address space (localV4Net / localV6Net). This is used to prevent GARP/NA
+// frames from being written into the host's physical LAN — a peer advertising
+// TapIP="192.168.1.1" (the physical gateway) would cause the victim's OS to
+// believe the gateway is the attacker, an L2 poisoning attack driven by an
+// L3 mesh member.
+func (n *Node) isOverlayIP(ip net.IP) bool {
+	if ip4 := ip.To4(); ip4 != nil {
+		return n.localV4Net != nil && n.localV4Net.Contains(ip4)
+	}
+	if ip6 := ip.To16(); ip6 != nil {
+		return n.localV6Net != nil && n.localV6Net.Contains(ip6)
+	}
+	return false
+}
+
+// isSubnetPeerAllowed returns true if the peer is allowed to advertise subnets.
+// An empty AllowedSubnetPeers whitelist means deny-all (fail-closed), matching
+// the config's deny-by-default intent. Without this shared helper, processSubnetRoutes
+// and reconcileSubnetRoutes disagreed on the empty case — one allowed all, the
+// other allowed none — silently inverting the operator's whitelist.
+func (n *Node) isSubnetPeerAllowed(pID peer.ID) bool {
+	cfg := n.config()
+	if !cfg.AcceptAdvertisedSubnets {
+		return false
+	}
+	if len(cfg.AllowedSubnetPeers) == 0 {
+		return false // deny-all when whitelist is empty
+	}
+	for _, p := range cfg.AllowedSubnetPeers {
+		if p == "*" || p == pID.String() {
+			return true
+		}
+	}
+	return false
 }
 
 // GetPeerMeta retrieves the cached metadata for a specific peer.
@@ -742,6 +779,13 @@ func (n *Node) ingestPeekMapNodeInfo(info PeekMapNodeInfo, viaPeer peer.ID) {
 	if hop < 1 {
 		hop = 1
 	}
+	// Clamp hop distance to a plausible range: an attacker advertising hop=1000
+	// would set an unrealistic weight that steers traffic away from honest peers.
+	// Legitimate peek-map announcements are at most ~5 hops across a federated
+	// backbone.
+	if hop > 10 {
+		hop = 10
+	}
 	estimatedRTT := int64(hop) * 25
 	// The peek-map learns this peer indirectly, through the relay/boot node
 	// (viaPeer). Mark the backfilled edge as circuit class so the cost model
@@ -836,10 +880,10 @@ func (n *Node) lookupPeekMapOrigin(pID peer.ID) (peekMapOrigin, bool) {
 
 // registerPeekMapAddrs stores endpoints advertised over the peek-map channel.
 //
-// AddressTTL (not PermanentAddrTTL) is deliberate: these are third-party claims
-// relayed through a boot, so they must expire if the peer stops republishing.
-// The peek-map republishes on every change and on every new peer, which keeps
-// live entries fresh.
+	// AddressTTL (not PermanentAddrTTL) is deliberate: these are third-party claims
+	// relayed through a boot, so they must expire if the peer stops republishing.
+	// The peek-map republishes on every change and on every new peer, which keeps
+	// live entries fresh.
 func (n *Node) registerPeekMapAddrs(pID peer.ID, addrs []string) {
 	if len(addrs) == 0 {
 		return
@@ -851,18 +895,22 @@ func (n *Node) registerPeekMapAddrs(pID peer.ID, addrs []string) {
 			log.Debug("Peek-map addr %q from %s is invalid, skipped: %v", s, pID.ShortString(), err)
 			continue
 		}
-		// A /p2p/<id> suffix would make the peerstore entry unusable for
-		// dialling; strip it and verify it matches the claimed publisher.
-		if info, err := peer.AddrInfoFromP2pAddr(ma); err == nil {
-			if info.ID != pID {
-				log.Debug("Peek-map addr %q claims peer %s but was published by %s, skipped",
-					s, info.ID.ShortString(), pID.ShortString())
-				continue
-			}
-			parsed = append(parsed, info.Addrs...)
+		// Require a /p2p/<id> suffix that matches the claimed peer ID. Plain
+		// multiaddrs without a suffix would be accepted verbatim, letting an
+		// attacker publish arbitrary addresses for a peer they don't control —
+		// causing the whole mesh to dial the attacker (resource drain + foothold
+		// for control-plane attacks).
+		info, err := peer.AddrInfoFromP2pAddr(ma)
+		if err != nil {
+			log.Debug("Peek-map addr %q from %s has no /p2p/ suffix, skipped", s, pID.ShortString())
 			continue
 		}
-		parsed = append(parsed, ma)
+		if info.ID != pID {
+			log.Debug("Peek-map addr %q claims peer %s but was published by %s, skipped",
+				s, info.ID.ShortString(), pID.ShortString())
+			continue
+		}
+		parsed = append(parsed, info.Addrs...)
 	}
 	if len(parsed) == 0 {
 		return
@@ -1163,19 +1211,7 @@ func (n *Node) processSubnetRoutes(remotePeer peer.ID, tapIPv4, tapIPv6 string, 
 		return
 	}
 
-	isAllowed := false
-	if len(n.Config.AllowedSubnetPeers) == 0 {
-		isAllowed = true
-	} else {
-		for _, p := range n.Config.AllowedSubnetPeers {
-			if p == "*" || p == remotePeer.String() {
-				isAllowed = true
-				break
-			}
-		}
-	}
-
-	if !isAllowed {
+	if !n.isSubnetPeerAllowed(remotePeer) {
 		log.Debug("🔒 Subnet route from peer %s ignored (not in allowed_subnet_peers whitelist)", remotePeer.String())
 		return
 	}
@@ -1231,7 +1267,6 @@ func (n *Node) reconcileSubnetRoutes() {
 	if n.Gateway == nil {
 		return
 	}
-	cfg := n.config()
 	validSubnets := make(map[string]string)
 	n.peerMeta.Range(func(key, value interface{}) bool {
 		pID := key.(peer.ID)
@@ -1240,14 +1275,8 @@ func (n *Node) reconcileSubnetRoutes() {
 		}
 		meta := value.(PeerMeta)
 
-		isAllowed := false
-		if cfg.AcceptAdvertisedSubnets {
-			for _, p := range cfg.AllowedSubnetPeers {
-				if p == "*" || p == pID.String() {
-					isAllowed = true
-					break
-				}
-			}
+		if !n.isSubnetPeerAllowed(pID) {
+			return true
 		}
 
 		cleanGWv4 := strings.Split(meta.TapIP, "/")[0]
@@ -1257,7 +1286,7 @@ func (n *Node) reconcileSubnetRoutes() {
 			if sub == "" {
 				continue
 			}
-			if !isAllowed && !n.isSubnetManuallyAuthorized(sub) {
+			if !n.isSubnetManuallyAuthorized(sub) {
 				continue
 			}
 			// Exclude subnets that lost the duplicate/overlap arbitration to a

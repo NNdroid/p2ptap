@@ -466,7 +466,13 @@ func (n *Node) sendDispatchTask(task dispatchTask) {
 		data := task.data
 		origLen := task.origLen
 		owned := task.owned
-		if err := n.Dispatcher.SendToPeer(n.ctx, target, data); err != nil {
+		// Bounded per-send timeout: the node's lifetime context would let a
+		// wedged peer (stream open succeeds but never reads) pin this goroutine
+		// indefinitely, exhausting urgent-send slots and starving time-critical
+		// frames.
+		ctx, cancel := context.WithTimeout(n.ctx, 3*time.Second)
+		defer cancel()
+		if err := n.Dispatcher.SendToPeer(ctx, target, data); err != nil {
 			log.Debug("Tx urgent unicast send error to peer %s: %v", target.String(), err)
 			n.handleUnicastFailure(target, dstMAC, err)
 		} else {

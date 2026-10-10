@@ -55,6 +55,14 @@ func setNATType(t int32) {
 	detectedNATType.Store(t)
 }
 
+// setNATTypeCAS atomically stores t only if the current value equals oldVal.
+// This prevents the check-then-set race in the STUN binder where concurrent
+// goroutines (one per STUN server) can overwrite each other's classification.
+// Returns true if the swap succeeded.
+func setNATTypeCAS(oldVal, t int32) bool {
+	return detectedNATType.CompareAndSwap(oldVal, t)
+}
+
 // needsTURN returns true if the detected NAT type requires TURN relay.
 func needsTURN() bool {
 	t := detectedNATType.Load()
@@ -635,10 +643,10 @@ func sendSTUNBindingRequest(ctx context.Context, conn *net.UDPConn, localAddr *n
 	if detectedNATType.Load() == natUnknown {
 		if localAddr.IP.Equal(result.IP) {
 			log.Debug("STUN NAT type: open internet (no NAT) — server-reflexive == local address")
-			setNATType(natOpen)
+			setNATTypeCAS(natUnknown, natOpen)
 		} else if localAddr.Port == result.Port {
 			log.Debug("STUN NAT type: restricted cone NAT (port preserved, IP changed)")
-			setNATType(natCone)
+			setNATTypeCAS(natUnknown, natCone)
 		} else {
 			log.Debug("STUN NAT type: unknown — port changed (local=%d, reflexive=%d), may be symmetric",
 				localAddr.Port, result.Port)

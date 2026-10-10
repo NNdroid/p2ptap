@@ -104,6 +104,14 @@ func (n *Node) recordPeerObservedTapMAC(p peer.ID, mac net.HardwareAddr) {
 	if len(mac) != 6 {
 		return
 	}
+	// Reject a registration that would hijack another peer's MAC entry: an
+	// attacker sending frames with srcMAC = honest peer X's TapMAC would
+	// overwrite the MAC table entry, redirecting X's traffic to the attacker.
+	if n.MACTable != nil {
+		if existing, ok := n.MACTable.Lookup(mac); ok && existing != p {
+			return
+		}
+	}
 	// In steady state the peer's emitted MAC never changes, so skip the write
 	// lock entirely once we've recorded it — avoids taking peerProbeMu on every
 	// inbound frame destined for us.
@@ -129,12 +137,14 @@ func (n *Node) recordPeerObservedTapMAC(p peer.ID, mac net.HardwareAddr) {
 		n.MACTable.Learn(cp, p)
 	}
 
-	// Emit a Gratuitous ARP to the local OS TAP so Windows immediately updates its ARP cache
+	// Emit a Gratuitous ARP to the local OS TAP so Windows immediately updates its ARP cache.
+	// Only for IPs within the overlay address space — a peer advertising TapIP="192.168.1.1"
+	// (physical gateway) would poison the victim's LAN.
 	if val, ok := n.peerMeta.Load(p); ok && n.TAP != nil {
 		meta := val.(PeerMeta)
 		if meta.TapIP != "" {
 			ipStr := strings.Split(meta.TapIP, "/")[0]
-			if ip := net.ParseIP(ipStr).To4(); ip != nil {
+			if ip := net.ParseIP(ipStr).To4(); ip != nil && n.isOverlayIP(ip) {
 				garpFrame := tap.BuildARPReplyFrame(cp, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, ip, ip)
 				_, _ = n.tapWrite(garpFrame)
 			}

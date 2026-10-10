@@ -328,6 +328,31 @@ func (gm *GatewayManager) installBypassRouteUnlocked(endpointIP string) {
 	gm.bypassRoutes[endpointIP] = gw
 }
 
+// validateSubnetCIDR rejects CIDRs that would hijack OS routing or install
+// routes into reserved/local address space. A /0 (default route) or /1 on a
+// /32 would route all internet traffic through the VPN tunnel; loopback,
+// link-local, and multicast prefixes are never legitimate subnet advertisements.
+func validateSubnetCIDR(subnetCIDR string) error {
+	_, subnet, err := net.ParseCIDR(subnetCIDR)
+	if err != nil {
+		return fmt.Errorf("invalid CIDR: %w", err)
+	}
+	ones, bits := subnet.Mask.Size()
+	if bits == 32 && ones < 8 {
+		return fmt.Errorf("IPv4 prefix /%d is too short (minimum /8)", ones)
+	}
+	if bits == 128 && ones < 48 {
+		return fmt.Errorf("IPv6 prefix /%d is too short (minimum /48)", ones)
+	}
+	if subnet.IP.IsLoopback() {
+		return fmt.Errorf("loopback prefix %s is not a valid subnet advertisement", subnetCIDR)
+	}
+	if subnet.IP.IsLinkLocalUnicast() {
+		return fmt.Errorf("link-local prefix %s is not a valid subnet advertisement", subnetCIDR)
+	}
+	return nil
+}
+
 // isInsideSubnet reports whether an IP falls inside any installed Subnet Route.
 func (gm *GatewayManager) isInsideSubnet(ip net.IP) bool {
 	if ip == nil {
@@ -578,6 +603,15 @@ func (gm *GatewayManager) AddSubnetRoute(subnetCIDR string, gatewayIP string) (b
 	if gm.disabledSubnets != nil && gm.disabledSubnets[subnetCIDR] {
 		gwLog.Debug("Subnet Route %s is manually disabled; skipping OS route installation", subnetCIDR)
 		return false, nil
+	}
+
+	// Validate CIDR prefix length before installing — an unvalidated /0 or /1
+	// from an LSA-advertised subnet hijacks the OS default route (priority 10
+	// beats the physical default), routing all host internet traffic into the
+	// VPN tunnel. Also reject loopback, link-local, and reserved ranges.
+	if err := validateSubnetCIDR(subnetCIDR); err != nil {
+		gwLog.Warn("Rejected subnet route %s: %v", subnetCIDR, err)
+		return false, err
 	}
 
 	// Skip duplicate OS route configuration if already installed with identical gateway

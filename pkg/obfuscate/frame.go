@@ -816,6 +816,9 @@ func EncryptPayloadRegionInto(dst, frame []byte, cipher ObfCipher) ([]byte, erro
 	out := append(dst[:0], frame[:hLen]...)
 	out = cipher.SealTo(out, nonce[:], frame[hLen:hLen+pLen])
 	ctLen := len(out) - hLen
+	if ctLen > math.MaxUint16 {
+		return nil, ErrFrameCorrupted
+	}
 	binary.BigEndian.PutUint16(out[11:13], uint16(ctLen))
 	out = append(out, frame[hLen+pLen:]...)
 
