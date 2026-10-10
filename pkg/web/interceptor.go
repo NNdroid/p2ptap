@@ -106,11 +106,13 @@ const maxTrackedSessions = 4096
 // created it. A count is maintained alongside the map because sync.Map offers
 // no O(1) length.
 func (it *TAPInterceptor) trackSession(key string, sess *tcpSession) bool {
+	it.sessionsMu.Lock()
+	defer it.sessionsMu.Unlock()
 	if _, loaded := it.sessions.LoadOrStore(key, sess); loaded {
 		return true // already tracked under this key
 	}
 	if it.sessionCount.Add(1) > maxTrackedSessions {
-		it.dropSession(key)
+		it.dropSessionLocked(key)
 		return false
 	}
 	return true
@@ -120,6 +122,12 @@ func (it *TAPInterceptor) trackSession(key string, sess *tcpSession) bool {
 // go through here rather than touching sessions.Delete directly, or the count
 // drifts upward and the ceiling stops being enforced.
 func (it *TAPInterceptor) dropSession(key string) {
+	it.sessionsMu.Lock()
+	defer it.sessionsMu.Unlock()
+	it.dropSessionLocked(key)
+}
+
+func (it *TAPInterceptor) dropSessionLocked(key string) {
 	if _, ok := it.sessions.Load(key); !ok {
 		return
 	}
@@ -138,6 +146,7 @@ type TAPInterceptor struct {
 	configState   *webConfigState
 	configPath    string
 	sessions      sync.Map // key: string -> *tcpSession
+	sessionsMu    sync.Mutex // protects the LoadOrStore/Add/Delete sequence in trackSession/dropSession
 	sessionCount  atomic.Int64
 	htmlDashboard []byte
 	bufferPool    sync.Pool
@@ -839,10 +848,13 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 		if incoming.DriverType == "" {
 			incoming.DriverType = cur.DriverType
 		}
-		if incoming.NodeKeyFile == "" {
-			incoming.NodeKeyFile = cur.NodeKeyFile
-		}
-		if len(incoming.ListenAddrs) == 0 {
+			if incoming.NodeKeyFile == "" {
+				incoming.NodeKeyFile = cur.NodeKeyFile
+			}
+			if incoming.PSK == "" {
+				incoming.PSK = cur.PSK
+			}
+			if len(incoming.ListenAddrs) == 0 {
 			incoming.ListenAddrs = cur.ListenAddrs
 		}
 		if incoming.WebUI.Port == 0 {
@@ -879,10 +891,12 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 		logger.SetGlobalLevel(logger.ParseLevel(incoming.LogLevel))
 
 		if it.collector != nil {
+			it.collector.mu.Lock()
 			it.collector.NodeName = incoming.NodeName
 			it.collector.ExitNode.Enable = incoming.ExitNode.Enable
 			it.collector.ExitNode.NATMasquerade = incoming.ExitNode.NATMasquerade
 			it.collector.ExitNode.WANInterface = incoming.ExitNode.WANInterface
+			it.collector.mu.Unlock()
 			if it.collector.OnConfigReload != nil {
 				it.collector.OnConfigReload(&newCfg)
 			}

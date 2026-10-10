@@ -1314,6 +1314,9 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			if incoming.NodeKeyFile == "" {
 				incoming.NodeKeyFile = c.NodeKeyFile
 			}
+			if incoming.PSK == "" {
+				incoming.PSK = c.PSK
+			}
 			if len(incoming.ListenAddrs) == 0 {
 				incoming.ListenAddrs = c.ListenAddrs
 			}
@@ -1355,10 +1358,12 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			logger.SetGlobalLevel(logger.ParseLevel(incoming.LogLevel))
 
 			if collector != nil {
+				collector.mu.Lock()
 				collector.NodeName = incoming.NodeName
 				collector.ExitNode.Enable = incoming.ExitNode.Enable
 				collector.ExitNode.NATMasquerade = incoming.ExitNode.NATMasquerade
 				collector.ExitNode.WANInterface = incoming.ExitNode.WANInterface
+				collector.mu.Unlock()
 				// Deliver the full new config to the node so it publishes the
 				// atomic snapshot (data plane reads it race-free) and applies the
 				// runtime side-effects. This replaces the former granular

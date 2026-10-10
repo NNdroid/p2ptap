@@ -691,7 +691,10 @@ func (c *Config) Validate() error {
 	}
 
 	// --- Durations ---
-	if c.HolePunchTimeout <= 0 || c.HolePunchTimeout > 120*time.Second {
+	// JSON serializes time.Duration as nanoseconds; accept only values
+	// >= 100ms to reject accidental "15" (nanoseconds) from operators
+	// who meant "15 seconds".
+	if c.HolePunchTimeout < 100*time.Millisecond || c.HolePunchTimeout > 120*time.Second {
 		c.HolePunchTimeout = 15 * time.Second
 	}
 	if c.RelayUpgradeInterval <= 0 {

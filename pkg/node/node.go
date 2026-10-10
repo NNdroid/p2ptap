@@ -764,6 +764,10 @@ func (n *Node) recordPeerTxBytes(targetPeer peer.ID, nBytes int) {
 	if nBytes <= 0 {
 		return
 	}
+	if v, ok := n.peerTxBytes.Load(targetPeer); ok {
+		v.(*atomic.Uint64).Add(uint64(nBytes))
+		return
+	}
 	v, _ := n.peerTxBytes.LoadOrStore(targetPeer, new(atomic.Uint64))
 	v.(*atomic.Uint64).Add(uint64(nBytes))
 }
@@ -773,6 +777,10 @@ func (n *Node) recordPeerTxBytes(targetPeer peer.ID, nBytes int) {
 // TCP ACK is displayed at its real Ethernet size instead of the padded wire size.
 func (n *Node) recordPeerRxBytes(sourcePeer peer.ID, nBytes int) {
 	if nBytes <= 0 {
+		return
+	}
+	if v, ok := n.peerRxBytes.Load(sourcePeer); ok {
+		v.(*atomic.Uint64).Add(uint64(nBytes))
 		return
 	}
 	v, _ := n.peerRxBytes.LoadOrStore(sourcePeer, new(atomic.Uint64))
@@ -816,19 +824,14 @@ type dispatchTask struct {
 	owned bool
 }
 
-type bcastDedupEntry struct {
-	hash uint64
-	at   time.Time
-}
-
 // bcastDedupRing is a lightweight content-based deduplication ring for
 // broadcast/multicast frames that arrive from multiple peers. Without this,
 // the same L2 frame written to TAP N times (once per peer stream) wastes
-// kernel CPU and can confuse upper-layer protocols.
+// kernel CPU and can confuse upper-layer protocols. Uses a hash map with lazy
+// expiry eviction instead of a linear ring so lookups are O(1).
 type bcastDedupRing struct {
 	mu      sync.Mutex
-	entries [1024]bcastDedupEntry
-	next    int
+	entries map[uint64]time.Time
 }
 
 func (r *bcastDedupRing) isDuplicate(h uint64) bool {
@@ -838,13 +841,24 @@ func (r *bcastDedupRing) isDuplicate(h uint64) bool {
 	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for i := range r.entries {
-		if r.entries[i].hash == h && now.Sub(r.entries[i].at) < 2*time.Second {
-			return true
+	if r.entries == nil {
+		r.entries = make(map[uint64]time.Time, 256)
+	}
+	if at, ok := r.entries[h]; ok && now.Sub(at) < 2*time.Second {
+		return true
+	}
+	// Lazily evict expired entries when the map grows too large.
+	if len(r.entries) >= 1024 {
+		for k, t := range r.entries {
+			if now.Sub(t) >= 2*time.Second {
+				delete(r.entries, k)
+				if len(r.entries) < 512 {
+					break
+				}
+			}
 		}
 	}
-	r.entries[r.next] = bcastDedupEntry{hash: h, at: now}
-	r.next = (r.next + 1) % len(r.entries)
+	r.entries[h] = now
 	return false
 }
 
@@ -2796,6 +2810,11 @@ func (n *Node) removePeerObf(p peer.ID) {
 	n.handshakeMu.Delete(p)
 	n.peerLocalEpochs.Delete(p)
 	n.peerRxDecryptRecentErrs.Delete(p)
+	n.peerTxBytes.Delete(p)
+	n.peerRxBytes.Delete(p)
+	n.decryptResyncCooldown.Delete(p)
+	n.rekeyReqCooldown.Delete(p)
+	n.lastRekeySuccess.Delete(p)
 }
 
 // ObfFingerprint returns a short fingerprint of the most recent ephemeral ECDH

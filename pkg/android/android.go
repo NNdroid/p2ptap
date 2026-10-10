@@ -730,10 +730,11 @@ func ApplyHotReload(cfgJSON string) error {
 
 	// Update collector display state (mirrors web/server.go config save handler).
 	if collector != nil {
-		collector.NodeName = cfg.NodeName
-		collector.ExitNode.Enable = cfg.ExitNode.Enable
-		collector.ExitNode.NATMasquerade = cfg.ExitNode.NATMasquerade
-		collector.ExitNode.WANInterface = cfg.ExitNode.WANInterface
+		collector.UpdateDisplayState(cfg.NodeName, web.ExitNodeInfoDTO{
+			Enable:       cfg.ExitNode.Enable,
+			NATMasquerade: cfg.ExitNode.NATMasquerade,
+			WANInterface:  cfg.ExitNode.WANInterface,
+		})
 		if collector.OnConfigReload != nil {
 			collector.OnConfigReload(cfg)
 		}

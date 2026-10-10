@@ -369,6 +369,16 @@ func (s *StatsCollector) UpdateExitNode(exit ExitNodeInfoDTO) {
 	s.ExitNode = exit
 }
 
+// UpdateDisplayState sets NodeName and ExitNode under the mutex. Called
+// by the config-save handlers to update the display state without
+// touching other fields (PeerID, TapIP, etc.) that SetNodeInfo also writes.
+func (s *StatsCollector) UpdateDisplayState(nodeName string, exit ExitNodeInfoDTO) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.NodeName = nodeName
+	s.ExitNode = exit
+}
+
 // SetDispatchDrops records the number of frames dropped at dispatch.
 func (s *StatsCollector) SetDispatchDrops(drops uint64) {
 	atomic.StoreUint64(&s.DispatchDrops, drops)
