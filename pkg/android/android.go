@@ -860,6 +860,18 @@ func Version() string {
 	return "dev"
 }
 
+// GetDefaultConfigJSON returns the Go engine's default configuration as JSON.
+// The Android app calls this to populate P2PConfig defaults (STUN/TURN servers,
+// obfuscation, etc.) so they stay in sync with the Go source of truth.
+func GetDefaultConfigJSON() string {
+	cfg := config.DefaultConfig()
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
 // OnNetworkChanged informs the Go engine that Android network connectivity has changed
 // (e.g. Wi-Fi <-> Cellular handoff or reconnection). It triggers immediate interface
 // re-probing, listener reconciliation, and peer/relay fast reconnection.
@@ -1109,4 +1121,8 @@ func (a *P2PTap) GetActiveExitNode() string {
 
 func (a *P2PTap) Version() string {
 	return Version()
+}
+
+func (a *P2PTap) GetDefaultConfigJSON() string {
+	return GetDefaultConfigJSON()
 }
