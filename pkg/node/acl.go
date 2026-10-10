@@ -153,8 +153,13 @@ func MatchACL(aclCfg *config.ACLConfig, frame []byte, peerID string, isTx bool) 
 		// and skip port rules entirely.
 		protoStr, dstPort, portsAvailable = parseIPv6Transport(ipHeader[6], ipHeader[40:])
 	} else {
-		// Non-IP frame (e.g. ARP/NDP), allow by default
-		return true, ""
+		// Non-IP frame (e.g. ARP/NDP). Apply the default action rather than
+		// unconditionally allowing: with DefaultAction=drop, ARP/NDP/L2-control
+		// traffic must also be denied, matching the fail-closed behavior applied
+		// to truncated IP frames above.
+		defAct := strings.ToLower(aclCfg.DefaultAction)
+		defAllow := defAct == "accept" || defAct == "allow" || defAct == ""
+		return defAllow, ""
 	}
 
 	// Match against ACL Rules in sequential order
@@ -192,14 +197,20 @@ func MatchACL(aclCfg *config.ACLConfig, frame []byte, peerID string, isTx bool) 
 				if len(parts) != 2 {
 					continue // malformed range never matches by accident
 				}
-				minP, _ := strconv.Atoi(parts[0])
-				maxP, _ := strconv.Atoi(parts[1])
+				minP, err1 := strconv.Atoi(parts[0])
+				maxP, err2 := strconv.Atoi(parts[1])
+				if err1 != nil || err2 != nil || minP < 0 || maxP < 0 || minP > maxP {
+					continue // malformed range never matches by accident
+				}
 				if dstPort < minP || dstPort > maxP {
 					continue
 				}
 			} else {
-				pVal, _ := strconv.Atoi(rule.Port)
-				if pVal > 0 && dstPort != pVal {
+				pVal, err := strconv.Atoi(rule.Port)
+				if err != nil || pVal < 0 || pVal > 65535 {
+					continue // malformed port never matches by accident
+				}
+				if dstPort != pVal {
 					continue
 				}
 			}

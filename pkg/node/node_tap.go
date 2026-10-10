@@ -840,6 +840,13 @@ func (n *Node) processTapFrame(payload []byte) bool {
 			return true
 		}
 
+		// Outbound ACL: check the frame against configured rules before sending.
+		// This was missing entirely — only inbound (isTx=false) was enforced,
+		// making every operator-configured outbound deny rule dead code.
+		if !n.checkACL(payload, n.peerIDString(targetPeer), true) {
+			return true
+		}
+
 		seqID := n.Packer.NextSeqID(n.txEpochForPeer(targetPeer))
 		// Pack DIRECTLY into the pooled buffer (same pattern as the broadcast
 		// fan-out): the old Pack-into-shared-outBuf + copy round-trip cost a

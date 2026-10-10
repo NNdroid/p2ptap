@@ -69,6 +69,13 @@ func UnpackRelayFrame(buf []byte) (finalDst, source peer.ID, ttl uint8, payload 
 		return "", "", 0, nil, fmt.Errorf("unsupported relay header version: 0x%02x (expected 0x%02x)", ver, RelayHeaderVersion)
 	}
 
+	// Clamp attacker-controlled TTL to MaxRelayTTL. Without this, a malicious
+	// peer sets ttl=255 for up to 254 relay hops (amplification / long-lived
+	// forwarding loops). The intended limit is MaxRelayTTL=5.
+	if ttl > MaxRelayTTL {
+		ttl = MaxRelayTTL
+	}
+
 	dstLen := int(binary.BigEndian.Uint16(buf[2:4]))
 	if len(buf) < 4+dstLen+2 {
 		return "", "", 0, nil, fmt.Errorf("truncated relay header: len=%d need>=%d", len(buf), 4+dstLen+2)

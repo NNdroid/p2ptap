@@ -887,14 +887,16 @@ func (sd *StrategyDispatcher) writePackedBatchLocked(targetPeer peer.ID, ps *Pee
 	if sd.node != nil {
 		fragMaxPayload = sd.node.maxFragPayloadForPS(ps)
 	}
-	var owned [32][][]byte
+	// packedFrames is bounded by the caller's chunk size (batchFrames=32), but
+	// a fixed [32] array would panic on a future caller passing more. Use a
+	// slice so the loop can never index out of range.
+	owned := make([][][]byte, len(packedFrames))
 	defer func() {
 		for _, frags := range owned {
 			releaseFragmentBuffers(frags)
 		}
 	}()
-	var scratch [32][]byte
-	wireFrames := scratch[:0]
+	wireFrames := make([][]byte, 0, len(packedFrames)*4)
 	logicalBytes := 0
 	for i, data := range packedFrames {
 		frags, origLen, pooled, err := sd.encryptAndFragment(targetPeer, cipher, data, fragMaxPayload)

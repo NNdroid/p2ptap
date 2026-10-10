@@ -242,7 +242,11 @@ func (n *Node) openRelayCtrlNextHop(hdr RelayCtrlHeader, fromPeer peer.ID) (netw
 			return nil, err
 		}
 		final := RelayCtrlHeader{Origin: hdr.Origin, Target: hdr.Target, Proto: hdr.Proto, Hops: nextHops, Stamp: hdr.Stamp}
-		fb, _ := json.Marshal(final)
+		fb, err := json.Marshal(final)
+		if err != nil {
+			sub.Close()
+			return nil, fmt.Errorf("marshal relay-ctrl header for hop: %w", err)
+		}
 		if werr := WriteFrame(sub, fb); werr != nil {
 			sub.Close()
 			return nil, werr
@@ -269,7 +273,11 @@ func (n *Node) openRelayCtrlNextHop(hdr RelayCtrlHeader, fromPeer peer.ID) (netw
 		return nil, err
 	}
 	final := RelayCtrlHeader{Origin: hdr.Origin, Target: hdr.Target, Proto: hdr.Proto, Hops: nextHops, Stamp: hdr.Stamp}
-	fb, _ := json.Marshal(final)
+	fb, err := json.Marshal(final)
+	if err != nil {
+		sub.Close()
+		return nil, fmt.Errorf("marshal relay-ctrl header: %w", err)
+	}
 	if werr := WriteFrame(sub, fb); werr != nil {
 		sub.Close()
 		return nil, werr
