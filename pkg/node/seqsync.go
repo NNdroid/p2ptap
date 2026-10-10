@@ -206,11 +206,15 @@ func (n *Node) txEpochForPeer(p peer.ID) uint64 {
 // because the key exchange already happened in the preceding sync/ack pair.
 // m.ObfPub is empty when encryption is disabled (or key generation failed).
 func (n *Node) buildSeqSyncMsg(msgType string, p peer.ID, myPub []byte) SeqSyncMsg {
+	// Read epoch once into a local so MySeq and ConnEpoch always agree.
+	// Calling ensureLocalEpoch twice risks a concurrent removePeerObf
+	// between the two calls, which would embed two different epochs.
+	epoch := n.ensureLocalEpoch(p)
 	m := SeqSyncMsg{
 		Type:      msgType,
 		NodeID:    n.Host.ID().String(),
-		MySeq:     n.Packer.NextSeqID(n.ensureLocalEpoch(p)),
-		ConnEpoch: n.ensureLocalEpoch(p),
+		MySeq:     n.Packer.NextSeqID(epoch),
+		ConnEpoch: epoch,
 		Timestamp: time.Now().UnixMilli(),
 	}
 	// Advertise encryption support only when we actually have a key pair AND a
@@ -423,11 +427,12 @@ func (n *Node) anchorDedupForPeer(p peer.ID, remoteSeq uint64, connEpoch uint64)
 // adopt the new anti-replay epoch — but it carries NO ephemeral ECDH public
 // key, so receiving it never triggers a cipher re-negotiation.
 func (n *Node) buildEpochSyncMsg(p peer.ID) SeqSyncMsg {
+	epoch := n.ensureLocalEpoch(p)
 	return SeqSyncMsg{
 		Type:      "epochSync",
 		NodeID:    n.Host.ID().String(),
-		MySeq:     n.Packer.NextSeqID(n.ensureLocalEpoch(p)),
-		ConnEpoch: n.ensureLocalEpoch(p),
+		MySeq:     n.Packer.NextSeqID(epoch),
+		ConnEpoch: epoch,
 		Timestamp: time.Now().UnixMilli(),
 	}
 }

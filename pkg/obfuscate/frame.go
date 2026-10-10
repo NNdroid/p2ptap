@@ -498,6 +498,13 @@ func (fp *FramePacker) Pack(seqID uint64, payload []byte, outBuf []byte) (int, e
 // p carries the immutable parameter snapshot taken by Pack. Reading the exported
 // fields directly here would race with UpdateConfig and could mix generations.
 func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte, mode string, p *packerParams) (int, error) {
+	// Guard against uint16 underflow in paddingLen calculation below: if the
+	// payload is larger than MaxFrameSize-HeaderLen, overhead exceeds
+	// MaxFrameSize, targetSize gets clamped to MaxFrameSize (which is now
+	// less than overhead), and uint16(targetSize-overhead) underflows.
+	if len(payload) > MaxFrameSize-HeaderLen {
+		return 0, ErrBufferTooSmall
+	}
 	overhead := HeaderLen + len(payload)
 	var targetSize int
 	switch mode {

@@ -359,20 +359,20 @@ func (n *Node) dispatchWorker(id int) {
 									}
 									return
 								}
-								select {
-								case n.relayFallbackSem <- struct{}{}:
-									go func() {
-										<-n.relayFallbackSem
-										ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
-										defer cancel()
-										if derr := n.Dispatcher.SendToPeer(ctx, t.target, t.data); derr == nil {
-											n.Collector.RecordSent(t.origLen)
-										}
-										if owned {
-											releaseFrameBuf(t.data)
-										}
-									}()
-								default:
+				select {
+					case n.relayFallbackSem <- struct{}{}:
+						go func() {
+							defer func() { <-n.relayFallbackSem }()
+							ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
+							defer cancel()
+							if derr := n.Dispatcher.SendToPeer(ctx, t.target, t.data); derr == nil {
+								n.Collector.RecordSent(t.origLen)
+							}
+							if owned {
+								releaseFrameBuf(t.data)
+							}
+						}()
+					default:
 									if owned {
 										releaseFrameBuf(t.data)
 									}
@@ -502,19 +502,19 @@ func (n *Node) sendDispatchTask(task dispatchTask) {
 				return
 			}
 				select {
-				case n.relayFallbackSem <- struct{}{}:
-					go func() {
-						<-n.relayFallbackSem
-						ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
-						defer cancel()
-						if derr := n.Dispatcher.SendToPeer(ctx, task.target, task.data); derr == nil {
-							n.Collector.RecordSent(task.origLen)
-						}
-						if owned {
-							releaseFrameBuf(task.data)
-						}
-					}()
-				default:
+					case n.relayFallbackSem <- struct{}{}:
+						go func() {
+							defer func() { <-n.relayFallbackSem }()
+							ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
+							defer cancel()
+							if derr := n.Dispatcher.SendToPeer(ctx, task.target, task.data); derr == nil {
+								n.Collector.RecordSent(task.origLen)
+							}
+							if owned {
+								releaseFrameBuf(task.data)
+							}
+						}()
+					default:
 					if owned {
 						releaseFrameBuf(task.data)
 					}

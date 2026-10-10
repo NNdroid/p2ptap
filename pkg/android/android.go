@@ -333,6 +333,14 @@ func SetLogCallback(cb LogCallback) {
 		return
 	}
 	logger.SetLogCallback(func(priority int, module, message string) {
+		// Recover from any Java exception so a bad callback cannot kill the
+		// logger goroutine (which includes the TAP read loop and stream
+		// goroutines).
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "[android] panic in log callback: %v\n", r)
+			}
+		}()
 		cb.OnLog(int32(priority), module, message)
 	})
 }
@@ -661,8 +669,15 @@ func Stop() error {
 	activeCollector = nil
 	mu.Unlock()
 
-	err := n.Close()
-	stopping.Store(false)
+	defer stopping.Store(false)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Warn("panic during node.Close(): %v", r)
+			}
+		}()
+		err = n.Close()
+	}()
 	_ = collector // keep linter quiet
 	emitStateChange("IDLE", "Node stopped")
 	return err

@@ -71,24 +71,30 @@ func (n *Node) connectWithRetry(pi peer.AddrInfo, peerType string, baseDelay tim
 		err := n.dialInParallel(n.ctx, pi, peerType)
 
 		if err != nil {
-			// Exponential backoff with jitter: base * 2^(attempt-1) + random[0, base/4]
-			// This prevents thundering-herd when many peers fail simultaneously
-			// and caps total retry window for bootstrap/static (3 attempts).
-			delay := baseDelay * time.Duration(1<<uint(attempt-1))
-			if delay > 60*time.Second {
-				delay = 60 * time.Second
-			}
-			// Add jitter (0-25% of delay) to de-synchronize concurrent retries.
-			// Guard against baseDelay=0 which would make delay=0 and rand.Int63n(0) panic.
-			if delay > 0 {
-				jitter := time.Duration(rand.Int63n(int64(delay/4)))
-				delay += jitter
-			}
-			log.Debug("%s peer %s connect failed (attempt %d): %v, retrying in %v", peerType, pi.ID.String(), attempt, err, delay)
-			select {
-			case <-n.ctx.Done():
-				return
-			case <-time.After(delay):
+			// Skip the backoff sleep on the final attempt — there is no
+			// retry after this, so sleeping only delays the failure log and
+			// extends the goroutine's lifetime (which matters because
+			// connectWithRetry goroutines are not tracked by n.wg).
+			if attempt < maxRetries {
+				// Exponential backoff with jitter: base * 2^(attempt-1) + random[0, base/4]
+				// This prevents thundering-herd when many peers fail simultaneously
+				// and caps total retry window for bootstrap/static (3 attempts).
+				delay := baseDelay * time.Duration(1<<uint(attempt-1))
+				if delay > 60*time.Second {
+					delay = 60 * time.Second
+				}
+				// Add jitter (0-25% of delay) to de-synchronize concurrent retries.
+				// Guard against baseDelay=0 which would make delay=0 and rand.Int63n(0) panic.
+				if delay > 0 {
+					jitter := time.Duration(rand.Int63n(int64(delay/4)))
+					delay += jitter
+				}
+				log.Debug("%s peer %s connect failed (attempt %d): %v, retrying in %v", peerType, pi.ID.String(), attempt, err, delay)
+				select {
+				case <-n.ctx.Done():
+					return
+				case <-time.After(delay):
+				}
 			}
 		} else {
 			return

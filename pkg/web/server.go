@@ -183,9 +183,15 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 }
 
 // writeError writes a JSON error envelope with the given HTTP status.
+// Headers must be set BEFORE WriteHeader; once WriteHeader is called the
+// header block is committed and any subsequent Set calls are no-ops,
+// which would strip Content-Type from every error response.
 func writeError(w http.ResponseWriter, status int, errMsg string) {
+	setJSONHeaders(w)
 	w.WriteHeader(status)
-	writeJSON(w, map[string]interface{}{"status": "error", "error": errMsg})
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{"status": "error", "error": errMsg}); err != nil {
+		webLog.Warn("failed to encode error JSON: %v", err)
+	}
 }
 
 // writePeerNotResolvable responds with HTTP 400 (the input was syntactically
@@ -1443,7 +1449,9 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 		ReadTimeout: 5 * time.Second,
 		// Raised from 10s so the token-gated /debug/pprof/profile (default 30s)
 		// and /debug/pprof/trace collections are not aborted by the server.
-		WriteTimeout: 120 * time.Second,
+		WriteTimeout:   120 * time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 1 << 18, // 256 KB; Go default is 1 MB which is large enough for header-flood DoS
 	}
 	s.listeners = listeners
 	s.recordBoundAddrs(listeners)

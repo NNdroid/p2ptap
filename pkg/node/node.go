@@ -866,7 +866,7 @@ func isBroadcastOrMulticastMAC(mac net.HardwareAddr) bool {
 
 type mdnsNotifee struct {
 	h    host.Host
-	node *Node
+	node atomic.Pointer[Node]
 }
 
 func (m *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
@@ -880,9 +880,9 @@ func (m *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	}
 	log.Info("mDNS discovered local LAN peer %s, connecting...", pi.ID.String())
 	go func(info peer.AddrInfo) {
-		if m.node != nil {
+		if n := m.node.Load(); n != nil {
 			// Use dialInParallel to get relay fallback, backoff, and coalescing.
-			if err := m.node.dialInParallel(m.node.ctx, info, "mdns"); err != nil {
+			if err := n.dialInParallel(n.ctx, info, "mdns"); err != nil {
 				log.Debug("mDNS connect to peer %s failed: %v", info.ID.String(), err)
 			} else {
 				log.Info("mDNS connected to peer %s successfully", info.ID.String())
@@ -1686,9 +1686,10 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			return ips
 		},
 		OnExitNodeChanged: func() {
-			node.NFTManager.UpdateConfig(&node.Config.ExitNode)
-			if node.Config.ExitNode.Enable {
-				_ = node.NFTManager.SetupExitNodeNAT(node.Config.ExitNode.WANInterface, node.Config.TapName, computeExitMSS(node.Config.MTU, node.Config.Obfuscation.Mode))
+			cfg := node.config()
+			node.NFTManager.UpdateConfig(&cfg.ExitNode)
+			if cfg.ExitNode.Enable {
+				_ = node.NFTManager.SetupExitNodeNAT(cfg.ExitNode.WANInterface, cfg.TapName, computeExitMSS(cfg.MTU, cfg.Obfuscation.Mode))
 			} else {
 				_ = node.NFTManager.CleanupExitNodeNAT()
 			}
@@ -1697,8 +1698,9 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			go node.publishPeekMapSelf()
 		},
 		OnObfuscationChanged: func() {
+			cfg := node.config()
 			if node.Packer != nil {
-				node.Packer.UpdateConfig(&node.Config.Obfuscation)
+				node.Packer.UpdateConfig(&cfg.Obfuscation)
 				node.Packer.SetSendAlgo(node.sendAlgo())
 				log.Info("Obfuscation config hot-reloaded: mode=%s algo=%s", node.Packer.Mode, obfuscate.AlgoName(node.sendAlgo()))
 			}
@@ -1706,10 +1708,11 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			go node.publishPeekMapSelf()
 		},
 		OnSubnetsChanged: func() {
+			cfg := node.config()
 			// Advertised subnets changed -> re-broadcast our LAN subnet
 			// advertisements over the peek-map channel so every peer updates its
 			// routed subnets / ARP proxy entries for us.
-			log.Debug("Advertised subnets changed (%v) — re-announcing over peek-map", node.Config.AdvertisedSubnets)
+			log.Debug("Advertised subnets changed (%v) — re-announcing over peek-map", cfg.AdvertisedSubnets)
 			go node.publishPeekMapSelf()
 		},
 		OnConfigReload: func(cfg *config.Config) {
@@ -2185,8 +2188,12 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				log.Info("Peer disconnected: %s via %s (transport lost, cleaning link-state & streams)", debounceID.String(), addrStr)
 				node.Router.RemoveDirectLink(debounceID)
 				node.MACTable.CleanPeer(debounceID)
-				node.Dispatcher.RemovePeer(debounceID)
-				node.removePeerObf(debounceID)
+			node.Dispatcher.RemovePeer(debounceID)
+			node.removePeerObf(debounceID)
+			// Evict stale reconnect throttle entry to prevent unbounded map growth.
+			node.reconnectTimeMu.Lock()
+			delete(node.lastReconnectTime, debounceID)
+			node.reconnectTimeMu.Unlock()
 				// Drop cached persistent control streams so the next use re-opens cleanly.
 				node.lsaPool.Invalidate(debounceID)
 				node.metaPool.Invalidate(debounceID)
@@ -2235,7 +2242,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// call dialInParallel (relay fallback, backoff, coalescing) instead of raw
 	// Host.Connect.
 	if mdnsN != nil {
-		mdnsN.node = node
+		mdnsN.node.Store(node)
 	}
 
 	return node, nil

@@ -374,7 +374,7 @@ func (it *TAPInterceptor) handleICMPv6NDP(frame []byte, writer PacketWriter) boo
 	reply[54] = 136
 	reply[55] = 0
 	binary.BigEndian.PutUint16(reply[56:58], 0) // Checksum placeholder
-	reply[58] = 0x60                            // Flags: Override (0x20) + Solicited (0x40) = 0x60
+	reply[58] = 0xC0                            // Flags: Override (0x80) + Solicited (0x40) = 0xC0 (RFC 4861 §6.2.7)
 	reply[59] = 0
 	reply[60] = 0
 	reply[61] = 0
@@ -395,8 +395,13 @@ func (it *TAPInterceptor) handleICMPv6NDP(frame []byte, writer PacketWriter) boo
 }
 
 func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, writer PacketWriter) bool {
-	srcMAC := net.HardwareAddr(frame[6:12])
-	srcIP := net.IP(frame[26:30])
+	// Copy from the TAP read buffer — it is reused on the next frame, so
+	// sub-slices would be silently corrupted by the time the worker goroutine
+	// sends the response (seconds later).
+	srcMAC := make(net.HardwareAddr, 6)
+	copy(srcMAC, frame[6:12])
+	srcIP := make(net.IP, 4)
+	copy(srcIP, frame[26:30])
 	srcPort := binary.BigEndian.Uint16(frame[tcpHeaderOffset : tcpHeaderOffset+2])
 
 	seqN := binary.BigEndian.Uint32(frame[tcpHeaderOffset+4 : tcpHeaderOffset+8])

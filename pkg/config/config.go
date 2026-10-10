@@ -520,7 +520,7 @@ func (c *Config) Validate() error {
 	default:
 		return errors.New("obfuscation.algorithm must be one of: auto, none, aes-gcm, chacha20")
 	}
-	if c.MTU <= 0 {
+	if c.MTU <= 0 || c.MTU > 9000 {
 		c.MTU = 1500
 	}
 	if c.DriverType == "" {
@@ -562,6 +562,12 @@ func (c *Config) Validate() error {
 				}
 			}
 		}
+	}
+	if c.HolePunchTimeout <= 0 || c.HolePunchTimeout > 120*time.Second {
+		c.HolePunchTimeout = 15 * time.Second
+	}
+	if c.RelayUpgradeInterval <= 0 {
+		c.RelayUpgradeInterval = 30 * time.Second
 	}
 	return nil
 }
@@ -641,7 +647,13 @@ func UpdateConfigFileDelta(configPath string, incoming *Config) error {
 	var rawMap map[string]interface{}
 	data, err := os.ReadFile(configPath)
 	if err == nil && len(data) > 0 {
-		_ = json.Unmarshal(data, &rawMap)
+		if err := json.Unmarshal(data, &rawMap); err != nil {
+			// Corrupt config: do NOT silently drop the whole file. If we
+			// replaced rawMap with an empty map, the unlisted fields below
+			// (stun_servers, turn_servers, hole_punch_timeout, etc.) would
+			// be lost — they are only preserved from the parsed rawMap.
+			return fmt.Errorf("config %s: JSON parse failed: %w", configPath, err)
+		}
 	}
 	if rawMap == nil {
 		rawMap = make(map[string]interface{})
@@ -777,7 +789,7 @@ func PersistWebUIToken(configPath, token string) error {
 		return nil
 	}
 	sidecar := filepath.Join(filepath.Dir(configPath), WebUITokenFile)
-	return os.WriteFile(sidecar, []byte(token), 0600)
+	return atomicWriteFile(sidecar, []byte(token), 0600)
 }
 
 // LoadWebUIToken reads the WebUI auth token a local control client should use.

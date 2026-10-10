@@ -431,7 +431,10 @@ func (rc *relayConn) writeLoop() {
 
 		// Pump frames.
 		if !rc.pumpFrames(&backoff) {
-			// PumpFrames returns false on shutdown.
+			// PumpFrames returns false on shutdown. Drain remaining jobs so
+			// their onFail callbacks fire (delivering the direct-unicast
+			// fallback) and pooled buffers are released.
+			rc.drainAll()
 			return
 		}
 		// Stream broke; backoff will grow, reconnect loop continues.

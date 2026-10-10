@@ -357,6 +357,11 @@ func (w *WintunTAPDevice) Read(b []byte) (int, error) {
 			// heap), so the GC never moves it and the uintptr->Pointer conversion
 			// is correct by construction. go vet's unsafeptr check is a known
 			// false positive for this driver-FFI pattern.
+			if packetSize == 0 {
+				// Malformed or torn ring buffer: release and skip.
+				procWintunReleaseReceivePacket.Call(uintptr(sess), retPtr)
+				continue
+			}
 			packetData := unsafe.Slice((*byte)(unsafe.Pointer(retPtr)), packetSize)
 
 			// Prepend 14-byte Ethernet Header (Destination MAC, Source MAC, EtherType)

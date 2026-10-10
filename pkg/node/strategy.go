@@ -253,6 +253,11 @@ func (sd *StrategyDispatcher) UnregisterStream(pID peer.ID, transportName string
 func (sd *StrategyDispatcher) RemovePeer(pID peer.ID) {
 	sd.peersMu.Lock()
 	defer sd.peersMu.Unlock()
+	if ps, exists := sd.peerMap[pID]; exists {
+		for _, s := range ps.GetAllStreams() {
+			_ = s.Close()
+		}
+	}
 	delete(sd.peerMap, pID)
 	log.Debug("Removed peer %s from strategy dispatcher map", pID.String())
 }
