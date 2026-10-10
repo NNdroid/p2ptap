@@ -684,6 +684,9 @@ func (n *Node) handleLSAStream(s network.Stream) {
 	// them one at a time rather than assuming one write-then-close message.
 	buf := make([]byte, obfuscate.MaxSealedFrameSize)
 	for {
+		// LSA frames are sent every 15s by each peer. A 60s deadline (4× the
+		// interval) detects a dead peer and releases the goroutine/stream.
+		_ = s.SetReadDeadline(time.Now().Add(60 * time.Second))
 		rn, err := ReadFrame(s, buf)
 		if err != nil {
 			if err != io.EOF {
@@ -708,6 +711,21 @@ func (n *Node) handleLSAStream(s network.Stream) {
 		// are identifiable even when the dedicated meta stream cannot be negotiated
 		// (e.g. circuit-relay sub-stream dial timeouts). lsa.Origin is the identity
 		// owner even when this LSA arrived via forwarding.
+		//
+		// First-hop verification: an LSA with TTL == DefaultLSATTL was minted by
+		// the sender, so lsa.Origin MUST equal the transport peer. Without this
+		// check, an attacker injects topology edges under any claimed origin
+		// (including making itself appear as another peer's direct neighbour,
+		// enabling route hijack). Forwarded LSAs (TTL < DefaultLSATTL) trust
+		// the origin — it was verified at the first hop by the forwarder.
+		if lsa.TTL == routing.DefaultLSATTL {
+			remotePeer := s.Conn().RemotePeer()
+			if lsa.Origin != "" && lsa.Origin != remotePeer.String() {
+				log.Debug("LSA origin mismatch from %s: claims origin %s, dropping",
+					remotePeer.ShortString(), lsa.Origin)
+				continue
+			}
+		}
 		if origin, err := peer.Decode(lsa.Origin); err == nil {
 			n.applyPeerMetaFromLSA(origin, lsa)
 		}
@@ -1124,6 +1142,10 @@ func (n *Node) handleEcho(s network.Stream) {
 	defer s.Close()
 	buf := make([]byte, obfuscate.MaxFrameSize)
 	for {
+		// Echo is a request/response protocol: the peer sends a probe, we
+		// reply immediately. A 30s deadline detects a dead peer (echo probes
+		// are sent every few seconds, so 30s is very generous).
+		_ = s.SetReadDeadline(time.Now().Add(30 * time.Second))
 		rn, err := ReadFrame(s, buf)
 		if err != nil {
 			if err != io.EOF {
@@ -1138,6 +1160,8 @@ func (n *Node) handleEcho(s network.Stream) {
 			n.protoTracker.Echo.RecordRx(1, uint64(rn))
 		}
 		// Echo the exact payload bytes back as a length-prefixed frame.
+		// Set a write deadline so a peer that stops reading doesn't stall us.
+		_ = s.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if err := WriteFrame(s, buf[:rn]); err != nil {
 			return
 		}
@@ -1282,6 +1306,7 @@ func (n *Node) sendTapProbeAckAfterTAP(prober peer.ID, tok uint64, flag uint8) {
 func (n *Node) handleTapProbeAck(s network.Stream) {
 	defer s.Close()
 	buf := make([]byte, 64)
+	_ = s.SetReadDeadline(time.Now().Add(30 * time.Second))
 	rn, err := ReadFrame(s, buf)
 	if err != nil || rn < 10 {
 		return

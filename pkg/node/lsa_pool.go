@@ -149,7 +149,10 @@ func (p *lsaStreamPool) openLocked(target peer.ID) network.Stream {
 	// 10s direct dial" property is preserved: openControlStream only attempts a
 	// direct NewStream when the peer IS directly connected, and otherwise goes
 	// straight to the relay hop / circuit.
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Use n.ctx so the stream open is cancelled when the node shuts down.
+	// context.Background() kept streams open long after Node.Close() returned,
+	// leaking goroutines and racing with Invalidate on the dead stream.
+	ctx, cancel := context.WithTimeout(p.node.ctx, 15*time.Second)
 	defer cancel()
 	s, err := p.node.openControlStream(ctx, target, p.protocol)
 	if err != nil {

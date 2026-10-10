@@ -81,7 +81,11 @@ func MatchACL(aclCfg *config.ACLConfig, frame []byte, peerID string, isTx bool) 
 	}
 
 	if len(frame) < 14 {
-		return true, "" // Non-IP/short control frame -> allow
+		// Non-IP/short control frame. Apply the default action rather than
+		// unconditionally allowing: with DefaultAction=drop, a malformed
+		// frame is a silent bypass of the deny-by-default policy.
+		defAct := strings.ToLower(aclCfg.DefaultAction)
+		return defAct == "accept" || defAct == "allow" || defAct == "", ""
 	}
 
 	etherType := binary.BigEndian.Uint16(frame[12:14])
@@ -94,13 +98,17 @@ func MatchACL(aclCfg *config.ACLConfig, frame []byte, peerID string, isTx bool) 
 	var portsAvailable bool
 
 	if etherType == packet.EtherTypeIPv4 { // IPv4
+		// Truncated IPv4 or bogus IHL: apply the default action rather than
+		// unconditionally allowing (a deny-by-default policy would be bypassed).
+		defAct := strings.ToLower(aclCfg.DefaultAction)
+		defAllow := defAct == "accept" || defAct == "allow" || defAct == ""
 		if len(frame) < 34 {
-			return true, ""
+			return defAllow, ""
 		}
 		ipHeader := frame[14:]
 		ihl := int(ipHeader[0]&0x0f) * 4
 		if len(ipHeader) < ihl {
-			return true, ""
+			return defAllow, ""
 		}
 		protocol := ipHeader[9]
 		dstIP = net.IP(ipHeader[16:20])
@@ -132,8 +140,11 @@ func MatchACL(aclCfg *config.ACLConfig, frame []byte, peerID string, isTx bool) 
 			protoStr = "any"
 		}
 	} else if etherType == packet.EtherTypeIPv6 { // IPv6
+		// Truncated IPv6: apply the default action (same as IPv4 above).
+		defAct := strings.ToLower(aclCfg.DefaultAction)
+		defAllow := defAct == "accept" || defAct == "allow" || defAct == ""
 		if len(frame) < 54 {
-			return true, ""
+			return defAllow, ""
 		}
 		ipHeader := frame[14:]
 		dstIP = net.IP(ipHeader[24:40])

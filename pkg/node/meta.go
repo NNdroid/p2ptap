@@ -35,7 +35,6 @@ func (n *Node) registerMetaStreamHandler() {
 // relay-ctrl tunnel's inner dispatch (logicalPeerStream makes s.Conn().RemotePeer()
 // report the true origin so identity is stored under the real counterpart).
 func (n *Node) handleMetaStream(s network.Stream) {
-	startTime := time.Now()
 	defer s.Close()
 	remotePeer := s.Conn().RemotePeer()
 
@@ -44,6 +43,9 @@ func (n *Node) handleMetaStream(s network.Stream) {
 	// response frame instead of closing after one exchange.
 	buf := make([]byte, 64*1024)
 	for {
+		// Meta exchanges happen periodically. A 120s deadline (generous for
+		// slow peers) detects a dead peer and releases the goroutine/stream.
+		_ = s.SetReadDeadline(time.Now().Add(120 * time.Second))
 		rn, err := ReadFrame(s, buf)
 		if err != nil {
 			if err != io.EOF {
@@ -134,7 +136,7 @@ func (n *Node) handleMetaStream(s network.Stream) {
 			OS:                runtime.GOOS,
 			Arch:              runtime.GOARCH,
 			Version:           version.Version,
-			UptimeSec:         int64(time.Since(startTime).Seconds()),
+			UptimeSec:         int64(time.Since(n.startTime).Seconds()),
 			Reachability:      "P2P Node",
 			IsExitNode:        src.ExitNode.Enable,
 			ExitNAT:           src.ExitNode.NATMasquerade,
