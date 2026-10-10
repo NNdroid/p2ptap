@@ -57,6 +57,12 @@ func TestBootRelayOverBackboneIntegration(t *testing.T) {
 	bootA := startRelayBoot(t, "bootA", entries)
 	bootB := startRelayBoot(t, "bootB", entries)
 
+	// Mark each boot as a mesh peer of the other so the backbone handler's
+	// mesh gate lets their uplinks through. Must happen before the uplink
+	// loops start (mirrors production: markMesh at startup, uplinks after).
+	bootA.hub.markMesh(bootB.h.ID())
+	bootB.hub.markMesh(bootA.h.ID())
+
 	// Bring the relay-over-backbone backbone up in BOTH directions (full mesh).
 	// Exercise the PRODUCTION uplink loop (it retries with backoff and the
 	// pre-dial jitter in runBootRelayMeshUplink breaks the simultaneous-dial
@@ -163,19 +169,20 @@ func startRelayBoot(t *testing.T, name string, entries []pskEntry) *relayBoot {
 
 	acl := newPSKACLFilter(true) // PSK mode: every client must authenticate
 	rr := newRelayRouter(acl, true)
-	hub := newPeekMapHub() // only used by handleAuthStream's publishBootInfo
+	hub := newPeekMapHub()
 
 	h.SetStreamHandler(authProtocolID, func(s network.Stream) {
 		handleAuthStream(s, entries, acl, h, hub, name)
 	})
 	h.SetStreamHandler(BootRelayProtocolID, makeBootRelayHandler(rr))
-	h.SetStreamHandler(BootRelayBackboneProtocolID, makeBootRelayBackboneHandler(rr))
-	return &relayBoot{h: h, rr: rr}
+	h.SetStreamHandler(BootRelayBackboneProtocolID, makeBootRelayBackboneHandler(rr, hub))
+	return &relayBoot{h: h, rr: rr, hub: hub}
 }
 
 type relayBoot struct {
-	h  host.Host
-	rr *relayRouter
+	h   host.Host
+	rr  *relayRouter
+	hub *peekMapHub
 }
 
 // connectRelayClient spins up a libp2p host, authenticates against boot with the

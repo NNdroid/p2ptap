@@ -145,11 +145,21 @@ func (n *Node) fragmentFrame(packed []byte, frag *fragReassembler, txEpoch uint6
 
 		n2, perr := n.Packer.Pack(n.Packer.NextSeqID(txEpoch), fragPayload, outBuf)
 		if perr != nil {
-			// Historical fallback: send a bare fragment envelope. Move it back to
-			// offset zero so the returned slice retains the pool buffer's full cap.
-			copy(outBuf[:payloadLen], fragPayload)
-			out = append(out, outBuf[:payloadLen])
-			continue
+			// Pack failure means this fragment cannot be obfuscated. Emitting a
+			// bare (unobfuscated) fragment envelope — the old "historical
+			// fallback" — was a security bug: the fragment headers and TAP
+			// payload travel in cleartext on the wire, and the receiver's
+			// outer unpack rejects the bare envelope as garbage, polluting
+			// its decrypt-failure window and potentially triggering spurious
+			// key resyncs. Drop the whole group instead: silently losing a
+			// frame is safer than leaking plaintext or poisoning rekey state.
+			// Pack failure is effectively a can't-happen programming error
+			// (MaxPackedLen under-sized), so surface it loudly.
+			log.Error("Fragment Pack failed for part %d/%d of %d-byte frame from txEpoch=%d: %v — dropping entire group",
+				i+1, total, len(packed), txEpoch, perr)
+			releaseFrameBuf(outBuf)
+			releaseFragmentBuffers(out)
+			return nil, false
 		}
 		out = append(out, outBuf[:n2])
 	}

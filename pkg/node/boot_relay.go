@@ -335,6 +335,13 @@ func (n *Node) handleBootRelayDownlink(s network.Stream, boot peer.ID) {
 	defer s.Close()
 	buf := make([]byte, obfuscate.MaxSealedFrameSize)
 	for {
+		// The write loop sends a loopback heartbeat every 15s, so the boot
+		// echoes at least one frame down this stream per interval. A 60s
+		// read deadline (4× the heartbeat) detects a half-open connection
+		// (the boot or transport silently died but TCP didn't notice) and
+		// tears down the uplink for reconnect. Without it, a silently dead
+		// connection pins this goroutine and the stream forever.
+		_ = s.SetReadDeadline(time.Now().Add(60 * time.Second))
 		readN, err := ReadFrame(s, buf)
 		if err != nil || readN == 0 {
 			return

@@ -51,6 +51,19 @@ import (
 var log = logger.New("Boot")
 var bootAlerts = bootweb.NewAlertBuffer(300)
 
+// maxBootRelayEnvelope is the largest possible boot-relay frame on the wire:
+//
+//	obfuscate.MaxSealedFrameSize (65551) + relay header (~98B for two 46-char
+//	peer.IDs) + boot-relay prefix (21B) = 65670 bytes.
+//
+// readFrame rejects any frame larger than its destination buffer ("frame too
+// large") and drops it silently, so every relay read path MUST allocate at
+// least this much or max-size envelopes are lost. 64 KiB (65536) is 134 bytes
+// too small for the envelope alone, which silently dropped the largest valid
+// frames. The constant is rounded up to 66000 for headroom; the extra 330
+// bytes are negligible at one allocation per stream.
+const maxBootRelayEnvelope = 66000
+
 // Global subsystems initialized in main() and used by bootDataProviderImpl.
 var (
 	gSessions         *sessionTracker
@@ -131,6 +144,45 @@ type PeekMapMessage struct {
 	From    string          `json:"from"`              // sender peer.ID (set by boot hub)
 	NetID   string          `json:"net_id,omitempty"`  // network isolation tag (PSK mode); empty in open mode
 	Payload json.RawMessage `json:"payload,omitempty"` // opaque node info, not inspected by hub
+}
+
+// peekMapMaxJSONBytes caps the total wire bytes decoded per PeekMapMessage. A
+// 64KB payload base64-encodes to ~85KB; adding the JSON envelope (type/from/
+// net_id keys, quotes, commas) keeps the total under 90KB. We round up to
+// 128KB to leave headroom for field-name growth. json.Decoder reads ahead in
+// bufio-sized chunks, so a raw LimitReader on the stream would accumulate
+// across messages; this reader resets the counter per Decode call instead.
+const peekMapMaxJSONBytes = 128 * 1024
+
+// cappedMsgReader enforces a per-message byte cap on a json.Decoder's input
+// stream. It counts bytes read since the last reset(); once the limit is hit,
+// it returns io.EOF, which makes the current Decode call fail (and the
+// json.Decoder treats it as a fatal parse error, closing the listener stream).
+// Without this, a single client could send a multi-gigabyte JSON payload and
+// force the decoder to allocate the entire thing in memory before the post-
+// decode len(msg.Payload) check fires — a straightforward memory-amplification
+// DoS that also rebroadcasts the oversized payload to every other client.
+type cappedMsgReader struct {
+	src   io.Reader
+	limit int64
+	count int64
+}
+
+func (c *cappedMsgReader) Read(p []byte) (int, error) {
+	if c.count >= c.limit {
+		return 0, io.EOF
+	}
+	remaining := c.limit - c.count
+	if int64(len(p)) > remaining {
+		p = p[:remaining]
+	}
+	n, err := c.src.Read(p)
+	c.count += int64(n)
+	return n, err
+}
+
+func (c *cappedMsgReader) reset() {
+	c.count = 0
 }
 
 // bootNodeInfo is the minimal identity the boot node publishes about itself over
@@ -267,8 +319,19 @@ func (h *peekMapHub) broadcastToLocalOnly(frame []byte, netID string) {
 }
 
 func (h *peekMapHub) fanout(frame []byte, exclude peer.ID, skipMesh bool, netID string) {
+	// Snapshot the target streams under RLock, then release before doing any
+	// network I/O. Writing under the lock let a single hung peer block every
+	// subsequent broadcast for up to the 10s write-deadline, and starved
+	// concurrent register/unregister calls. The snapshot can go stale (a peer
+	// may disconnect between snapshot and write), but a failed write is
+	// handled by the unregister sweep below, so the eventual consistency is
+	// fine.
+	type target struct {
+		peer     peer.ID
+		stream   network.Stream
+	}
 	h.mu.RLock()
-	failed := make([]peer.ID, 0, len(h.listener))
+	targets := make([]target, 0, len(h.listener))
 	for p, s := range h.listener {
 		if p == exclude {
 			continue
@@ -289,13 +352,18 @@ func (h *peekMapHub) fanout(frame []byte, exclude peer.ID, skipMesh bool, netID 
 				}
 			}
 		}
-		_ = s.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		if _, err := s.Write(frame); err != nil {
-			log.Debug("[peek-map] broadcast write to %s failed: %v", p.ShortString(), err)
-			failed = append(failed, p)
-		}
+		targets = append(targets, target{peer: p, stream: s})
 	}
 	h.mu.RUnlock()
+
+	var failed []peer.ID
+	for _, t := range targets {
+		_ = t.stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if _, err := t.stream.Write(frame); err != nil {
+			log.Debug("[peek-map] broadcast write to %s failed: %v", t.peer.ShortString(), err)
+			failed = append(failed, t.peer)
+		}
+	}
 	// Evict dead listeners outside the lock so a dead peer can't head-of-line
 	// block every subsequent broadcast (each failed write would otherwise cost
 	// up to the 10s write-deadline on every frame).
@@ -756,7 +824,7 @@ func makeBootRelayHandler(rr *relayRouter) func(network.Stream) {
 				fmt.Sprintf("Boot-relay client disconnected: %s", remotePeer.ShortString()))
 			_ = s.Close()
 		}()
-		buf := make([]byte, 64*1024)
+		buf := make([]byte, maxBootRelayEnvelope)
 		for {
 			_ = s.SetReadDeadline(time.Now().Add(5 * time.Minute))
 			n, err := readFrame(s, buf)
@@ -769,16 +837,26 @@ func makeBootRelayHandler(rr *relayRouter) func(network.Stream) {
 }
 
 // makeBootRelayBackboneHandler is the server side of a peer boot's backbone
-// uplink. Frames arriving here are local-delivery-only.
-func makeBootRelayBackboneHandler(rr *relayRouter) func(network.Stream) {
+// uplink. Frames arriving here are local-delivery-only. Only peers in the
+// configured -mesh list are accepted; any other peer would be treated as a
+// backbone boot (fromMesh=true) and could forge srcPeer/netID, bypassing
+// anti-spoofing and network isolation checks.
+func makeBootRelayBackboneHandler(rr *relayRouter, hub *peekMapHub) func(network.Stream) {
 	return func(s network.Stream) {
 		remotePeer := s.Conn().RemotePeer()
+		if !hub.isMesh(remotePeer) {
+			log.Warn("[boot-relay] rejecting backbone stream from non-mesh peer %s", remotePeer.ShortString())
+			bootAlerts.Add("warn", "boot_relay_backbone_denied", remotePeer.ShortString(),
+				fmt.Sprintf("Boot-relay backbone access denied: %s is not a configured mesh peer", remotePeer.ShortString()))
+			_ = s.Close()
+			return
+		}
 		rr.registerMesh(remotePeer, s)
 		defer func() {
 			rr.unregisterMesh(remotePeer)
 			_ = s.Close()
 		}()
-		buf := make([]byte, 64*1024)
+		buf := make([]byte, maxBootRelayEnvelope)
 		for {
 			_ = s.SetReadDeadline(time.Now().Add(5 * time.Minute))
 			n, err := readFrame(s, buf)
@@ -881,13 +959,18 @@ func proxyStreams(s1, s2 network.Stream) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		defer s2.CloseWrite()
 		_, _ = io.Copy(s2, s1)
+		// One direction EOF'd. Close() signals the remote end (FIN/RESET) AND
+		// tears down the local read side, so the reverse goroutine's io.Copy
+		// unblocks on the now-closed stream. Without the full Close, a peer
+		// that ignores the half-close FIN leaves the reverse goroutine blocked
+		// on io.Copy(s1, s2) forever, pinning both streams and this proxy.
+		_ = s2.Close()
 	}()
 	go func() {
 		defer wg.Done()
-		defer s1.CloseWrite()
 		_, _ = io.Copy(s1, s2)
+		_ = s1.Close()
 	}()
 	wg.Wait()
 }
@@ -961,7 +1044,7 @@ func runBootRelayMeshUplink(ctx context.Context, h host.Host, rr *relayRouter, i
 	bootAlerts.Add("info", "mesh_connected", info.ID.ShortString(),
 		fmt.Sprintf("Mesh backbone connected: boot %s", info.ID.ShortString()))
 
-	buf := make([]byte, 64*1024)
+	buf := make([]byte, maxBootRelayEnvelope)
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -1028,9 +1111,11 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Pre-declare hub so the PSK auth handler closure below (registered before
-	// hub is constructed) can capture it. Assigned in step 7.
-	var hub *peekMapHub
+	// Initialize hub BEFORE any stream handler is registered. The PSK auth
+	// handler closure captures this variable; if it is nil when a peer
+	// authenticates (before step 7 below), hub.publishBootInfo panics with a
+	// nil-pointer dereference and crashes the entire boot server.
+	hub := newPeekMapHub()
 
 	listenAddrs := cfg.ListenAddrs
 	if len(listenAddrs) == 0 {
@@ -1318,7 +1403,8 @@ func main() {
 	// 7. Register peek-map pub/sub broadcast hub. The boot node acts purely as
 	//    a stateless router: every client opens a long-lived stream, and each
 	//    UPDATE frame is rebroadcast to all other clients. No node data cached.
-	hub = newPeekMapHub()
+	// hub was already initialized early (before handler registration) to avoid
+	// a nil-pointer panic if a peer authenticates before this point.
 	// In PSK mode, discovery is isolated per network: route frames only to peers
 	// in the same network as the sender. nil resolver => open mode (no isolation).
 	if pskEnabled {
@@ -1337,7 +1423,7 @@ func main() {
 	// cannot span.
 	relayRouter := newRelayRouter(aclFilter, pskEnabled)
 	h.SetStreamHandler(BootRelayProtocolID, makeBootRelayHandler(relayRouter))
-	h.SetStreamHandler(BootRelayBackboneProtocolID, makeBootRelayBackboneHandler(relayRouter))
+	h.SetStreamHandler(BootRelayBackboneProtocolID, makeBootRelayBackboneHandler(relayRouter, hub))
 	h.SetStreamHandler(RelayCtrlProtocolID, makeRelayCtrlHandler(h, aclFilter, hub))
 	fmt.Printf("[+] Boot-relay & relay-control handlers registered (protocols: %s, %s, %s)\n",
 		BootRelayProtocolID, BootRelayBackboneProtocolID, RelayCtrlProtocolID)
@@ -1972,9 +2058,6 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 			// record) would block for the full 30-second read deadline before
 			// receiving its 0x01 success reply. This made auth appear to take
 			// 30 seconds and caused relay connection timeouts.
-			acl.AddAuthenticated(remotePeer, e.netID)
-			_, _ = s.Write([]byte{0x01}) // Auth success response
-
 			// Best-effort read the peer's version/capability record with a
 			// short timeout. An OLD node sends only the 32-byte token and
 			// closes, so a short read means "unknown version" — we then
@@ -1988,6 +2071,8 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 			// difference with an identical envelope is safe (Warn, allowed); only
 			// a genuinely incompatible envelope (no common version) is Danger,
 			// and even that is allowed unless StrictVersionCheck is enabled.
+			// This gate runs BEFORE AddAuthenticated so a rejected peer is never
+			// left in the ACL as "authenticated".
 			switch lvl, reason := version.CurrentRecord().CompatibleWith(nodeRec); lvl {
 			case version.CompatOK:
 				// identical build or unknown peer — nothing to gate on
@@ -2000,12 +2085,16 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 				if version.StrictVersionCheck {
 					bootAlerts.Add("error", "auth_version_mismatch", remotePeer.ShortString(),
 						fmt.Sprintf("Peer %s rejected: %s (peer commit=%s)", remotePeer.ShortString(), reason, nodeRec.Commit))
-					_, _ = s.Write([]byte{0x00}) // Auth failed response (after success — client should already be done)
+					_, _ = s.Write([]byte{0x00}) // Auth failed response
 					return
 				}
 				log.Warn("[auth] peer %s version incompatible but StrictVersionCheck=false — allowing: %s (peer commit=%s)",
 					remotePeer.String(), reason, nodeRec.Commit)
 			}
+
+			// Version gate passed (or not enforced) — now authenticate.
+			acl.AddAuthenticated(remotePeer, e.netID)
+			_, _ = s.Write([]byte{0x01}) // Auth success response
 			// Hand our version record back so the node can also verify (and so
 			// an old node harmlessly sees a closed stream after the 0x01).
 			_ = s.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -2188,11 +2277,20 @@ func makePeekMapHandler(h host.Host, hub *peekMapHub, nodeName string) func(netw
 		// partial JSON value, nor blow up memory by sending a multi-gigabyte
 		// payload that we would then rebroadcast to every other client
 		// (amplification). Oversized/garbled messages make Decode fail and the
-		// listener stream is closed. A fresh LimitReader per iteration keeps the
-		// cap per-message (not a running total across messages).
-		dec := json.NewDecoder(s)
+		// listener stream is closed.
+		//
+		// The cap is enforced at the reader level (cappedMsgReader) so that the
+		// JSON decoder never allocates more than peekMapMaxJSONBytes per
+		// message, regardless of what the client sends. The post-decode
+		// len(msg.Payload) > 64*1024 check below is a secondary guard that
+		// catches messages whose decoded payload exceeds the broadcast limit
+		// (the JSON envelope + base64 encoding can make the wire size smaller
+		// than the decoded payload size).
+		capped := &cappedMsgReader{src: s, limit: peekMapMaxJSONBytes}
+		dec := json.NewDecoder(capped)
 		for {
 			_ = s.SetReadDeadline(time.Now().Add(5 * time.Minute))
+			capped.reset()
 			var msg PeekMapMessage
 			if err := dec.Decode(&msg); err != nil {
 				log.Debug("[peek-map] listener for %s closed: %v", remotePeer.ShortString(), err)
