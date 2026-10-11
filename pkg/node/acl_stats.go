@@ -68,11 +68,21 @@ func (n *Node) checkRelayTransitACL(srcPeer, finalDst peer.ID) bool {
 	// (before reaching the rule loop that checks peer_id), making the old nil
 	// call a silent no-op. We evaluate peer_id rules directly here; protocol/
 	// port rules only apply at the final hop where the frame is visible.
+	//
+	// "*" is the catch-all MatchACL applies on the direct path, and it MUST be
+	// honoured here too. Skipping it let a {peer_id:"*", action:"deny"} rule
+	// block every peer on the direct/final-hop path while traffic kept reaching
+	// any peer whose own ACL was permissive via a third-party relay — exactly
+	// the bounce bypass this check exists to close, for the one rule shape an
+	// operator most naturally writes as "deny everyone".
+	//
+	// Rules apply in CONFIGURATION ORDER, matching MatchACL's first-match-wins.
+	// Deliberately not most-specific-wins: that would let a "* deny" the
+	// operator placed ahead of a specific accept be overridden on the relay path
+	// only, i.e. under-deny relative to the direct path. Ignoring protocol/port
+	// here can only over-deny, which is the safe direction.
 	for _, rule := range c.ACL.Rules {
-		if rule.PeerID == "" || rule.PeerID == "*" {
-			continue
-		}
-		if rule.PeerID == srcPeer.String() {
+		if rule.PeerID == srcPeer.String() || rule.PeerID == "*" {
 			action := strings.ToLower(rule.Action)
 			return action == "accept" || action == "allow"
 		}

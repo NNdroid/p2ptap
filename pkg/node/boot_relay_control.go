@@ -393,6 +393,15 @@ func (n *Node) deliverBootRelayControl(finalDst, srcPeer peer.ID, proto protocol
 		log.Debug("[boot-relay] control frame finalDst %s != self; dropping", finalDst.ShortString())
 		return
 	}
+	// An empty proto is the uplink heartbeat the boot echoes back to us
+	// (bootRelayWriteLoop, finalDst == srcPeer == self). Nothing is multiplexed
+	// onto it: the read itself is the half-open signal the downlink's read
+	// deadline is waiting for. Returning here also keeps us from recording this
+	// node as a peer reachable through its own boot, which would show up as a
+	// self-referential entry in the peek-map topology.
+	if proto == "" {
+		return
+	}
 	n.notePeerRx(srcPeer)
 	if viaBoot != "" && viaBoot != srcPeer {
 		n.recordPeekMapOrigin(srcPeer, viaBoot, 1, false)

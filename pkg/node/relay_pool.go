@@ -137,13 +137,13 @@ func isP2ptapBootPeer(h host.Host, n *Node, hop peer.ID) bool {
 var bootSkippedOnce sync.Map // peer.ID → *atomic.Bool
 
 // relayPoolReapInterval is how often the pool's idle reaper scans for conns that
-// have been permanently orphaned (a hop that is circuit-broken AND no longer
-// connected). Reaping is lazy: it only tears down a conn that has stayed in the
-// orphaned state for a full overlayRelayBlacklistTTL, so a hop that is
-// transiently broken and about to recover is never needlessly dropped. The
-// interval is deliberately large (not hot-path) — a scan at most once per TTL
-// keeps the steady-state overhead negligible.
-const relayPoolReapInterval = overlayRelayBlacklistTTL
+// have been permanently orphaned (a hop that is no longer connected). Reaping is
+// lazy: it only tears down a conn that has stayed orphaned for a full
+// overlayRelayBlacklistTTL, so a hop that is transiently broken and about to
+// recover is never needlessly dropped. The scan itself is a map walk over the
+// number of relay hops, so it stays on a slow tick while the candidate window
+// keeps the churn tolerance.
+const relayPoolReapInterval = 30 * time.Second
 
 // relayStreamPool manages persistent relay streams per relay hop.
 // One background write goroutine per active relay peer.
@@ -157,10 +157,10 @@ type relayStreamPool struct {
 	wg     sync.WaitGroup
 
 	// candidateSince records, per hop, the first time the pool's reaper observed
-	// the hop's conn in the "orphaned" (blacklisted AND disconnected) state. A
-	// conn whose orphaned state persists for a full overlayRelayBlacklistTTL is
-	// reaped (goroutine stopped, map entry removed) so a permanently-dead hop
-	// cannot leak a goroutine + 128-slot queue forever. Guarded by mu.
+	// the hop's conn in the "orphaned" (disconnected) state. A conn whose
+	// orphaned state persists for a full overlayRelayBlacklistTTL is reaped
+	// (goroutine stopped, map entry removed) so a permanently-dead hop cannot
+	// leak a goroutine + 128-slot queue forever. Guarded by mu.
 	candidateSince map[peer.ID]time.Time
 }
 
@@ -188,11 +188,10 @@ func newRelayStreamPool(ctx context.Context, h host.Host, n *Node) *relayStreamP
 }
 
 // reapLoop periodically removes relay conns whose hop is permanently orphaned
-// (circuit-broken by the overlay-relay health monitor AND no longer connected).
-// Such a conn's write goroutine is only waiting out blacklist timers to re-probe
-// a hop that can never serve frames again; keeping it alive forever leaks one
-// goroutine + a 128-slot queue per dead hop. getOrCreate lazily rebuilds a conn
-// the moment the hop becomes reachable and is re-selected, so reaping is lossless.
+// (no longer connected). Such a conn's write goroutine is only re-dialing a hop
+// that cannot serve frames; keeping it alive forever leaks one goroutine + a
+// 128-slot queue per dead hop. getOrCreate lazily rebuilds a conn the moment the
+// hop becomes reachable and is re-selected, so reaping is lossless.
 func (p *relayStreamPool) reapLoop() {
 	defer p.wg.Done()
 	ticker := time.NewTicker(relayPoolReapInterval)
@@ -207,21 +206,29 @@ func (p *relayStreamPool) reapLoop() {
 	}
 }
 
-// reapOrphaned removes conns whose hop has been both circuit-broken (blacklisted)
-// and disconnected for a full overlayRelayBlacklistTTL. It cancels the conn's
-// context (which exits its writeLoop), closes any live stream, and drops the map
-// entry. getOrCreate will recreate the conn lazily if the hop ever returns.
+// reapOrphaned removes conns whose hop has been disconnected for a full
+// overlayRelayBlacklistTTL. It cancels the conn's context (which exits its
+// writeLoop), closes any live stream, and drops the map entry. getOrCreate will
+// recreate the conn lazily if the hop ever returns.
+//
+// The blacklist bit is deliberately NOT part of the predicate. Requiring it
+// leaked a conn for every peer that disconnected cleanly: a clean disconnect
+// never produces the write failures that accumulate to
+// overlayRelayBlacklistMaxFailures, so the hop never got blacklisted, this scan
+// never matched it, and the peer kept one parked writeLoop goroutine (re-dialing
+// an absent peer every few seconds) plus a 128-slot queue for the rest of the
+// node's lifetime. A disconnected hop cannot serve relay frames at all, so the
+// blacklist added nothing beyond delay.
 func (p *relayStreamPool) reapOrphaned() {
 	now := time.Now()
 	var toReap []*relayConn
 
 	p.mu.Lock()
 	for hop, rc := range p.conns {
-		orphaned := p.node != nil && p.node.isOverlayRelayBlacklisted(hop) &&
-			!p.relayHopConnected(hop)
+		orphaned := p.node != nil && !p.relayHopConnected(hop)
 		if !orphaned {
-			// Hop recovered (connected, or no longer blacklisted) — clear any
-			// pending candidate so a later re-blacklist starts fresh.
+			// Hop connected again — clear any pending candidate so a later drop
+			// starts a fresh window.
 			delete(p.candidateSince, hop)
 			continue
 		}
@@ -244,7 +251,7 @@ func (p *relayStreamPool) reapOrphaned() {
 
 	for _, rc := range toReap {
 		p.teardownConn(rc)
-		relayLog.Warn("[relay-pool] reaped orphaned relay conn for %s: hop circuit-broken and disconnected for %s; will lazily rebuild if it returns",
+		relayLog.Warn("[relay-pool] reaped orphaned relay conn for %s: hop disconnected for %s; will lazily rebuild if it returns",
 			rc.peer.ShortString(), overlayRelayBlacklistTTL)
 	}
 }

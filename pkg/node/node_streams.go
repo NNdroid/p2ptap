@@ -748,18 +748,28 @@ func (n *Node) handleLSAStream(s network.Stream) {
 		// while preserving legitimate forwarding.
 		remotePeer := s.Conn().RemotePeer()
 		if lsa.Origin != "" {
-			// Snapshot frames bypass the origin check: the cached LSA was
-			// originally verified when first received, and the receiver may
-			// not be directly connected to the origin.
-			if lsa.Snapshot {
-				n.seenOrigins.Store(lsa.Origin, seenOriginEntry{firstSeen: time.Now(), source: remotePeer.String()})
-			} else if val, known := n.seenOrigins.Load(lsa.Origin); known {
+			remoteStr := remotePeer.String()
+			if val, known := n.seenOrigins.Load(lsa.Origin); known {
 				entry := val.(seenOriginEntry)
 				// Known origin: the frame must come from the origin itself
 				// or from the peer that first introduced it. This closes
 				// the TTL-downgrade bypass where an attacker sends
 				// ttl < max claiming a known origin from a different peer.
-				remoteStr := remotePeer.String()
+				//
+				// Snapshot frames take the SAME check, not a bypass: lsa.Snapshot
+				// is a sender-written JSON field and proves nothing about where
+				// the payload actually came from. Treating it as authoritative let
+				// any directly-connected peer clobber entry.source and re-pin an
+				// already-known origin to itself, after which every legitimate LSA
+				// and relayed frame for that origin via any other carrier was
+				// dropped for the entry's whole 5-minute lifetime.
+				//
+				// entry.source is deliberately never updated here. Re-pointing it
+				// to the origin when a direct frame arrives would revoke the first
+				// carrier, so a loss of the direct path would blackhole every
+				// carrier-carried LSA for that origin until the reaper evicts the
+				// entry (up to 5 minutes). The gate above already admits frames
+				// from the origin itself, so nothing is blocked by keeping the pin.
 				if remoteStr != lsa.Origin && remoteStr != entry.source {
 					log.Debug("LSA from %s claims known origin %s (source=%s) but is not origin or source; dropping",
 						remotePeer.ShortString(), lsa.Origin, entry.source)
@@ -767,28 +777,45 @@ func (n *Node) handleLSAStream(s network.Stream) {
 				}
 				entry.firstSeen = time.Now()
 				n.seenOrigins.Store(lsa.Origin, entry)
+			} else if lsa.Snapshot {
+				// First sighting via a cached snapshot. The receiver is usually
+				// NOT directly connected to the origin, so the direct+full-TTL
+				// rule below cannot apply, and this trust is unavoidable: LSAs
+				// carry no PSK-keyed stamp the way the relay-ctrl tunnel does
+				// (relay_ctrl_attest.go). It is bounded, though — this branch only
+				// fires on the FIRST sighting, so a snapshot can never re-pin an
+				// origin someone else already introduced, and the entry ages out
+				// with the seenOrigins reaper.
+				n.seenOrigins.Store(lsa.Origin, seenOriginEntry{firstSeen: time.Now(), source: remoteStr})
 			} else {
 				// First time seeing this origin: must come directly with full TTL.
-				if lsa.Origin != remotePeer.String() || lsa.TTL != routing.DefaultLSATTL {
+				if lsa.Origin != remoteStr || lsa.TTL != routing.DefaultLSATTL {
 					log.Debug("LSA from %s claims unseen origin %s with ttl=%d; dropping",
 						remotePeer.ShortString(), lsa.Origin, lsa.TTL)
 					continue
 				}
-				n.seenOrigins.Store(lsa.Origin, seenOriginEntry{firstSeen: time.Now(), source: remotePeer.String()})
+				n.seenOrigins.Store(lsa.Origin, seenOriginEntry{firstSeen: time.Now(), source: remoteStr})
 			}
 		}
-		if origin, err := peer.Decode(lsa.Origin); err == nil {
-			n.applyPeerMetaFromLSA(origin, lsa)
-		}
 
-		changed := n.Router.ProcessLSA(&lsa)
-		if changed {
+		// Apply the piggybacked node identity only to an LSA that ProcessLSA
+		// actually accepted. Running it before ProcessLSA installed
+		// attacker-chosen NodeName/TapIP/TapMAC, subnet routes and TAP IP/MAC
+		// bindings keyed by a claimed origin from an LSA that was then rejected
+		// (stale or absurd sequence number, TTL out of range, graph cap reached).
+		accepted := n.Router.ProcessLSA(&lsa)
+		if accepted && lsa.Origin != "" {
+			if origin, err := peer.Decode(lsa.Origin); err == nil {
+				n.applyPeerMetaFromLSA(origin, lsa)
+			}
+		}
+		if accepted {
 			// Retain the freshest accepted payload for this origin so we can
 			// hand a FULL topology snapshot to the next peer that connects.
 			// Must be captured BEFORE the TTL decrement below.
 			n.cacheLSA(&lsa)
 		}
-		if changed && lsa.TTL > 1 {
+		if accepted && lsa.TTL > 1 {
 			lsa.TTL--
 			forwardData, err := json.Marshal(lsa)
 			if err == nil {
@@ -1055,6 +1082,12 @@ func (n *Node) handleRelayStream(s network.Stream) {
 				entry := val.(seenOriginEntry)
 				// Known origin: the frame must come from the origin itself
 				// or from the peer that first introduced it.
+				//
+				// entry.source is deliberately never updated here: re-pointing it
+				// to the origin on a direct frame would revoke the first carrier
+				// and blackhole every carrier-carried frame for that origin until
+				// the reaper evicts the entry (up to 5 minutes). The gate below
+				// already admits frames from the origin itself.
 				if remoteStr != srcStr && remoteStr != entry.source {
 					log.Debug("Relay frame from %s claims known srcPeer %s (source=%s) but is not origin or source; dropping",
 						remotePeer.String(), srcStr, entry.source)
@@ -1236,12 +1269,21 @@ func (n *Node) handleRelayStream(s network.Stream) {
 					n.relayDiag.fwdPoolFull()
 				}
 			} else {
-				// ttl<=1 and we are not the destination: the envelope dies
-				// here (the origin's MaxRelayTTL budget was spent — usually a
-				// stale route table pointing hops at each other).
-				n.relayDiag.ttlExpired()
+				log.Warn("Relay forward repack failed for dst %s src %s: %v",
+					finalDst.String(), srcPeer.String(), err)
 			}
+			continue
 		}
+		// Not the destination and the TTL budget is spent: the envelope dies
+		// here. This is the ONLY thing that terminates an overlay-relay cycle
+		// (a stale route table pointing hops at each other), so the drop has to
+		// be observable. When this count sat in the PackRelayFrame error branch
+		// below it was unreachable — PackRelayFrame only errors on an absurdly
+		// long peer-ID string — so a live cycle left every diag counter at zero
+		// and showed up nowhere in /api/relay/diag or the periodic drop summary.
+		n.relayDiag.ttlExpired()
+		log.Debug("Relay envelope expired at a non-destination hop: src=%s dst=%s via=%s ttl=%d; dropping",
+			srcPeer.String(), finalDst.String(), remotePeer.String(), ttl)
 	}
 }
 

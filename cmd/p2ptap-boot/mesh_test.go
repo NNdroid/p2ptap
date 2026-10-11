@@ -87,6 +87,13 @@ type fakeStream struct {
 func (f *fakeStream) Write(p []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// writeFrame issues TWO writes per frame (a 4-byte length prefix, then the
+	// body), so fold an immediately-following pair back into one frame. Without
+	// this, a caller counting writes would see 2 for a single frame.
+	if len(f.writes) > 0 && len(f.writes[len(f.writes)-1]) == 4 {
+		f.writes[len(f.writes)-1] = append(f.writes[len(f.writes)-1], p...)
+		return len(p), nil
+	}
 	cp := make([]byte, len(p))
 	copy(cp, p)
 	f.writes = append(f.writes, cp)
@@ -99,6 +106,16 @@ func (f *fakeStream) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.writes)
+}
+
+// written returns the frame written at index, nil when there is none.
+func (f *fakeStream) written(i int) []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i < 0 || i >= len(f.writes) {
+		return nil
+	}
+	return f.writes[i]
 }
 
 // TestPeekMapHubBackboneIsLoopFree pins the forwarding asymmetry that keeps a

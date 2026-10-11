@@ -849,6 +849,17 @@ type dispatchTask struct {
 // the same L2 frame written to TAP N times (once per peer stream) wastes
 // kernel CPU and can confuse upper-layer protocols. Uses a hash map with lazy
 // expiry eviction instead of a linear ring so lookups are O(1).
+const (
+	// bcastDedupTTL is how long a broadcast frame's hash suppresses an identical
+	// duplicate. It must exceed the worst case for the same frame to arrive over
+	// several peer streams (a few hundred ms of fan-out skew), but stay short
+	// enough that legitimately recurring frames (ARP, mDNS) are not suppressed.
+	bcastDedupTTL = 2 * time.Second
+	// bcastDedupMaxEntries caps the ring so a unique-content broadcast flood
+	// cannot grow it without bound.
+	bcastDedupMaxEntries = 1024
+)
+
 type bcastDedupRing struct {
 	mu      sync.Mutex
 	entries map[uint64]time.Time
@@ -864,17 +875,31 @@ func (r *bcastDedupRing) isDuplicate(h uint64) bool {
 	if r.entries == nil {
 		r.entries = make(map[uint64]time.Time, 256)
 	}
-	if at, ok := r.entries[h]; ok && now.Sub(at) < 2*time.Second {
+	if at, ok := r.entries[h]; ok && now.Sub(at) < bcastDedupTTL {
 		return true
 	}
-	// Lazily evict expired entries when the map grows too large.
-	if len(r.entries) >= 1024 {
+	// Evict on EVERY insert at capacity, not only when the map first overflows.
+	// A sustained flood of unique-content broadcasts (DHCPDISCOVERs with distinct
+	// client IDs, mDNS) pins the ring at bcastDedupMaxEntries where nothing has
+	// expired yet, so every new hash is a miss and the ring silently stops
+	// filtering at exactly the moment it is most needed.
+	if len(r.entries) >= bcastDedupMaxEntries {
 		for k, t := range r.entries {
-			if now.Sub(t) >= 2*time.Second {
+			if now.Sub(t) >= bcastDedupTTL {
 				delete(r.entries, k)
-				if len(r.entries) < 512 {
+			}
+		}
+		if len(r.entries) >= bcastDedupMaxEntries {
+			// Nothing is expirable, so the traffic is genuinely unique-content and
+			// no ring could deduplicate it anyway. Drop the oldest half to keep
+			// accepting new hashes instead of holding a frozen set forever.
+			evict := len(r.entries) - bcastDedupMaxEntries/2
+			for k := range r.entries {
+				if evict <= 0 {
 					break
 				}
+				delete(r.entries, k)
+				evict--
 			}
 		}
 	}

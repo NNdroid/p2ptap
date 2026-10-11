@@ -146,15 +146,29 @@ func TestBootRelayOverBackboneIntegration(t *testing.T) {
 	}
 	t.Log("✓ Contract #2: cross-network frame correctly dropped (PSK isolation enforced)")
 
-	// --- Contract #3: loop guard — A sends to itself, dropped ---
+	// --- Contract #3: loop guard — A sends to itself ---
+	// The frame IS echoed back to nodeA (that is the uplink heartbeat the node's
+	// downlink reader treats as its half-open detector: bootRelayWriteLoop sends
+	// finalDst==srcPeer==self every 15s and the reader's 60s deadline assumes the
+	// boot sends a byte back at least that often). What must NOT happen is that
+	// the frame is flooded to the backbone: nodeB sits on a different boot, so it
+	// can only see the frame if bootA pushed it onto the mesh.
 	if err := nodeA.send(nodeA.h.ID(), netA, []byte("loop")); err != nil {
 		t.Fatalf("nodeA self-send: %v", err)
 	}
-	_, ok = nodeA.recv(3 * time.Second)
-	if ok {
-		t.Fatal("Contract #3 FAILED: self-destined frame echoed back to sender (loop guard broken)")
+	r3, ok := nodeA.recv(3 * time.Second)
+	if !ok {
+		t.Fatal("Contract #3 FAILED: self-destined heartbeat was not echoed back to its sender")
 	}
-	t.Log("✓ Contract #3: self-destined frame dropped (loop guard)")
+	if r3.finalDst != nodeA.h.ID() || r3.srcPeer != nodeA.h.ID() {
+		t.Fatalf("Contract #3 FAILED: echo routing wrong (finalDst=%s srcPeer=%s, want A/A)",
+			r3.finalDst.ShortString(), r3.srcPeer.ShortString())
+	}
+	_, leaked := nodeB.recv(3 * time.Second)
+	if leaked {
+		t.Fatal("Contract #3 FAILED: self-destined frame was flooded across the backbone (loop guard broken)")
+	}
+	t.Log("✓ Contract #3: self-destined frame echoed locally to its sender and never flooded")
 }
 
 // startRelayBoot builds a real libp2p host wired with the boot-relay handlers

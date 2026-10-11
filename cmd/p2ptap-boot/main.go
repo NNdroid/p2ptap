@@ -736,11 +736,6 @@ func (r *relayRouter) route(data []byte, fromMesh bool, fromPeer peer.ID) {
 			srcPeer.ShortString(), r.acl.NetworkOf(srcPeer), netID)
 		return
 	}
-	// Loop guard: never bridge a frame back to its own origin.
-	if finalDst == srcPeer {
-		return
-	}
-
 	// Local delivery?
 	r.mu.RLock()
 	ls := r.clientStreams[finalDst]
@@ -768,30 +763,46 @@ func (r *relayRouter) route(data []byte, fromMesh bool, fromPeer peer.ID) {
 		return
 	}
 
-	// Not a local client: flood to the backbone (single hop only; frames from
-	// the backbone are never re-flooded).
-	if !fromMesh && ttl > 1 && len(r.meshStreams) > 0 {
+	// Not a local client. A frame that already arrived over the backbone is
+	// local-delivery-only and is never re-flooded: this is what caps every
+	// backbone frame at exactly one hop.
+	if fromMesh {
+		return
+	}
+	// A self-addressed frame is a client's own uplink heartbeat (finalDst ==
+	// srcPeer == the sender; the node's bootRelayWriteLoop). It is delivered
+	// above while the uplink is registered, and it must NEVER be flooded — that
+	// is the loop guard this check used to be. Dropping it BEFORE local
+	// delivery (as it was) meant the heartbeat never came back, so the
+	// destination's downlink reader never saw a byte and its 60s read deadline
+	// (set as 4× the 15s heartbeat) tore the uplink down every minute.
+	if finalDst == srcPeer {
+		return
+	}
+	// Flood to the backbone (single hop only).
+	if ttl <= 1 || len(r.meshStreams) == 0 {
+		return
+	}
+	r.mu.RLock()
+	peers := make([]peer.ID, 0, len(r.meshStreams))
+	for bp := range r.meshStreams {
+		peers = append(peers, bp)
+	}
+	r.mu.RUnlock()
+	for _, bp := range peers {
 		r.mu.RLock()
-		peers := make([]peer.ID, 0, len(r.meshStreams))
-		for bp := range r.meshStreams {
-			peers = append(peers, bp)
-		}
+		ms := r.meshStreams[bp]
 		r.mu.RUnlock()
-		for _, bp := range peers {
-			r.mu.RLock()
-			ms := r.meshStreams[bp]
-			r.mu.RUnlock()
-			if ms == nil {
-				continue
-			}
-			// Write length-prefixed: the receiving boot's backbone handler reads
-			// with readFrame (4-byte length prefix), so the flood must be framed
-			// the same way (a raw write would desync the remote reader).
-			_ = ms.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if werr := writeFrame(ms, data); werr != nil {
-				log.Debug("[boot-relay] write to backbone boot %s failed: %v; dropping uplink", bp.ShortString(), werr)
-				r.unregisterMesh(bp)
-			}
+		if ms == nil {
+			continue
+		}
+		// Write length-prefixed: the receiving boot's backbone handler reads
+		// with readFrame (4-byte length prefix), so the flood must be framed
+		// the same way (a raw write would desync the remote reader).
+		_ = ms.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if werr := writeFrame(ms, data); werr != nil {
+			log.Debug("[boot-relay] write to backbone boot %s failed: %v; dropping uplink", bp.ShortString(), werr)
+			r.unregisterMesh(bp)
 		}
 	}
 }
