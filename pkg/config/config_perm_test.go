@@ -59,7 +59,7 @@ func TestUpdateConfigFileDeltaPSKIsOwnerOnly(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 
 	cfg := DefaultConfig()
-	cfg.PSK = "unit-test-psk"
+	cfg.PSK = "unit-test-psk-16ch" // must be >=16 chars for entropy validation
 	if err := UpdateConfigFileDelta(path, cfg); err != nil {
 		t.Fatalf("UpdateConfigFileDelta: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestLoadConfigFromFileTightensLegacyPerm(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 
 	legacy := DefaultConfig()
-	legacy.PSK = "unit-test-psk"
+	legacy.PSK = "unit-test-psk-16ch" // must be >=16 chars for entropy validation
 	data, err := json.MarshalIndent(legacy, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
