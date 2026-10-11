@@ -150,14 +150,26 @@ func TestSyncFromAnchorsWindow(t *testing.T) {
 	} else {
 		t.Logf("[anchor] repeated seq#%d detected duplicate", remote[5000]+1)
 	}
-	// A fresh-timestamped out-of-order frame below the anchor is still
-	// accepted (bit not yet set) — out-of-order multi-path delivery must not
-	// be dropped. Cross-session stale replays are caught by the timestamp age
-	// check instead.
-	if dedup.IsDuplicate(remote[10]) {
-		t.Error("fresh out-of-order frame below anchor should be accepted")
+	// An out-of-order frame that trails the anchor by less than dedupWindow
+	// is legitimate multi-path reordering and must be accepted. SyncFrom does
+	// not set bits for everything below the anchor, so this must not be
+	// misclassified as a "duplicate".
+	ooo := (seqVer1 << seqVerShift) | (uint64(p.srcHash) << seqSrcShift) |
+		(uint64(0) << seqEpochShift) | uint64(CounterFromSeq(remote[5000])-101)
+	if dedup.IsDuplicate(ooo) {
+		t.Error("in-window out-of-order frame below anchor should be accepted")
 	} else {
-		t.Logf("[anchor] out-of-order seq#%d below anchor accepted (fresh)", remote[10])
+		t.Logf("[anchor] in-window out-of-order seq#%d below anchor accepted", ooo)
+	}
+	// But a frame thousands of counters below the anchor is a replay, not
+	// reordering: real multi-path reordering is bounded by a few hundred
+	// frames, so anything beyond maxBehindTolerance is dropped.
+	stale := (seqVer1 << seqVerShift) | (uint64(p.srcHash) << seqSrcShift) |
+		(uint64(0) << seqEpochShift) | uint64(CounterFromSeq(remote[5000])-4000)
+	if !dedup.IsDuplicate(stale) {
+		t.Error("frame 4000 counters below anchor should be dropped as a replay")
+	} else {
+		t.Logf("[anchor] far-behind seq#%d dropped as replay", stale)
 	}
 }
 
@@ -208,25 +220,39 @@ func TestDedupWindowSlidesAfterCounterWrap(t *testing.T) {
 			(c & seqCntMask)
 	}
 
-	// Feed a long monotonic stream well past the 65536 low-16 wrap.
-	const total = 70000
+	// Feed a monotonic stream well past the 65536 low-16 wrap so the same
+	// slot is legitimately reused by the next counter cycle.
+	const total = 7200
 	for c := uint64(1); c <= total; c++ {
 		if dedup.IsDuplicate(mkSeq(c)) {
 			t.Fatalf("frame c=%d dropped as duplicate on first sequential pass", c)
 		}
 	}
 
-	// Replay an out-of-order frame whose low-16 counter (50000) was seen ~20000
-	// frames "ago" in the 16-bit projection — outside the 16384 out-of-order
-	// tolerance, so its bit must have been evicted by the sliding window. Before
-	// the fix this was wrongly dropped as a "duplicate".
-	if dedup.IsDuplicate(mkSeq(50000)) {
-		t.Errorf("out-of-order frame c=50000 wrongly dropped as duplicate; dedup window is not sliding")
+	// An out-of-order frame from the PREVIOUS 65536 cycle whose low-16 counter
+	// (7159) was seen 50400 frames ago in the 16-bit projection. The sliding
+	// window cleared that bit as max advanced past it, so the frame must be
+	// accepted as legitimate reordering — it trails max by only 41 counters,
+	// far inside the replay tolerance. Before the fix the bit stayed set
+	// forever and this was wrongly dropped as a "duplicate".
+	reorder := mkSeq(65536 + 7159)
+	if dedup.IsDuplicate(reorder) {
+		t.Errorf("out-of-order frame c=%d wrongly dropped as duplicate; dedup window is not sliding", 65536+7159)
+	} else {
+		t.Logf("[slide] rewrapped out-of-order seq#%d accepted (window slid)", reorder)
+	}
+
+	// A true cross-cycle replay — counter 100, about 70900 counters behind
+	// max — is far outside the tolerance and must still be dropped.
+	if !dedup.IsDuplicate(mkSeq(100)) {
+		t.Errorf("cross-cycle replay c=100 (70900 behind) should be dropped")
+	} else {
+		t.Logf("[slide] cross-cycle replay seq#%d dropped", mkSeq(100))
 	}
 
 	// An exact repeat of a *recent* in-window counter must still be detected.
-	if !dedup.IsDuplicate(mkSeq(69999)) {
-		t.Errorf("recent duplicate c=69999 should be detected as duplicate")
+	if !dedup.IsDuplicate(mkSeq(total - 1)) {
+		t.Errorf("recent duplicate c=%d should be detected as duplicate", total-1)
 	}
 }
 

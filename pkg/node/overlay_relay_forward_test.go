@@ -13,6 +13,25 @@ import (
 	"p2ptap/pkg/tap"
 )
 
+// buildSeedLSA builds an LSA advertising from's current graph that `to`'s
+// router will accept, isolating the data path under test from LSA timing.
+// ProcessLSA guards against a replay on two axes — the sequence must be above
+// the receiver's last recorded one for the origin, and must not jump more than
+// maxLSASeqJump — so the anchor is to's recorded sequence, not the wall clock
+// that startup and topology-change broadcasts run from.
+func buildSeedLSA(from, to *Node) *routing.LinkStatePayload {
+	return from.Router.BuildLSA(to.Router.SeedableLSASeq(from.Host.ID()), routing.NodeIdentity{
+		NodeName:          from.nodeName,
+		TapIP:             from.Config.TapIP,
+		TapIPv6:           from.Config.TapIPv6,
+		TapMAC:            from.Config.TapMAC,
+		OS:                runtime.GOOS,
+		Arch:              runtime.GOARCH,
+		IsExitNode:        from.Config.ExitNode.Enable,
+		AdvertisedSubnets: from.Config.AdvertisedSubnets,
+	})
+}
+
 // TestOverlayRelayForwardThroughRelayNode reproduces the reported production
 // failure: traffic cannot be forwarded THROUGH the relay node
 // "DESKTOP-VCJ70RT" to reach the destination "fah0-vm0-ndbbd0".
@@ -117,20 +136,8 @@ func TestOverlayRelayForwardThroughRelayNode(t *testing.T) {
 	bNode.Router.UpdateDirectLink(aNode.Host.ID(), 10, routing.LinkDirect) // keep B's graph consistent
 	bNode.Router.UpdateDirectLink(cNode.Host.ID(), 12, routing.LinkDirect) // B-C direct edge
 
-	// NOTE: each node fires an INITIAL LSA broadcast at startup using
-	// time.Now().UnixNano() as the sequence (node.go:1469). That value (~1.7e18)
-	// is already recorded in A's seqMap[B], so any smaller seed seq would be
-	// dropped as stale. Use a seq strictly greater than UnixNano to win.
-	lsa := bNode.Router.BuildLSA(uint64(time.Now().UnixNano())+1, routing.NodeIdentity{
-		NodeName:          bNode.nodeName,
-		TapIP:             bNode.Config.TapIP,
-		TapIPv6:           bNode.Config.TapIPv6,
-		TapMAC:            bNode.Config.TapMAC,
-		OS:                runtime.GOOS,
-		Arch:              runtime.GOARCH,
-		IsExitNode:        bNode.Config.ExitNode.Enable,
-		AdvertisedSubnets: bNode.Config.AdvertisedSubnets,
-	})
+	// The LSA seq must beat A's recorded seq for B (see buildSeedLSA).
+	lsa := buildSeedLSA(bNode, aNode)
 	if !aNode.Router.ProcessLSA(lsa) {
 		t.Fatalf("NodeA.ProcessLSA (from B) returned false — could not seed B-C topology (lsa seq=%d, neighbors=%v)",
 			lsa.Seq, lsa.Neighbors)
@@ -263,16 +270,7 @@ func TestOverlayRelayPreservesInnerIPTTL(t *testing.T) {
 	bNode.Router.UpdateDirectLink(aNode.Host.ID(), 10, routing.LinkDirect)
 	bNode.Router.UpdateDirectLink(cNode.Host.ID(), 12, routing.LinkDirect)
 
-	lsa := bNode.Router.BuildLSA(uint64(time.Now().UnixNano())+1, routing.NodeIdentity{
-		NodeName:          bNode.nodeName,
-		TapIP:             bNode.Config.TapIP,
-		TapIPv6:           bNode.Config.TapIPv6,
-		TapMAC:            bNode.Config.TapMAC,
-		OS:                runtime.GOOS,
-		Arch:              runtime.GOARCH,
-		IsExitNode:        bNode.Config.ExitNode.Enable,
-		AdvertisedSubnets: bNode.Config.AdvertisedSubnets,
-	})
+	lsa := buildSeedLSA(bNode, aNode)
 	if !aNode.Router.ProcessLSA(lsa) {
 		t.Fatalf("NodeA.ProcessLSA (from B) returned false")
 	}
@@ -421,19 +419,10 @@ func TestOverlayRelayForwardThreeHop(t *testing.T) {
 	cNode.Router.UpdateDirectLink(dNode.Host.ID(), 12, routing.LinkDirect)
 	dNode.Router.UpdateDirectLink(cNode.Host.ID(), 12, routing.LinkDirect)
 
-	// Seed LSAs with seq > UnixNano (see 2-hop test note: node.go:1469 fires an
-	// initial broadcast at startup using UnixNano, recorded in seqMap).
+	// Seed LSAs whose seq beats what the receiver already holds (see
+	// buildSeedLSA for why a wall-clock seq is unreliable here).
 	seedLSA := func(from, to *Node) {
-		lsa := from.Router.BuildLSA(uint64(time.Now().UnixNano())+1, routing.NodeIdentity{
-			NodeName:          from.nodeName,
-			TapIP:             from.Config.TapIP,
-			TapIPv6:           from.Config.TapIPv6,
-			TapMAC:            from.Config.TapMAC,
-			OS:                runtime.GOOS,
-			Arch:              runtime.GOARCH,
-			IsExitNode:        from.Config.ExitNode.Enable,
-			AdvertisedSubnets: from.Config.AdvertisedSubnets,
-		})
+		lsa := buildSeedLSA(from, to)
 		if !to.Router.ProcessLSA(lsa) {
 			t.Fatalf("ProcessLSA(%s->%s) returned false (seq=%d neighbors=%v)",
 				from.Host.ID().ShortString(), to.Host.ID().ShortString(), lsa.Seq, lsa.Neighbors)
@@ -556,16 +545,7 @@ func TestCanEgressToPeerRelayAware(t *testing.T) {
 	aNode.Router.UpdateDirectLink(bNode.Host.ID(), 10, routing.LinkDirect)
 	bNode.Router.UpdateDirectLink(aNode.Host.ID(), 10, routing.LinkDirect)
 	bNode.Router.UpdateDirectLink(cNode.Host.ID(), 12, routing.LinkDirect)
-	lsa := bNode.Router.BuildLSA(uint64(time.Now().UnixNano())+1, routing.NodeIdentity{
-		NodeName:          bNode.nodeName,
-		TapIP:             bNode.Config.TapIP,
-		TapIPv6:           bNode.Config.TapIPv6,
-		TapMAC:            bNode.Config.TapMAC,
-		OS:                runtime.GOOS,
-		Arch:              runtime.GOARCH,
-		IsExitNode:        bNode.Config.ExitNode.Enable,
-		AdvertisedSubnets: bNode.Config.AdvertisedSubnets,
-	})
+	lsa := buildSeedLSA(bNode, aNode)
 	if !aNode.Router.ProcessLSA(lsa) {
 		t.Fatalf("NodeA.ProcessLSA (from B) returned false")
 	}

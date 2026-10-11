@@ -94,6 +94,20 @@ func (n *Node) isBootstrapPeer(pID peer.ID) bool {
 	if _, ok := n.discoveredBoots.Load(pID); ok {
 		return true
 	}
+	return n.isConfiguredBootstrapPeer(pID)
+}
+
+// isConfiguredBootstrapPeer reports whether pID is a bootstrap peer the
+// operator pinned in config, as opposed to one we discovered over the network.
+//
+// This is the trust boundary: a configured boot is trusted by the operator's
+// own decision and so may be believed before we have a meta stream to it,
+// whereas a discovered boot is a claim that arrived over the wire and must
+// earn trust through a connection first.
+func (n *Node) isConfiguredBootstrapPeer(pID peer.ID) bool {
+	if n == nil || n.Config == nil {
+		return false
+	}
 	for _, bStr := range n.Config.BootstrapPeers {
 		ma, err := multiaddr.NewMultiaddr(bStr)
 		if err != nil {

@@ -128,6 +128,25 @@ func MultiaddrsToStrings(addrs []multiaddr.Multiaddr) []string {
 	return out
 }
 
+// AddrsWithPeerID renders each addr with a /p2p/<pid> suffix, for publishers
+// that must satisfy a receiver-side "the suffix names the claimed peer" check.
+// Addrs already carrying a suffix are passed through unchanged — appending a
+// second one would make the string unparseable. Nil elements are skipped.
+func AddrsWithPeerID(addrs []multiaddr.Multiaddr, pid peer.ID) []string {
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		if a == nil {
+			continue
+		}
+		if _, ok := TargetPeerID(a); !ok {
+			out = append(out, WithPeerID(a, pid))
+			continue
+		}
+		out = append(out, a.String())
+	}
+	return out
+}
+
 // ReplaceIPInMultiaddr returns a copy of ma with its IP component replaced
 // by newIP. The IP family (ip4/ip6) is preserved; other components are
 // rebuilt via their raw bytes.

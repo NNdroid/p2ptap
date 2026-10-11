@@ -3,7 +3,6 @@ package node
 import (
 	"bytes"
 	"net"
-	"runtime"
 	"testing"
 	"time"
 
@@ -114,16 +113,7 @@ func TestRelayCtrlEstablishesEndToEndCipher(t *testing.T) {
 	bNode.Router.UpdateDirectLink(aNode.Host.ID(), 10, routing.LinkDirect)
 	bNode.Router.UpdateDirectLink(cNode.Host.ID(), 12, routing.LinkDirect)
 
-	lsa := bNode.Router.BuildLSA(uint64(time.Now().UnixNano())+1, routing.NodeIdentity{
-		NodeName:          bNode.nodeName,
-		TapIP:             bNode.Config.TapIP,
-		TapIPv6:           bNode.Config.TapIPv6,
-		TapMAC:            bNode.Config.TapMAC,
-		OS:                runtime.GOOS,
-		Arch:              runtime.GOARCH,
-		IsExitNode:        bNode.Config.ExitNode.Enable,
-		AdvertisedSubnets: bNode.Config.AdvertisedSubnets,
-	})
+	lsa := buildSeedLSA(bNode, aNode)
 	if !aNode.Router.ProcessLSA(lsa) {
 		t.Fatalf("NodeA.ProcessLSA (from B) returned false — could not seed B-C topology")
 	}

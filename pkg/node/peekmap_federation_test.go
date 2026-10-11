@@ -28,12 +28,13 @@ func newFederationTestNode(t *testing.T, v4, v6 string) *Node {
 // propagation that makes a peer discovered across a federated boot backbone
 // actually DIALABLE.
 //
-// The forgery case is the important one: peek-map frames are relayed by a boot
-// and re-stamped with the *publisher's* ID, but the payload is opaque to the
-// boot. A malicious publisher could therefore attach addresses claiming to
-// belong to a different peer. Accepting those would let it redirect other
-// peers' dials to an address it controls, so an address whose embedded /p2p/<id>
-// disagrees with the publisher must be dropped.
+// The forgery cases are the important ones: peek-map frames are relayed by a
+// boot and re-stamped with the *publisher's* ID, but the payload is opaque to
+// the boot. A malicious publisher could therefore attach addresses claiming to
+// belong to a different peer, or omit the suffix entirely so that a bare addr
+// is stored verbatim. Accepting either would let it redirect other peers' dials
+// to an address it controls, so an address without a /p2p/<id> suffix that names
+// the publisher must be dropped.
 func TestRegisterPeekMapAddrsAcceptsOwnAndRejectsForged(t *testing.T) {
 	n := newFederationTestNode(t, "10.9.0.1/24", "fd09::1/64")
 
@@ -41,10 +42,11 @@ func TestRegisterPeekMapAddrsAcceptsOwnAndRejectsForged(t *testing.T) {
 	victim := test.RandPeerIDFatal(t)
 
 	n.registerPeekMapAddrs(publisher, []string{
-		"/ip4/203.0.113.10/tcp/4001",                                   // plain addr -> accept
-		"/ip4/203.0.113.11/udp/4001/quic-v1/p2p/" + publisher.String(), // own /p2p/ suffix -> strip + accept
-		"/ip4/203.0.113.12/tcp/4001/p2p/" + victim.String(),            // claims another peer -> reject
-		"totally-not-a-multiaddr",                                      // garbage -> skip
+		"/ip4/203.0.113.10/tcp/4001/p2p/" + publisher.String(),           // own /p2p/ suffix -> strip + accept
+		"/ip4/203.0.113.11/udp/4001/quic-v1/p2p/" + publisher.String(),   // own /p2p/ suffix -> strip + accept
+		"/ip4/203.0.113.12/tcp/4001/p2p/" + victim.String(),              // claims another peer -> reject
+		"/ip4/203.0.113.13/tcp/4001",                                     // no /p2p/ suffix -> reject
+		"totally-not-a-multiaddr",                                        // garbage -> skip
 	})
 
 	got := n.Host.Peerstore().Addrs(publisher)

@@ -1018,28 +1018,43 @@ func (n *Node) handleRelayStream(s network.Stream) {
 			continue
 		}
 		n.relayDiag.recv()
-		// First-hop origin verification: only the origin can legitimately send
-		// a relay frame directly. On the first hop (ttl == MaxRelayTTL, since
-		// the origin always starts at MaxRelayTTL and each relay decrements it),
-		// srcPeer must match remotePeer — the authenticated transport peer.
-		// On subsequent hops, remotePeer is the relay hop and srcPeer is the
-		// origin: they are expected to differ.
+		// First-hop origin verification. Every envelope carries two claims: who
+		// sent it (the transport peer, authenticated by libp2p) and who
+		// originated it (srcPeer, attacker-writable). Only the first is ever
+		// authenticated, so what follows is a set of path-shape consistency
+		// checks, not an identity proof.
 		//
-		// ROUND 8 FIX: TTL-downgrade bypass. The previous check
-		// (ttl == MaxRelayTTL && srcPeer != remotePeer) was bypassed by
-		// setting ttl = MaxRelayTTL - 1. We now track seen origins: the
-		// FIRST time a srcPeer is observed it MUST arrive directly with
-		// full TTL. Subsequent sightings via forwarders are trusted. This
-		// closes the bypass while preserving legitimate multi-hop relay.
+		//  1. Claimed origin == transport peer at full TTL: a definitive first
+		//     hop. The sender is authenticated and the path length matches the
+		//     claim.
+		//
+		//  2. Claimed origin != transport peer: a relay hop, so it must have
+		//     been decremented at least once — 1 <= ttl < MaxRelayTTL. This is
+		//     the ordinary shape of multi-hop traffic. In a hub-and-spoke mesh
+		//     a destination spoke's very first view of a peer is through the hub,
+		//     already one hop down, so demanding full TTL here breaks every such
+		//     path.
+		//
+		//  3. Anything else — ttl == MaxRelayTTL carried by someone other than
+		//     the claimed origin — advertises a zero-hop path that does not
+		//     exist. Drop. This is the pre-ROUND 8 check
+		//     (ttl == MaxRelayTTL && srcPeer != remotePeer).
+		//
+		// ROUND 8 FIX: TTL-downgrade bypass. Rule 3 alone was bypassed by
+		// setting ttl = MaxRelayTTL - 1 while re-claiming an already-known
+		// origin from a different carrier. seenOrigins closes that half: once an
+		// origin has been observed, later sightings must come from the origin
+		// itself or from the peer that first introduced it. This is the only
+		// half that is decidable — the two claims are indistinguishable at the
+		// first sighting, so the first sighting is shape-checked, not
+		// authenticated, and the re-attribution is where the gate bites.
 		if srcPeer != "" {
 			srcStr := srcPeer.String()
+			remoteStr := remotePeer.String()
 			if val, known := n.seenOrigins.Load(srcStr); known {
 				entry := val.(seenOriginEntry)
 				// Known origin: the frame must come from the origin itself
-				// or from the peer that first introduced it. This closes
-				// the TTL-downgrade bypass where an attacker sends
-				// ttl < max claiming a known origin from a different peer.
-				remoteStr := remotePeer.String()
+				// or from the peer that first introduced it.
 				if remoteStr != srcStr && remoteStr != entry.source {
 					log.Debug("Relay frame from %s claims known srcPeer %s (source=%s) but is not origin or source; dropping",
 						remotePeer.String(), srcStr, entry.source)
@@ -1048,15 +1063,19 @@ func (n *Node) handleRelayStream(s network.Stream) {
 				}
 				entry.firstSeen = time.Now()
 				n.seenOrigins.Store(srcStr, entry)
+			} else if srcPeer == remotePeer && ttl == routing.MaxRelayTTL {
+				// Direct origin at full TTL.
+				n.seenOrigins.Store(srcStr, seenOriginEntry{firstSeen: time.Now(), source: remoteStr})
+			} else if ttl >= 1 && ttl < routing.MaxRelayTTL {
+				// First sighting carried by a relay: legitimate multi-hop, with
+				// at least one decrement already applied by an upstream hop.
+				n.seenOrigins.Store(srcStr, seenOriginEntry{firstSeen: time.Now(), source: remoteStr})
 			} else {
-				// First time seeing this origin: must come directly with full TTL.
-				if srcPeer != remotePeer || ttl != routing.MaxRelayTTL {
-					log.Debug("Relay frame from %s claims unseen srcPeer %s with ttl=%d; dropping",
-						remotePeer.String(), srcStr, ttl)
-					n.relayDiag.envBad()
-					continue
-				}
-				n.seenOrigins.Store(srcStr, seenOriginEntry{firstSeen: time.Now(), source: remotePeer.String()})
+				// Full TTL claimed over a path that is not the claimed origin.
+				log.Debug("Relay frame from %s claims unseen srcPeer %s with ttl=%d; dropping",
+					remotePeer.String(), srcStr, ttl)
+				n.relayDiag.envBad()
+				continue
 			}
 		}
 		// Return-path liveness signal: we just received a frame ORIGINATING at

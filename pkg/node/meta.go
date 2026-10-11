@@ -807,13 +807,23 @@ func (n *Node) ingestPeekMapNodeInfo(info PeekMapNodeInfo, viaPeer peer.ID) {
 		pID.ShortString(), viaPeer.ShortString(), info.NodeName, info.TapIP, info.TapIPv6, info.TapMAC, info.OS, info.Arch, info.Version, info.IsExitNode, info.AdvertisedSubnets, info.HopDistance)
 
 	// Trust gate (Round 9 HIGH): metadata (MAC, IP, subnets) from a Peek-Map
-	// UPDATE is only trusted when the relay (viaPeer) is already a known peer.
-	// An unknown relay can forge info about any peer — applying it would install
-	// a spoofed MAC/IP/subnet entry that redirects the honest peer's traffic.
+	// UPDATE is only trusted when the relay (viaPeer) is a known peer or one of
+	// our configured bootstrap peers. An unknown relay can forge info about any
+	// peer — applying it would install a spoofed MAC/IP/subnet entry that
+	// redirects the honest peer's traffic.
+	//
+	// A CONFIGURED boot is trusted even before we have a meta stream to it: it
+	// is pinned in config.json by the operator, and the federation metadata it
+	// announces (remote boot names, remote cluster members) is the very thing
+	// that makes a two-cluster topology visible. Demanding a prior meta exchange
+	// would gate the announcement on the connection that the announcement is
+	// supposed to enable. A boot we only DISCOVERED over the wire is not
+	// trusted this way — it must earn trust by connecting.
 	// Topology discovery (SetEdge, recordPeekMapOrigin, considerDiscovered)
-	// still proceeds so cross-cluster connectivity works; once the peer is
-	// connected directly, its meta stream provides the real metadata.
-	viaPeerKnown := n.peerKnownPeer(viaPeer.String())
+	// still proceeds regardless, so cross-cluster connectivity works; once the
+	// peer is connected directly, its meta stream provides the authoritative
+	// metadata and supersedes anything relayed here.
+	viaPeerKnown := n.peerKnownPeer(viaPeer.String()) || n.isConfiguredBootstrapPeer(viaPeer)
 	if viaPeerKnown || n.peerKnownPeer(pID.String()) {
 		n.applyPeerMetaFromLSA(pID, routing.LinkStatePayload{
 			NodeName:          info.NodeName,
@@ -1089,10 +1099,13 @@ func (n *Node) localPeekMapNodeInfo() PeekMapNodeInfo {
 		HopDistance: 0,
 		// Publish our endpoints so peers that learn about us indirectly (through
 		// a boot, or across a federated boot backbone) can actually dial us.
+		// Each addr is stamped with our own /p2p/<id>: registerPeekMapAddrs only
+		// accepts addrs whose suffix names the claimed peer, so a bare addr would
+		// be dropped on every receiver and we would be visible-but-unreachable.
 		// Loopback is not stripped here: the peerstore is a knowledge base and
 		// the dial paths already drop loopback (filterUndialableAddrs), so
 		// filtering twice would only make single-machine setups untestable.
-		Addrs:    MultiaddrsToStrings(n.Host.Addrs()),
+		Addrs:    AddrsWithPeerID(n.Host.Addrs(), n.Host.ID()),
 		ObfsAlgo: c.Obfuscation.Algorithm,
 		ObfsMode: c.Obfuscation.Mode,
 	}

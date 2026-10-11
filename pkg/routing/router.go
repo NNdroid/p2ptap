@@ -480,6 +480,23 @@ type NodeIdentity struct {
 	AdvertisedSubnets []string
 }
 
+// SeedableLSASeq returns a sequence number that ProcessLSA will accept for
+// origin. It sits above the highest sequence this router has seen so far —
+// that is the value the replay guard compares against, not the wall clock —
+// offset by half of maxLSASeqJump so that one or two concurrent real
+// broadcasts from origin do not make it stale, while staying inside the
+// forward-jump cap so the guard cannot mistake it for a poison sequence.
+//
+// Reading the receiver's own recorded sequence (rather than guessing from
+// time.Now().UnixNano()) is what makes a test-originated LSA deterministic:
+// startup and topology-change broadcasts move that sequence during stream
+// warmup, so a clock-derived guess can be either stale or over the jump cap.
+func (r *Router) SeedableLSASeq(origin peer.ID) uint64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.seqMap[origin] + maxLSASeqJump/2
+}
+
 func (r *Router) BuildLSA(seq uint64, id NodeIdentity) *LinkStatePayload {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
