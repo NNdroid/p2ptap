@@ -132,7 +132,7 @@ func TestArbitratePeers(t *testing.T) {
 // rebuildARPIndex can read AllowedSubnetPeers, then seeds the given peers.
 func newArbitrationNode(t *testing.T, order []string, metas map[peer.ID]PeerMeta) *Node {
 	t.Helper()
-	n := &Node{Config: &config.Config{AllowedSubnetPeers: order}}
+	n := &Node{Config: &config.Config{AcceptAdvertisedSubnets: true, AllowedSubnetPeers: order}}
 	for p, m := range metas {
 		n.storePeerMeta(p, m)
 	}

@@ -14,12 +14,22 @@ import (
 // function that touches config more than once and reuse the returned pointer so
 // the whole function observes one consistent configuration version (a mid-frame
 // reload must not tear a decision).
-func (n *Node) config() *config.Config { return n.configPtr.Load() }
+func (n *Node) config() *config.Config {
+	if c := n.configPtr.Load(); c != nil {
+		return c
+	}
+	return n.Config
+}
 
 // CurrentConfig returns the current atomic configuration snapshot (the one the
 // data plane reads). Unlike the exported Config field — which is the immutable
 // construction-time baseline — this reflects any runtime hot-reload.
-func (n *Node) CurrentConfig() *config.Config { return n.configPtr.Load() }
+func (n *Node) CurrentConfig() *config.Config {
+	if c := n.configPtr.Load(); c != nil {
+		return c
+	}
+	return n.Config
+}
 
 // SetConfig atomically publishes a new configuration snapshot. It is the single
 // write path for runtime hot-reload (WebUI save). Only the atomic snapshot is
