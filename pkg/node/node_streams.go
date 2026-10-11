@@ -1640,24 +1640,42 @@ func (n *Node) ProbePeerEchoAddr(targetStr string, targetAddrStr string) *observ
 			}
 		}
 		// Rebuild the multiaddr with resolved IPs replacing the DNS component.
-		parts := strings.SplitN(targetMA.String(), "/", 4)
+		comps := multiaddr.Split(targetMA)
+		dnsIdx := -1
+		for i, c := range comps {
+			if c.Code() == multiaddr.P_DNS4 || c.Code() == multiaddr.P_DNS6 ||
+				c.Code() == multiaddr.P_DNS || c.Code() == multiaddr.P_DNSADDR {
+				dnsIdx = i
+				break
+			}
+		}
 		targetMA = nil
-		if len(parts) >= 4 && (parts[1] == "dns4" || parts[1] == "dns6") {
-			suffix := parts[3]
+		if dnsIdx >= 0 && dnsIdx < len(comps)-1 {
+			var suffix multiaddr.Multiaddr
+			for _, c := range comps[dnsIdx+1:] {
+				suffix = multiaddr.Join(suffix, c.Multiaddr())
+			}
 			for _, ipStr := range resolvedIPs {
 				ip := net.ParseIP(ipStr)
 				if ip == nil {
 					continue
 				}
-				ipProto := "/ip4/"
-				if ip.To4() == nil {
-					ipProto = "/ip6/"
+				var ipProto int
+				if ip.To4() != nil {
+					ipProto = multiaddr.P_IP4
+				} else {
+					ipProto = multiaddr.P_IP6
 				}
-				s := ipProto + ipStr + "/" + suffix
-				if ipMA, err := multiaddr.NewMultiaddr(s); err == nil {
-					if targetMA == nil {
-						targetMA = ipMA
-					}
+				ipComp, err := multiaddr.NewComponent(multiaddr.ProtocolWithCode(ipProto).Name, ipStr)
+				if err != nil {
+					continue
+				}
+				ipMA := ipComp.Multiaddr()
+				if suffix != nil {
+					ipMA = multiaddr.Join(ipMA, suffix)
+				}
+				if targetMA == nil {
+					targetMA = ipMA
 				}
 			}
 		}

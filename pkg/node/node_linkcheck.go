@@ -137,24 +137,42 @@ func (n *Node) DiagnoseLink(multiaddrStr string) *observer.LinkDiagnosis {
 	// validated set is what actually gets dialed.
 	var candidates []ma.Multiaddr
 	if hasDNSComponent(maAddr) && len(resolvedIPs) > 0 {
-		// Multiaddr format: /dns4/hostname/transport/port[/p2p/peerID]
-		// Split by "/" and replace the DNS component (index 1-2) with an IP.
-		parts := strings.SplitN(maAddr.String(), "/", 4)
-		if len(parts) >= 4 && (parts[1] == "dns4" || parts[1] == "dns6") {
-			suffix := parts[3]
+		comps := ma.Split(maAddr)
+		// Find the DNS component and build the suffix from components after it.
+		dnsIdx := -1
+		for i, c := range comps {
+			if c.Code() == ma.P_DNS4 || c.Code() == ma.P_DNS6 ||
+				c.Code() == ma.P_DNS || c.Code() == ma.P_DNSADDR {
+				dnsIdx = i
+				break
+			}
+		}
+		if dnsIdx >= 0 && dnsIdx < len(comps)-1 {
+			// Build suffix from components after the DNS one.
+			var suffix ma.Multiaddr
+			for _, c := range comps[dnsIdx+1:] {
+				suffix = ma.Join(suffix, c.Multiaddr())
+			}
 			for _, ipStr := range resolvedIPs {
 				ip := net.ParseIP(ipStr)
 				if ip == nil {
 					continue
 				}
-				ipProto := "/ip4/"
-				if ip.To4() == nil {
-					ipProto = "/ip6/"
+				var ipProto int
+				if ip.To4() != nil {
+					ipProto = ma.P_IP4
+				} else {
+					ipProto = ma.P_IP6
 				}
-				s := ipProto + ipStr + "/" + suffix
-				if ipMA, err := ma.NewMultiaddr(s); err == nil {
-					candidates = append(candidates, ipMA)
+				ipComp, err := ma.NewComponent(ma.ProtocolWithCode(ipProto).Name, ipStr)
+				if err != nil {
+					continue
 				}
+				ipMA := ipComp.Multiaddr()
+				if suffix != nil {
+					ipMA = ma.Join(ipMA, suffix)
+				}
+				candidates = append(candidates, ipMA)
 			}
 		}
 	}
