@@ -583,6 +583,9 @@ func (n *Node) isIPClaimedByOtherPeer(ip string, senderPeer peer.ID) bool {
 // other allowed none — silently inverting the operator's whitelist.
 func (n *Node) isSubnetPeerAllowed(pID peer.ID) bool {
 	cfg := n.config()
+	if cfg == nil {
+		return false
+	}
 	if !cfg.AcceptAdvertisedSubnets {
 		return false
 	}

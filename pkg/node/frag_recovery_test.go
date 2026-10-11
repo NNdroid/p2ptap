@@ -144,7 +144,7 @@ func TestReceiveFragmentEpochRecovery(t *testing.T) {
 				payload[0], payload[5], payload[6] = 2, 1, 2
 				inner := pack(n.Packer.MakeSeqID(1, epoch), payload)
 				if path == "relay" {
-					envelope, err := routing.PackRelayFrame(local, pid, 3, inner)
+					envelope, err := routing.PackRelayFrame(local, pid, routing.MaxRelayTTL, inner)
 					if err != nil {
 						t.Fatal(err)
 					}

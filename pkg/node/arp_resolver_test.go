@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"p2ptap/pkg/config"
 )
 
 // newTestNodeWithIndex builds a minimal Node and populates the read-optimized
@@ -14,7 +15,11 @@ import (
 // tests exercise index build + lookup exactly as the running daemon does.
 func newTestNodeWithIndex(t *testing.T, peers []PeerMeta) *Node {
 	t.Helper()
-	n := &Node{}
+	cfg := config.DefaultConfig()
+	cfg.AcceptAdvertisedSubnets = true
+	cfg.AllowedSubnetPeers = []string{"*"}
+	n := &Node{Config: cfg}
+	n.SetConfig(cfg)
 	for i, m := range peers {
 		pID := peer.ID("peer-" + string(rune('A'+i)))
 		n.storePeerMeta(pID, m)
