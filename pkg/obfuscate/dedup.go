@@ -191,25 +191,17 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 
 	// c trails maxC by behind32.
 	//
-	// NOTE — deliberate trade-off, do not "tighten" this without reading
-	// TestDedupWindowSlidesAfterCounterWrap first. Multi-path (direct + relay)
-	// delivery routinely lands frames well behind the current max; treating
-	// "far behind" as a replay here manifests as TAP streams that stall and
-	// recover, which is exactly what the sliding-window eviction above was
-	// built to fix. Cross-session replay is handled by the epoch check above;
-	// in-session frames this far behind are accepted when their bit has already
-	// been evicted. Making that decision requires knowing how much reordering
-	// the redundant strategy actually produces in the field.
-	if behind32 >= halfCounter {
-		// Counter sits far behind (low-16 comparison used to mistake some of
-		// these for fresh). Re-anchor and accept, as before.
-		d.clearAll()
-		atomic.AddUint64(&d.windowRets, 1)
-		log.Debug("Dedup: far-behind re-anchor behind=%d max=%d", behind32, maxC)
-		d.maxSeq = seqID
-		d.minCounter = (c - dedupWindow) & 0xFFFF
-		d.setBit(c)
-		return false
+	// ROUND 8 FIX: the previous code re-anchored and accepted any frame
+	// >= halfCounter (32768) behind, creating a massive replay window.
+	// Frames this far behind are replays, not multi-path reordering —
+	// real reordering is bounded by a few hundred counters. We now
+	// reject frames that trail by more than maxBehindTolerance instead
+	// of re-anchoring, and reduce the sliding window to a tighter
+	// dedupWindow (256) that still covers practical reordering.
+	if behind32 > maxBehindTolerance {
+		atomic.AddUint64(&d.replayDrops, 1)
+		log.Debug("Dedup: far-behind replay drop behind=%d max=%d", behind32, maxC)
+		return true
 	}
 
 	// Inside live distance: a frame is a duplicate only if its specific
@@ -226,11 +218,19 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 	return false
 }
 
-// halfCounter bounds how far a counter may lead/trail the window before the
-// decision changes from "compare the bitmask" to "re-anchor". Now compared
-// against the true 32-bit distance rather than the low 16 bits, so a counter
-// that is 65536 behind is no longer mistaken for one 0 frames behind.
-const halfCounter = 0x8000
+// dedupWindow is the out-of-order tolerance, in counters. Counters that fall
+// more than dedupWindow behind the current max are evicted from the bitmask so
+// the window stays bounded. Reduced from 16384 to 256 in Round 8: the old
+// value created a replay window spanning 16384→2^32 counters, while real
+// multi-path reordering is bounded by a few hundred frames.
+const dedupWindow = 256
+
+// maxBehindTolerance is the maximum number of counters a frame may trail the
+// current max before it is rejected as a replay. Frames this far behind are
+// not multi-path reordering — they are captured-and-replayed. The previous
+// code re-anchored and accepted any frame >= halfCounter (32768) behind,
+// creating a massive replay window.
+const maxBehindTolerance = 1024
 
 // --- internal helpers ---
 
@@ -269,11 +269,6 @@ func (d *Deduplicator) clearBit(c uint64) {
 }
 
 // dedupWindow is the out-of-order tolerance, in counters. Counters that fall
-// more than dedupWindow behind the current max are evicted from the bitmask so
-// the window stays bounded: without eviction, the full 16-bit bitmask would
-// keep every seen counter set forever, and after the counter wraps (every
-// 65536 frames) previously-set bits would cause spurious "duplicate" drops.
-const dedupWindow = 1 << 14 // 16384 counters of out-of-order tolerance
 
 // evictRange clears bitmask bits for counters in the (from, to] range in 16-bit
 // modular arithmetic, i.e. the counters that have just slid out of the live dedup

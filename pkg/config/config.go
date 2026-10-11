@@ -798,9 +798,15 @@ func validateCIDR(field, s string, wantIPv6 bool, rejectHostBits bool) error {
 		if bits == 128 && ones == 128 {
 			return fmt.Errorf("invalid config: %s: '%s' is a host address (/128), use a network CIDR like /64", field, s)
 		}
-		// Reject host bits being set (e.g. 192.168.1.5/24 has host bits)
-		if ip.Mask(ipnet.Mask).String() != ip.String() {
-			return fmt.Errorf("invalid config: %s: '%s' has host bits set, use the network address (e.g. '%s')", field, s, ipnet.IP.String())
+		// Reject host bits being set (e.g. 192.168.1.5/24 has host bits).
+		// net.ParseCIDR returns ip already masked to the network address,
+		// so we must re-parse the IP portion of the original string to
+		// detect whether host bits were present in the input.
+		if rawIPStr, _, splitErr := strings.Cut(s, "/"); splitErr {
+			rawIP := net.ParseIP(rawIPStr)
+			if rawIP != nil && !rawIP.Equal(ipnet.IP) {
+				return fmt.Errorf("invalid config: %s: '%s' has host bits set, use the network address (e.g. '%s')", field, s, ipnet.IP.String())
+			}
 		}
 	}
 	return nil

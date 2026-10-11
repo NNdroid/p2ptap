@@ -20,6 +20,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 
 	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/observer"
@@ -738,12 +739,32 @@ func (n *Node) handleLSAStream(s network.Stream) {
 		// (including making itself appear as another peer's direct neighbour,
 		// enabling route hijack). Forwarded LSAs (TTL < DefaultLSATTL) trust
 		// the origin — it was verified at the first hop by the forwarder.
-		if lsa.TTL == routing.DefaultLSATTL {
-			remotePeer := s.Conn().RemotePeer()
-			if lsa.Origin != "" && lsa.Origin != remotePeer.String() {
-				log.Debug("LSA origin mismatch from %s: claims origin %s, dropping",
-					remotePeer.ShortString(), lsa.Origin)
-				continue
+		//
+		// ROUND 8 FIX: the TTL-downgrade bypass. An attacker sets
+		// ttl = DefaultLSATTL - 1 and lsa.Origin = <victim> to skip the
+		// check above. We now track seen origins: the FIRST time an origin
+		// is observed it MUST arrive directly with full TTL. Subsequent
+		// sightings via forwarders are trusted. This closes the bypass
+		// while preserving legitimate forwarding.
+		remotePeer := s.Conn().RemotePeer()
+		if lsa.Origin != "" {
+			if _, known := n.seenOrigins.Load(lsa.Origin); !known {
+				// First time seeing this origin: must come directly.
+				if lsa.Origin != remotePeer.String() || lsa.TTL != routing.DefaultLSATTL {
+					log.Debug("LSA from %s claims unseen origin %s with ttl=%d; dropping",
+						remotePeer.ShortString(), lsa.Origin, lsa.TTL)
+					continue
+				}
+				n.seenOrigins.Store(lsa.Origin, time.Now())
+			} else {
+				// Known origin: still verify full-TTL frames directly.
+				if lsa.TTL == routing.DefaultLSATTL && lsa.Origin != remotePeer.String() {
+					log.Debug("LSA origin mismatch from %s: claims origin %s, dropping",
+						remotePeer.ShortString(), lsa.Origin)
+					continue
+				}
+				// Refresh timestamp on every sighting.
+				n.seenOrigins.Store(lsa.Origin, time.Now())
 			}
 		}
 		if origin, err := peer.Decode(lsa.Origin); err == nil {
@@ -989,16 +1010,34 @@ func (n *Node) handleRelayStream(s network.Stream) {
 		// the origin always starts at MaxRelayTTL and each relay decrements it),
 		// srcPeer must match remotePeer — the authenticated transport peer.
 		// On subsequent hops, remotePeer is the relay hop and srcPeer is the
-		// origin: they are expected to differ. Without this check on the first
-		// hop, an attacker can spoof any peer ID, causing (a) false liveness
-		// for dead peers, (b) unbounded per-peer state growth for invented peer
-		// IDs, and (c) peek-map origin pollution. Mirrors the handleLSAStream
-		// check at :733-736.
-		if ttl == routing.MaxRelayTTL && srcPeer != remotePeer {
-			log.Debug("Relay frame from %s claims srcPeer %s != transport peer; dropping",
-				remotePeer.String(), srcPeer.String())
-			n.relayDiag.envBad()
-			continue
+		// origin: they are expected to differ.
+		//
+		// ROUND 8 FIX: TTL-downgrade bypass. The previous check
+		// (ttl == MaxRelayTTL && srcPeer != remotePeer) was bypassed by
+		// setting ttl = MaxRelayTTL - 1. We now track seen origins: the
+		// FIRST time a srcPeer is observed it MUST arrive directly with
+		// full TTL. Subsequent sightings via forwarders are trusted. This
+		// closes the bypass while preserving legitimate multi-hop relay.
+		if srcPeer != "" {
+			if _, known := n.seenOrigins.Load(srcPeer.String()); !known {
+				// First time seeing this origin: must come directly.
+				if srcPeer != remotePeer || ttl != routing.MaxRelayTTL {
+					log.Debug("Relay frame from %s claims unseen srcPeer %s with ttl=%d; dropping",
+						remotePeer.String(), srcPeer.String(), ttl)
+					n.relayDiag.envBad()
+					continue
+				}
+				n.seenOrigins.Store(srcPeer.String(), time.Now())
+			} else {
+				// Known origin: still verify full-TTL frames directly.
+				if ttl == routing.MaxRelayTTL && srcPeer != remotePeer {
+					log.Debug("Relay frame from %s claims srcPeer %s != transport peer; dropping",
+						remotePeer.String(), srcPeer.String())
+					n.relayDiag.envBad()
+					continue
+				}
+				n.seenOrigins.Store(srcPeer.String(), time.Now())
+			}
 		}
 		// Return-path liveness signal: we just received a frame ORIGINATING at
 		// srcPeer (even if we are merely forwarding it), so its return path to
@@ -1543,6 +1582,17 @@ func (n *Node) ProbePeerEchoAddr(targetStr string, targetAddrStr string) *observ
 	targetMA, err := multiaddr.NewMultiaddr(targetAddrStr)
 	if err != nil {
 		res.Error = fmt.Sprintf("invalid multiaddr '%s': %v", targetAddrStr, err)
+		return res
+	}
+
+	// SSRF guard: reject multiaddrs pointing to loopback, link-local,
+	// unspecified, multicast, or broadcast ranges. Without this, an
+	// attacker-supplied multiaddr (via the WebUI or a mesh peer) could
+	// force a dial to internal services. The existing overlayConnGater
+	// only blocks overlay/TAP CIDRs and is DNS-blind; this check covers
+	// the full SSRF surface.
+	if manet.IsIPLoopback(targetMA) || isSSRFBlockedAddr(targetMA) {
+		res.Error = fmt.Sprintf("multiaddr %s points to a blocked address range (loopback/link-local/multicast/broadcast); refusing to probe", targetAddrStr)
 		return res
 	}
 

@@ -171,6 +171,12 @@ func (n *Node) rebuildARPIndex() {
 			if sub == "" {
 				continue
 			}
+			if validateSubnetCIDR(sub) != nil {
+				continue
+			}
+			if !n.isSubnetPeerAllowed(pID) {
+				continue
+			}
 			if _, ipNet, err := net.ParseCIDR(sub); err == nil {
 				allSubnets = append(allSubnets, arpSubnetEntry{net: ipNet, mac: effectiveMAC, pid: pID})
 			}

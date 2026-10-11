@@ -103,6 +103,28 @@ func (n *Node) DiagnoseLink(multiaddrStr string) *observer.LinkDiagnosis {
 			detail += ": " + strings.Join(resolvedIPs, ", ")
 		}
 		addStep(2, "dns_resolve", detail, true, false, dt)
+
+		// ---- Stage 2b: reject SSRF-dangerous resolved IPs ----
+		// The stage-1b check is IP-component-only and blind to DNS. A DNS
+		// multiaddr like /dns4/169.254.169.254/tcp/80 passes stage-1b because
+		// manet.ToIP returns an error for DNS components. We must therefore
+		// validate the RESOLVED IPs before any dial. Without this, an
+		// attacker-controlled DNS server can return an internal address
+		// (DNS rebinding) and the raw-socket probe at stage 3 will dial it.
+		for _, ipStr := range resolvedIPs {
+			ip := net.ParseIP(ipStr)
+			if ip == nil {
+				continue
+			}
+			if ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+				ip.IsUnspecified() || ip.IsMulticast() ||
+				ip.Equal(net.IPv4bcast) {
+				addStep(2, "dns_ssrf_blocked",
+					fmt.Sprintf("DNS 解析到不可拨号地址 %s（loopback/link-local/多播/广播），拒绝诊断", ipStr),
+					false, true, 0)
+				return finish()
+			}
+		}
 	} else {
 		addStep(2, "dns_resolve", "静态 IP 地址，无需 DNS 解析", true, true, dt)
 	}

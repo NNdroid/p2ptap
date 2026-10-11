@@ -624,6 +624,14 @@ type Node struct {
 	// so users can enable routing to an advertised subnet without editing config.json.
 	manuallyAuthSubnetsMu sync.RWMutex
 	manuallyAuthSubnets   map[string]bool
+
+	// seenOrigins tracks peer IDs we have seen as origins in LSA or relay
+	// frames. The first time an origin is observed it MUST arrive directly
+	// (srcPeer == remotePeer) with full TTL; subsequent sightings can come
+	// via forwarders. This prevents TTL-downgrade bypass where an attacker
+	// sets ttl < MaxTTL to skip the first-hop origin check. Entries are
+	// cleaned up by a janitor after 5 minutes of inactivity.
+	seenOrigins sync.Map // peer.ID → time.Time
 }
 
 func (n *Node) manuallyAuthorizeSubnet(cidr string) {
@@ -2252,6 +2260,27 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		}
 	}()
 
+	// Periodic reaper for seenOrigins entries. Origins that have not been
+	// seen for >5 minutes are evicted to bound memory under peer churn.
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-node.ctx.Done():
+				return
+			case <-ticker.C:
+				cutoff := time.Now().Add(-5 * time.Minute)
+				node.seenOrigins.Range(func(key, value any) bool {
+					if t, ok := value.(time.Time); ok && t.Before(cutoff) {
+						node.seenOrigins.Delete(key)
+					}
+					return true
+				})
+			}
+		}
+	}()
+
 	// Wire the mDNS notifee to the fully-constructed Node so HandlePeerFound can
 	// call dialInParallel (relay fallback, backoff, coalescing) instead of raw
 	// Host.Connect.
@@ -2815,6 +2844,18 @@ func (n *Node) removePeerObf(p peer.ID) {
 	n.decryptResyncCooldown.Delete(p)
 	n.rekeyReqCooldown.Delete(p)
 	n.lastRekeySuccess.Delete(p)
+
+	// ROUND 8: additional churn cleanup for per-peer maps that were
+	// previously never evicted, growing unboundedly under peer churn.
+	n.connGenerations.Delete(p)
+	n.peerRTTMu.Lock()
+	delete(n.peerRTT, p)
+	n.peerRTTMu.Unlock()
+	delete(n.perPeerLastTx, p)
+	delete(n.perPeerLastRx, p)
+	delete(n.perPeerTxSpeed, p)
+	delete(n.perPeerRxSpeed, p)
+	bootSkippedOnce.Delete(p)
 }
 
 // ObfFingerprint returns a short fingerprint of the most recent ephemeral ECDH
