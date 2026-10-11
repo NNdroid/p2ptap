@@ -2,6 +2,7 @@ package node
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,13 +64,21 @@ func (n *Node) checkRelayTransitACL(srcPeer, finalDst peer.ID) bool {
 	if c == nil || !c.ACL.Enable {
 		return true // ACL disabled — fast path
 	}
-	// Build a synthetic "any protocol" inbound frame check: we don't have the
-	// actual frame payload at the relay node, so we check the peer pair against
-	// the ACL rules without protocol/port filters. A peer blocked by a generic
-	// peer_id rule will be denied here; protocol/port-specific rules only apply
-	// at the final hop where the frame is visible.
-	allowed, _ := MatchACL(&c.ACL, nil, srcPeer.String(), false)
-	return allowed
+	// Direct peer-ID rule evaluation: MatchACL returns early when frame is nil
+	// (before reaching the rule loop that checks peer_id), making the old nil
+	// call a silent no-op. We evaluate peer_id rules directly here; protocol/
+	// port rules only apply at the final hop where the frame is visible.
+	for _, rule := range c.ACL.Rules {
+		if rule.PeerID == "" || rule.PeerID == "*" {
+			continue
+		}
+		if rule.PeerID == srcPeer.String() {
+			action := strings.ToLower(rule.Action)
+			return action == "accept" || action == "allow"
+		}
+	}
+	defAct := strings.ToLower(c.ACL.DefaultAction)
+	return defAct == "accept" || defAct == "allow" || defAct == ""
 }
 
 // ACLStatsSnapshotDTO is the JSON shape returned to the WebUI. Defined here

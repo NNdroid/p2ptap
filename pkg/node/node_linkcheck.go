@@ -56,6 +56,18 @@ func (n *Node) DiagnoseLink(multiaddrStr string) *observer.LinkDiagnosis {
 	}
 	addStep(1, "multiaddr_valid", "multiaddr 解析成功", true, false, dt)
 
+	// ---- Stage 1b: reject SSRF-dangerous addresses ----
+	// A user-supplied multiaddr must not point to any undialable range:
+	// loopback, overlay/TAP, link-local, unspecified, multicast, broadcast.
+	// These are never legitimate P2P dial targets and would either leak to
+	// internal services (SSRF) or fail immediately. This is defence-in-depth:
+	// even if the WebUI already validates input, a crafted request could
+	// bypass client-side validation.
+	if manet.IsIPLoopback(maAddr) || isSSRFBlockedAddr(maAddr) {
+		addStep(1, "ssrf_blocked", "地址属于不可拨号范围（loopback/link-local/多播/广播等），拒绝诊断", false, true, 0)
+		return finish()
+	}
+
 	// peer id carried in /p2p/<id>, if any
 	pid, _ := peer.IDFromP2PAddr(maAddr)
 	if pid != "" {

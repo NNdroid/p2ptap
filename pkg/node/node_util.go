@@ -572,11 +572,14 @@ func isOverlayMultiaddr(a multiaddr.Multiaddr) bool {
 	return false
 }
 
-// filterUndialableAddrs drops loopback AND overlay multiaddrs.  It is the
-// receive-side counterpart to filterAdvertisedAddrs: even if a peer
-// advertises a TAP-local address (because its AddrsFactory is not deployed
-// or its peerstore carries a stale entry), we must never dial it — that
-// would route the connection back through our own tunnel.
+// filterUndialableAddrs drops multiaddrs that point to non-routable,
+// locally-reserved, or SSRF-dangerous address ranges. It is the receive-side
+// counterpart to filterAdvertisedAddrs: even if a peer advertises an address
+// we must never dial, we refuse to connect to it.
+//
+// Filtered: loopback, overlay/TAP, link-local, unspecified, multicast,
+// and broadcast. These ranges are never legitimate P2P dial targets and would
+// either fail immediately or leak to internal services (SSRF).
 func filterUndialableAddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 	if len(addrs) == 0 {
 		return addrs
@@ -589,9 +592,27 @@ func filterUndialableAddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 		if isOverlayMultiaddr(a) {
 			continue
 		}
+		if isSSRFBlockedAddr(a) {
+			continue
+		}
 		filtered = append(filtered, a)
 	}
 	return filtered
+}
+
+// isSSRFBlockedAddr reports whether a multiaddr points to a link-local,
+// unspecified, multicast, or broadcast address. These ranges are never
+// legitimate for a P2P dial target. IPv4-mapped IPv6 addresses (e.g.
+// ::ffff:169.254.x.x) are handled transparently by net.IP's methods.
+func isSSRFBlockedAddr(a multiaddr.Multiaddr) bool {
+	ip, err := manet.ToIP(a)
+	if err != nil || ip == nil {
+		return false
+	}
+	return ip.IsLinkLocalUnicast() ||
+		ip.IsUnspecified() ||
+		ip.IsMulticast() ||
+		ip.Equal(net.IPv4bcast)
 }
 
 // overlayConnGater is a libp2p.ConnectionGater that rejects any dial to an

@@ -350,9 +350,15 @@ func (fp *FramePacker) NextSeqID(epoch uint64) uint64 {
 }
 
 // randomJitter returns [-jitter, +jitter].
+// Upper-bound clamped: jitter*2+1 overflows signed int for jitter > math.MaxInt/2,
+// causing randv2.IntN to panic with "invalid argument" and crash the node.
+// The clamp at 1<<20 (1 MiB) is well above any realistic MTU or frame size.
 func randomJitter(jitter int) int {
 	if jitter <= 0 {
 		return 0
+	}
+	if jitter > 1<<20 {
+		jitter = 1 << 20
 	}
 	return randv2.IntN(jitter*2+1) - jitter
 }

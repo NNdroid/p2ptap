@@ -255,7 +255,7 @@ func IsZeroKey(key []byte) bool {
 			return false
 		}
 	}
-	return len(key) > 0
+	return true
 }
 
 // KeyFingerprint returns a short, stable, NON-REVERSIBLE fingerprint of a

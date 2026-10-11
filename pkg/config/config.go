@@ -413,7 +413,7 @@ func DefaultConfig() *Config {
 			AllowModeSwitch:      false,
 			MaxFragSize:          0,
 			Algorithm:            "auto",
-			StrictKeyNegotiation: false,
+			StrictKeyNegotiation: true,
 		},
 		ExitNode: ExitNodeConfig{
 			Enable:        false,

@@ -36,13 +36,10 @@ func parseIPv6Transport(firstHeader byte, payload []byte) (string, int, bool) {
 				return "any", 0, false
 			}
 			inner := payload[0]
-			offset := binary.BigEndian.Uint16(payload[2:4]) & 0xFFF8
-			if offset == 0 {
-				// First fragment carries the transport header at its start.
-				next = inner
-				payload = payload[8:]
-				continue
-			}
+			// Whether offset is 0 (first fragment, transport header present but
+			// untrustworthy) or > 0 (continuation, no transport header), port-
+			// based ACL matching is unsafe: the real transport header may differ
+			// from what the first fragment claims. Return protocol without port.
 			switch inner {
 			case 6:
 				return "tcp", 0, false
@@ -107,7 +104,10 @@ func MatchACL(aclCfg *config.ACLConfig, frame []byte, peerID string, isTx bool) 
 		}
 		ipHeader := frame[14:]
 		ihl := int(ipHeader[0]&0x0f) * 4
-		if len(ipHeader) < ihl {
+		// IHL < 5 (20 bytes) is invalid: the "payload" pointer would land inside
+		// the IP header, letting an attacker read arbitrary IP-header bytes as
+		// the transport port and bypass port-based ACL rules.
+		if ihl < 20 || len(ipHeader) < ihl {
 			return defAllow, ""
 		}
 		protocol := ipHeader[9]
@@ -121,18 +121,19 @@ func MatchACL(aclCfg *config.ACLConfig, frame []byte, peerID string, isTx bool) 
 		// fragment, which IS fully matched). Ports are therefore only
 		// available when the fragment offset is zero.
 		fragOff := int(binary.BigEndian.Uint16(ipHeader[6:8]) & 0x1FFF)
+		mfFlag := (binary.BigEndian.Uint16(ipHeader[6:8]) >> 15) & 1
 		switch protocol {
 		case 1: // ICMP
 			protoStr = "icmp"
 		case 6: // TCP
 			protoStr = "tcp"
-			if fragOff == 0 && len(payload) >= 4 {
+			if fragOff == 0 && mfFlag == 0 && len(payload) >= 4 {
 				dstPort = int(binary.BigEndian.Uint16(payload[2:4]))
 				portsAvailable = true
 			}
 		case 17: // UDP
 			protoStr = "udp"
-			if fragOff == 0 && len(payload) >= 4 {
+			if fragOff == 0 && mfFlag == 0 && len(payload) >= 4 {
 				dstPort = int(binary.BigEndian.Uint16(payload[2:4]))
 				portsAvailable = true
 			}

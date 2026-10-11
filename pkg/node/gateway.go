@@ -347,8 +347,14 @@ func validateSubnetCIDR(subnetCIDR string) error {
 	if subnet.IP.IsLoopback() {
 		return fmt.Errorf("loopback prefix %s is not a valid subnet advertisement", subnetCIDR)
 	}
+	if subnet.IP.IsUnspecified() {
+		return fmt.Errorf("unspecified prefix %s is not a valid subnet advertisement", subnetCIDR)
+	}
 	if subnet.IP.IsLinkLocalUnicast() {
 		return fmt.Errorf("link-local prefix %s is not a valid subnet advertisement", subnetCIDR)
+	}
+	if subnet.IP.IsMulticast() {
+		return fmt.Errorf("multicast prefix %s is not a valid subnet advertisement", subnetCIDR)
 	}
 	return nil
 }

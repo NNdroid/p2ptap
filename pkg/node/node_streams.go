@@ -188,6 +188,15 @@ func (n *Node) handleStream(s network.Stream) {
 			break
 		}
 
+		// Zero-length frames indicate a broken or half-closed stream: ReadFrame
+		// returned no data but no error either. Without this check the loop would
+		// spin at 100% CPU on a peer that keeps the stream open but sends nothing.
+		if readN == 0 {
+			log.Warn("Stream zero-length read from peer %s after %d frames; resetting stream", remotePeer.String(), frameCount)
+			_ = s.Reset()
+			break
+		}
+
 		if n.protoTracker != nil {
 			n.protoTracker.Data.RecordRx(1, uint64(readN))
 		}
@@ -975,6 +984,22 @@ func (n *Node) handleRelayStream(s network.Stream) {
 			continue
 		}
 		n.relayDiag.recv()
+		// First-hop origin verification: only the origin can legitimately send
+		// a relay frame directly. On the first hop (ttl == MaxRelayTTL, since
+		// the origin always starts at MaxRelayTTL and each relay decrements it),
+		// srcPeer must match remotePeer — the authenticated transport peer.
+		// On subsequent hops, remotePeer is the relay hop and srcPeer is the
+		// origin: they are expected to differ. Without this check on the first
+		// hop, an attacker can spoof any peer ID, causing (a) false liveness
+		// for dead peers, (b) unbounded per-peer state growth for invented peer
+		// IDs, and (c) peek-map origin pollution. Mirrors the handleLSAStream
+		// check at :733-736.
+		if ttl == routing.MaxRelayTTL && srcPeer != remotePeer {
+			log.Debug("Relay frame from %s claims srcPeer %s != transport peer; dropping",
+				remotePeer.String(), srcPeer.String())
+			n.relayDiag.envBad()
+			continue
+		}
 		// Return-path liveness signal: we just received a frame ORIGINATING at
 		// srcPeer (even if we are merely forwarding it), so its return path to
 		// us is currently alive. Recorded for the ping-pong probe's outbound-vs-
