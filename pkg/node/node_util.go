@@ -941,8 +941,16 @@ func (n *Node) learnPeerAddressFromFrame(srcPeer peer.ID, srcMAC net.HardwareAdd
 			}
 			changed := false
 			if m.TapIP == "" {
-				m.TapIP = srcIP.String() + "/24"
-				changed = true
+				// Anti-spoof: before writing a fresh TapIP on the first frame,
+				// verify the claimed srcIP is not already owned by another peer.
+				// Without this, an attacker sends srcIP=victim's TapIP and the
+				// function sets the attacker's peerMeta with the victim's IP,
+				// then emits GARP mapping victim's IP → attacker's MAC — a
+				// one-frame L2 MITM.
+				if !n.isIPClaimedByOtherPeer(srcIP.String(), srcPeer) {
+					m.TapIP = srcIP.String() + "/24"
+					changed = true
+				}
 			}
 			// Anti-spoof: only accept the frame's srcIP as the sender's TapIP if
 			// it matches the sender's already-advertised TapIP. Without this, an
@@ -991,8 +999,12 @@ func (n *Node) learnPeerAddressFromFrame(srcPeer peer.ID, srcMAC net.HardwareAdd
 			}
 			changed := false
 			if m.TapIPv6 == "" {
-				m.TapIPv6 = srcIP.String() + "/64"
-				changed = true
+				// Anti-spoof: before writing a fresh TapIPv6 on the first frame,
+				// verify the claimed srcIP is not already owned by another peer.
+				if !n.isIPClaimedByOtherPeer(srcIP.String(), srcPeer) {
+					m.TapIPv6 = srcIP.String() + "/64"
+					changed = true
+				}
 			}
 			cleanTapIPv6 := strings.Split(m.TapIPv6, "/")[0]
 			if m.TapIPv6 != "" && cleanTapIPv6 != srcIP.String() {

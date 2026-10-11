@@ -469,7 +469,7 @@ func (n *Node) applyPeerMetaFromLSA(remotePeer peer.ID, lsa routing.LinkStatePay
 	if len(lsa.AdvertisedSubnets) > 0 {
 		updated.AdvertisedSubnets = lsa.AdvertisedSubnets
 	}
-	updated.IsExitNode = lsa.IsExitNode
+	updated.IsExitNode = updated.IsExitNode || lsa.IsExitNode
 	updated.SyncSource = "LSA / Peek-Map"
 	updated.LastSync = time.Now()
 
@@ -1267,6 +1267,9 @@ func (n *Node) processSubnetRoutes(remotePeer peer.ID, tapIPv4, tapIPv6 string, 
 	if remotePeer == n.Host.ID() || len(subnets) == 0 || !n.config().AcceptAdvertisedSubnets {
 		return
 	}
+	if n.Gateway == nil {
+		return
+	}
 
 	if !n.isSubnetPeerAllowed(remotePeer) {
 		log.Debug("🔒 Subnet route from peer %s ignored (not in allowed_subnet_peers whitelist)", remotePeer.String())
@@ -1299,6 +1302,13 @@ func (n *Node) processSubnetRoutes(remotePeer peer.ID, tapIPv4, tapIPv6 string, 
 			continue
 		}
 
+		// Only install routes for subnets the user has explicitly authorised;
+		// the reconciliation path (line 1346) already checks this, but the
+		// immediate-install path was missing it, so an advertised subnet could
+		// be installed before the first reconciliation pass removes it.
+		if !n.isSubnetManuallyAuthorized(sub) {
+			continue
+		}
 		// Skip OS route installation for a subnet that lost the duplicate/overlap
 		// arbitration to a higher-priority peer; the ARP index already suppressed
 		// its L2/L3 resolution, so installing the route would create a conflicting

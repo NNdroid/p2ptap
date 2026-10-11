@@ -104,14 +104,6 @@ func (n *Node) recordPeerObservedTapMAC(p peer.ID, mac net.HardwareAddr) {
 	if len(mac) != 6 {
 		return
 	}
-	// Reject a registration that would hijack another peer's MAC entry: an
-	// attacker sending frames with srcMAC = honest peer X's TapMAC would
-	// overwrite the MAC table entry, redirecting X's traffic to the attacker.
-	if n.MACTable != nil {
-		if existing, ok := n.MACTable.Lookup(mac); ok && existing != p {
-			return
-		}
-	}
 	// In steady state the peer's emitted MAC never changes, so skip the write
 	// lock entirely once we've recorded it — avoids taking peerProbeMu on every
 	// inbound frame destined for us.
@@ -125,6 +117,16 @@ func (n *Node) recordPeerObservedTapMAC(p peer.ID, mac net.HardwareAddr) {
 	cp := make(net.HardwareAddr, 6)
 	copy(cp, mac)
 	n.peerProbeMu.Lock()
+	// Reject a registration that would hijack another peer's MAC entry: an
+	// attacker sending frames with srcMAC = honest peer X's TapMAC would
+	// overwrite the MAC table entry, redirecting X's traffic to the attacker.
+	// The check must be under the same lock as the write to avoid a TOCTOU race.
+	if n.MACTable != nil {
+		if existing, ok := n.MACTable.Lookup(mac); ok && existing != p {
+			n.peerProbeMu.Unlock()
+			return
+		}
+	}
 	if n.peerObservedTapMAC == nil {
 		n.peerObservedTapMAC = make(map[peer.ID]net.HardwareAddr)
 	}

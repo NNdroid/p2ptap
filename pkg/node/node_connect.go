@@ -84,9 +84,9 @@ func (n *Node) connectWithRetry(pi peer.AddrInfo, peerType string, baseDelay tim
 					delay = 60 * time.Second
 				}
 				// Add jitter (0-25% of delay) to de-synchronize concurrent retries.
-				// Guard against baseDelay=0 which would make delay=0 and rand.Int63n(0) panic.
-				if delay > 0 {
-					jitter := time.Duration(rand.Int63n(int64(delay/4)))
+				// Guard against delay/4==0 which would make rand.Int63n(0) panic.
+				if jitterBase := delay / 4; jitterBase > 0 {
+					jitter := time.Duration(rand.Int63n(int64(jitterBase)))
 					delay += jitter
 				}
 				log.Debug("%s peer %s connect failed (attempt %d): %v, retrying in %v", peerType, pi.ID.String(), attempt, err, delay)
@@ -1288,6 +1288,7 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 			case second := <-ch:
 				if second.err == nil && second.mode == "direct" {
 					log.Info("%s peer %s connected via direct (direct preferred over relay winner)", peerType, pi.ID.String())
+					timer.Stop()
 					if peerType == "bootstrap" {
 						go n.ensureRelayAuth(pi)
 					}

@@ -7,6 +7,8 @@ import (
 	"net"
 	"sync"
 	"syscall"
+
+	"p2ptap/pkg/logger"
 )
 
 // androidProtectFunc is registered by the Android binding layer
@@ -39,8 +41,12 @@ func protectSocketOS(fd uintptr, wanIfName string) error {
 		return fmt.Errorf("android VpnService.protect(fd=%d) returned false", fd)
 	}
 	// Tune socket buffers for high performance throughput on Android (4MB send/recv buffers)
-	_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4*1024*1024)
-	_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, 4*1024*1024)
+	if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4*1024*1024); err != nil {
+		logger.New("Protect").Debug("SetsockoptInt SO_RCVBUF failed for fd=%d: %v", fd, err)
+	}
+	if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, 4*1024*1024); err != nil {
+		logger.New("Protect").Debug("SetsockoptInt SO_SNDBUF failed for fd=%d: %v", fd, err)
+	}
 	return nil
 }
 

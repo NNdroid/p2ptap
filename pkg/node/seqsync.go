@@ -884,6 +884,21 @@ func (n *Node) negotiateObfWithPeer(p peer.ID, peerPub []byte, peerAlgos []byte,
 	algo := selectAlgoSymmetric(n.mySupportedAlgos(), peerAlgos)
 	if algo == obfuscate.ObfAlgoNone {
 		log.Debug("SeqSync: no common algorithm with %s, falling back to plaintext", p.String())
+		// R10: clear any existing cipher so stale keys are not reused when
+		// the peer's supported algorithms change (e.g. after a config reload
+		// removes the common cipher). Without this, the node would continue
+		// encrypting with the old key even though the peer no longer supports
+		// it.
+		if existing := n.peerObf(p); existing != nil {
+			// Copy-on-write: clear the cipher by storing a new PeerObf with
+			// zeroed cipher fields. The old *PeerObf is immutable and may be
+			// read by concurrent goroutines on the data path.
+			cleared := &PeerObf{
+				algo:       obfuscate.ObfAlgoNone,
+				negotiated: false,
+			}
+			n.storePeerObf(p, cleared)
+		}
 		return
 	}
 	txKey, rxKey := keyA, keyB

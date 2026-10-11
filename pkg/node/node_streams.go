@@ -748,23 +748,33 @@ func (n *Node) handleLSAStream(s network.Stream) {
 		// while preserving legitimate forwarding.
 		remotePeer := s.Conn().RemotePeer()
 		if lsa.Origin != "" {
-			if _, known := n.seenOrigins.Load(lsa.Origin); !known {
-				// First time seeing this origin: must come directly.
+			// Snapshot frames bypass the origin check: the cached LSA was
+			// originally verified when first received, and the receiver may
+			// not be directly connected to the origin.
+			if lsa.Snapshot {
+				n.seenOrigins.Store(lsa.Origin, seenOriginEntry{firstSeen: time.Now(), source: remotePeer.String()})
+			} else if val, known := n.seenOrigins.Load(lsa.Origin); known {
+				entry := val.(seenOriginEntry)
+				// Known origin: the frame must come from the origin itself
+				// or from the peer that first introduced it. This closes
+				// the TTL-downgrade bypass where an attacker sends
+				// ttl < max claiming a known origin from a different peer.
+				remoteStr := remotePeer.String()
+				if remoteStr != lsa.Origin && remoteStr != entry.source {
+					log.Debug("LSA from %s claims known origin %s (source=%s) but is not origin or source; dropping",
+						remotePeer.ShortString(), lsa.Origin, entry.source)
+					continue
+				}
+				entry.firstSeen = time.Now()
+				n.seenOrigins.Store(lsa.Origin, entry)
+			} else {
+				// First time seeing this origin: must come directly with full TTL.
 				if lsa.Origin != remotePeer.String() || lsa.TTL != routing.DefaultLSATTL {
 					log.Debug("LSA from %s claims unseen origin %s with ttl=%d; dropping",
 						remotePeer.ShortString(), lsa.Origin, lsa.TTL)
 					continue
 				}
-				n.seenOrigins.Store(lsa.Origin, time.Now())
-			} else {
-				// Known origin: still verify full-TTL frames directly.
-				if lsa.TTL == routing.DefaultLSATTL && lsa.Origin != remotePeer.String() {
-					log.Debug("LSA origin mismatch from %s: claims origin %s, dropping",
-						remotePeer.ShortString(), lsa.Origin)
-					continue
-				}
-				// Refresh timestamp on every sighting.
-				n.seenOrigins.Store(lsa.Origin, time.Now())
+				n.seenOrigins.Store(lsa.Origin, seenOriginEntry{firstSeen: time.Now(), source: remotePeer.String()})
 			}
 		}
 		if origin, err := peer.Decode(lsa.Origin); err == nil {
@@ -897,8 +907,11 @@ func (n *Node) pushLSASnapshotToPeer(target peer.ID) {
 	for _, lsa := range snapshot {
 		// Refresh TTL so the snapshot can propagate onward from the receiver
 		// (the cached copy may have arrived with an almost-exhausted TTL).
+		// Mark as snapshot so the receiver bypasses the seenOrigins first-hop
+		// check — the receiver may not be directly connected to the origin.
 		replay := *lsa
 		replay.TTL = routing.DefaultLSATTL
+		replay.Snapshot = true
 		data, err := json.Marshal(&replay)
 		if err != nil {
 			continue
@@ -1019,24 +1032,31 @@ func (n *Node) handleRelayStream(s network.Stream) {
 		// full TTL. Subsequent sightings via forwarders are trusted. This
 		// closes the bypass while preserving legitimate multi-hop relay.
 		if srcPeer != "" {
-			if _, known := n.seenOrigins.Load(srcPeer.String()); !known {
-				// First time seeing this origin: must come directly.
+			srcStr := srcPeer.String()
+			if val, known := n.seenOrigins.Load(srcStr); known {
+				entry := val.(seenOriginEntry)
+				// Known origin: the frame must come from the origin itself
+				// or from the peer that first introduced it. This closes
+				// the TTL-downgrade bypass where an attacker sends
+				// ttl < max claiming a known origin from a different peer.
+				remoteStr := remotePeer.String()
+				if remoteStr != srcStr && remoteStr != entry.source {
+					log.Debug("Relay frame from %s claims known srcPeer %s (source=%s) but is not origin or source; dropping",
+						remotePeer.String(), srcStr, entry.source)
+					n.relayDiag.envBad()
+					continue
+				}
+				entry.firstSeen = time.Now()
+				n.seenOrigins.Store(srcStr, entry)
+			} else {
+				// First time seeing this origin: must come directly with full TTL.
 				if srcPeer != remotePeer || ttl != routing.MaxRelayTTL {
 					log.Debug("Relay frame from %s claims unseen srcPeer %s with ttl=%d; dropping",
-						remotePeer.String(), srcPeer.String(), ttl)
+						remotePeer.String(), srcStr, ttl)
 					n.relayDiag.envBad()
 					continue
 				}
-				n.seenOrigins.Store(srcPeer.String(), time.Now())
-			} else {
-				// Known origin: still verify full-TTL frames directly.
-				if ttl == routing.MaxRelayTTL && srcPeer != remotePeer {
-					log.Debug("Relay frame from %s claims srcPeer %s != transport peer; dropping",
-						remotePeer.String(), srcPeer.String())
-					n.relayDiag.envBad()
-					continue
-				}
-				n.seenOrigins.Store(srcPeer.String(), time.Now())
+				n.seenOrigins.Store(srcStr, seenOriginEntry{firstSeen: time.Now(), source: remotePeer.String()})
 			}
 		}
 		// Return-path liveness signal: we just received a frame ORIGINATING at
@@ -1594,6 +1614,57 @@ func (n *Node) ProbePeerEchoAddr(targetStr string, targetAddrStr string) *observ
 	if manet.IsIPLoopback(targetMA) || isSSRFBlockedAddr(targetMA) {
 		res.Error = fmt.Sprintf("multiaddr %s points to a blocked address range (loopback/link-local/multicast/broadcast); refusing to probe", targetAddrStr)
 		return res
+	}
+
+	// ---- Close the DNS rebinding TOCTOU window ----
+	// If the multiaddr contains a DNS component, the dialer below would
+	// re-resolve it. An attacker-controlled DNS server could swap the answer
+	// to an internal address between this SSRF check and the Connect call.
+	// Resolve once here, validate the IPs, and dial the IP-based multiaddrs.
+	if hasDNSComponent(targetMA) {
+		resolvedIPs, dnsErr := lookupDNSMultiaddr(targetMA)
+		if dnsErr != nil {
+			res.Error = fmt.Sprintf("DNS resolution failed for %s: %v", targetAddrStr, dnsErr)
+			return res
+		}
+		for _, ipStr := range resolvedIPs {
+			ip := net.ParseIP(ipStr)
+			if ip == nil {
+				continue
+			}
+			if ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+				ip.IsUnspecified() || ip.IsMulticast() ||
+				ip.Equal(net.IPv4bcast) {
+				res.Error = fmt.Sprintf("DNS resolved to blocked address %s; refusing to probe", ipStr)
+				return res
+			}
+		}
+		// Rebuild the multiaddr with resolved IPs replacing the DNS component.
+		parts := strings.SplitN(targetMA.String(), "/", 4)
+		targetMA = nil
+		if len(parts) >= 4 && (parts[1] == "dns4" || parts[1] == "dns6") {
+			suffix := parts[3]
+			for _, ipStr := range resolvedIPs {
+				ip := net.ParseIP(ipStr)
+				if ip == nil {
+					continue
+				}
+				ipProto := "/ip4/"
+				if ip.To4() == nil {
+					ipProto = "/ip6/"
+				}
+				s := ipProto + ipStr + "/" + suffix
+				if ipMA, err := multiaddr.NewMultiaddr(s); err == nil {
+					if targetMA == nil {
+						targetMA = ipMA
+					}
+				}
+			}
+		}
+		if targetMA == nil {
+			res.Error = fmt.Sprintf("DNS resolved to no valid IPs for %s", targetAddrStr)
+			return res
+		}
 	}
 
 	// Force a fresh dial of the explicit target multiaddr: clear any dial

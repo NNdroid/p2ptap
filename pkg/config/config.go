@@ -536,8 +536,14 @@ func (c *Config) Validate() error {
 		if sub == "" {
 			continue
 		}
-		if err := validateCIDR("advertised_subnets", sub, false, true); err != nil {
-			return fmt.Errorf("invalid config: advertised_subnets[%d]: %v", i, err)
+		// Detect family from the input: advertised subnets can be IPv4 or IPv6.
+		if _, ipNet, parseErr := net.ParseCIDR(sub); parseErr == nil {
+			wantV6 := ipNet.IP.To4() == nil
+			if err := validateCIDR("advertised_subnets", sub, wantV6, true); err != nil {
+				return fmt.Errorf("invalid config: advertised_subnets[%d]: %v", i, err)
+			}
+		} else {
+			return fmt.Errorf("invalid config: advertised_subnets[%d]: %v", i, parseErr)
 		}
 	}
 
@@ -643,6 +649,22 @@ func (c *Config) Validate() error {
 	}
 	if c.Obfuscation.MinSize > 0 && c.Obfuscation.MaxSize > 0 && c.Obfuscation.MinSize > c.Obfuscation.MaxSize {
 		return fmt.Errorf("invalid config: obfuscation.min_size: %d must be <= max_size %d", c.Obfuscation.MinSize, c.Obfuscation.MaxSize)
+	}
+	// Upper bounds: the obfuscate frame header + payload cannot exceed
+	// MaxFrameSize (65535), so any configured size above that is useless
+	// and would cause ErrBufferTooSmall on every Pack call.
+	const maxObfSize = 65535
+	if c.Obfuscation.FixedSize > maxObfSize {
+		return fmt.Errorf("invalid config: obfuscation.fixed_size: %d must be <= %d", c.Obfuscation.FixedSize, maxObfSize)
+	}
+	if c.Obfuscation.BlockSize > maxObfSize {
+		return fmt.Errorf("invalid config: obfuscation.block_size: %d must be <= %d", c.Obfuscation.BlockSize, maxObfSize)
+	}
+	if c.Obfuscation.MinSize > maxObfSize {
+		return fmt.Errorf("invalid config: obfuscation.min_size: %d must be <= %d", c.Obfuscation.MinSize, maxObfSize)
+	}
+	if c.Obfuscation.MaxSize > maxObfSize {
+		return fmt.Errorf("invalid config: obfuscation.max_size: %d must be <= %d", c.Obfuscation.MaxSize, maxObfSize)
 	}
 	if c.Obfuscation.MaxFragSize < 0 {
 		return fmt.Errorf("invalid config: obfuscation.max_frag_size: %d must be >= 0 (0 = auto)", c.Obfuscation.MaxFragSize)

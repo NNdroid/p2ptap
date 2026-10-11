@@ -60,11 +60,15 @@ func (p *protectNet) ListenUDP(network string, locAddr *net.UDPAddr) (transport.
 }
 
 func (p *protectNet) ListenTCP(network string, laddr *net.TCPAddr) (transport.TCPListener, error) {
+	// Use the base implementation to avoid type-mismatch issues with
+	// pion's transport.TCPListener interface; the socket-control hook is
+	// applied via the base's internal net.ListenConfig.
 	return p.base.ListenTCP(network, laddr)
 }
 
 func (p *protectNet) Dial(network, address string) (net.Conn, error) {
-	return p.base.Dial(network, address)
+	d := &net.Dialer{Control: GetSocketControlHook("")}
+	return d.Dial(network, address)
 }
 
 func (p *protectNet) DialUDP(network string, laddr, raddr *net.UDPAddr) (transport.UDPConn, error) {
@@ -130,5 +134,15 @@ func (p *protectNet) InterfaceByName(name string) (*transport.Interface, error) 
 }
 
 func (p *protectNet) CreateDialer(dialer *net.Dialer) transport.Dialer {
+	// Inject the socket-control hook if the caller did not provide one, so
+	// that every dial through this transport is pinned to the physical NIC.
+	if dialer == nil || dialer.Control == nil {
+		hook := GetSocketControlHook("")
+		if dialer == nil {
+			dialer = &net.Dialer{Control: hook}
+		} else {
+			dialer.Control = hook
+		}
+	}
 	return p.base.CreateDialer(dialer)
 }

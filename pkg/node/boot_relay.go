@@ -379,13 +379,6 @@ func (n *Node) handleBootRelayDownlink(s network.Stream, boot peer.ID) {
 			continue
 		}
 
-		// Return-path liveness and provenance tracking: an inbound frame
-		// from srcPeer via boot proves the return path is alive and records
-		// that srcPeer is reachable through this boot hop.
-		n.notePeerRx(srcPeer)
-		if boot != "" && boot != srcPeer {
-			n.recordPeekMapOrigin(srcPeer, boot, 1, false)
-		}
 		// Control-plane frames (SeqSync / LSA / Meta / Echo for a relay-only
 		// peer) carry the raw inner protocol bytes and must NOT be decrypted with
 		// a per-peer cipher — that cipher is exactly what the handshake is trying
@@ -411,6 +404,13 @@ func (n *Node) handleBootRelayDownlink(s network.Stream, boot peer.ID) {
 		if uerr != nil {
 			log.Debug("[boot-relay] downlink Unpack err=%v from origin=%s; dropping", uerr, srcPeer.String())
 			continue
+		}
+		// Return-path liveness and provenance tracking: only record after
+		// successful decryption and unpack, so a malformed or undecryptable
+		// frame cannot keep a stale peer connection alive.
+		n.notePeerRx(srcPeer)
+		if boot != "" && boot != srcPeer {
+			n.recordPeekMapOrigin(srcPeer, boot, 1, false)
 		}
 		n.deliverRelayedFrameToTAP(unpacked, srcPeer, boot, seqID)
 	}

@@ -795,14 +795,16 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 					return it.buildHTTPResponse(400, "application/json", []byte(`{"error":"invalid exit_tap_ipv6"}`))
 				}
 				if cleanIP == "" && cleanIP6 == "" {
-					return it.buildHTTPResponse(400, "application/json", []byte(fmt.Sprintf(`{"error":"no TAP IP address found for peer '%s'"}`, incoming.PeerID)))
+					body, _ := json.Marshal(map[string]string{"error": "no TAP IP address found for peer " + incoming.PeerID})
+					return it.buildHTTPResponse(400, "application/json", body)
 				}
 				var endpoints []string
 				if it.collector.ResolvePeerAddrs != nil {
 					endpoints = it.collector.ResolvePeerAddrs(incoming.PeerID)
 				}
 				if err := it.collector.Gateway.SetExitNode(incoming.PeerID, cleanIP, cleanIP6, endpoints); err != nil {
-					return it.buildHTTPResponse(500, "application/json", []byte(fmt.Sprintf(`{"error":"%v"}`, err)))
+					body, _ := json.Marshal(map[string]string{"error": err.Error()})
+					return it.buildHTTPResponse(500, "application/json", body)
 				}
 			} else if incoming.Action == "clear" {
 				if err := it.collector.Gateway.ClearExitNode(); err != nil {

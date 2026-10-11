@@ -335,6 +335,14 @@ func (n *Node) recordRelayedTapDelivery(srcPeer peer.ID, payload []byte) {
 // expensive operation in the Go scheduler — is amortised.
 func (n *Node) tapWriteLoop() {
 	defer n.wg.Done()
+	// R10: recover from panics in the TAP write path. A panic in
+	// tapWrite (e.g. from a corrupted frame buffer) would kill this
+	// goroutine and stop all TAP writes, black-holing the entire mesh.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("tapWriteLoop: panic recovered: %v", r)
+		}
+	}()
 	// Reuse a worker-local batch slot to avoid per-batch allocation.
 	var batch [32]tapWriteJob
 	for {
@@ -408,6 +416,12 @@ func (n *Node) tapWriteUrgent(payload []byte) {
 // forwarding path cannot starve diagnostic probe replies.
 func (n *Node) tapWriteUrgentLoop() {
 	defer n.wg.Done()
+	// R10: recover from panics in the urgent TAP write path.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("tapWriteUrgentLoop: panic recovered: %v", r)
+		}
+	}()
 	for {
 		select {
 		case <-n.ctx.Done():

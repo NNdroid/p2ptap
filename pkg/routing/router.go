@@ -60,6 +60,13 @@ type LinkStatePayload struct {
 	IsExitNode bool   `json:"is_exit_node,omitempty"`
 	// AdvertisedSubnets carries this node's LAN subnets routed across the mesh.
 	AdvertisedSubnets []string `json:"advertised_subnets,omitempty"`
+
+	// Snapshot is set to true when this LSA is part of a topology snapshot
+	// replayed to a freshly connected peer. Snapshot frames bypass the
+	// seenOrigins first-hop origin check because the receiver may not be
+	// directly connected to the origin; the cached LSA was originally
+	// verified when first received.
+	Snapshot bool `json:"snapshot,omitempty"`
 }
 
 type RouteInfo struct {
@@ -664,7 +671,11 @@ func (r *Router) findSubPath(src, dst, exclude peer.ID) ([]peer.ID, int64) {
 			if v == exclude || v == u || visited[v] {
 				continue
 			}
-			newDist := dist[u] + edgeCost(edge)
+			edgeC := edgeCost(edge)
+			if dist[u] > math.MaxInt64-edgeC {
+				continue
+			}
+			newDist := dist[u] + edgeC
 			if old, ok := dist[v]; !ok || newDist < old {
 				dist[v] = newDist
 				prev[v] = u

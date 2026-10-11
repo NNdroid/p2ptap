@@ -627,11 +627,22 @@ type Node struct {
 
 	// seenOrigins tracks peer IDs we have seen as origins in LSA or relay
 	// frames. The first time an origin is observed it MUST arrive directly
-	// (srcPeer == remotePeer) with full TTL; subsequent sightings can come
-	// via forwarders. This prevents TTL-downgrade bypass where an attacker
-	// sets ttl < MaxTTL to skip the first-hop origin check. Entries are
-	// cleaned up by a janitor after 5 minutes of inactivity.
-	seenOrigins sync.Map // peer.ID → time.Time
+	// (srcPeer == remotePeer) with full TTL; subsequent sightings must come
+	// from the origin itself or the peer that first introduced it. This
+	// prevents TTL-downgrade bypass where an attacker sets ttl < MaxTTL to
+	// skip the first-hop origin check. Entries are cleaned up by a janitor
+	// after 5 minutes of inactivity.
+	seenOrigins sync.Map // peer.ID string → seenOriginEntry
+}
+
+// seenOriginEntry records when an origin was first observed and which peer
+// first introduced it. For subsequent sightings of a known origin, frames
+// must come from the origin itself or from the stored source peer — this
+// prevents TTL-downgrade forgery where an attacker sends a frame with
+// ttl < max claiming a known origin but from a different peer.
+type seenOriginEntry struct {
+	firstSeen time.Time
+	source    string // peer.ID of the peer that first introduced this origin
 }
 
 func (n *Node) manuallyAuthorizeSubnet(cidr string) {
@@ -2272,7 +2283,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			case <-ticker.C:
 				cutoff := time.Now().Add(-5 * time.Minute)
 				node.seenOrigins.Range(func(key, value any) bool {
-					if t, ok := value.(time.Time); ok && t.Before(cutoff) {
+					if entry, ok := value.(seenOriginEntry); ok && entry.firstSeen.Before(cutoff) {
 						node.seenOrigins.Delete(key)
 					}
 					return true

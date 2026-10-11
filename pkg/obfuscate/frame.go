@@ -684,7 +684,7 @@ func UnpackWith(frame []byte, cipher ObfCipher) (seqID uint64, payload []byte, e
 	}
 	raw := frame[HeaderLen : HeaderLen+pLen]
 
-	if cipher != nil && obfType != ObfAlgoNone {
+	if cipher != nil {
 		// Nonce = the same 12 bytes derived from the immutable header that
 		// EncryptPayloadRegion used to Seal this frame (see obfNonceFromHeader).
 		// Historically this used frame[2:14] (SeqID+ObfType+PayloadLen), which

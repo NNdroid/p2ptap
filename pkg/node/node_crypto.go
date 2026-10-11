@@ -136,6 +136,17 @@ func (n *Node) obfCipherForPeer(p peer.ID) obfuscate.ObfCipher {
 			p.String(), po.framesSinceRekey.Load(), obfRekeyFrameThreshold)
 		n.triggerPeerRekey(p)
 	}
+	// R10: Hard stop when the nonce budget is exhausted and a re-key is
+	// in flight. Returning nil causes the caller to send the frame in
+	// plaintext rather than reusing a (key, nonce) pair under the
+	// current key. The re-key completes asynchronously and the next
+	// frame will be encrypted with a fresh key/nonce.
+	if po.framesSinceRekey.Load() > obfRekeyFrameThreshold {
+		if _, rekeying := n.rekeyPeers.Load(p); rekeying {
+			log.Debug("Tx: nonce budget exhausted for %s; re-key in flight — dropping encryption for this frame", p.String())
+			return nil
+		}
+	}
 	// PERF: guarded by IsDebug() on purpose. Go evaluates arguments at the CALL
 	// SITE, so without this guard every frame pays peer.String() (base58, ~930ns)
 	// + KeyFingerprint() (SHA-256+hex) even when debug logging is suppressed —

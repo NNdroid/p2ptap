@@ -165,21 +165,21 @@ func shouldProtect(address string) bool {
 	if ip.IsLoopback() {
 		return false
 	}
-	if runtime.GOOS == "android" {
-		// On Android, all physical P2P transport sockets (including dials to 10.x.x.x LAN peers)
-		// MUST be protected via VpnService.protect(fd) so they never loop into the TUN interface.
-		return true
+	// TAP/mesh overlay addresses must NOT be pinned to the physical NIC, even
+	// on Android. A socket dialing a mesh peer must be captured by the TAP,
+	// not forced onto the physical adapter. Without this check before the
+	// Android return, overlay IPs on Android would be incorrectly pinned.
+	if isOverlayIPAddress(address) {
+		return false
 	}
 	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 		return false
 	}
-	// TAP/mesh overlay addresses must NOT be pinned to the physical NIC. A
-	// listener explicitly bound to a TAP IP (the "strict" listener-split case)
-	// must keep egressing via the TAP device itself, and a socket dialing a
-	// mesh peer must be captured by the TAP, not forced onto the physical
-	// adapter. p2ptap overlay ranges: 10.0.0.0/8, 172.16.0.0/12, fd00::/8.
-	if isOverlayIPAddress(address) {
-		return false
+	if runtime.GOOS == "android" {
+		// On Android, all physical P2P transport sockets (including dials to
+		// 10.x.x.x LAN peers) MUST be protected via VpnService.protect(fd)
+		// so they never loop into the TUN interface.
+		return true
 	}
 	return true
 }
@@ -208,6 +208,12 @@ func GetSocketControlHook(wanIfName string) func(network, address string, c sysc
 // addresses are routed through the virtual TAP tunnel, so sockets bound to or
 // dialing them must NOT be pinned to the physical NIC via IP_UNICAST_IF /
 // SO_BINDTODEVICE — doing so would break tunnel-local traffic.
+// isOverlayIPAddress reports whether the given address falls inside one of
+// the well-known TAP/VPN CIDRs. This standalone version uses a broad static
+// check and is suitable for callers that lack Node context (e.g.
+// physicalNICIPs, expandListenAddr). For callers that have a Node instance,
+// prefer the Node method n.isOverlayIPAddress which checks the actual
+// configured TAP networks.
 func isOverlayIPAddress(address string) bool {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
@@ -218,13 +224,45 @@ func isOverlayIPAddress(address string) bool {
 		return false
 	}
 	if ip4 := ip.To4(); ip4 != nil {
+		// RFC1918 private ranges
 		if ip4[0] == 10 || (ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31) {
 			return true
 		}
-	} else if ip16 := ip.To16(); ip16 != nil {
-		if ip16[0] == 0xfd {
+		// CGNAT shared address space (100.64.0.0/10) — commonly used by TAP
+		// VPNs to avoid conflicts with corporate RFC1918 addresses.
+		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
 			return true
 		}
+	} else if ip16 := ip.To16(); ip16 != nil {
+		// Teredo, IPv6 unique-local (fd00::/8), and IPv6 link-local
+		if ip16[0] == 0xfd || ip16[0] == 0xfc {
+			return true
+		}
+		if ip16[0] == 0xfe && ip16[1] == 0x80 {
+			return true
+		}
+	}
+	return false
+}
+
+// isOverlayIPAddress (Node method) checks the address against the node's
+// actual configured TAP networks. This is more accurate than the standalone
+// version because it catches any user-configured CIDR, not just the well-known
+// ranges.
+func (n *Node) isOverlayIPAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if n.localV4Net != nil && n.localV4Net.Contains(ip) {
+		return true
+	}
+	if n.localV6Net != nil && n.localV6Net.Contains(ip) {
+		return true
 	}
 	return false
 }

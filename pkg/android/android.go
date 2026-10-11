@@ -116,6 +116,17 @@ func init() {
 			if err != nil {
 				conn, err = d.DialContext(ctx, "udp", "1.1.1.1:53")
 			}
+			// TCP DNS fallback: some networks block UDP/53 but allow TCP/53,
+			// so fall back to TCP if all UDP attempts fail.
+			if err != nil {
+				conn, err = d.DialContext(ctx, "tcp", "223.5.5.5:53")
+			}
+			if err != nil {
+				conn, err = d.DialContext(ctx, "tcp", "8.8.8.8:53")
+			}
+			if err != nil {
+				conn, err = d.DialContext(ctx, "tcp", "1.1.1.1:53")
+			}
 			return conn, err
 		},
 	}

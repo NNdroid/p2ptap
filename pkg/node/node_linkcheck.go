@@ -129,10 +129,38 @@ func (n *Node) DiagnoseLink(multiaddrStr string) *observer.LinkDiagnosis {
 		addStep(2, "dns_resolve", "静态 IP 地址，无需 DNS 解析", true, true, dt)
 	}
 
-	// Candidates to dial: libp2p (and the raw-socket probe) resolve /dns* components
-	// internally, so we keep the original multiaddr (with its DNS component) as-is
-	// rather than expanding it by hand.
-	candidates := []ma.Multiaddr{maAddr}
+	// ---- Close the DNS rebinding TOCTOU window ----
+	// If the multiaddr contains a DNS component, the dialer at Stage 3/4 would
+	// resolve it again. An attacker-controlled DNS server could swap the answer
+	// to an internal address between the Stage-2 validation and the Stage-3 dial.
+	// Replace the DNS component with the IPs already validated above so the
+	// validated set is what actually gets dialed.
+	var candidates []ma.Multiaddr
+	if hasDNSComponent(maAddr) && len(resolvedIPs) > 0 {
+		// Multiaddr format: /dns4/hostname/transport/port[/p2p/peerID]
+		// Split by "/" and replace the DNS component (index 1-2) with an IP.
+		parts := strings.SplitN(maAddr.String(), "/", 4)
+		if len(parts) >= 4 && (parts[1] == "dns4" || parts[1] == "dns6") {
+			suffix := parts[3]
+			for _, ipStr := range resolvedIPs {
+				ip := net.ParseIP(ipStr)
+				if ip == nil {
+					continue
+				}
+				ipProto := "/ip4/"
+				if ip.To4() == nil {
+					ipProto = "/ip6/"
+				}
+				s := ipProto + ipStr + "/" + suffix
+				if ipMA, err := ma.NewMultiaddr(s); err == nil {
+					candidates = append(candidates, ipMA)
+				}
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		candidates = []ma.Multiaddr{maAddr}
+	}
 
 	// transport-only variants (strip /p2p/<id>) for raw socket + libp2p dial
 	peerAddrs := make([]ma.Multiaddr, 0, len(candidates))
