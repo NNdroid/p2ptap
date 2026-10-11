@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -616,7 +617,7 @@ func (c *Config) Validate() error {
 	// any eavesdropper join the mesh and decrypt traffic; a weak auth_token
 	// lets anyone control the WebUI. ---
 	if c.PSK != "" {
-		if err := validateSecretEntropy("psk", c.PSK, 16, 32); err != nil {
+		if err := validatePSK(c.PSK); err != nil {
 			return err
 		}
 	}
@@ -756,6 +757,59 @@ func (c *Config) Validate() error {
 }
 
 // --- Validation helpers ---
+
+// validatePSK checks the mesh pre-shared key. Deployment practice is a
+// hex-encoded key — the key a WebUI/server installer generates is 32 bytes,
+// i.e. 64 hex characters — so for hex input the length bound must be expressed
+// in BYTES. Measuring characters instead capped the PSK at 16 bytes and
+// rejected the standard key, which made a correctly configured client refuse to
+// start against a server using its own shipped key.
+//
+// The bound is a sanity limit, not a protocol one: libp2p SHA-256 hashes the
+// PSK when deriving its network keys, so any length is cryptographically valid.
+// The cap exists to catch a whole key file pasted into the field — the PSK is
+// fed to every per-peer key derivation on connect, so a huge value is a
+// self-inflicted performance trap.
+func validatePSK(psk string) error {
+	const (
+		pskMinBytes = 8  // 16 hex chars; matches the former 16-character minimum
+		pskMaxBytes = 64 // 128 hex chars; matches the plaintext character cap
+		pskMinChars = 16
+		pskMaxChars = 128
+	)
+	if raw, err := hex.DecodeString(psk); err == nil {
+		if len(raw) < pskMinBytes {
+			return fmt.Errorf("invalid config: psk: %d hex characters decodes to %d bytes, below the %d-byte minimum for adequate entropy",
+				len(psk), len(raw), pskMinBytes)
+		}
+		if len(raw) > pskMaxBytes {
+			return fmt.Errorf("invalid config: psk: %d hex characters decodes to %d bytes, above the %d-byte maximum",
+				len(psk), len(raw), pskMaxBytes)
+		}
+		// A hex key uses a fixed alphabet, so it spans the whole character space
+		// by construction and the plaintext diversity check would be meaningless
+		// — it would spuriously reject a random key that happens to contain only
+		// digits.
+		return nil
+	}
+	if isHexString(psk) && len(psk)%2 == 1 {
+		return fmt.Errorf("invalid config: psk: %d hex characters is an odd count; a hex key must encode a whole number of bytes", len(psk))
+	}
+	return validateSecretEntropy("psk", psk, pskMinChars, pskMaxChars)
+}
+
+// isHexString reports whether s is non-empty and consists solely of hex digits.
+func isHexString(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f') || (s[i] >= 'A' && s[i] <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
 
 // validateSecretEntropy checks that a secret (PSK, auth_token) has at least
 // minLen characters and at most maxLen, and contains at least 2 distinct
