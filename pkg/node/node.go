@@ -2923,10 +2923,18 @@ func (n *Node) removePeerObf(p peer.ID) {
 	n.peerRTTMu.Lock()
 	delete(n.peerRTT, p)
 	n.peerRTTMu.Unlock()
+	// The per-peer speed maps are plain maps shared with the sampling baseline
+	// (samplePeerSpeeds) and the Web UI / JNI readers (getPeerSpeed,
+	// peerSpeedMeasured), all of which already hold perPeerBytesMu. Dropping an
+	// entry without it races: Disconnected fires one callback per dropped
+	// connection, so two of them delete the same peer concurrently — a write vs
+	// write on the map header (caught by the CI race detector).
+	n.perPeerBytesMu.Lock()
 	delete(n.perPeerLastTx, p)
 	delete(n.perPeerLastRx, p)
 	delete(n.perPeerTxSpeed, p)
 	delete(n.perPeerRxSpeed, p)
+	n.perPeerBytesMu.Unlock()
 	bootSkippedOnce.Delete(p)
 }
 
