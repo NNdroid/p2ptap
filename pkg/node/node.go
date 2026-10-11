@@ -1424,7 +1424,12 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	}
 	log.Info("libp2p host created, PeerID: %s", h.ID().String())
 
-	// Log actual listen addresses the host is bound to (confirms transport gating worked).
+	// Verify the host actually bound to the configured listen addresses.
+	// Without at least one listener the node cannot be dialed by peers or
+	// dial any peer directly, so continuing would create a useless node that
+	// can only rely on relay traversal — which requires bootstrap peers and
+	// is not guaranteed. Fail fast so the caller (and tests) see a clear
+	// error instead of a silent "no addresses" dial failure later.
 	hostAddrs := h.Addrs()
 	var listenParts []string
 	for _, a := range hostAddrs {
@@ -1433,7 +1438,21 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	if len(listenParts) > 0 {
 		log.Info("Host listening on %d address(es): %v", len(listenParts), listenParts)
 	} else {
-		log.Warn("Host has no listen addresses — check transport flags and listen addr config")
+		// Clean up resources before returning the error: cancel the context
+		// (stops any goroutines started so far), close the host (releases
+		// bound sockets and transport resources), and release the TAP device
+		// handle if we created it. Mirrors the libp2p.New error path above.
+		cancel()
+		_ = h.Close()
+		if ownedTAP && tapDev != nil {
+			_ = tapDev.Close()
+			tapDev = nil
+		}
+		return nil, fmt.Errorf(
+			"libp2p host has no listen addresses: configured %d addr(s) but host bound 0 — "+
+				"check listen address config, transport flags, and platform socket permissions",
+			len(addrs),
+		)
 	}
 
 	// Initialize Kademlia DHT for Peer discovery

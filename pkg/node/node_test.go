@@ -33,12 +33,12 @@ var (
 
 func createTestNodeConfig(tapIP, tapIPv6, strategy string) *config.Config {
 	cfg := config.DefaultConfig()
-	// Pin a deterministic listen port derived from the TAP IPv4 so repeated E2E
-	// runs (and the per-round / per-strategy subtests) reuse the same local
-	// address instead of churning ephemeral ports. Ephemeral allocation under
-	// the rapid create/close cycles of these suites previously stressed the OS
-	// ephemeral range and produced intermittent bind races / "address in use".
-	cfg.ListenAddrs = []string{"/ip4/127.0.0.1/tcp/0"}
+	// Use 0.0.0.0 so the listen address is expanded to physical NIC IPs by
+	// expandListenAddr, which works across all platforms (Windows, Linux,
+	// macOS, CI runners) where 127.0.0.1 may be blocked by socket-protection
+	// hooks or firewall rules. All E2E tests run on localhost, so binding to
+	// a physical NIC IP is equivalent for connectivity.
+	cfg.ListenAddrs = []string{"/ip4/0.0.0.0/tcp/0"}
 	cfg.BootstrapPeers = []string{}
 	cfg.StaticPeers = []string{}
 	cfg.EnableMDNS = false
