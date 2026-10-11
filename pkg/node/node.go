@@ -1120,6 +1120,20 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		cfg.Transports.EnableWebRTC, cfg.Transports.EnableWebTransport,
 		cfg.Transports.DisableRelay)
 
+	// The AddrsFactory closure is the one place that sees every listener address
+	// libp2p reports BEFORE filterAdvertisedAddrs drops loopback and TAP addrs.
+	// Host.Addrs() is therefore the *advertised* set, not the *bound* set, which
+	// makes it the wrong signal for "did the transports bind at all": a node
+	// listening only on 127.0.0.1 advertises zero addresses while its listener
+	// works perfectly. Capture the pre-filter set here so the post-creation check
+	// can tell "bound nothing" (fail) apart from "bound only loopback" (valid
+	// locally, unreachable from any other machine — warn instead).
+	var (
+		boundMu    sync.Mutex
+		boundAddrs []multiaddr.Multiaddr
+		boundSeen  = map[string]bool{}
+	)
+
 	opts := []libp2p.Option{
 		libp2p.Muxer("/yamux/1.0.0", &yamuxOpt),
 		// NoDelayDialRanker: our dialInParallel already does its own
@@ -1131,6 +1145,19 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		libp2p.NATPortMap(),
 		libp2p.EnableNATService(),
 		libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
+			// Record every address libp2p has ever reported as a listener, before
+			// the loopback/TAP filter below removes them. Called from several
+			// goroutines (initial host setup plus later addr updates).
+			boundMu.Lock()
+			for _, a := range addrs {
+				if boundSeen[a.String()] {
+					continue
+				}
+				boundSeen[a.String()] = true
+				boundAddrs = append(boundAddrs, a)
+			}
+			boundMu.Unlock()
+
 			filtered := filterAdvertisedAddrs(addrs, cfg.TapIP, cfg.TapIPv6, cfg.WebUI.ListenIP, cfg.WebUI.ListenIPv6)
 			stunAddrs := getSTUNReflexiveAddrs()
 			if len(stunAddrs) > 0 {
@@ -1435,9 +1462,24 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	for _, a := range hostAddrs {
 		listenParts = append(listenParts, a.String())
 	}
-	if len(listenParts) > 0 {
+	// The advertised set (above) and the bound set (captured in AddrsFactory)
+	// diverge whenever a listener is on loopback or a TAP address: those are
+	// deliberately never advertised, so they are the only legitimate way to
+	// arrive here with a live host and zero advertised addresses.
+	boundMu.Lock()
+	boundParts := make([]string, 0, len(boundAddrs))
+	for _, a := range boundAddrs {
+		boundParts = append(boundParts, a.String())
+	}
+	boundMu.Unlock()
+
+	switch {
+	case len(listenParts) > 0:
 		log.Info("Host listening on %d address(es): %v", len(listenParts), listenParts)
-	} else {
+	case len(boundParts) > 0:
+		log.Warn("Host bound %d listener(s) %v but advertises none — every listener is loopback or TAP-only, so no other machine can dial this node. Configure a listen address on a routable interface (or a wildcard one, which expands to the physical NICs).",
+			len(boundParts), boundParts)
+	default:
 		// Clean up resources before returning the error: cancel the context
 		// (stops any goroutines started so far), close the host (releases
 		// bound sockets and transport resources), and release the TAP device

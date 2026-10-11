@@ -33,11 +33,12 @@ var (
 
 func createTestNodeConfig(tapIP, tapIPv6, strategy string) *config.Config {
 	cfg := config.DefaultConfig()
-	// Use 0.0.0.0 so the listen address is expanded to physical NIC IPs by
-	// expandListenAddr, which works across all platforms (Windows, Linux,
-	// macOS, CI runners) where 127.0.0.1 may be blocked by socket-protection
-	// hooks or firewall rules. All E2E tests run on localhost, so binding to
-	// a physical NIC IP is equivalent for connectivity.
+	// 0.0.0.0 is mandatory, not a portability escape hatch: AddrsFactory runs
+	// filterAdvertisedAddrs, which drops every loopback address, so a
+	// 127.0.0.1 listener advertises nothing and no peer can dial it.
+	// expandListenAddr expands 0.0.0.0 to the physical NIC IPs instead, which
+	// are advertised normally. Every E2E suite runs locally, so a physical-NIC
+	// bind is equivalent for connectivity.
 	cfg.ListenAddrs = []string{"/ip4/0.0.0.0/tcp/0"}
 	cfg.BootstrapPeers = []string{}
 	cfg.StaticPeers = []string{}

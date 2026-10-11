@@ -63,7 +63,14 @@ const (
 // transportSpec enumerates every overlay transport the node supports. Each
 // entry names the cfg.Transports flags that must be set to make the node
 // LISTEN on that transport, plus the listen address fragment used to pin the
-// listener to 127.0.0.1 (loopback keeps the matrix hermetic and fast).
+// listener to a single transport.
+//
+// The wildcard /ip4/0.0.0.0/ form is mandatory here, not a portability escape
+// hatch: AddrsFactory runs filterAdvertisedAddrs, which drops every loopback
+// address, so a 127.0.0.1 listener advertises nothing and the peer cannot be
+// dialed at all. 0.0.0.0 is expanded by expandListenAddr to the physical NIC
+// IPs, which are advertised normally. Same requirement as every other E2E
+// suite (see createTestNodeConfig).
 type transportSpec struct {
 	name      string
 	listen    string
@@ -74,7 +81,7 @@ func allTransportSpecs() []transportSpec {
 	return []transportSpec{
 		{
 			name:   "QUIC",
-			listen: "/ip4/127.0.0.1/udp/0/quic-v1",
+			listen: "/ip4/0.0.0.0/udp/0/quic-v1",
 			setEnable: func(t *testing.T) {
 				t.Helper()
 				// EnableQUICReuse=true is the DefaultConfig state; nothing to do.
@@ -82,7 +89,7 @@ func allTransportSpecs() []transportSpec {
 		},
 		{
 			name:   "TCP",
-			listen: "/ip4/127.0.0.1/tcp/0",
+			listen: "/ip4/0.0.0.0/tcp/0",
 			setEnable: func(t *testing.T) {
 				t.Helper()
 				// EnableTCPReuse=true is the DefaultConfig state; nothing to do.
@@ -90,7 +97,7 @@ func allTransportSpecs() []transportSpec {
 		},
 		{
 			name:   "WebRTC",
-			listen: "/ip4/127.0.0.1/udp/0/webrtc-direct",
+			listen: "/ip4/0.0.0.0/udp/0/webrtc-direct",
 			setEnable: func(t *testing.T) {
 				t.Helper()
 				// EnableWebRTC=true is the DefaultConfig state; nothing to do.
@@ -98,7 +105,7 @@ func allTransportSpecs() []transportSpec {
 		},
 		{
 			name:   "WebTransport",
-			listen: "/ip4/127.0.0.1/udp/0/quic-v1/webtransport",
+			listen: "/ip4/0.0.0.0/udp/0/quic-v1/webtransport",
 			setEnable: func(t *testing.T) {
 				t.Helper()
 				// EnableWebTransport=true is the DefaultConfig state.
@@ -292,8 +299,9 @@ func setupProtocolPair(t *testing.T, spec transportSpec) *protocolPair {
 
 	cfgA := createTestNodeConfig("10.0.0.1/24", "fd00::1/64", "best_path")
 	cfgB := createTestNodeConfig("10.0.0.2/24", "fd00::2/64", "best_path")
-	// Pin the listener to exactly the transport under test on loopback so the
-	// swarm has one dial target and the matrix assertion is meaningful.
+	// Pin the listener to exactly the transport under test so the swarm has
+	// one dial target and the matrix assertion is meaningful. See
+	// allTransportSpecs for why the address must be a wildcard, not 127.0.0.1.
 	cfgA.ListenAddrs = []string{spec.listen}
 	cfgB.ListenAddrs = []string{spec.listen}
 	spec.setEnable(t)
@@ -314,7 +322,8 @@ func setupProtocolPair(t *testing.T, spec transportSpec) *protocolPair {
 	nodeB.Start()
 
 	// Bounded connect: Host.Connect with no deadline can block indefinitely on
-	// transports whose in-process ICE/DTLS never converges on loopback.
+	// transports whose in-process ICE/DTLS never converges (WebRTC without
+	// usable TURN credentials is the usual case).
 	failHard := spec.name == "QUIC" || spec.name == "TCP"
 	connectCtx, cancelConnect := context.WithTimeout(nodeA.ctx, 15*time.Second)
 	defer cancelConnect()
