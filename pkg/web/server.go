@@ -199,6 +199,7 @@ func writeError(w http.ResponseWriter, status int, errMsg string) {
 // small "known_peers" hint so the WebUI can offer clickable candidates instead
 // of dead-ending on "peer not found".
 func (s *Server) writePeerNotResolvable(w http.ResponseWriter, input, op string) {
+	setJSONHeaders(w)
 	w.WriteHeader(http.StatusBadRequest)
 	writeJSON(w, map[string]interface{}{
 		"status":      "error",
@@ -514,6 +515,7 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	// a collector built without a capture buffer.
 	pcapAvailable := func(w http.ResponseWriter) bool {
 		if collector == nil || collector.Pcap == nil {
+			setJSONHeaders(w)
 			w.WriteHeader(http.StatusServiceUnavailable)
 			writeJSON(w, map[string]string{"error": "packet capture unavailable"})
 			return false
@@ -524,6 +526,7 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	// auth required on every /api/*, a plain GET is no longer CSRF-able.
 	requirePost := func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodPost {
+			setJSONHeaders(w)
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			writeJSON(w, map[string]string{"error": "method not allowed, use POST"})
 			return false

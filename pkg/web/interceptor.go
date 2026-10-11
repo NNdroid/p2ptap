@@ -101,21 +101,23 @@ const maxHTTPRequestBytes = 64 * 1024
 const maxTrackedSessions = 4096
 
 // trackSession registers a new session under key, refusing to grow past
-// maxTrackedSessions. It reports whether the caller may use sess — when false
-// the session was not retained and must be dropped along with the frame that
-// created it. A count is maintained alongside the map because sync.Map offers
-// no O(1) length.
-func (it *TAPInterceptor) trackSession(key string, sess *tcpSession) bool {
+// maxTrackedSessions. It returns the session that the caller should use —
+// when loaded was true the stored session is returned so that concurrent
+// goroutines operating on the same key share a single *tcpSession. When
+// false the session was not retained and must be dropped. A count is
+// maintained alongside the map because sync.Map offers no O(1) length.
+func (it *TAPInterceptor) trackSession(key string, sess *tcpSession) (*tcpSession, bool) {
 	it.sessionsMu.Lock()
 	defer it.sessionsMu.Unlock()
-	if _, loaded := it.sessions.LoadOrStore(key, sess); loaded {
-		return true // already tracked under this key
+	existing, loaded := it.sessions.LoadOrStore(key, sess)
+	if loaded {
+		return existing.(*tcpSession), true
 	}
 	if it.sessionCount.Add(1) > maxTrackedSessions {
 		it.dropSessionLocked(key)
-		return false
+		return nil, false
 	}
-	return true
+	return sess, true
 }
 
 // dropSession removes key and keeps sessionCount in step. Every call site must
@@ -451,7 +453,9 @@ func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, write
 			lastActive: nowSec,
 			isIPv6:     false,
 		}
-		if !it.trackSession(sessionKey, sess) {
+		if tracked, ok := it.trackSession(sessionKey, sess); ok {
+			sess = tracked
+		} else {
 			return true
 		}
 	}
@@ -570,7 +574,9 @@ func (it *TAPInterceptor) handleIPv6TCP(frame []byte, writer PacketWriter) bool 
 			lastActive: nowSec,
 			isIPv6:     true,
 		}
-		if !it.trackSession(sessionKey, sess) {
+		if tracked, ok := it.trackSession(sessionKey, sess); ok {
+			sess = tracked
+		} else {
 			return true
 		}
 	}

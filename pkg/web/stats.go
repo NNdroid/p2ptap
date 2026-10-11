@@ -779,6 +779,10 @@ func (s *StatsCollector) GetResponse() StatsResponse {
 	if listenAddrs == nil {
 		listenAddrs = []string{}
 	}
+	peerMetas := s.PeerMetas
+	if peerMetas == nil {
+		peerMetas = []observer.PeerMetaDTO{}
+	}
 
 	sysHealth := SystemHealthDTO{
 		HeapAllocMB:   float64(mStats.HeapAlloc) / (1024 * 1024),
@@ -924,7 +928,7 @@ func (s *StatsCollector) GetResponse() StatsResponse {
 		Speed:                SpeedStatsDTO{TxBytesPerSec: txSpd, RxBytesPerSec: rxSpd},
 		SpeedHistory:         historyCopy,
 		SubnetRoutes:         subnetRoutes,
-		PeerMetas:            s.PeerMetas,
+		PeerMetas:            peerMetas,
 		MeshMatrix:           meshMatrix,
 		ProtocolChannels:     protoChannels,
 		ActiveStreams:        activeStreams,

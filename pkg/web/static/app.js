@@ -290,6 +290,7 @@
                 pcap_col_len: "Len",
                 pcap_col_info: "Info",
                 pcap_col_hex: "Hex (first 64B)",
+                pcap_hex_parse_error: "Cannot parse raw frame",
                 err_enter_multiaddr: "Please enter a valid Multiaddr string",
                 toast_testing_adding: "Testing and adding static peer",
                 toast_static_added: "Static peer added and permanently registered in Peerstore!",
@@ -1135,6 +1136,7 @@
                 pcap_col_len: "长度",
                 pcap_col_info: "摘要",
                 pcap_col_hex: "Hex(前64B)",
+                pcap_hex_parse_error: "无法解析原始帧",
                 err_enter_multiaddr: "请输入有效的 Multiaddr 节点地址",
                 toast_testing_adding: "正在测试并添加静态节点",
                 toast_static_added: "静态节点已成功添加并赋予永久存续 (PermanentAddrTTL)！",
@@ -1873,6 +1875,7 @@
                 pcap_col_len: "長度",
                 pcap_col_info: "摘要",
                 pcap_col_hex: "Hex(前64B)",
+                pcap_hex_parse_error: "无法解析原始帧",
                 share_config: "📲 分享與匯出",
                 terminal_title: "📟 實時系統日誌主控台",
                 auto_scroll: "📜 自動滾動: 開啟",
@@ -2680,6 +2683,7 @@
                 pcap_col_len: "長さ",
                 pcap_col_info: "概要",
                 pcap_col_hex: "Hex (先頭64B)",
+                pcap_hex_parse_error: "生フレームを解析できません",
                 share_config: "📲 共有とエクスポート",
                 terminal_title: "📟 リアルタイムログコンソール",
                 auto_scroll: "📜 自動スクロール: オン",
@@ -3486,6 +3490,7 @@
                 pcap_col_len: "Länge",
                 pcap_col_info: "Info",
                 pcap_col_hex: "Hex (erste 64B)",
+                pcap_hex_parse_error: "Rohrahmen kann nicht geparst werden",
                 share_config: "📲 Teilen & Exportieren",
                 terminal_title: "📟 Live-Systemprotokolle",
                 auto_scroll: "📜 Auto-Scroll: AN",
@@ -4292,6 +4297,7 @@
                 pcap_col_len: "Long.",
                 pcap_col_info: "Resumen",
                 pcap_col_hex: "Hex (primeros 64B)",
+                pcap_hex_parse_error: "No se puede analizar el cuadro crudo",
                 share_config: "📲 Compartir y Exportar",
                 terminal_title: "📟 Consola de Registros en Vivo",
                 auto_scroll: "📜 Desplazamiento Auto: ON",
@@ -5098,6 +5104,7 @@
                 pcap_col_len: "Long.",
                 pcap_col_info: "Résumé",
                 pcap_col_hex: "Hex (64 premiers B)",
+                pcap_hex_parse_error: "Impossible d'analyser la trame brute",
                 share_config: "📲 Partager et Exporter",
                 terminal_title: "📟 Console de Journaux en Direct",
                 auto_scroll: "📜 Défilement Auto: ON",
@@ -5813,20 +5820,28 @@
             localStorage.setItem('p2ptap_lang', lang);
             document.getElementById('langSelect').value = lang;
 
+            // Elements whose text is managed by the stats/render loop must NOT
+            // be overwritten here: doing so replaces live values (node name,
+            // strategy badge, log count, auto-scroll state, pcap state, etc.)
+            // with the static default for up to one poll cycle.
+            const liveStateIds = new Set([
+                'strategyBadge', 'nodeName', 'nodePeerID', 'logCountBadge',
+                'logPausedBadge', 'autoScrollBtn', 'logPauseBtn',
+                'pcapStateBadge', 'pcapToggleBtn'
+            ]);
+
             document.querySelectorAll('[data-i18n]').forEach(el => {
+                if (liveStateIds.has(el.id)) return;
                 const k = el.getAttribute('data-i18n');
                 if (k) {
-                    // Fall back to English for any key the active language lacks,
-                    // so newly added labels (e.g. broadcast/multicast/gateway
-                    // packets) always render instead of going blank.
                     el.innerText = t(k);
                 }
             });
 
             document.querySelectorAll('[data-i18n-ph]').forEach(el => {
                 const k = el.getAttribute('data-i18n-ph');
-                if (k && i18nDict[lang][k]) {
-                    el.placeholder = i18nDict[lang][k];
+                if (k) {
+                    el.placeholder = t(k);
                 }
             });
 
@@ -5911,10 +5926,16 @@
 
         function formatSpeed(bytesPerSec) {
             if (!bytesPerSec || bytesPerSec <= 0) return '⚡ 0 KB/s';
-            if (bytesPerSec < 1024 * 1024) {
+            if (bytesPerSec < 1024) {
+                return '⚡ ' + bytesPerSec.toFixed(1) + ' B/s';
+            }
+            if (bytesPerSec < 1048576) {
                 return '⚡ ' + (bytesPerSec / 1024).toFixed(1) + ' KB/s';
             }
-            return '⚡ ' + (bytesPerSec / (1024 * 1024)).toFixed(2) + ' MB/s';
+            if (bytesPerSec < 1073741824) {
+                return '⚡ ' + (bytesPerSec / 1048576).toFixed(2) + ' MB/s';
+            }
+            return '⚡ ' + (bytesPerSec / 1073741824).toFixed(2) + ' GB/s';
         }
 
         const peerDetailsCache = new Map();
@@ -7428,9 +7449,9 @@
                 decisionBadge = `<span class="pill-badge role-bootstrap" style="font-size:0.85rem; padding:4px 12px;">🔄 ${transportPathLabel(path)}</span>`;
                 decisionText = `<strong>Actual transport:</strong> the destination is the next overlay hop, but the live libp2p connection traverses a circuit relay. RTT values below are routing estimates.`;
             } else if (path === 'overlay-relay') {
-                decisionBadge = `<span class="pill-badge role-bootstrap" style="font-size:0.85rem; padding:4px 12px;">🔀 ${t('relay_chosen_title')} (${r.next_hop_name})</span>`;
+                decisionBadge = `<span class="pill-badge role-bootstrap" style="font-size:0.85rem; padding:4px 12px;">🔀 ${t('relay_chosen_title')} (${escapeHTML(r.next_hop_name || 'unknown hop')})</span>`;
                 const savedStr = r.saved_rtt_ms > 0 ? `${t('saved_latency')} <strong style="color:var(--success);">≈${r.saved_rtt_ms} ms</strong> (${t('vs_direct')} <strong>≈${r.direct_rtt_ms} ms</strong>)` : `${t('nat_fallback_desc')}`;
-                decisionText = `<strong>${t('relay_accel_active')}:</strong> ${t('relay_accel_desc')} <strong>${r.next_hop_name}</strong> (≈${r.total_rtt_ms} ms routing estimate), ${savedStr}.`;
+                decisionText = `<strong>${t('relay_accel_active')}:</strong> ${t('relay_accel_desc')} <strong>${escapeHTML(r.next_hop_name || 'unknown hop')}</strong> (≈${r.total_rtt_ms} ms routing estimate), ${savedStr}.`;
             } else {
                 decisionBadge = `<span class="pill-badge" style="font-size:0.85rem; padding:4px 12px;">❔ ${transportPathLabel(path)}</span>`;
                 decisionText = `<strong>Transport not verified:</strong> a cached routing entry exists, but there is no live connection evidence proving direct or relay transport.`;
@@ -7450,7 +7471,7 @@
                             <td>${optTag}</td>
                             <td><code style="color:var(--accent-purple);">${pathStr}</code></td>
                             <td><strong>${rttStr}</strong></td>
-                            <td style="color:var(--text-dim); font-size:0.82rem;">${c.reason}</td>
+                            <td style="color:var(--text-dim); font-size:0.82rem;">${escapeHTML(c.reason || '')}</td>
                         </tr>
                     `;
                 }).join('');
@@ -7459,7 +7480,7 @@
             content.innerHTML = `
                 <div class="glass-card" style="padding:14px; background:var(--surface-fill);">
                     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                        <strong style="color:var(--text-primary); font-size:1.02rem;">${t('target_node')}: ${r.dest_name}</strong>
+                        <strong style="color:var(--text-primary); font-size:1.02rem;">${t('target_node')}: ${escapeHTML(r.dest_name || '')}</strong>
                         <code>IP: ${escapeHTML(r.tap_ip)}</code>
                     </div>
                     <div style="margin-bottom:8px;">${decisionBadge}</div>
@@ -7507,6 +7528,9 @@
                     const urlToken = params.get('token');
                     if (urlToken) {
                         try { localStorage.setItem(AUTH_TOKEN_KEY, urlToken); } catch (e) {}
+                        // Strip the token from the URL so it doesn't linger in
+                        // browser history, proxy logs, or the address bar.
+                        history.replaceState(null, '', location.pathname + location.hash);
                         return urlToken;
                     }
                 }
@@ -7516,6 +7540,10 @@
                     const hashToken = hashParams.get('token');
                     if (hashToken) {
                         try { localStorage.setItem(AUTH_TOKEN_KEY, hashToken); } catch (e) {}
+                        // Strip the token from the hash fragment for the same
+                        // reason as above.
+                        const clean = window.location.hash.replace(/([?&])token=[^&]*&?/, '$1').replace(/token=[^&]*&?/g, '');
+                        history.replaceState(null, '', window.location.pathname + clean);
                         return hashToken;
                     }
                 }
@@ -7541,13 +7569,13 @@
         }
         // Promise-based in-page login modal (replaces native window.prompt).
         let loginModalActive = false;
-        let loginResolve = null;
+        let loginResolvers = [];
 
         function openLoginModal() {
             return new Promise((resolve) => {
-                if (loginModalActive) { loginResolve = resolve; return; }
+                loginResolvers.push(resolve);
+                if (loginModalActive) return;
                 loginModalActive = true;
-                loginResolve = resolve;
                 const modal = document.getElementById('loginModal');
                 const input = document.getElementById('loginTokenInput');
                 const err = document.getElementById('loginError');
@@ -7563,9 +7591,9 @@
             const modal = document.getElementById('loginModal');
             modal.style.display = 'none';
             loginModalActive = false;
-            const r = loginResolve;
-            loginResolve = null;
-            if (r) r(success);
+            const resolvers = loginResolvers;
+            loginResolvers = [];
+            resolvers.forEach(r => r(success));
         }
 
         function submitLogin() {
@@ -8294,6 +8322,7 @@
         const ppsChartState = { history: [], maxVal: 1, width: 0, height: 0, stepX: 0, margin: { top: 8, right: 10, bottom: 28, left: 50 } };
 
         function formatChartRate(v) {
+            if (v >= 1073741824) return (v / 1073741824).toFixed(1) + ' GB/s';
             if (v >= 1048576) return (v / 1048576).toFixed(1) + ' MB/s';
             if (v >= 1024) return (v / 1024).toFixed(1) + ' KB/s';
             return v + ' B/s';
@@ -9031,7 +9060,7 @@
                             const dTxF = Math.max(0, (ch.tx_frames || 0) - prev.tx_frames) / dt;
                             const dRxF = Math.max(0, (ch.rx_frames || 0) - prev.rx_frames) / dt;
                             if (dTxB > 0 || dRxB > 0 || dTxF > 0 || dRxF > 0) {
-                                rateHtml = `<span class="proto-rate-pill" title="Live Rate">⚡ ↑${formatBytes(dTxB)}/s · ↓${formatBytes(dRxB)}/s</span>`;
+                                rateHtml = `<span class="proto-rate-pill" title="Live Rate">⚡ ↑${formatChartRate(dTxB)} · ↓${formatChartRate(dRxB)}</span>`;
                             }
                         }
                         prevProtoTrackerSnapshot[ch.id] = {
@@ -9721,11 +9750,20 @@
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
             try {
-                const response = await fetch(url, withAuth({ ...options, signal: controller.signal }));
+                let response = await fetch(url, withAuth({ ...options, signal: controller.signal }));
                 if (response.status === 401) {
                     const ok = await promptForToken();
                     if (ok) {
-                        return await fetch(url, withAuth({ ...options, signal: controller.signal }));
+                        // New controller for retry: the original may have been
+                        // aborted by its own timeout while the user was filling
+                        // in the login form.
+                        const retryCtrl = new AbortController();
+                        const retryTO = setTimeout(() => retryCtrl.abort(), timeoutMs);
+                        try {
+                            return await fetch(url, withAuth({ ...options, signal: retryCtrl.signal }));
+                        } finally {
+                            clearTimeout(retryTO);
+                        }
                     }
                 }
                 return response;
@@ -10527,13 +10565,13 @@
                                 if (idx === 0) {
                                     return `<span style="background:var(--accent-cyan-fill); border:1px solid var(--accent-cyan-border); color:var(--accent-cyan); border-radius:5px; padding:2px 7px; font-size:0.78rem; font-weight:600;">💻 Local</span>`;
                                 } else if (idx === r.path_names.length - 1) {
-                                    return `<span style="background:var(--accent-green-fill); border:1px solid var(--accent-green-border); color:var(--success); border-radius:5px; padding:2px 7px; font-size:0.78rem; font-weight:600;">🎯 ${name}</span>`;
+                                    return `<span style="background:var(--accent-green-fill); border:1px solid var(--accent-green-border); color:var(--success); border-radius:5px; padding:2px 7px; font-size:0.78rem; font-weight:600;">🎯 ${escapeHTML(name)}</span>`;
                                 } else {
-                                    return `<span style="background:var(--accent-purple-fill); border:1px solid var(--accent-purple-border); color:var(--accent-purple); border-radius:5px; padding:2px 7px; font-size:0.78rem; font-weight:600;">🔀 ${name}</span>`;
+                                    return `<span style="background:var(--accent-purple-fill); border:1px solid var(--accent-purple-border); color:var(--accent-purple); border-radius:5px; padding:2px 7px; font-size:0.78rem; font-weight:600;">🔀 ${escapeHTML(name)}</span>`;
                                 }
                             }).join('<span style="color:var(--text-muted); margin:0 4px; font-size:0.75rem;">➔</span>');
                         } else {
-                            visualPath = `<code style="color:var(--accent-purple)">${r.dest_name}</code>`;
+                            visualPath = `<code style="color:var(--accent-purple)">${escapeHTML(r.dest_name || '')}</code>`;
                         }
 
                         // Render Smart Optimization Progress Bar & Gain Badge
@@ -10601,7 +10639,7 @@
 
                         return `
                             <tr>
-                                <td><strong style="color:var(--text-primary); font-size:0.9rem">${r.dest_name}</strong></td>
+                                <td><strong style="color:var(--text-primary); font-size:0.9rem">${escapeHTML(r.dest_name || '')}</strong></td>
                                 <td>${ipHtml}</td>
                                 <td>${hopBadge}</td>
                                 <td><div style="display:flex; align-items:center; flex-wrap:wrap;">${visualPath}</div></td>
@@ -13739,7 +13777,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                 }
                 return lines.join('\n');
             } catch (e) {
-                return '(无法解析原始帧)';
+                return '(' + t('pcap_hex_parse_error') + ')';
             }
         }
 
@@ -13759,8 +13797,8 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             let metaHtml = '<table class="pkt-meta-table">';
             for (const [k, v] of meta) {
                 metaHtml += '<tr>' +
-                    '<td class="pkt-meta-key">' + k + '</td>' +
-                    '<td class="pkt-meta-val">' + (v === '' || v === 0 || v === '-' ? '-' : v) + '</td>' +
+                    '<td class="pkt-meta-key">' + escapeHTML(String(k)) + '</td>' +
+                    '<td class="pkt-meta-val">' + (v === '' || v === 0 || v === '-' ? '-' : escapeHTML(String(v))) + '</td>' +
                     '</tr>';
             }
             metaHtml += '</table>';
@@ -13889,14 +13927,14 @@ window.toggleSubnetRoute = async function(cidr, enable) {
                     '<div class="pkt-layer-row">' +
                     '<span class="pkt-layer-row-offset">' + (r[2] || '') + '</span>' +
                     '<span class="pkt-layer-row-key">' + r[0] + ':</span>' +
-                    '<span class="pkt-layer-row-val">' + (r[1] === '' || r[1] === 0 || r[1] === '-' ? '-' : r[1]) + '</span>' +
+                    '<span class="pkt-layer-row-val">' + (r[1] === '' || r[1] === 0 || r[1] === '-' ? '-' : escapeHTML(String(r[1]))) + '</span>' +
                     '</div>'
                 ).join('');
                 html += '<details open class="pkt-layer-box">' +
                     '<summary class="pkt-layer-summary" style="color:' + L.color + ';">' +
                     '<span class="pkt-layer-offset">[' + (L.off || '-') + ']</span>' +
-                    '<span class="pkt-layer-name">' + L.name + '</span>' +
-                    '<span class="pkt-layer-summary-text">' + (L.summary || '') + '</span>' +
+                    '<span class="pkt-layer-name">' + escapeHTML(String(L.name)) + '</span>' +
+                    '<span class="pkt-layer-summary-text">' + escapeHTML(String(L.summary || '')) + '</span>' +
                     '</summary>' +
                     '<div class="pkt-layer-body">' + rowsHtml + '</div>' +
                     '</details>';

@@ -100,7 +100,9 @@ func NewServer(provider BootDataProvider, listenAddr, authToken string) *Server 
 	// live topology/log views and is checkable via /api/auth/verify.
 	if authToken == "" {
 		b := make([]byte, 24)
-		_, _ = rand.Read(b)
+		if _, err := rand.Read(b); err != nil {
+			panic(fmt.Sprintf("bootweb: crypto/rand failed: %v", err))
+		}
 		authToken = hex.EncodeToString(b)
 	}
 	return &Server{
@@ -199,10 +201,10 @@ func (s *Server) checkAuth(r *http.Request) bool {
 			return true
 		}
 	}
-	// 2. Authorization header: Bearer <token>
+	// 2. Authorization header: Bearer <token> (scheme is case-insensitive per RFC 6750)
 	authHeader := r.Header.Get("Authorization")
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		if subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(authHeader, "Bearer ")), tokenBytes) == 1 {
+	if len(authHeader) >= 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
+		if subtle.ConstantTimeCompare([]byte(authHeader[7:]), tokenBytes) == 1 {
 			return true
 		}
 	}

@@ -603,8 +603,8 @@ func parseFrame(seq uint64, dir CaptureDir, frame []byte, maxHex int, resolver P
 					} else { // UDP
 						cf.Info = "UDP " + cf.SrcIP + ":" + strconv.Itoa(cf.SrcPort) +
 							" -> " + cf.DstIP + ":" + strconv.Itoa(cf.DstPort)
-						if (cf.SrcPort == 53 || cf.DstPort == 53) && len(frame) >= l4+12 {
-							if q, ok := parseDNSQuery(frame[l4:]); ok {
+						if (cf.SrcPort == 53 || cf.DstPort == 53) && len(frame) >= l4+8+12 {
+							if q, ok := parseDNSQuery(frame[l4+8:]); ok {
 								cf.DNSQuery = q
 								cf.Info += " DNS?" + q
 							}
@@ -656,8 +656,8 @@ func parseFrame(seq uint64, dir CaptureDir, frame []byte, maxHex int, resolver P
 					} else { // UDP
 						cf.Info = "UDP " + cf.SrcIP + ":" + strconv.Itoa(cf.SrcPort) +
 							" -> " + cf.DstIP + ":" + strconv.Itoa(cf.DstPort)
-						if (cf.SrcPort == 53 || cf.DstPort == 53) && len(frame) >= l4+12 {
-							if q, ok := parseDNSQuery(frame[l4:]); ok {
+						if (cf.SrcPort == 53 || cf.DstPort == 53) && len(frame) >= l4+8+12 {
+							if q, ok := parseDNSQuery(frame[l4+8:]); ok {
 								cf.DNSQuery = q
 								cf.Info += " DNS?" + q
 							}
@@ -832,6 +832,11 @@ func parseTLSSNI(b []byte) (string, bool) {
 		extType := int(binary.BigEndian.Uint16(b[pos : pos+2]))
 		extLen := int(binary.BigEndian.Uint16(b[pos+2 : pos+4]))
 		pos += 4
+		if extLen == 0 {
+			// A zero-length extension with a non-server_name type would cause
+			// an infinite loop (pos never advances). Exit immediately.
+			return "", false
+		}
 		if extType == 0x00 { // server_name
 			if pos+2 > end {
 				return "", false

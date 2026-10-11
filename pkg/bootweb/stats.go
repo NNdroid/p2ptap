@@ -515,13 +515,17 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 	return BootDashboardDTO{
 		Server: serverInfo,
 		Relay: RelayStatsDTO{
-			MaxCircuits:        1024,
-			MaxReservations:    1024,
+			// These match libp2p's DefaultResources() — see
+			// pkg/go-libp2p/p2p/protocol/circuitv2/relay/resources.go.
+			// p2ptap enables the relay via libp2p.EnableRelay() with no
+			// custom limiter, so these are the actual enforced values.
+			MaxCircuits:        16, // per-peer circuit cap (was 1024)
+			MaxReservations:    128, // total relay slots (was 1024)
 			ActiveReservations: len(peersList),
-			MaxPerPeer:         16,
-			MaxPerIP:           64,
-			DurationLimitSec:   300,
-			DataLimitMB:        512,
+			MaxPerPeer:         1, // reservation per peer (was 16)
+			MaxPerIP:           8, // reservations per IP (was 64)
+			DurationLimitSec:   120, // 2 min connection lifetime (was 300)
+			DataLimitMB:        0, // 128KB default rounds to 0 MB
 		},
 		PeekMap: PeekMapStatsDTO{
 			ActiveListeners: p.GetPeekMapListenerCount(),
