@@ -176,11 +176,19 @@ func createWintunTAPDevice(tapName, tapIP string, mtu int) (TAPDevice, error) {
 	return dev, nil
 }
 
+const maxShadowARPEntries = 4096
+
 func (w *WintunTAPDevice) recordMAC(ipStr string, mac net.HardwareAddr) {
 	if ipStr == "" || len(mac) < 6 {
 		return
 	}
 	w.ipMapMu.Lock()
+	// Cap the shadow ARP map — a mesh peer can plant arbitrary IP→MAC pairs
+	// from inbound TAP frames, and without a limit the map grows without bound.
+	if _, exists := w.ipToMacMap[ipStr]; !exists && len(w.ipToMacMap) >= maxShadowARPEntries {
+		w.ipMapMu.Unlock()
+		return
+	}
 	w.ipToMacMap[ipStr] = append(net.HardwareAddr(nil), mac...)
 	w.ipMapMu.Unlock()
 }
@@ -478,7 +486,7 @@ func (w *WintunTAPDevice) Read(b []byte) (int, error) {
 
 func (w *WintunTAPDevice) Write(b []byte) (int, error) {
 	if len(b) < 14 {
-		return len(b), nil
+		return 0, nil
 	}
 
 	// Session snapshot + closed guard (see deviceState). The ARP/NA branches

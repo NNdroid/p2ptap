@@ -19,6 +19,8 @@ var ErrReadTimeout = errors.New("TAP read timeout")
 // error; the caller falls back to timer-based polling.
 type EpollPoller struct {
 	epfd, tapFd, wakeFd int
+	notifierStopped chan struct{}
+	notifierStoppedOnce sync.Once
 }
 
 // TAPDevice is the interface for virtual TAP ethernet devices

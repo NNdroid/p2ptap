@@ -20,8 +20,9 @@ var logStreamUpgrader = websocket.Upgrader{
 	ReadBufferSize:    1024,
 	WriteBufferSize:   4096,
 	EnableCompression: true, // permessage-deflate; browsers negotiate it, cutting JSON bandwidth
-	// WebUI token already gates access; we refuse cross-origin without a valid token.
-	CheckOrigin: func(r *http.Request) bool { return true },
+	// Use the default gorilla/websocket origin checker to prevent cross-origin
+	// WebSocket hijacking.  Same-origin connections (localhost, LAN) still work.
+	CheckOrigin: nil, // nil uses gorilla's safe default: reject cross-origin requests
 }
 
 const (

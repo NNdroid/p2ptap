@@ -141,6 +141,15 @@ func (t *ShardedMACTable) LearnWithIP(mac net.HardwareAddr, ip string, peerID pe
 	// Slow path: new or changed mapping — full write lock, as before.
 	shard.mu.Lock()
 	entry, exists = shard.entries[k]
+	// Conflict guard: only reject when an IP is also being registered (the
+	// ARP/NDP learn path). A frame-based Learn (ip=="") can legitimately
+	// rebind a MAC after a peer roam, so we allow it through. An attacker
+	// advertising another peer's TapMAC via ARP/NDP would overwrite the
+	// entry and redirect the honest peer's unicast traffic (L2 MITM).
+	if exists && entry.PeerID != peerID && ip != "" {
+		shard.mu.Unlock()
+		return
+	}
 	if !exists {
 		t.peerCountsMu.Lock()
 		if t.peerCounts[peerID] >= MaxMACsPerPeer {

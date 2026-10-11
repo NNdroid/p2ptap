@@ -18,9 +18,11 @@ var pcapStreamUpgrader = websocket.Upgrader{
 	ReadBufferSize:    4096,
 	WriteBufferSize:   8192,
 	EnableCompression: true, // permessage-deflate; browsers negotiate it, drastically cuts JSON bandwidth
-	// Browsers setting Origin must match the dashboard host. WebUI token
-	// already gates access; we refuse cross-origin without a valid token.
-	CheckOrigin: func(r *http.Request) bool { return true },
+	// Use the default gorilla/websocket origin checker: it refuses requests
+	// whose Origin header does not match the request Host.  This prevents
+	// cross-origin WebSocket connections (e.g. from a malicious web page)
+	// while still allowing same-origin connections from localhost and the LAN.
+	CheckOrigin: nil, // nil uses gorilla's safe default: reject cross-origin requests
 }
 
 // pcapStreamDefaultBacklog bounds how many buffered frames are pushed to a

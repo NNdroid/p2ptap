@@ -355,7 +355,20 @@ func ipv6Str(b [16]byte) string {
 }
 
 func loadOrGenerateNodeKey(keyPath string) (crypto.PrivKey, error) {
-	if _, err := os.Stat(keyPath); err == nil {
+	// Resolve the real path and reject symlinks — a symlink planted by any
+	// local process redirects the key read (TOCTOU between Stat and ReadFile),
+	// so a world-readable decoy leaks the node's private identity key.
+	realPath, err := filepath.EvalSymlinks(keyPath)
+	if err == nil && realPath != keyPath {
+		return nil, fmt.Errorf("node key path %s is a symlink — refusing to load key from a symlink target", keyPath)
+	}
+
+	if info, err := os.Stat(keyPath); err == nil {
+		// Reject world-readable keys — a leaked identity key compromises mesh
+		// identity and every PSK/KEM derived from it.
+		if info.Mode().Perm()&0077 != 0 {
+			return nil, fmt.Errorf("node key file %s has insecure permissions %o (must be 0600 or stricter)", keyPath, info.Mode().Perm())
+		}
 		keyBytes, err := os.ReadFile(keyPath)
 		if err != nil {
 			return nil, err
@@ -374,8 +387,32 @@ func loadOrGenerateNodeKey(keyPath string) (crypto.PrivKey, error) {
 		return nil, err
 	}
 
-	_ = os.MkdirAll(filepath.Dir(keyPath), 0755)
-	if err := os.WriteFile(keyPath, keyBytes, 0600); err != nil {
+	_ = os.MkdirAll(filepath.Dir(keyPath), 0700)
+
+	// Atomic write: WriteFile truncates on failure, potentially destroying an
+	// existing key. Use CreateTemp → Write → Close → Rename.
+	dir := filepath.Dir(keyPath)
+	tmp, err := os.CreateTemp(dir, ".nodekey-*")
+	if err != nil {
+		log.Warn("Failed to save key file to %s: %v", keyPath, err)
+		return priv, nil
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(keyBytes); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		log.Warn("Failed to save key file to %s: %v", keyPath, err)
+		return priv, nil
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		log.Warn("Failed to sync key file %s: %v", keyPath, err)
+	}
+	tmp.Close()
+	os.Chmod(tmpName, 0600)
+	if err := os.Rename(tmpName, keyPath); err != nil {
+		os.Remove(tmpName)
 		log.Warn("Failed to save key file to %s: %v", keyPath, err)
 	} else {
 		log.Info("Generated new persistent identity key: %s", keyPath)
@@ -880,7 +917,21 @@ func (n *Node) learnPeerAddressFromFrame(srcPeer peer.ID, srcMAC net.HardwareAdd
 				m.TapIP = srcIP.String() + "/24"
 				changed = true
 			}
+			// Anti-spoof: only accept the frame's srcIP as the sender's TapIP if
+			// it matches the sender's already-advertised TapIP. Without this, an
+			// attacker sends srcIP=victim's TapIP and the function overwrites the
+			// attacker's peerMeta with the victim's IP, then emits GARP/NA mapping
+			// victim's IP → attacker's MAC — a one-frame L2 MITM.
 			cleanTapIP := strings.Split(m.TapIP, "/")[0]
+			if m.TapIP != "" && cleanTapIP != srcIP.String() {
+				// srcIP does not match the sender's advertised TapIP — don't learn
+				// or emit GARP/NA. But do learn the MAC if it differs.
+				if m.TapMAC == "" || m.TapMAC != srcMAC.String() {
+					m.TapMAC = srcMAC.String()
+					n.storePeerMeta(srcPeer, m)
+				}
+				return
+			}
 			if (m.TapMAC == "" || m.TapMAC != srcMAC.String()) && cleanTapIP == srcIP.String() {
 				m.TapMAC = srcMAC.String()
 				changed = true
@@ -917,6 +968,14 @@ func (n *Node) learnPeerAddressFromFrame(srcPeer peer.ID, srcMAC net.HardwareAdd
 				changed = true
 			}
 			cleanTapIPv6 := strings.Split(m.TapIPv6, "/")[0]
+			if m.TapIPv6 != "" && cleanTapIPv6 != srcIP.String() {
+				// Anti-spoof: srcIP doesn't match the sender's advertised TapIPv6.
+				if m.TapMAC == "" || m.TapMAC != srcMAC.String() {
+					m.TapMAC = srcMAC.String()
+					n.storePeerMeta(srcPeer, m)
+				}
+				return
+			}
 			if (m.TapMAC == "" || m.TapMAC != srcMAC.String()) && cleanTapIPv6 == srcIP.String() {
 				m.TapMAC = srcMAC.String()
 				changed = true

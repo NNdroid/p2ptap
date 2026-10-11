@@ -52,8 +52,11 @@ const (
 )
 
 // allowVerifyAttempt consumes one attempt for ip and reports whether the
-// request may proceed. Stale entries are swept opportunistically so the map
-// stays bounded by active sources.
+// request may proceed. Stale entries are swept opportunistically and the map
+// is capped — a relay/proxy pool rotating IPs would otherwise pin unbounded
+// memory on a LAN-exposed boot dashboard.
+const verifyMaxEntries = 1024
+
 func (s *Server) allowVerifyAttempt(ip string) bool {
 	s.verifyMu.Lock()
 	defer s.verifyMu.Unlock()
@@ -61,9 +64,17 @@ func (s *Server) allowVerifyAttempt(ip string) bool {
 		s.verifyAttempts = make(map[string]verifyWindow)
 	}
 	now := time.Now()
+	// Opportunistic sweep: prune stale windows.
 	for k, v := range s.verifyAttempts {
 		if now.Sub(v.start) > verifyWindowSeconds*time.Second {
 			delete(s.verifyAttempts, k)
+		}
+	}
+	// Hard cap: if the map is still too large (e.g. IP rotation attack), reject
+	// new entries to prevent unbounded memory growth.
+	if len(s.verifyAttempts) >= verifyMaxEntries {
+		if _, ok := s.verifyAttempts[ip]; !ok {
+			return false
 		}
 	}
 	w := s.verifyAttempts[ip]

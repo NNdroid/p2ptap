@@ -375,7 +375,9 @@ func NewEpollPoller(dev TAPDevice) (*EpollPoller, error) {
 // Wait blocks until the TAP fd is readable or ctx is cancelled.
 // It returns nil when data is available and ctx.Err() on cancellation.
 func (p *EpollPoller) Wait(ctx context.Context) error {
-	var events [1]unix.EpollEvent
+	// Buffer 2 events: if both the eventfd and the TAP fd are ready,
+	// reading only 1 event lags cancellation/wake by one loop iteration.
+	var events [2]unix.EpollEvent
 	for {
 		nfds, err := unix.EpollWait(p.epfd, events[:], -1)
 		if err != nil {
@@ -387,29 +389,54 @@ func (p *EpollPoller) Wait(ctx context.Context) error {
 		if nfds == 0 {
 			continue
 		}
-		if int(events[0].Fd) == p.wakeFd {
-			// Drain the eventfd to clear it for next time.
-			var val [8]byte
-			unix.Read(p.wakeFd, val[:]) //nolint:errcheck
+		// Check both events — drain the eventfd if present so it doesn't
+		// stay ready and cause a spurious immediate return next iteration.
+		wakeFired := false
+		tapReady := false
+		for i := 0; i < nfds && i < len(events); i++ {
+			if int(events[i].Fd) == p.wakeFd {
+				var val [8]byte
+				unix.Read(p.wakeFd, val[:]) //nolint:errcheck
+				wakeFired = true
+			} else {
+				tapReady = true
+			}
+		}
+		if tapReady {
+			return nil // TAP fd is readable
+		}
+		if wakeFired {
 			return ctx.Err()
 		}
-		return nil // TAP fd is readable
 	}
 }
 
-// Close releases the epoll file descriptor.
+// Close releases the epoll file descriptor and stops the notifier goroutine.
 func (p *EpollPoller) Close() error {
+	p.notifierStoppedOnce.Do(func() {
+		if p.notifierStopped != nil {
+			close(p.notifierStopped)
+		}
+	})
 	return unix.Close(p.epfd)
 }
 
 // NotifyOnCancel starts a goroutine that writes to the internal eventfd
 // when ctx is cancelled, waking any in-progress EpollWait so Wait()
-// returns ctx.Err() promptly.
+// returns ctx.Err() promptly. The goroutine exits when either ctx is
+// cancelled or Close() is called, preventing goroutine leaks on TAP flap.
 func (p *EpollPoller) NotifyOnCancel(ctx context.Context) {
+	if p.notifierStopped == nil {
+		p.notifierStopped = make(chan struct{})
+	}
 	go func() {
-		<-ctx.Done()
-		var val [8]byte
-		val[0] = 1
-		unix.Write(p.wakeFd, val[:])
+		select {
+		case <-ctx.Done():
+			var val [8]byte
+			val[0] = 1
+			unix.Write(p.wakeFd, val[:]) //nolint:errcheck
+		case <-p.notifierStopped:
+			// Close() called — stop the goroutine.
+		}
 	}()
 }

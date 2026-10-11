@@ -654,7 +654,16 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 	// identically here: same resolved token, constant-time compare, header or
 	// ?token=. Non-/api paths (dashboard HTML) stay open, matching the Server.
 	if bytes.Contains(lines[0], []byte(" /api/")) {
-		if want := it.effectiveToken(); want != "" && !it.requestAuthorized(lines, want) {
+		want := it.effectiveToken()
+		if want == "" {
+			// Fail-closed: no resolvable token means deny, not "auth disabled".
+			// The interceptor serves a full userspace /api/* surface (config
+			// rewrite, exit-node changes, probes) to mesh peers; an unresolvable
+			// token must never silently disable the gate.
+			return it.buildHTTPResponse(http.StatusUnauthorized, "application/json",
+				[]byte(`{"status":"error","error":"unauthorized: no authentication token configured","tokenRequired":true}`))
+		}
+		if !it.requestAuthorized(lines, want) {
 			return it.buildHTTPResponse(http.StatusUnauthorized, "application/json",
 				[]byte(`{"status":"error","error":"unauthorized: missing or invalid token","tokenRequired":true}`))
 		}
@@ -858,23 +867,36 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 			incoming.ListenAddrs = cur.ListenAddrs
 		}
 		if incoming.WebUI.Port == 0 {
-			incoming.WebUI = cur.WebUI
-		}
+				incoming.WebUI = cur.WebUI
+			}
 		if incoming.WebUI.AuthToken == "" {
-			incoming.WebUI.AuthToken = cur.WebUI.AuthToken
-		}
-		if incoming.Transports == (config.TransportsConfig{}) {
-			incoming.Transports = cur.Transports
-		}
+					incoming.WebUI.AuthToken = cur.WebUI.AuthToken
+				}
+			if incoming.Transports == (config.TransportsConfig{}) {
+				incoming.Transports = cur.Transports
+			}
 
-		if err := incoming.Validate(); err != nil {
-			return it.buildHTTPResponse(400, "application/json", []byte(fmt.Sprintf(`{"error":"invalid config: %v"}`, err)))
-		}
+			if err := incoming.Validate(); err != nil {
+				return it.buildHTTPResponse(400, "application/json", []byte(fmt.Sprintf(`{"error":"invalid config: %v"}`, err)))
+			}
 
-		effectivePath := it.configPath
-		if cur != nil && cur.ConfigPath != "" {
-			effectivePath = cur.ConfigPath
-		}
+			effectivePath := it.configPath
+			if cur != nil && cur.ConfigPath != "" {
+				effectivePath = cur.ConfigPath
+			}
+			// Strip auto-generated tokens from the persisted config — they belong
+			// in their private startup sidecar (0600), not config.json which is
+			// routinely committed, synced, and attached to support tickets.
+			// A token loaded from the sidecar is auto-generated; only tokens
+			// explicitly set in the incoming request or in the config file are
+			// user-managed.
+			if cur != nil && cur.ConfigPath != "" {
+				if sidecar := config.LoadWebUIToken(effectivePath); sidecar != "" {
+					if incoming.WebUI.AuthToken == sidecar {
+						incoming.WebUI.AuthToken = "" // auto-generated — don't persist
+					}
+				}
+			}
 		if err := persistWebConfig(it.collector, effectivePath, &incoming); err != nil {
 			return it.buildHTTPResponse(500, "application/json", []byte(`{"error":"configuration could not be saved"}`))
 		}
