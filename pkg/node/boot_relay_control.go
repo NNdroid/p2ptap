@@ -21,6 +21,12 @@ import (
 	"p2ptap/pkg/routing"
 )
 
+// maxBootRelayCtrlStreams caps the number of concurrent boot-relay control
+// streams per node. Each distinct convID mints a goroutine; without a cap an
+// attacker can mint unlimited goroutines by sending many distinct convIDs
+// (Round 9 MED finding).
+const maxBootRelayCtrlStreams = 256
+
 // errBootRelayCtrlDeadline is returned by Read/Write on a boot-relay control
 // stream once its deadline has elapsed. It is treated by the control handlers
 // (SeqSync/LSA/Meta/Echo) like any other stream read/write error — the caller
@@ -408,6 +414,12 @@ func (n *Node) deliverBootRelayControl(finalDst, srcPeer peer.ID, proto protocol
 	n.bootRelayCtrlMu.Lock()
 	st, ok := n.bootRelayCtrlStreams[key]
 	if !ok {
+		if len(n.bootRelayCtrlStreams) >= maxBootRelayCtrlStreams {
+			n.bootRelayCtrlMu.Unlock()
+			log.Warn("[boot-relay] control stream cap reached (%d), dropping convID=%q from %s",
+				maxBootRelayCtrlStreams, key, srcPeer.ShortString())
+			return
+		}
 		st = &bootRelayCtrlStream{
 			n:       n,
 			remote:  srcPeer,

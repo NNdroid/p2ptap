@@ -66,9 +66,18 @@ const dispatchBurstGrace = 200 * time.Millisecond
 const peerStallCooldown = 3 * time.Second
 
 // notePeerSendError sees through framing, retry and batch error wrappers.
+// A send timeout means the peer's link is wedged: arm the stall breaker so
+// subsequent sends for this peer skip the expensive write deadline.
 func (n *Node) notePeerSendError(pid peer.ID, err error) {
 	var timeout net.Error
 	if errors.As(err, &timeout) && timeout.Timeout() {
+		n.markPeerStalled(pid)
+		return
+	}
+	// libp2p stream writes can return context.DeadlineExceeded directly
+	// (not wrapped in net.Error). Without this check the dominant timeout
+	// path never trips the breaker.
+	if errors.Is(err, context.DeadlineExceeded) {
 		n.markPeerStalled(pid)
 	}
 }

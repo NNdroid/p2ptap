@@ -42,6 +42,12 @@ const (
 	maxFragTotal   = (obfuscate.MaxSealedFrameSize + 255) / 256
 	maxReasmGroups = 1024
 	maxReasmBytes  = obfuscate.MaxSealedFrameSize
+
+	// Per-peer reassembly quota. Without this, a single attacker peer can open
+	// maxReasmGroups concurrent groups and starve all other peers (Round 9 MED).
+	// 64 groups per peer is generous: a single frame at 256-byte fragments
+	// needs at most 257 groups, but concurrent in-flight frames are far fewer.
+	maxReasmGroupsPerPeer = 64
 )
 
 type reasmKey struct {
@@ -68,6 +74,10 @@ type fragReassembler struct {
 	mu   sync.Mutex
 	bufs map[reasmKey]*reasmBuf
 
+	// perPeerGroups tracks how many reassembly groups each peer has open.
+	// Guarded by mu. Prevents a single peer from exhausting the global budget.
+	perPeerGroups map[peer.ID]int
+
 	// seqGen belongs exclusively to the TX fragmentation path. Keep it atomic
 	// instead of protecting it with mu: mu serializes RX reassembly state, and
 	// sharing that lock made every fragmented TX frame contend with every RX
@@ -85,7 +95,10 @@ type reasmBuf struct {
 }
 
 func newFragReassembler() *fragReassembler {
-	return &fragReassembler{bufs: make(map[reasmKey]*reasmBuf)}
+	return &fragReassembler{
+		bufs:          make(map[reasmKey]*reasmBuf),
+		perPeerGroups: make(map[peer.ID]int),
+	}
 }
 
 // nextOrigSeq allocates a monotonically increasing sequence for a new frame
@@ -220,7 +233,11 @@ func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte, channel
 		return nil, false
 	}
 	if fragTotal == 1 {
-		return chunk, true
+		// Copy chunk — it is a sub-slice of the caller's pooled payload buffer.
+		// Returning the sub-slice directly lets the pooled buffer be recycled
+		// while the caller still holds the reference, causing
+		// "crypto/cipher: invalid buffer overlap" panics during AEAD open.
+		return append([]byte(nil), chunk...), true
 	}
 
 	f.mu.Lock()
@@ -229,6 +246,12 @@ func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte, channel
 	key := reasmKey{peerID: remotePeer, origSeq: origSeq, channel: channel, epoch: epoch}
 	rb, ok := f.bufs[key]
 	if !ok || rb.deadline.Before(time.Now()) {
+			// Per-peer quota: reject if this peer has too many concurrent groups.
+		if !ok && f.perPeerGroups[remotePeer] >= maxReasmGroupsPerPeer {
+			log.Debug("Rx: peer %s exceeded per-peer fragment group limit (%d); dropping",
+				remotePeer.ShortString(), maxReasmGroupsPerPeer)
+			return nil, false
+		}
 		// Bound concurrent groups: if we are at capacity, evict the oldest
 		// group before opening a new one so memory stays capped even between
 		// reaper ticks.
@@ -243,6 +266,7 @@ func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte, channel
 			deadline: time.Now().Add(reasmTimeout),
 		}
 		f.bufs[key] = rb
+		f.perPeerGroups[remotePeer]++
 	}
 	if rb.total != int(fragTotal) {
 		return nil, false // preserve the existing valid group
@@ -254,6 +278,10 @@ func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte, channel
 		if rb.size+len(chunk) > maxReasmBytes {
 			log.Debug("Rx: fragment group from %s origSeq=%d exceeded max reassembly bytes; aborting", remotePeer.String(), origSeq)
 			delete(f.bufs, key)
+			f.perPeerGroups[remotePeer]--
+			if f.perPeerGroups[remotePeer] == 0 {
+				delete(f.perPeerGroups, remotePeer)
+			}
 			return nil, false
 		}
 		chunkCopy := make([]byte, len(chunk))
@@ -276,6 +304,10 @@ func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte, channel
 		reassembled = append(reassembled, p...)
 	}
 	delete(f.bufs, key)
+	f.perPeerGroups[remotePeer]--
+	if f.perPeerGroups[remotePeer] == 0 {
+		delete(f.perPeerGroups, remotePeer)
+	}
 	return reassembled, true
 }
 
@@ -295,6 +327,10 @@ func (f *fragReassembler) evictOldestGroup() {
 	}
 	if !first {
 		delete(f.bufs, oldestKey)
+		f.perPeerGroups[oldestKey.peerID]--
+		if f.perPeerGroups[oldestKey.peerID] == 0 {
+			delete(f.perPeerGroups, oldestKey.peerID)
+		}
 	}
 }
 
@@ -306,6 +342,10 @@ func (f *fragReassembler) reap() {
 	for k, rb := range f.bufs {
 		if rb.deadline.Before(now) {
 			delete(f.bufs, k)
+			f.perPeerGroups[k.peerID]--
+			if f.perPeerGroups[k.peerID] == 0 {
+				delete(f.perPeerGroups, k.peerID)
+			}
 		}
 	}
 }

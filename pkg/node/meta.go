@@ -88,7 +88,7 @@ func (n *Node) handleMetaStream(s network.Stream) {
 			n.processSubnetRoutes(remotePeer, payload.TapIP, payload.TapIPv6, payload.AdvertisedSubnets)
 			if payload.TapMAC != "" {
 				if hw, err := net.ParseMAC(payload.TapMAC); err == nil && len(hw) == 6 {
-					n.MACTable.Learn(hw, remotePeer)
+					n.learnMACFromMeta(hw, remotePeer)
 					cleanIP := strings.Split(payload.TapIP, "/")[0]
 					cleanv6 := strings.Split(payload.TapIPv6, "/")[0]
 					if setter, ok := n.TAP.(interface{ RegisterIPMAC(string, string) }); ok {
@@ -99,11 +99,11 @@ func (n *Node) handleMetaStream(s network.Stream) {
 							setter.RegisterIPMAC(cleanv6, payload.TapMAC)
 						}
 					}
-					if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 && n.TAP != nil && n.isOverlayIP(ip) {
+					if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 && n.TAP != nil && n.isOverlayIP(ip) && !n.isIPClaimedByOtherPeer(cleanIP, remotePeer) {
 						garpFrame := tap.BuildARPReplyFrame(hw, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, ip, ip)
 						_, _ = n.tapWrite(garpFrame)
 					}
-					if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil && n.TAP != nil && n.isOverlayIP(ip6) {
+					if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil && n.TAP != nil && n.isOverlayIP(ip6) && !n.isIPClaimedByOtherPeer(cleanv6, remotePeer) {
 						naFrame := tap.BuildIPv6NeighborAdvertisementFrame(hw, ip6)
 						if len(naFrame) > 0 {
 							_, _ = n.tapWrite(naFrame)
@@ -403,7 +403,7 @@ func (n *Node) handleMetaResponse(remotePeer peer.ID, respData []byte) {
 		return
 	}
 
-	n.MACTable.Learn(hw, remotePeer)
+	n.learnMACFromMeta(hw, remotePeer)
 
 	cleanIP := strings.Split(respPayload.TapIP, "/")[0]
 	cleanv6 := strings.Split(respPayload.TapIPv6, "/")[0]
@@ -420,11 +420,11 @@ func (n *Node) handleMetaResponse(remotePeer peer.ID, respData []byte) {
 	if n.TAP == nil {
 		return
 	}
-	if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 && n.isOverlayIP(ip) {
+	if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 && n.isOverlayIP(ip) && !n.isIPClaimedByOtherPeer(cleanIP, remotePeer) {
 		garpFrame := tap.BuildARPReplyFrame(hw, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, ip, ip)
 		_, _ = n.tapWrite(garpFrame)
 	}
-	if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil && n.isOverlayIP(ip6) {
+	if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil && n.isOverlayIP(ip6) && !n.isIPClaimedByOtherPeer(cleanv6, remotePeer) {
 		naFrame := tap.BuildIPv6NeighborAdvertisementFrame(hw, ip6)
 		if len(naFrame) > 0 {
 			_, _ = n.tapWrite(naFrame)
@@ -487,7 +487,7 @@ func (n *Node) applyPeerMetaFromLSA(remotePeer peer.ID, lsa routing.LinkStatePay
 		n.registerPeerIPMACFallback(remotePeer, lsa.TapIP, lsa.TapIPv6)
 		return
 	}
-	n.MACTable.Learn(hw, remotePeer)
+	n.learnMACFromMeta(hw, remotePeer)
 
 	cleanIP := strings.Split(lsa.TapIP, "/")[0]
 	cleanv6 := strings.Split(lsa.TapIPv6, "/")[0]
@@ -502,11 +502,11 @@ func (n *Node) applyPeerMetaFromLSA(remotePeer peer.ID, lsa routing.LinkStatePay
 	if n.TAP == nil {
 		return
 	}
-	if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 && n.isOverlayIP(ip) {
+	if ip := net.ParseIP(cleanIP); ip != nil && len(ip.To4()) == 4 && n.isOverlayIP(ip) && !n.isIPClaimedByOtherPeer(cleanIP, remotePeer) {
 		garpFrame := tap.BuildARPReplyFrame(hw, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, ip, ip)
 		_, _ = n.tapWrite(garpFrame)
 	}
-	if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil && n.isOverlayIP(ip6) {
+	if ip6 := net.ParseIP(cleanv6); ip6 != nil && ip6.To16() != nil && n.isOverlayIP(ip6) && !n.isIPClaimedByOtherPeer(cleanv6, remotePeer) {
 		naFrame := tap.BuildIPv6NeighborAdvertisementFrame(hw, ip6)
 		if len(naFrame) > 0 {
 			_, _ = n.tapWrite(naFrame)
@@ -528,6 +528,52 @@ func (n *Node) isOverlayIP(ip net.IP) bool {
 		return n.localV6Net != nil && n.localV6Net.Contains(ip6)
 	}
 	return false
+}
+
+// learnMACFromMeta learns a MAC from meta/LSA/PeekMap streams. Unlike
+// frame-based Learn (which allows rebind after peer roam), meta streams are
+// inherently less trustworthy — a peer can claim any MAC in its metadata
+// payload. Reject if the MAC is already learned by a different peer to
+// prevent L2 MITM via MAC table poisoning (Round 9 HIGH finding).
+func (n *Node) learnMACFromMeta(hw net.HardwareAddr, remotePeer peer.ID) {
+	if existing, found := n.MACTable.Lookup(hw); found && existing != remotePeer {
+		log.Warn("MAC spoofing via meta stream: peer %s claimed MAC %s but it is learned by %s; rejecting",
+			remotePeer.ShortString(), hw.String(), existing.ShortString())
+		return
+	}
+	n.MACTable.Learn(hw, remotePeer)
+}
+
+// isIPClaimedByOtherPeer checks if the claimed IP is already known to
+// belong to a different peer (from peerMeta). If so, the peer is
+// attempting IP spoofing and GARP/NA must not be written — it would
+// poison the local OS ARP/NDP cache and redirect the honest peer's
+// unicast traffic (Round 9 MED finding).
+func (n *Node) isIPClaimedByOtherPeer(ip string, senderPeer peer.ID) bool {
+	if ip == "" {
+		return false
+	}
+	found := false
+	n.peerMeta.Range(func(key, value any) bool {
+		pid, ok := key.(peer.ID)
+		if !ok || pid == senderPeer {
+			return true
+		}
+		pm, ok := value.(PeerMeta)
+		if !ok {
+			return true
+		}
+		claimedIP := strings.Split(pm.TapIP, "/")[0]
+		claimedV6 := strings.Split(pm.TapIPv6, "/")[0]
+		if claimedIP == ip || claimedV6 == ip {
+			log.Warn("IP spoofing via meta stream: peer %s claimed IP %s but it is known to belong to peer %s; rejecting GARP/NA",
+				senderPeer.ShortString(), ip, pid.ShortString())
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // isSubnetPeerAllowed returns true if the peer is allowed to advertise subnets.
@@ -759,17 +805,28 @@ func (n *Node) ingestPeekMapNodeInfo(info PeekMapNodeInfo, viaPeer peer.ID) {
 	}
 	log.Debug("Peek-map ingesting node info: peer=%s via=%s name=%q tapIP=%s tapIPv6=%s mac=%s os=%s arch=%s ver=%s exit=%v subnets=%v hop=%d",
 		pID.ShortString(), viaPeer.ShortString(), info.NodeName, info.TapIP, info.TapIPv6, info.TapMAC, info.OS, info.Arch, info.Version, info.IsExitNode, info.AdvertisedSubnets, info.HopDistance)
-	n.applyPeerMetaFromLSA(pID, routing.LinkStatePayload{
-		NodeName:          info.NodeName,
-		TapIP:             info.TapIP,
-		TapIPv6:           info.TapIPv6,
-		TapMAC:            info.TapMAC,
-		OS:                info.OS,
-		Arch:              info.Arch,
-		Version:           info.Version,
-		IsExitNode:        info.IsExitNode,
-		AdvertisedSubnets: info.AdvertisedSubnets,
-	})
+
+	// Trust gate (Round 9 HIGH): metadata (MAC, IP, subnets) from a Peek-Map
+	// UPDATE is only trusted when the relay (viaPeer) is already a known peer.
+	// An unknown relay can forge info about any peer — applying it would install
+	// a spoofed MAC/IP/subnet entry that redirects the honest peer's traffic.
+	// Topology discovery (SetEdge, recordPeekMapOrigin, considerDiscovered)
+	// still proceeds so cross-cluster connectivity works; once the peer is
+	// connected directly, its meta stream provides the real metadata.
+	viaPeerKnown := n.peerKnownPeer(viaPeer.String())
+	if viaPeerKnown || n.peerKnownPeer(pID.String()) {
+		n.applyPeerMetaFromLSA(pID, routing.LinkStatePayload{
+			NodeName:          info.NodeName,
+			TapIP:             info.TapIP,
+			TapIPv6:           info.TapIPv6,
+			TapMAC:            info.TapMAC,
+			OS:                info.OS,
+			Arch:              info.Arch,
+			Version:           info.Version,
+			IsExitNode:        info.IsExitNode,
+			AdvertisedSubnets: info.AdvertisedSubnets,
+		})
+	}
 	// Backfill the indirect link into the topology graph. The weight estimates
 	// the boot<->peer latency as a base relay cost scaled by the advertised hop
 	// distance (1 hop = single relay hop, 2 = two cascaded hops, ...). This lets
