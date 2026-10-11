@@ -190,3 +190,42 @@ func TestPendingConfigKeepsActiveTokenUntilRestart(t *testing.T) {
 		t.Fatalf("redacted save lost pending token: %s", result)
 	}
 }
+
+// TestConfigSaveValidationErrorDoesNotRepeatPrefix pins the message a client sees
+// for a rejected PSK. Config.Validate already starts with "invalid config:", and
+// both the HTTP handler and the interceptor used to wrap it with the same words,
+// producing "invalid config: invalid config: psk: ..." in logs and on screen.
+func TestConfigSaveValidationErrorDoesNotRepeatPrefix(t *testing.T) {
+	baseline := config.DefaultConfig()
+	baseline.WebUI.AuthToken = "test-config-token"
+	collector := NewStatsCollector()
+	collector.SetNodeInfo("test", "", baseline.TapIP, baseline.TapIPv6, baseline.TransportStrategy)
+	srv, host := startConfigTestServerOnFreePort(t, collector, baseline)
+	defer srv.Close()
+
+	next := *baseline
+	next.PSK = "s3cret" // below the 16-character minimum
+	body, _ := json.Marshal(&next)
+	resp, err := http.Post("http://"+host+"/api/config?token="+srv.AuthToken(), "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, body=%s", resp.StatusCode, data)
+	}
+	if n := strings.Count(string(data), "invalid config:"); n != 1 {
+		t.Fatalf("server path: prefix should appear exactly once, got %d in %q", n, data)
+	}
+	if !strings.Contains(string(data), "psk:") {
+		t.Fatalf("field name lost: %s", data)
+	}
+
+	// The interceptor builds its error JSON by hand, so check it separately.
+	it := &TAPInterceptor{collector: collector, configState: configStateFor(collector, baseline)}
+	result := it.processHTTP(append([]byte("POST /api/config HTTP/1.1\r\nAuthorization: Bearer test-config-token\r\n\r\n"), body...))
+	if n := strings.Count(string(result), "invalid config:"); n != 1 {
+		t.Fatalf("interceptor path: prefix should appear exactly once, got %d in %s", n, result)
+	}
+}

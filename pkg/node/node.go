@@ -310,8 +310,9 @@ type Node struct {
 	// routing.PackBootRelayFrame envelope and written to the uplink of a
 	// connected boot, which bridges them to the destination across the boot
 	// backbone. Guarded by bootRelayMu. bootRelayNetID is the node's own
-	// network ID (sha256("p2ptap-net:"+PSK) prefix), attached in-band to every
-	// boot-relay envelope so the destination boot can enforce PSK isolation.
+	// network ID (SHA-256 over the PSK domain separator and canonical key bytes;
+	// see routing.NetworkIDFromPSK), attached in-band to every boot-relay
+	// envelope so the destination boot can enforce PSK isolation.
 	bootRelayMu    sync.Mutex
 	bootRelayConns map[peer.ID]*bootRelayConn
 	// bootRelayStarted records boots for which the uplink goroutine has been

@@ -1,9 +1,7 @@
 package routing
 
 import (
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -30,17 +28,8 @@ const (
 	BootRelayKindControl = byte(1) // inner payload = raw control-protocol bytes
 )
 
-// NetworkIDFromPSK derives the opaque network ID for a PSK. It MUST stay
-// byte-for-byte identical to the boot server's networkIDFromPSK: the first 8
-// bytes of SHA-256("p2ptap-net:" + PSK) hex-encoded (16 chars). The plaintext
-// PSK is never placed on the wire; only this derivative travels, so a backbone
-// boot can enforce PSK isolation on relay-over-backbone frames — it only knows
-// the net IDs of ITS OWN authenticated clients, so the origin must carry its
-// net ID in-band for the receiving boot to compare against the destination's.
-func NetworkIDFromPSK(psk string) string {
-	sum := sha256.Sum256([]byte("p2ptap-net:" + psk))
-	return hex.EncodeToString(sum[:8])
-}
+// PSK derivatives (NetworkIDFromPSK, RelayAuthToken, PSKKeyBytes) live in psk.go,
+// which is the single place that decides how a PSK string becomes key bytes.
 
 // PackBootRelayFrame wraps an overlay relay envelope with a network-ID tag so a
 // backbone boot can enforce PSK isolation for relay-over-backbone (relay-over-

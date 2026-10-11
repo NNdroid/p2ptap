@@ -1,6 +1,30 @@
 package P2PTap
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// TestValidateConfigErrorDoesNotRepeatPrefix: Config.Validate already starts its
+// message with "invalid config:", so wrapping it with the same words produced
+// "android: invalid config: invalid config: psk: ..." in device logs.
+func TestValidateConfigErrorDoesNotRepeatPrefix(t *testing.T) {
+	cfg := `{"psk":"s3cret"}` // too short, so Validate fails deterministically
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected validation to fail for a 6-character PSK")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "android: ") {
+		t.Errorf("platform marker lost: %q", msg)
+	}
+	if strings.Contains(msg, "invalid config: invalid config:") {
+		t.Errorf("prefix duplicated: %q", msg)
+	}
+	if !strings.HasPrefix(msg, "android: invalid config: ") {
+		t.Errorf("unexpected error shape: %q", msg)
+	}
+}
 
 func TestValidateConfigWithoutStartingEngine(t *testing.T) {
 	for _, strategy := range []string{"best_path", "redundant", "fallback"} {

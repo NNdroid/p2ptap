@@ -3,7 +3,6 @@ package node
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +23,7 @@ import (
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 
+	"p2ptap/pkg/routing"
 	"p2ptap/pkg/version"
 )
 
@@ -257,8 +257,10 @@ func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 
 	log.Debug("Authenticating with relay peer %s using PSK...", peerID.String())
 
-	// Compute auth token: SHA-256("p2ptap-relay-auth:" + PSK)
-	token := sha256.Sum256([]byte("p2ptap-relay-auth:" + n.Config.PSK))
+	// Compute the auth token. routing.RelayAuthToken is the one derivation the
+	// boot server also calls, so the two sides cannot drift apart and a hex PSK
+	// is treated case-insensitively on both.
+	token := routing.RelayAuthToken(n.Config.PSK)
 
 	// Set a read deadline BEFORE any read. Without this, if the boot accepts
 	// the stream but never replies (stale boot, mid-restart), the goroutine
@@ -950,7 +952,6 @@ const directRaceGracePeriod = 10 * time.Second
 // launching a second competing dial (which can cause libp2p transport conflicts).
 var dialingMu sync.Mutex
 var dialingDone = make(map[peer.ID]chan struct{})
-
 
 // allAddrsLoopback reports whether every address is loopback — i.e. the peer is
 // ourselves. It is intentionally stricter than allAddrsLocal: private/ULA

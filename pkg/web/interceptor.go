@@ -885,7 +885,9 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 			}
 
 			if err := incoming.Validate(); err != nil {
-				return it.buildHTTPResponse(400, "application/json", []byte(fmt.Sprintf(`{"error":"invalid config: %v"}`, err)))
+				// Config.Validate already starts its message with "invalid config:",
+				// so repeating the words here produced a doubled prefix.
+				return it.buildHTTPResponse(400, "application/json", []byte(fmt.Sprintf(`{"error":"%v"}`, err)))
 			}
 
 			effectivePath := it.configPath

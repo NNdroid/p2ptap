@@ -10,6 +10,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"p2ptap/pkg/obfuscate"
+	"p2ptap/pkg/routing"
 )
 
 // peerObf is the lock-free hot-path lookup used by every TX/RX packet. It loads
@@ -39,12 +40,17 @@ func (n *Node) pskRequired() bool {
 // pskSaltBytes returns the PSK bytes mixed into the per-peer KDF salt (nil for a
 // PSK-less deployment, which keeps the pre-binding key schedule byte-for-byte
 // compatible with older builds).
+//
+// The canonical form from routing.PSKKeyBytes is used, not the raw config
+// string: hex is case-insensitive, so "ABCD" and "abcd" must yield the same
+// salt. Both ends of a link route through the same canonicalizer, which is what
+// makes per-peer key agreement possible.
 func pskSaltBytes(n *Node) []byte {
 	c := n.config()
 	if c == nil || c.PSK == "" {
 		return nil
 	}
-	return []byte(c.PSK)
+	return routing.PSKKeyBytes(c.PSK)
 }
 
 // hasNegotiatedCipher reports whether an encrypted per-peer cipher has been

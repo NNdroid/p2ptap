@@ -15,7 +15,9 @@ func parseConfig(cfgJSON string) (*config.Config, error) {
 		}
 	}
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("android: invalid config: %w", err)
+		// Config.Validate already prefixes its message with "invalid config:", so
+		// adding the same words here produced "invalid config: invalid config:".
+		return nil, fmt.Errorf("android: %w", err)
 	}
 	if cfg.ExitNode.Enable {
 		return nil, fmt.Errorf("android: exit node server is not supported on this build")

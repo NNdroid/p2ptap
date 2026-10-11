@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
@@ -208,7 +207,6 @@ type bootNodeInfo struct {
 	IsBoot bool `json:"is_boot"`
 }
 
-
 // peekMapHub is a stateless pub/sub router: it rebroadcasts every frame from
 // one client to all other connected clients. It holds no node data.
 //
@@ -327,8 +325,8 @@ func (h *peekMapHub) fanout(frame []byte, exclude peer.ID, skipMesh bool, netID 
 	// handled by the unregister sweep below, so the eventual consistency is
 	// fine.
 	type target struct {
-		peer     peer.ID
-		stream   network.Stream
+		peer   peer.ID
+		stream network.Stream
 	}
 	h.mu.RLock()
 	targets := make([]target, 0, len(h.listener))
@@ -1905,8 +1903,6 @@ func (p *bootDataProviderImpl) GetConfigSummary() bootweb.ConfigSummaryDTO {
 	}
 }
 
-
-// computePSKHash derives a 32-byte authentication token from PSK using SHA-256
 // seqSyncMsg mirrors the JSON wire format used by pkg/node's seqsync protocol.
 // Field tags MUST stay in sync with node.SeqSyncMsg; only the fields the boot
 // node actually populates are read here, but the same JSON keys are produced.
@@ -1987,9 +1983,12 @@ func connEpochBoot() uint64 {
 	return uint64(binary.BigEndian.Uint32(b[:])) & 0xFFF
 }
 
+// computePSKHash derives the 32-byte relay auth token for a configured PSK. It
+// delegates to the shared routing.RelayAuthToken so the boot and the node
+// cannot derive different tokens for the same key — and so a hex PSK is
+// treated case-insensitively on both sides.
 func computePSKHash(psk string) [32]byte {
-	// Double hash: SHA-256("p2ptap-relay-auth:" + PSK)
-	return sha256.Sum256([]byte("p2ptap-relay-auth:" + psk))
+	return routing.RelayAuthToken(psk)
 }
 
 // networkIDFromPSK derives the opaque network ID for a PSK. It delegates to the

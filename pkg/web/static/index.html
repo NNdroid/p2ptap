@@ -930,6 +930,12 @@
                     <div>
                         <div class="config-row-label" data-i18n="psk_lbl">Pre-Shared Key (PSK)</div>
                         <div class="config-row-desc" data-i18n="psk_desc">Empty for public network, set key for encrypted isolation</div>
+                        <!-- No data-i18n: the format spec is a language-neutral technical
+                             constant, so applyI18n() does not rewrite it and no per-locale
+                             translation is needed. 64 hex chars is the documented format
+                             that `p2ptap genconf` emits and LuCI enforces; the Go validator
+                             is more lenient and also accepts 16-128 hex characters. -->
+                        <div class="config-row-desc" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">64 hex chars / 32 bytes, case-insensitive</div>
                     </div>
                     <input type="password" id="cfgPSK" class="form-input ext145" placeholder="••••••••">
                 </div>

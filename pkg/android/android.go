@@ -748,7 +748,8 @@ func ApplyHotReload(cfgJSON string) error {
 	}
 	mergeHotReload(candidate, cfg)
 	if err := candidate.Validate(); err != nil {
-		return fmt.Errorf("android: invalid config: %w", err)
+		// Config.Validate already prefixes its message with "invalid config:".
+		return fmt.Errorf("android: %w", err)
 	}
 	if candidate.ExitNode.Enable {
 		return errors.New("android: exit node server is not supported on this build")

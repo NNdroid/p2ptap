@@ -1343,7 +1343,8 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			}
 
 			if err := incoming.Validate(); err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid config: %v", err))
+				// Config.Validate already starts its message with "invalid config:".
+				writeError(w, http.StatusBadRequest, err.Error())
 				return
 			}
 
