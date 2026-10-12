@@ -666,6 +666,21 @@ func TestTransportWebRTC_Deadline(t *testing.T) {
 }
 
 func TestTransportWebRTC_StreamWriteBufferContention(t *testing.T) {
+	// The payload has to exceed the write path's non-blocking push threshold.
+	//
+	// Association.sendPayloadData queues chunks into pendingQueue and returns
+	// immediately; it only waits (and only there does it consult the deadline)
+	// while another write holds the association's write slot. So whether a write
+	// times out depends on whether the payload fills the write window, not on
+	// wall-clock speed. Measured on this tree into a never-read stream: up to
+	// ~4MB returns nil in ~35ms with every byte reported as written, while
+	// 12MB+ reliably times out at the deadline with a fixed partial count of
+	// ~32KB. The 2MB payload this test used before is well below the threshold,
+	// so both writes completed in ~32ms and the deadline assertion below was
+	// unreachable — the test failed on any machine fast enough to queue 2MB,
+	// which is to say all of them.
+	const largeBuffer = 16 * 1024 * 1024
+
 	tr, listeningPeer := getTransport(t)
 	listenMultiaddr := ma.StringCast("/ip4/127.0.0.1/udp/0/webrtc-direct")
 	listener, err := tr.Listen(listenMultiaddr)
@@ -682,6 +697,8 @@ func TestTransportWebRTC_StreamWriteBufferContention(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { lconn.Close() })
 		require.Equal(t, connectingPeer, lconn.RemotePeer())
+		// Never read: the unread receive buffers are what fills the write
+		// window and creates the contention being asserted on below.
 		for range 2 {
 			go func() {
 				defer wg.Done()
@@ -703,8 +720,7 @@ func TestTransportWebRTC_StreamWriteBufferContention(t *testing.T) {
 			require.NoError(t, err)
 
 			stream.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
-			largeBuffer := make([]byte, 2*1024*1024)
-			_, err = stream.Write(largeBuffer)
+			_, err = stream.Write(make([]byte, largeBuffer))
 			errC <- err
 		}()
 	}
