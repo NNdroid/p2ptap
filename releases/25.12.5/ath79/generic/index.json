@@ -2,15 +2,15 @@
   "packages": [
     {
       "name": "luci-app-p2ptap",
-      "version": "1.0.20261012.138-r138",
-      "hashes": "00b3fe18a1493f3ca0f18a65fea49b353253694a7b000786902ed9a4ba7c0f44",
+      "version": "1.0.20261012.139-r139",
+      "hashes": "9ed63771edcb0b661a7120f1a8f843f9649f278c032f60a210d8f562be4dbeae",
       "description": "LuCI support for p2ptap Layer-2 P2P TAP VPN",
       "arch": "noarch",
       "origin": "feeds/base/luci-app-p2ptap",
       "maintainer": "OpenWrt LuCI community",
       "url": "https://github.com/openwrt/luci",
       "installed-size": 29726,
-      "file-size": 11071,
+      "file-size": 11073,
       "depends": [
         "libc",
         "luci-compat",
@@ -22,13 +22,13 @@
       ]
     }, {
       "name": "luci-i18n-p2ptap-fr",
-      "version": "1.0.20261012.138-r138",
-      "hashes": "98e62033d8785237dc1297141be0a3e8edfec8f715a156e3d292d307e7bd4ab7",
+      "version": "1.0.20261012.139-r139",
+      "hashes": "fe3b213dbeff84b3ebdbc3d4a535817f39c975ea3dd724ac616c97cafe739ce3",
       "description": "Translation for luci-app-p2ptap - Français (French)",
       "arch": "noarch",
       "origin": "feeds/base/luci-app-p2ptap",
       "installed-size": 7127,
-      "file-size": 4382,
+      "file-size": 4384,
       "depends": [
         "libc",
         "luci-app-p2ptap"
@@ -38,13 +38,13 @@
       ]
     }, {
       "name": "luci-i18n-p2ptap-ja",
-      "version": "1.0.20261012.138-r138",
-      "hashes": "98eba9355f03b7b6c0cd268431883c4e68bb81b3a53c72edb567af5f03ebf1e7",
+      "version": "1.0.20261012.139-r139",
+      "hashes": "1794b48ecb8e436c3098b3c071ba15ea8e0a94b51c8b5a42391502b9ce902267",
       "description": "Translation for luci-app-p2ptap - 日本語 (Japanese)",
       "arch": "noarch",
       "origin": "feeds/base/luci-app-p2ptap",
       "installed-size": 7705,
-      "file-size": 4555,
+      "file-size": 4556,
       "depends": [
         "libc",
         "luci-app-p2ptap"
@@ -54,13 +54,13 @@
       ]
     }, {
       "name": "luci-i18n-p2ptap-zh-cn",
-      "version": "1.0.20261012.138-r138",
-      "hashes": "eb9f87ad64fc8549ee63c8b3b11caa8f8432c16b7b0753dbe6cb0d3922ea1ab7",
+      "version": "1.0.20261012.139-r139",
+      "hashes": "24222deaa4a2b30afa547881598e5e04fbc41e18e7d68ef8cc834caa5846dc98",
       "description": "Translation for luci-app-p2ptap - 简体中文 (Simplified Chinese)",
       "arch": "noarch",
       "origin": "feeds/base/luci-app-p2ptap",
       "installed-size": 1607,
-      "file-size": 1942,
+      "file-size": 1939,
       "depends": [
         "libc",
         "luci-app-p2ptap"
@@ -70,8 +70,8 @@
       ]
     }, {
       "name": "p2ptap",
-      "version": "1.0.20261012.138-r138",
-      "hashes": "fffdf9c7dd234d3183b8bb8af27f25c4cf39e624d6be02dcd2c450af2f465651",
+      "version": "1.0.20261012.139-r139",
+      "hashes": "a9fc9ed9ff6452bcb1bfd5012140392a28650d2032489532cd6d2b11a3fa530e",
       "description": "p2ptap is a high-performance Layer-2 P2P TAP Virtual Private Network built on go-libp2p. It supports multi-transport (QUIC, WebRTC, WebTransport, TCP), obfuscation padding, PSK authentication, and NAT traversal with Circuit Relay v2.",
       "arch": "mips_24kc",
       "license": "MIT",
@@ -79,7 +79,7 @@
       "maintainer": "p2ptap developers",
       "url": "https://github.com/NNdroid/p2ptap",
       "installed-size": 36178683,
-      "file-size": 11657413,
+      "file-size": 11663337,
       "depends": [
         "ca-certificates",
         "jshn",
