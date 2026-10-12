@@ -477,7 +477,7 @@ func normalizeSTUNServer(ctx context.Context, s string) ([]net.Addr, bool, error
 		if portNum == 0 {
 			portNum = 3478
 		}
-		ips, err := resolveIPs(ctx, host)
+		ips, err := resolveSTUNHost(ctx, host)
 		if err != nil {
 			return nil, isTCP, fmt.Errorf("cannot resolve STUN host %q: %w", host, err)
 		}
@@ -495,7 +495,7 @@ func normalizeSTUNServer(ctx context.Context, s string) ([]net.Addr, bool, error
 
 	// No port specified, use default
 	port := 3478
-	ips, err := resolveIPs(ctx, s)
+	ips, err := resolveSTUNHost(ctx, s)
 	if err != nil {
 		return nil, isTCP, fmt.Errorf("cannot resolve STUN host %q: %w", s, err)
 	}
@@ -527,16 +527,21 @@ func stunQueryUDP(ctx context.Context, server string, serverAddr net.Addr) (net.
 	sa := serverAddr.(*net.UDPAddr)
 	log.Debug("UDP STUN query: connecting to %s:%d", sa.IP.String(), sa.Port)
 
-	conn, err := net.DialUDP("udp", nil, sa)
+	conn, err := controlPlaneDialer().DialContext(ctx, "udp", sa.String())
 	if err != nil {
 		return net.UDPAddr{}, fmt.Errorf("dial %s: %w", sa.String(), err)
 	}
-	defer conn.Close()
+	udpConn, ok := conn.(*net.UDPConn)
+	if !ok {
+		conn.Close()
+		return net.UDPAddr{}, fmt.Errorf("UDP STUN dial returned %T", conn)
+	}
+	defer udpConn.Close()
 
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	localAddr := udpConn.LocalAddr().(*net.UDPAddr)
 	log.Debug("UDP STUN query: connected to %s via local socket %s", sa.String(), localAddr.String())
 
-	addr, err := sendSTUNBindingRequest(ctx, conn, localAddr)
+	addr, err := sendSTUNBindingRequest(ctx, udpConn, localAddr)
 	if err != nil {
 		return net.UDPAddr{}, fmt.Errorf("UDP STUN query to %s: %w", sa.String(), err)
 	}
@@ -555,16 +560,21 @@ func stunQueryTCP(ctx context.Context, server string, serverAddr net.Addr) (net.
 	sa := serverAddr.(*net.TCPAddr)
 	log.Debug("TCP STUN query: connecting to %s:%d", sa.IP.String(), sa.Port)
 
-	conn, err := net.DialTCP("tcp", nil, sa)
+	conn, err := controlPlaneDialer().DialContext(ctx, "tcp", sa.String())
 	if err != nil {
 		return net.UDPAddr{}, fmt.Errorf("dial TCP %s: %w", sa.String(), err)
 	}
-	defer conn.Close()
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		conn.Close()
+		return net.UDPAddr{}, fmt.Errorf("TCP STUN dial returned %T", conn)
+	}
+	defer tcpConn.Close()
 
-	localAddr := conn.LocalAddr().(*net.TCPAddr)
+	localAddr := tcpConn.LocalAddr().(*net.TCPAddr)
 	log.Debug("TCP STUN query: connected to %s via local socket %s", sa.String(), localAddr.String())
 
-	addr, err := sendSTUNBindingRequestTCP(ctx, conn, localAddr)
+	addr, err := sendSTUNBindingRequestTCP(ctx, tcpConn, localAddr)
 	if err != nil {
 		return net.UDPAddr{}, fmt.Errorf("TCP STUN query to %s: %w", sa.String(), err)
 	}
@@ -784,4 +794,35 @@ func resolveIPs(ctx context.Context, host string) ([]net.IP, error) {
 		}
 	}
 	return ips, nil
+}
+
+// controlPlaneSocketControl is the socket-control hook for STUN and TURN
+// control-plane sockets. It binds each socket to the physical NIC, so a
+// control-plane lookup cannot loop into the TAP tunnel once the relay or boot
+// server is configured as the default gateway — at which point the traffic
+// would be relayed back to whoever is behind this box and the NAT type would be
+// reported from the wrong interface.
+var controlPlaneSocketControl = GetSocketControlHook("")
+
+// stunControlTimeout bounds a single STUN/TURN control-plane connect or DNS
+// lookup. A blackholed server or a stuck resolver must not be able to eat the
+// whole cycle context that the parallel batch shares.
+const stunControlTimeout = 5 * time.Second
+
+// controlPlaneDialer returns a dialer for control-plane traffic with a connect
+// timeout.
+func controlPlaneDialer() *net.Dialer {
+	return &net.Dialer{
+		Control: controlPlaneSocketControl,
+		Timeout: stunControlTimeout,
+	}
+}
+
+// resolveSTUNHost resolves a single STUN/TURN host under its own timeout, so
+// one slow or unresolvable name cannot consume the cycle context of the whole
+// batch.
+func resolveSTUNHost(ctx context.Context, host string) ([]net.IP, error) {
+	lookupCtx, cancel := context.WithTimeout(ctx, stunControlTimeout)
+	defer cancel()
+	return resolveIPs(lookupCtx, host)
 }

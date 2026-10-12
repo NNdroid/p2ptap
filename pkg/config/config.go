@@ -65,12 +65,10 @@ func validNodeName(name string) bool {
 
 // TransportsConfig defines transport layer protocol options
 type TransportsConfig struct {
-	EnableQUICReuse    bool   `json:"enable_quic_reuse"`
-	EnableWebRTC       bool   `json:"enable_webrtc"`
-	EnableWebTransport bool   `json:"enable_webtransport"`
-	EnableTCPReuse     bool   `json:"enable_tcp_reuse"`
-	EnableTCPBrutal    bool   `json:"enable_tcp_brutal"`
-	TCPBrutalRate      string `json:"tcp_brutal_rate"`
+	EnableQUICReuse    bool `json:"enable_quic_reuse"`
+	EnableWebRTC       bool `json:"enable_webrtc"`
+	EnableWebTransport bool `json:"enable_webtransport"`
+	EnableTCPReuse     bool `json:"enable_tcp_reuse"`
 	// DisableRelay turns OFF libp2p circuit-relay client/service, AutoRelay
 	// and DCUtR hole-punching. Use as a diagnostic: if a peer that was reachable
 	// (but slow, e.g. hundreds of ms) becomes UNREACHABLE with this on, it was
@@ -236,8 +234,20 @@ type Config struct {
 	// for WebRTC connections by providing server-reflexive candidates.
 	StunServers []string `json:"stun_servers"`
 	// TurnServers is a list of TURN server URLs for NAT traversal fallback.
-	// Format: "turn:host:port" (anonymous) or "turn:host:port?username=...&credential=..."
-	// (authenticated). Empty means no TURN relay allocation.
+	// Format: "turn:<host>:<port>?username=<user>&credential=<pass>".
+	//
+	// Credentials are required, not optional: TURN servers authenticate every
+	// allocation, so a bare "turn:host:port" entry is parsed and accepted but
+	// can never allocate a relay port. WebRTC ICE rejects such an entry
+	// outright — pion aborts the whole peer connection on the first
+	// credential-less TURN server, which takes down every WebRTC link, not
+	// just the relayed ones — so those entries are excluded from ICE and only
+	// feed the QUIC relay binder, where they fail every cycle.
+	//
+	// Empty (the default) means no TURN relay allocation at all, which is the
+	// correct default: NAT traversal works via STUN + hole punching for the
+	// common NAT types, and relay is a fallback that needs a TURN service you
+	// actually have an account on.
 	TurnServers []string `json:"turn_servers"`
 	// RelayUpgradeInterval controls how often relay-only peers are retried for a
 	// direct connection upgrade. Default: 30s. Shorter intervals improve direct
@@ -281,12 +291,23 @@ func DefaultConfig() *Config {
 			"/ip4/0.0.0.0/tcp/0",
 			"/ip6/::/tcp/0",
 		},
+		// Concrete-IP bootstrap peers, not /dnsaddr/. The public
+		// bootstrap.libp2p.io name is no longer published — the domain does not
+		// resolve at all (no A, no AAAA, no TXT), so every /dnsaddr/ entry
+		// failed DNS resolution and a freshly installed node could not bootstrap
+		// its DHT nor reach a relay via EnableAutoRelayWithStaticRelays. These
+		// are the canonical upstream peers pinned to their own addresses, which
+		// is what the libp2p examples still ship with.
 		BootstrapPeers: []string{
-			"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-			"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-			"/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
-			"/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
-			"/dnsaddr/bootstrap.libp2p.io/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ",
+			"/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ",
+			"/ip4/104.236.179.241/tcp/4001/p2p/QmSoLPppuBtQSGwKDZT2M73ULpjvfd3aZ6ha4oFGL1KrGM",
+			"/ip4/128.199.219.111/tcp/4001/p2p/QmSoLSafTMBsPKadTEgaXctDQVcqN88CNLHXMkTNwMKPnu",
+			"/ip4/104.236.76.40/tcp/4001/p2p/QmSoLV4Bbm51jM9C4gDYZQ9Cy3U6aXMJDAbzgu2fzaDs64",
+			"/ip4/178.62.158.247/tcp/4001/p2p/QmSoLer265NRgSp2LA3dPaeykiS1J6DifTC88f5uVQKNAd",
+			"/ip6/2604:a880:1:20::203:d001/tcp/4001/p2p/QmSoLPppuBtQSGwKDZT2M73ULpjvfd3aZ6ha4oFGL1KrGM",
+			"/ip6/2400:6180:0:d0::151:6001/tcp/4001/p2p/QmSoLSafTMBsPKadTEgaXctDQVcqN88CNLHXMkTNwMKPnu",
+			"/ip6/2604:a880:800:10::4a:5001/tcp/4001/p2p/QmSoLV4Bbm51jM9C4gDYZQ9Cy3U6aXMJDAbzgu2fzaDs64",
+			"/ip6/2a03:b0c0:0:1010::23:1001/tcp/4001/p2p/QmSoLer265NRgSp2LA3dPaeykiS1J6DifTC88f5uVQKNAd",
 		},
 		StaticPeers: []string{},
 		// On by default: a node that is told about a federated boot cannot reach
@@ -305,8 +326,6 @@ func DefaultConfig() *Config {
 			EnableWebRTC:       true,
 			EnableWebTransport: true,
 			EnableTCPReuse:     true,
-			EnableTCPBrutal:    false,
-			TCPBrutalRate:      "100Mbps",
 			DisableRelay:       false,
 		},
 		TransportStrategy: "best_path",
@@ -319,109 +338,39 @@ func DefaultConfig() *Config {
 		DriverType:        "auto", // TAP first, Wintun fallback on Windows
 		NodeKeyFile:       "node.key",
 		PSK:               "",
+		// A short, curated list. The binder queries servers concurrently with a
+		// 5s per-server timeout and stops after a few successes, so the list only
+		// has to contain servers that work, not every server that ever existed:
+		// adding more entries does not raise success odds once a couple of them
+		// answer, it only spends concurrency slots and timeout budget on servers
+		// that never will.
 		StunServers: []string{
-			// ── UDP STUN servers ──
+			// ── UDP STUN ──
 			"/udp/turn.cloudflare.com/3478",
 			"/udp/stun.cloudflare.com/3478",
 			"/udp/stun.l.google.com/19302",
 			"/udp/stun1.l.google.com/19302",
 			"/udp/stun2.l.google.com/19302",
-			"/udp/stun3.l.google.com/19302",
-			"/udp/stun4.l.google.com/19302",
 			"/udp/fwa.lifesizecloud.com/3478",
-			"/udp/stun.isp.net.au/3478",
-			"/udp/stun.freeswitch.org/3478",
-			"/udp/stun.voip.blackberry.com/3478",
 			"/udp/stun.nextcloud.com/3478",
-			"/udp/stun.sipnet.com/3478",
-			"/udp/stun.radiojar.com/3478",
-			"/udp/stun.sonetel.com/3478",
-			"/udp/stun.voipgate.com/3478",
-			"/udp/stun.miwifi.com/3478",
 			"/udp/stun.chat.bilibili.com/3478",
-			"/udp/stun.douyucdn.cn/18000",
-			"/udp/stun.hitv.com/3478",
-			"/udp/stun.cdnbye.com/3478",
-			"/udp/stun.relay.metered.ca/80",
-			"/udp/stun.hivestreaming.com/3478",
-			// ── Amazon Kinesis STUN servers (UDP) ──
-			"/udp/stun.kinesisvideo.us-east-2.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.us-east-1.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.us-west-2.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.af-south-1.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.ap-east-1.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.ap-south-1.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.ap-northeast-2.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.ap-southeast-1.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.ap-southeast-2.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.ap-northeast-1.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.ca-central-1.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.eu-central-1.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.eu-west-1.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.eu-west-2.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.eu-west-3.amazonaws.com/443",
-			"/udp/stun.kinesisvideo.sa-east-1.amazonaws.com/443",
-			// ── TCP STUN servers (RFC 7675) ──
+			// ── TCP STUN (RFC 7675) ──
 			"/tcp/turn.cloudflare.com/80",
 			"/tcp/stun.cloudflare.com/3478",
 			"/tcp/stun.l.google.com/3478",
-			"/tcp/stun1.l.google.com/3478",
 			"/tcp/fwa.lifesizecloud.com/3478",
-			"/tcp/stun.isp.net.au/3478",
-			"/tcp/stun.freeswitch.org/3478",
-			"/tcp/stun.voip.blackberry.com/3478",
 			"/tcp/stun.nextcloud.com/3478",
-			"/tcp/stun.sipnet.com/3478",
-			"/tcp/stun.radiojar.com/3478",
-			"/tcp/stun.sonetel.com/3478",
-			"/tcp/stun.voipgate.com/3478",
-			"/tcp/stun.miwifi.com/3478",
-			"/tcp/stun.chat.bilibili.com/3478",
-			"/tcp/turn.cloud-rtc.com/80",
-			"/tcp/w1.xirsys.com/3478",
-			"/tcp/u1.xirsys.com/3478",
-			"/tcp/relay1.expressturn.com/3478",
-			"/tcp/relay2.expressturn.com/3478",
-			"/tcp/relay3.expressturn.com/3478",
-			"/tcp/relay4.expressturn.com/3478",
-			"/tcp/relay5.expressturn.com/3478",
-			"/tcp/relay6.expressturn.com/3478",
-			"/tcp/relay7.expressturn.com/3478",
-			"/tcp/relay8.expressturn.com/3478",
-			"/tcp/global.turn.twilio.com/3478",
-			"/tcp/stun.relay.metered.ca/80",
-			// ── Amazon Kinesis STUN servers (TCP) ──
-			"/tcp/stun.kinesisvideo.us-east-2.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.us-east-1.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.us-west-2.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.af-south-1.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.ap-east-1.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.ap-south-1.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.ap-northeast-2.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.ap-southeast-1.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.ap-southeast-2.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.ap-northeast-1.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.ca-central-1.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.eu-central-1.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.eu-west-1.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.eu-west-2.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.eu-west-3.amazonaws.com/443",
-			"/tcp/stun.kinesisvideo.sa-east-1.amazonaws.com/443",
 		},
-		TurnServers: []string{
-			"turn:turn.cloud-rtc.com:80",
-			"turn:w1.xirsys.com:3478",
-			"turn:u1.xirsys.com:3478",
-			"turn:relay1.expressturn.com:3478",
-			"turn:relay2.expressturn.com:3478",
-			"turn:relay3.expressturn.com:3478",
-			"turn:relay4.expressturn.com:3478",
-			"turn:relay5.expressturn.com:3478",
-			"turn:relay6.expressturn.com:3478",
-			"turn:relay7.expressturn.com:3478",
-			"turn:relay8.expressturn.com:3478",
-			"turn:global.turn.twilio.com:3478",
-		},
+		// Empty on purpose. TURN is useless without credentials: every public
+		// server in the old default list required authentication, so an
+		// anonymous allocation always failed. The consequences of listing them
+		// were pure downside — the TURN binder burned a full allocation cycle
+		// against servers that can never allocate, and a credential-less TURN
+		// entry would additionally disable WebRTC entirely (pion rejects the
+		// entry and aborts the whole peer connection). Fill this in with a real
+		// turn:<host>:<port>?username=<user>&credential=<pass> URL from a TURN
+		// provider you own; see TurnServers in the config docs.
+		TurnServers:          []string{},
 		RelayUpgradeInterval: 30 * time.Second,
 		Obfuscation: ObfuscationConfig{
 			Enable:               true,
@@ -604,9 +553,6 @@ func (c *Config) Validate() error {
 	}
 
 	// --- Transports ---
-	if err := validateRate("transports.tcp_brutal_rate", c.Transports.TCPBrutalRate); err != nil {
-		return err
-	}
 	if c.Transports.TLSServerName != "" {
 		if err := validateDNSName("transports.tls_server_name", c.Transports.TLSServerName); err != nil {
 			return err
@@ -982,6 +928,12 @@ func validateTURNServer(field, server string) error {
 	if s == "" {
 		return fmt.Errorf("invalid config: %s: empty host in '%s'", field, server)
 	}
+	// Credential-less entries are accepted on purpose. Requiring credentials
+	// here would make config load — and every WebUI config save, which validates
+	// the merged config — fail for anyone whose file predates the requirement,
+	// and a file that cannot be saved can only be edited by hand. Instead the
+	// TURN binders skip such entries up front with a specific warning naming the
+	// fix, and IceTURNConfig keeps them out of WebRTC ICE where they are fatal.
 	return nil
 }
 
@@ -998,26 +950,6 @@ func validateInterfaceName(field, name string) error {
 		}
 	}
 	return nil
-}
-
-func validateRate(field, rate string) error {
-	if rate == "" {
-		return nil // empty = disabled
-	}
-	for _, suffix := range []string{"Mbps", "Gbps", "Kbps", "bps"} {
-		if strings.HasSuffix(rate, suffix) {
-			numStr := strings.TrimSuffix(rate, suffix)
-			if numStr == "" {
-				return fmt.Errorf("invalid config: %s: missing value before '%s'", field, rate)
-			}
-			v, err := strconv.ParseFloat(numStr, 64)
-			if err != nil || v <= 0 {
-				return fmt.Errorf("invalid config: %s: '%s' must be a positive number like '100Mbps'", field, rate)
-			}
-			return nil
-		}
-	}
-	return fmt.Errorf("invalid config: %s: must end with 'Mbps', 'Gbps', 'Kbps', or 'bps', got '%s'", field, rate)
 }
 
 func validateDNSName(field, name string) error {

@@ -300,6 +300,12 @@ func bootTURNBindOnce(ctx context.Context, h host.Host, servers []string) error 
 		return nil
 	}
 
+	usable, dropped := usableTURNServers(servers)
+	warnUnusableTURNServers(dropped)
+	if len(usable) == 0 {
+		return nil
+	}
+
 	startTime := time.Now()
 	const maxConcurrent = 5
 	sem := make(chan struct{}, maxConcurrent)
@@ -309,7 +315,7 @@ func bootTURNBindOnce(ctx context.Context, h host.Host, servers []string) error 
 	var successes, failures int
 	successServers := make(map[string]bool)
 
-	for _, server := range servers {
+	for _, server := range usable {
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
@@ -370,10 +376,13 @@ func bootTURNBindOnce(ctx context.Context, h host.Host, servers []string) error 
 			}
 		}
 	} else if failures > 0 {
-		log.Debug("Boot TURN bind cycle: all %d servers failed", failures)
+		log.Debug("Boot TURN bind cycle: all %d server(s) failed", failures)
 	}
 
 	log.Debug("Boot TURN bind cycle completed in %v: %d success, %d failure(s)", elapsed, successes, failures)
+	if failures == len(usable) {
+		return fmt.Errorf("all %d TURN server(s) failed", len(usable))
+	}
 	return nil
 }
 
@@ -385,9 +394,9 @@ func bootAllocateTURNRelay(ctx context.Context, serverURL string) ([]multiaddr.M
 		return nil, fmt.Errorf("parse TURN URL: %w", err)
 	}
 
-	conn, err := net.ListenPacket("udp4", "0.0.0.0:0")
+	conn, err := newTURNControlConn(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("create TURN control conn: %w", err)
+		return nil, err
 	}
 
 	turnCfg := turn.ClientConfig{

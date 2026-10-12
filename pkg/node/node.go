@@ -1321,12 +1321,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				continue
 			}
 		}
-		ma, err := multiaddr.NewMultiaddr(aStr)
-		if err == nil {
-			addrs = append(addrs, expandListenAddr(ma)...)
-		} else {
-			log.Warn("Invalid listen multiaddr '%s': %v", aStr, err)
+		if err := ValidateListenAddr(aStr); err != nil {
+			log.Warn("Skipping invalid listen address '%s': %v", aStr, err)
+			skippedAddrs++
+			continue
 		}
+		ma, _ := multiaddr.NewMultiaddr(aStr)
+		addrs = append(addrs, expandListenAddr(ma)...)
 	}
 
 	// When no user-configured addresses survive (or none were configured at

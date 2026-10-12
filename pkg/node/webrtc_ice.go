@@ -24,13 +24,14 @@ package node
 //     pair differs from the first one would fail with ErrTurnCredentials, so it
 //     is left out rather than poisoning the list.
 //
-// Servers that end up excluded are only excluded from WebRTC ICE. They are
-// still used by the QUIC TURN binder, which speaks TURN over its own client and
-// is unaffected by pion's validation. dropped reports how many were excluded.
+// Excluded servers fall out of WebRTC ICE only. Usable ones are also used by
+// the QUIC TURN binder; credential-less ones are dropped there too (see
+// turnCredentialsUsable, which both paths share). dropped reports how many
+// were excluded.
 func IceTURNConfig(servers []string) (urls []string, username, credential string, dropped int) {
 	for _, s := range servers {
 		tc, err := parseTurnURL(s)
-		if err != nil || tc.Username == "" || tc.Credential == "" {
+		if err != nil || !turnCredentialsUsable(tc) {
 			dropped++
 			continue
 		}

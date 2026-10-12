@@ -50,8 +50,13 @@ func DefaultBootConfig() *BootConfig {
 			"/ip6/::/udp/4001/quic-v1",
 			"/ip4/0.0.0.0/udp/4002/webrtc-direct",
 			"/ip6/::/udp/4002/webrtc-direct",
-			"/ip4/0.0.0.0/udp/4003/webtransport",
-			"/ip6/::/udp/4003/webtransport",
+			// WebTransport is QUIC-over-HTTP/3, so /quic-v1/ is mandatory. Without
+			// it multiaddr still parses — the parser does not check transport
+			// layering — but webtransport.Transport.Listen rejects the address
+			// and swarm_listen only warns per address, so the listener silently
+			// never comes up and libp2p.New returns success anyway.
+			"/ip4/0.0.0.0/udp/4003/quic-v1/webtransport",
+			"/ip6/::/udp/4003/quic-v1/webtransport",
 			"/ip4/0.0.0.0/tcp/4001",
 			"/ip6/::/tcp/4001",
 		},
@@ -66,26 +71,21 @@ func DefaultBootConfig() *BootConfig {
 			Listen:    "0.0.0.0:8080",
 			AuthToken: "",
 		},
-		// STUN/TURN defaults — a curated subset of the client's list.
-		// Boot servers need fewer fallbacks since they are typically
-		// deployed on stable infrastructure, but STUN is essential
-		// for discovering the public IP behind NAT.
+		// Boot relays usually sit on stable infrastructure, so STUN needs only a
+		// handful of fallbacks. Still kept: a relay behind NAT cannot serve as a
+		// relay unless it can discover its own public address.
 		StunServers: []string{
 			"/udp/turn.cloudflare.com/3478",
 			"/udp/stun.cloudflare.com/3478",
 			"/udp/stun.l.google.com/19302",
 			"/udp/stun1.l.google.com/19302",
-			"/udp/stun2.l.google.com/19302",
 			"/tcp/turn.cloudflare.com/80",
 			"/tcp/stun.cloudflare.com/3478",
 		},
-		TurnServers: []string{
-			"turn:turn.cloud-rtc.com:80",
-			"turn:w1.xirsys.com:3478",
-			"turn:u1.xirsys.com:3478",
-			"turn:relay1.expressturn.com:3478",
-			"turn:global.turn.twilio.com:3478",
-		},
+		// Empty on purpose. TURN requires authentication, so anonymous entries
+		// can never allocate a relay port and only burn an allocation cycle.
+		// Fill this in with a real URL carrying ?username=...&credential=....
+		TurnServers: []string{},
 	}
 }
 

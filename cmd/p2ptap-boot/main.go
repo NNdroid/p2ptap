@@ -1357,11 +1357,11 @@ func main() {
 
 	var mAddrs []multiaddr.Multiaddr
 	for _, aStr := range listenAddrs {
-		ma, err := multiaddr.NewMultiaddr(aStr)
-		if err != nil {
-			fmt.Printf("Warning: Invalid multiaddr %q skipped: %v\n", aStr, err)
+		if err := node.ValidateListenAddr(aStr); err != nil {
+			fmt.Printf("Warning: invalid listen address %q skipped: %v\n", aStr, err)
 			continue
 		}
+		ma, _ := multiaddr.NewMultiaddr(aStr)
 		mAddrs = append(mAddrs, ma)
 	}
 

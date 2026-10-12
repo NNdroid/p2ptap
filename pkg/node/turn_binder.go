@@ -366,6 +366,12 @@ func (n *Node) turnBindOnce(ctx context.Context) error {
 		return nil
 	}
 
+	usable, dropped := usableTURNServers(servers)
+	warnUnusableTURNServers(dropped)
+	if len(usable) == 0 {
+		return nil
+	}
+
 	startTime := time.Now()
 
 	const maxConcurrent = 5
@@ -376,7 +382,7 @@ func (n *Node) turnBindOnce(ctx context.Context) error {
 	var successes, failures int
 	successServers := make(map[string]bool)
 
-	for _, server := range servers {
+	for _, server := range usable {
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
@@ -458,10 +464,85 @@ func (n *Node) turnBindOnce(ctx context.Context) error {
 		}
 	}
 
-	if failures == len(servers) {
-		return fmt.Errorf("all %d TURN servers failed", len(servers))
+	if failures == len(usable) {
+		return fmt.Errorf("all %d TURN server(s) failed", len(usable))
 	}
 	return nil
+}
+
+// usableTURNServers filters a configured TURN list down to servers that carry
+// the credentials an allocation requires, and reports the entries it dropped
+// along with them.
+//
+// TURN authenticates every allocation, so a bare "turn:host:port" is not a
+// degraded TURN entry — it is one that can never allocate. Left in the list it
+// burns a full cycle for nothing: a concurrency slot, a 30s timeout, and a new
+// UDP socket per attempt, every relay-upgrade interval. WebRTC ICE is worse off
+// with them (see IceTURNConfig), so they have to be dropped there too.
+func usableTURNServers(servers []string) (usable []string, dropped []string) {
+	for _, s := range servers {
+		if hasTURNCredentials(s) {
+			usable = append(usable, s)
+			continue
+		}
+		dropped = append(dropped, s)
+	}
+	return usable, dropped
+}
+
+// warnUnusableTURNServers emits one warning for every credential-less TURN entry,
+// so a misconfigured list is obvious in the log instead of showing up as a
+// binder that silently does nothing.
+func warnUnusableTURNServers(dropped []string) {
+	if len(dropped) == 0 {
+		return
+	}
+	log.Warn("%d TURN server(s) skipped for missing ?username=...&credential=...: "+
+		"%v. TURN always authenticates, so they can never allocate a relay port. "+
+		"Add credentials to turn_servers, or leave turn_servers empty to disable "+
+		"relay fallback", len(dropped), strings.Join(dropped, ", "))
+}
+
+// turnCredentialsUsable reports whether a parsed TURN server carries both the
+// username and credential that an allocation requires.
+//
+// Every code path that decides whether to use a TURN entry must go through
+// this (directly, or via hasTURNCredentials). IceTURNConfig and the TURN
+// binders have to agree, or WebRTC ICE and the QUIC relay binder would
+// silently disagree about which servers exist — one of them would spend a full
+// allocation cycle on a server the other already refused.
+func turnCredentialsUsable(tc *turnConfig) bool {
+	return tc.Username != "" && tc.Credential != ""
+}
+
+// hasTURNCredentials reports whether a TURN URL carries both the username and
+// credential that an allocation requires. parseTurnURL already understands all
+// the accepted forms (query string, userinfo, both), so this reuses it instead
+// of re-parsing the URL.
+func hasTURNCredentials(serverURL string) bool {
+	cfg, err := parseTurnURL(serverURL)
+	if err != nil {
+		return false
+	}
+	return turnCredentialsUsable(cfg)
+}
+
+// newTURNControlConn creates the UDP socket a TURN client uses for both its
+// control plane (Allocate/Refresh/CreatePermission) and its relayed data plane.
+//
+// The socket is pinned to the physical NIC. Without that, once the TAP is the
+// default gateway the Allocate request would be routed into the tunnel and
+// relayed back out through this node's own relay, so the TURN server answered
+// from the wrong NAT and the allocation returned a port nobody could reach.
+// listenerProtectControl is the same hook the transport listeners use, so the
+// socket's protection policy stays consistent with the rest of the node.
+func newTURNControlConn(ctx context.Context) (net.PacketConn, error) {
+	lc := net.ListenConfig{Control: listenerProtectControl}
+	conn, err := lc.ListenPacket(ctx, "udp4", "0.0.0.0:0")
+	if err != nil {
+		return nil, fmt.Errorf("create TURN control conn: %w", err)
+	}
+	return conn, nil
 }
 
 func (n *Node) allocateTURNRelay(ctx context.Context, serverURL string) ([]multiaddr.Multiaddr, error) {
@@ -471,9 +552,9 @@ func (n *Node) allocateTURNRelay(ctx context.Context, serverURL string) ([]multi
 	}
 
 	// Build pion/turn config. Pion v4 requires a pre-created PacketConn.
-	conn, err := net.ListenPacket("udp4", "0.0.0.0:0")
+	conn, err := newTURNControlConn(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("create TURN control conn: %w", err)
+		return nil, err
 	}
 
 	turnCfg := turn.ClientConfig{

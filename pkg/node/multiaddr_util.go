@@ -215,6 +215,45 @@ func containsTransport(ma multiaddr.Multiaddr, protoCode int) bool {
 	return false
 }
 
+// ValidateListenAddr checks a configured listen address for problems that
+// multiaddr.NewMultiaddr accepts but a transport then refuses. The multiaddr
+// parser validates syntax only — it never checks transport layering — so
+// "/ip4/0.0.0.0/udp/4003/webtransport" parses cleanly and TransportOf still
+// reports "webtransport" (P_WEBTRANSPORT is present), so the transport gate
+// lets it through and webtransport.Transport.Listen rejects it. A single
+// rejected address is only a log.Warn inside swarm_listen, so the listener
+// silently never comes up while libp2p.New returns success and the node looks
+// perfectly healthy.
+func ValidateListenAddr(aStr string) error {
+	if aStr == "" {
+		return fmt.Errorf("empty listen address")
+	}
+	ma, err := multiaddr.NewMultiaddr(aStr)
+	if err != nil {
+		return err
+	}
+	switch TransportOf(ma) {
+	case "webtransport":
+		// WebTransport is QUIC-over-HTTP/3: the /quic-v1/ layer is mandatory.
+		if !containsTransport(ma, multiaddr.P_QUIC_V1) && !containsTransport(ma, multiaddr.P_QUIC) {
+			return fmt.Errorf("webtransport listens over QUIC, expected .../udp/<port>/quic-v1/webtransport")
+		}
+	case "quic", "webrtc":
+		// UDP-only transports. This also rejects a transport layered on the
+		// wrong carrier (e.g. /tcp/N/quic-v1): TransportOf reports the top
+		// layer, so the missing UDP layer is what surfaces the bad stack.
+		if !containsTransport(ma, multiaddr.P_UDP) {
+			return fmt.Errorf("%s listens over UDP, expected .../udp/<port>", TransportOf(ma))
+		}
+		// Plain "tcp" needs no layer check: TransportOf can only report it when
+		// the /tcp/ component is present, so there is nothing to verify.
+	}
+	if !containsTransport(ma, multiaddr.P_IP4) && !containsTransport(ma, multiaddr.P_IP6) {
+		return fmt.Errorf("listen address must contain an /ip4/ or /ip6/ address")
+	}
+	return nil
+}
+
 // transportFromStr returns the TransportOf result for a string address.
 // Used at call sites that only have a string (e.g. config ListenAddrs).
 // Falls back to best-effort string detection for unparseable addrs,
