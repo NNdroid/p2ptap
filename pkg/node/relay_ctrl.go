@@ -118,12 +118,24 @@ func (n *Node) openRelayCtrlStream(ctx context.Context, hop, origin, target peer
 //     control protocol with the stream's logical peer rewritten to hdr.Origin,
 //     so the cipher / identity negotiated here is anchored on the TRUE origin
 //     (A), not on the relay that carried the bytes.
+//
 //   - TRANSIT HOP (hdr.Target != self): forward the inner bytes toward Target,
 //     either by opening a direct relay-ctrl stream to Target (when we are
 //     directly connected to it) or by recursing through the next overlay hop
-//     (relayHopForTarget). Bytes are proxied verbatim in both directions; the
-//     transit hop never interprets the inner control protocol, so it can never
-//     learn (or corrupt) the A↔C shared secret.
+//     (relayHopForTarget). Bytes are proxied verbatim in both directions and the
+//     transit hop never interprets the inner control protocol, so it cannot
+//     PASSIVELY derive the A<->C shared secret: DeriveKeysPSK needs one side's
+//     ECDH private key, and the hop holds neither.
+//
+//     Passive safety is not MITM safety. SeqSync authenticates neither side's
+//     ObfPub against the origin's identity, and the transport here authenticates
+//     the RELAY, not the origin — so an ACTIVE hop can substitute its own ObfPub
+//     for each peer's and land on two separate sessions it can both decrypt. A
+//     PSK-keyed MAC over ObfPub cannot close this: the PSK is shared with every
+//     mesh member including relays, so a PSK-holding hop forges it. Origin
+//     SPOOFING is a different claim and IS closed, by the stamp in
+//     relay_ctrl_attest.go. Closing the key-exchange MITM needs authenticated DH
+//     over the tunnel, which is a protocol change rather than a patch.
 func (n *Node) handleRelayCtrl(s network.Stream) {
 	defer s.Close()
 	remotePeer := s.Conn().RemotePeer()
