@@ -734,19 +734,31 @@ func ApplyHotReload(cfgJSON string) error {
 		return errors.New("android: node not running")
 	}
 
-	// Start from the running config, not defaults, so omitted fields are
-	// preserved. Starting from DefaultConfig() and unmarshalling over it
-	// silently replaces every absent field (PSK, STUN servers, ACL,
-	// transport strategy, etc.) with its default — ApplyHotReload("{}")
-	// on a PSK-secured node would publish an unencrypted config.
+	// Start from the running config and overlay only the keys the caller
+	// actually sent. Seeding DefaultConfig() and unmarshalling over it replaces
+	// every absent field with its default, so a hot reload that omits
+	// web_ui.auth_token would publish an empty token (WebUI auth off), one that
+	// omits acl would disable the mesh firewall, and one that omits
+	// advertised_subnets would wipe subnet routing — ApplyHotReload("{}") on a
+	// PSK-secured node would publish an unencrypted config. Collecting the key
+	// set first is what lets the merge distinguish "not sent" from "sent as
+	// zero".
 	cfg := n.CurrentConfig()
-	candidate := config.DefaultConfig()
+	candidate := *cfg
+	sent := map[string]bool{}
 	if cfgJSON != "" {
-		if err := json.Unmarshal([]byte(cfgJSON), candidate); err != nil {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(cfgJSON), &fields); err != nil {
+			return fmt.Errorf("android: invalid config JSON: %w", err)
+		}
+		for k := range fields {
+			sent[k] = true
+		}
+		if err := json.Unmarshal([]byte(cfgJSON), &candidate); err != nil {
 			return fmt.Errorf("android: invalid config JSON: %w", err)
 		}
 	}
-	mergeHotReload(candidate, cfg)
+	mergeHotReload(&candidate, cfg, sent)
 	if err := candidate.Validate(); err != nil {
 		// Config.Validate already prefixes its message with "invalid config:".
 		return fmt.Errorf("android: %w", err)
@@ -763,55 +775,11 @@ func ApplyHotReload(cfgJSON string) error {
 			WANInterface:  candidate.ExitNode.WANInterface,
 		})
 		if collector.OnConfigReload != nil {
-			collector.OnConfigReload(candidate)
+			collector.OnConfigReload(&candidate)
 		}
 	}
 
 	return nil
-}
-
-// mergeHotReload copies non-zero fields from the incoming candidate into the
-// running config, mirroring the zero-preserving merge the WebUI handler uses.
-// bool fields are excluded because they have no neutral zero value — DiscoverBootMesh
-// defaults to true and ForcePrivateReachability to false, so a missing key is
-// indistinguishable from an explicit false.
-func mergeHotReload(dst *config.Config, src *config.Config) {
-	if dst.NodeName == "" {
-		dst.NodeName = src.NodeName
-	}
-	if dst.TapIP == "" {
-		dst.TapIP = src.TapIP
-	}
-	if dst.TapIPv6 == "" {
-		dst.TapIPv6 = src.TapIPv6
-	}
-	if dst.MTU == 0 {
-		dst.MTU = src.MTU
-	}
-	if dst.PSK == "" {
-		dst.PSK = src.PSK
-	}
-	if dst.NodeKeyFile == "" {
-		dst.NodeKeyFile = src.NodeKeyFile
-	}
-	if len(dst.ListenAddrs) == 0 {
-		dst.ListenAddrs = src.ListenAddrs
-	}
-	if len(dst.StunServers) == 0 {
-		dst.StunServers = src.StunServers
-	}
-	if len(dst.TurnServers) == 0 {
-		dst.TurnServers = src.TurnServers
-	}
-	if dst.HolePunchTimeout == 0 {
-		dst.HolePunchTimeout = src.HolePunchTimeout
-	}
-	if dst.RelayUpgradeInterval == 0 {
-		dst.RelayUpgradeInterval = src.RelayUpgradeInterval
-	}
-	if dst.TransportStrategy == "" {
-		dst.TransportStrategy = src.TransportStrategy
-	}
 }
 
 // GetPeerID returns the libp2p Peer ID of the running node, or empty if not running.

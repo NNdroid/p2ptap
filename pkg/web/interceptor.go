@@ -41,8 +41,15 @@ type tcpSession struct {
 	// worker pool when it builds response frames — so, like serverSeq, it is
 	// touched only through sync/atomic. (It used to be a bare uint32, which
 	// -race reports as a data race.)
-	clientSeq  uint32
-	serverSeq  uint32 // accessed via sync/atomic (read by sendFrame, written by response goroutine)
+	clientSeq uint32
+	serverSeq uint32 // accessed via sync/atomic (read by sendFrame, written by response goroutine)
+	// bufMu serialises requestBuf. Session keys come straight off the wire — the
+	// source IP and port are attacker-chosen in any frame a peer forwards — so
+	// two peers talking to the WebUI over different physical endpoints can key
+	// the SAME spoofed address/port and reach the same *tcpSession from two
+	// goroutines. requestBuf is neither atomic nor CAS-guarded like clientSeq,
+	// serverSeq and processing, so append/read/nil must be serialised.
+	bufMu      sync.Mutex
 	requestBuf []byte
 	lastActive int64 // unix timestamp in seconds (atomic)
 	isIPv6     bool
@@ -147,13 +154,13 @@ type TAPInterceptor struct {
 	collector     *StatsCollector
 	configState   *webConfigState
 	configPath    string
-	sessions      sync.Map // key: string -> *tcpSession
+	sessions      sync.Map   // key: string -> *tcpSession
 	sessionsMu    sync.Mutex // protects the LoadOrStore/Add/Delete sequence in trackSession/dropSession
 	sessionCount  atomic.Int64
 	htmlDashboard []byte
 	bufferPool    sync.Pool
 	workerPool    *httpWorkerPool // bounded goroutine pool for HTTP request processing
-	done          chan struct{}    // closed on Close() to stop background goroutines
+	done          chan struct{}   // closed on Close() to stop background goroutines
 	closeOnce     sync.Once
 }
 
@@ -478,21 +485,33 @@ func (it *TAPInterceptor) handleIPv4TCP(frame []byte, tcpHeaderOffset int, write
 	// PSH / ACK with Data -> HTTP Request (offloaded to worker pool)
 	if len(payload) > 0 {
 		atomic.StoreUint32(&sess.clientSeq, seqN+uint32(len(payload)))
+		tooBig := false
+		complete := false
+		var httpReq []byte
+		sess.bufMu.Lock()
 		sess.requestBuf = append(sess.requestBuf, payload...)
 		if len(sess.requestBuf) > maxHTTPRequestBytes {
+			tooBig = true
+		} else if isHTTPRequestComplete(sess.requestBuf) {
+			complete = true
+			httpReq = sess.requestBuf
+			sess.requestBuf = nil
+		}
+		sess.bufMu.Unlock()
+		if tooBig {
 			// Never-completing request flood — drop the session outright.
+			// Drop outside bufMu: dropSession takes sessionsMu, which is also
+			// held by trackSession, so the two must never be nested.
 			it.dropSession(sessionKey)
 			return true
 		}
 
-		if isHTTPRequestComplete(sess.requestBuf) {
+		if complete {
 			// Acquire session processing token — prevents concurrent handling
 			// of the same TCP session by multiple workers.
 			if !atomic.CompareAndSwapInt32(&sess.processing, 0, 1) {
 				return true // session busy; ACK already tracked
 			}
-			httpReq := sess.requestBuf
-			sess.requestBuf = nil
 
 			mtu := 1500
 			if itCfg := it.loadCfg(); itCfg != nil && itCfg.MTU > 0 {
@@ -595,18 +614,30 @@ func (it *TAPInterceptor) handleIPv6TCP(frame []byte, writer PacketWriter) bool 
 
 	if len(payload) > 0 {
 		atomic.StoreUint32(&sess.clientSeq, seqN+uint32(len(payload)))
+		tooBig := false
+		complete := false
+		var httpReq []byte
+		sess.bufMu.Lock()
 		sess.requestBuf = append(sess.requestBuf, payload...)
 		if len(sess.requestBuf) > maxHTTPRequestBytes {
+			tooBig = true
+		} else if isHTTPRequestComplete(sess.requestBuf) {
+			complete = true
+			httpReq = sess.requestBuf
+			sess.requestBuf = nil
+		}
+		sess.bufMu.Unlock()
+		if tooBig {
+			// Drop outside bufMu: dropSession takes sessionsMu, which is also
+			// held by trackSession, so the two must never be nested.
 			it.dropSession(sessionKey)
 			return true
 		}
 
-		if isHTTPRequestComplete(sess.requestBuf) {
+		if complete {
 			if !atomic.CompareAndSwapInt32(&sess.processing, 0, 1) {
 				return true
 			}
-			httpReq := sess.requestBuf
-			sess.requestBuf = nil
 
 			mtu := 1500
 			if itCfg := it.loadCfg(); itCfg != nil && itCfg.MTU > 0 {
@@ -865,48 +896,48 @@ func (it *TAPInterceptor) processHTTP(req []byte) []byte {
 		if incoming.DriverType == "" {
 			incoming.DriverType = cur.DriverType
 		}
-			if incoming.NodeKeyFile == "" {
-				incoming.NodeKeyFile = cur.NodeKeyFile
-			}
-			if incoming.PSK == "" {
-				incoming.PSK = cur.PSK
-			}
-			if len(incoming.ListenAddrs) == 0 {
+		if incoming.NodeKeyFile == "" {
+			incoming.NodeKeyFile = cur.NodeKeyFile
+		}
+		if incoming.PSK == "" {
+			incoming.PSK = cur.PSK
+		}
+		if len(incoming.ListenAddrs) == 0 {
 			incoming.ListenAddrs = cur.ListenAddrs
 		}
 		if incoming.WebUI.Port == 0 {
-				incoming.WebUI = cur.WebUI
-			}
+			incoming.WebUI = cur.WebUI
+		}
 		if incoming.WebUI.AuthToken == "" {
-					incoming.WebUI.AuthToken = cur.WebUI.AuthToken
-				}
-			if incoming.Transports == (config.TransportsConfig{}) {
-				incoming.Transports = cur.Transports
-			}
+			incoming.WebUI.AuthToken = cur.WebUI.AuthToken
+		}
+		if incoming.Transports == (config.TransportsConfig{}) {
+			incoming.Transports = cur.Transports
+		}
 
-			if err := incoming.Validate(); err != nil {
-				// Config.Validate already starts its message with "invalid config:",
-				// so repeating the words here produced a doubled prefix.
-				return it.buildHTTPResponse(400, "application/json", []byte(fmt.Sprintf(`{"error":"%v"}`, err)))
-			}
+		if err := incoming.Validate(); err != nil {
+			// Config.Validate already starts its message with "invalid config:",
+			// so repeating the words here produced a doubled prefix.
+			return it.buildHTTPResponse(400, "application/json", []byte(fmt.Sprintf(`{"error":"%v"}`, err)))
+		}
 
-			effectivePath := it.configPath
-			if cur != nil && cur.ConfigPath != "" {
-				effectivePath = cur.ConfigPath
-			}
-			// Strip auto-generated tokens from the persisted config — they belong
-			// in their private startup sidecar (0600), not config.json which is
-			// routinely committed, synced, and attached to support tickets.
-			// A token loaded from the sidecar is auto-generated; only tokens
-			// explicitly set in the incoming request or in the config file are
-			// user-managed.
-			if cur != nil && cur.ConfigPath != "" {
-				if sidecar := config.LoadWebUIToken(effectivePath); sidecar != "" {
-					if incoming.WebUI.AuthToken == sidecar {
-						incoming.WebUI.AuthToken = "" // auto-generated — don't persist
-					}
+		effectivePath := it.configPath
+		if cur != nil && cur.ConfigPath != "" {
+			effectivePath = cur.ConfigPath
+		}
+		// Strip auto-generated tokens from the persisted config — they belong
+		// in their private startup sidecar (0600), not config.json which is
+		// routinely committed, synced, and attached to support tickets.
+		// A token loaded from the sidecar is auto-generated; only tokens
+		// explicitly set in the incoming request or in the config file are
+		// user-managed.
+		if cur != nil && cur.ConfigPath != "" {
+			if sidecar := config.LoadWebUIToken(effectivePath); sidecar != "" {
+				if incoming.WebUI.AuthToken == sidecar {
+					incoming.WebUI.AuthToken = "" // auto-generated — don't persist
 				}
 			}
+		}
 		if err := persistWebConfig(it.collector, effectivePath, &incoming); err != nil {
 			return it.buildHTTPResponse(500, "application/json", []byte(`{"error":"configuration could not be saved"}`))
 		}

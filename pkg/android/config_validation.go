@@ -36,3 +36,113 @@ func ValidateConfig(cfgJSON string) error {
 func NormalizePeerAddress(address string) (string, error) {
 	return config.NormalizePeerAddress(address)
 }
+
+// mergeHotReload preserves every running-config field the caller did not
+// actually send, so a partial config cannot silently downgrade the running one.
+// Three rules, one per kind of zero value:
+//
+//   - strings/durations where zero is never a valid setting: preserved when the
+//     key is absent OR when it was sent empty (an empty node_name falls back to
+//     the hostname, MTU 0 is invalid — neither is a real request to clear).
+//   - slices where an empty list IS a valid setting: preserved only when absent,
+//     so "advertised_subnets": [] still clears.
+//   - bools, which have no zero value at all: preserved only when absent. This
+//     replaces the old bool exemption — a reload that omits enable_mdns used to
+//     take DefaultConfig's value instead of the running one.
+//
+// sent is the set of keys actually present in the incoming JSON.
+func mergeHotReload(dst *config.Config, src *config.Config, sent map[string]bool) {
+	if !sent["node_name"] || dst.NodeName == "" {
+		dst.NodeName = src.NodeName
+	}
+	if !sent["tap_ip"] || dst.TapIP == "" {
+		dst.TapIP = src.TapIP
+	}
+	if !sent["tap_ipv6"] || dst.TapIPv6 == "" {
+		dst.TapIPv6 = src.TapIPv6
+	}
+	if !sent["tap_mac"] || dst.TapMAC == "" {
+		dst.TapMAC = src.TapMAC
+	}
+	if !sent["mtu"] || dst.MTU == 0 {
+		dst.MTU = src.MTU
+	}
+	if !sent["driver_type"] || dst.DriverType == "" {
+		dst.DriverType = src.DriverType
+	}
+	if !sent["psk"] || dst.PSK == "" {
+		dst.PSK = src.PSK
+	}
+	if !sent["node_key_file"] || dst.NodeKeyFile == "" {
+		dst.NodeKeyFile = src.NodeKeyFile
+	}
+	if !sent["listen_addrs"] {
+		dst.ListenAddrs = src.ListenAddrs
+	}
+	if !sent["bootstrap_peers"] {
+		dst.BootstrapPeers = src.BootstrapPeers
+	}
+	if !sent["static_peers"] {
+		dst.StaticPeers = src.StaticPeers
+	}
+	if !sent["stun_servers"] {
+		dst.StunServers = src.StunServers
+	}
+	if !sent["turn_servers"] {
+		dst.TurnServers = src.TurnServers
+	}
+	if !sent["hole_punch_timeout"] || dst.HolePunchTimeout == 0 {
+		dst.HolePunchTimeout = src.HolePunchTimeout
+	}
+	if !sent["relay_upgrade_interval"] || dst.RelayUpgradeInterval == 0 {
+		dst.RelayUpgradeInterval = src.RelayUpgradeInterval
+	}
+	if !sent["transport_strategy"] || dst.TransportStrategy == "" {
+		dst.TransportStrategy = src.TransportStrategy
+	}
+	if !sent["log_level"] || dst.LogLevel == "" {
+		dst.LogLevel = src.LogLevel
+	}
+
+	// Struct and list fields with no meaningful zero.
+	if !sent["web_ui"] {
+		dst.WebUI = src.WebUI
+	}
+	if !sent["transports"] {
+		dst.Transports = src.Transports
+	}
+	if !sent["obfuscation"] {
+		dst.Obfuscation = src.Obfuscation
+	}
+	if !sent["exit_node"] {
+		dst.ExitNode = src.ExitNode
+	}
+	if !sent["acl"] {
+		dst.ACL = src.ACL
+	}
+	if !sent["advertised_subnets"] {
+		dst.AdvertisedSubnets = src.AdvertisedSubnets
+	}
+	if !sent["allowed_subnet_peers"] {
+		dst.AllowedSubnetPeers = src.AllowedSubnetPeers
+	}
+
+	// Bool fields: absence is the only reliable "not sent" signal.
+	if !sent["enable_mdns"] {
+		dst.EnableMDNS = src.EnableMDNS
+	}
+	if !sent["discover_boot_mesh"] {
+		dst.DiscoverBootMesh = src.DiscoverBootMesh
+	}
+	if !sent["force_private_reachability"] {
+		dst.ForcePrivateReachability = src.ForcePrivateReachability
+	}
+	if !sent["accept_advertised_subnets"] {
+		dst.AcceptAdvertisedSubnets = src.AcceptAdvertisedSubnets
+	}
+
+	// json:"-" — never in the JSON, so always carried over from the running
+	// config. Dropping it would make the running config lose the path it was
+	// loaded from.
+	dst.ConfigPath = src.ConfigPath
+}

@@ -216,6 +216,53 @@ func (prl *PeerRateLimiter) Allow(p peer.ID) bool {
 	return tb.allow()
 }
 
+// Acquire blocks until a token is available for peer p or maxWait expires,
+// returning false on expiry. On a DATA plane it is preferred to Allow: waiting
+// applies back-pressure to the abusive peer instead of silently discarding its
+// packets, which an L2 tunnel has no way to recover. The wait is bounded so a
+// pathological sender cannot pin the read goroutine forever.
+func (prl *PeerRateLimiter) Acquire(p peer.ID, maxWait time.Duration) bool {
+	if prl == nil || prl.rate <= 0 {
+		return true
+	}
+	deadline := time.Now().Add(maxWait)
+	for {
+		prl.mu.Lock()
+		tb, ok := prl.buckets[p]
+		if !ok {
+			tb = &tokenBucket{
+				tokens:     prl.burst,
+				capacity:   prl.burst,
+				rate:       prl.rate,
+				lastRefill: time.Now(),
+			}
+			prl.buckets[p] = tb
+		}
+		now := time.Now()
+		tb.tokens += now.Sub(tb.lastRefill).Seconds() * prl.rate
+		if tb.tokens > prl.burst {
+			tb.tokens = prl.burst
+		}
+		tb.lastRefill = now
+		if tb.tokens >= 1.0 {
+			tb.tokens -= 1.0
+			prl.mu.Unlock()
+			return true
+		}
+		need := time.Duration((1.0 - tb.tokens) / prl.rate * float64(time.Second))
+		prl.mu.Unlock()
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		if need > remaining {
+			return false
+		}
+		time.Sleep(need)
+	}
+}
+
 // Remove removes tracking state for a disconnected peer.
 func (prl *PeerRateLimiter) Remove(p peer.ID) {
 	prl.mu.Lock()

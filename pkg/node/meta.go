@@ -553,6 +553,23 @@ func (n *Node) isIPClaimedByOtherPeer(ip string, senderPeer peer.ID) bool {
 	if ip == "" {
 		return false
 	}
+	// The node's own TAP IP is never claimable by a peer. peerMeta holds only
+	// peer records, so a peer advertising the node's own TAP IP would win a
+	// first-sighting race against the loop below and be installed into the ARP
+	// index outright. resolveProxyMAC prefers that index over the node's own
+	// address, so the node would start routing its own traffic to the peer.
+	if claimIP := net.ParseIP(ip); claimIP != nil {
+		if n.localV4IP != nil && claimIP.Equal(n.localV4IP) {
+			log.Warn("IP spoofing via meta stream: peer %s claimed the local TAP IP %s; rejecting",
+				senderPeer.ShortString(), ip)
+			return true
+		}
+		if n.localV6IP != nil && claimIP.Equal(n.localV6IP) {
+			log.Warn("IP spoofing via meta stream: peer %s claimed the local TAP IPv6 %s; rejecting",
+				senderPeer.ShortString(), ip)
+			return true
+		}
+	}
 	found := false
 	n.peerMeta.Range(func(key, value any) bool {
 		pid, ok := key.(peer.ID)

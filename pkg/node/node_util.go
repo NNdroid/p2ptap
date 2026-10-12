@@ -95,8 +95,20 @@ func (n *Node) storePeerMeta(pID peer.ID, m PeerMeta) {
 		ipStr := strings.Split(m.TapIP, "/")[0]
 		if ip := net.ParseIP(ipStr).To4(); ip != nil {
 			if mac, err := net.ParseMAC(m.TapMAC); err == nil && len(mac) == 6 {
-				garpFrame := tap.BuildARPReplyFrame(mac, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, ip, ip)
-				_, _ = n.tapWrite(garpFrame)
+				// Only overlay-space addresses may be asserted on the local TAP,
+				// and never one already claimed by a different peer. storePeerMeta
+				// is reached from the meta and LSA streams, which carry no PSK gate
+				// (only the data path does), so a mesh peer can claim ANY IP here.
+				// Writing a GARP for an off-overlay address puts a gratuitous ARP
+				// reply into the host's physical LAN segment — advertising
+				// TapIP="192.168.1.1" (the physical gateway) makes the host's OS
+				// route LAN traffic to the claiming peer. The caller-side GARP
+				// sites at meta.go:105 and meta.go:423 apply both guards; this
+				// helper funnels every other caller, so it needs them too.
+				if n.isOverlayIP(ip) && !n.isIPClaimedByOtherPeer(ipStr, pID) {
+					garpFrame := tap.BuildARPReplyFrame(mac, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, ip, ip)
+					_, _ = n.tapWrite(garpFrame)
+				}
 			}
 		}
 	}

@@ -1285,10 +1285,31 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			s.configState.mu.Lock()
 			defer s.configState.mu.Unlock()
 			c = s.loadCfg()
-			var incoming config.Config
-			if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
+			// Decode into a map of raw fields first so we can tell "the client
+			// did not send this field" apart from "the client sent its zero
+			// value". A partial client that omits the acl or obfuscation object
+			// must not silently reset them to their zero values — that turns
+			// acl.enable=false (mesh firewall off) and obfuscation.mode=""
+			// (padding off) into a live config. Presence-based preservation
+			// keeps an explicit value able to clear a field.
+			var fields map[string]json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
 				writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
 				return
+			}
+			body, err := json.Marshal(fields)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+				return
+			}
+			var incoming config.Config
+			if err := json.Unmarshal(body, &incoming); err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+				return
+			}
+			sent := func(key string) bool {
+				_, ok := fields[key]
+				return ok
 			}
 
 			if c == nil {
@@ -1336,6 +1357,69 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			// so it is written to disk and applied on next restart.
 			if incoming.Transports == (config.TransportsConfig{}) {
 				incoming.Transports = c.Transports
+			}
+			// Objects and arrays that a partial client may omit entirely. Unlike
+			// the zero-value checks above, an empty value here is a legitimate
+			// setting (an empty rule list, an empty subnet list), so the checks
+			// are on field presence rather than emptiness.
+			if !sent("acl") {
+				incoming.ACL = c.ACL
+			}
+			if !sent("obfuscation") {
+				incoming.Obfuscation = c.Obfuscation
+			}
+			if !sent("exit_node") {
+				incoming.ExitNode = c.ExitNode
+			}
+			if !sent("advertised_subnets") {
+				incoming.AdvertisedSubnets = c.AdvertisedSubnets
+			}
+			if !sent("allowed_subnet_peers") {
+				incoming.AllowedSubnetPeers = c.AllowedSubnetPeers
+			}
+			if !sent("accept_advertised_subnets") {
+				incoming.AcceptAdvertisedSubnets = c.AcceptAdvertisedSubnets
+			}
+			// Bool fields have no zero value at all, so an omission must not
+			// become false — presence is the only reliable signal.
+			if !sent("enable_mdns") {
+				incoming.EnableMDNS = c.EnableMDNS
+			}
+			if !sent("discover_boot_mesh") {
+				incoming.DiscoverBootMesh = c.DiscoverBootMesh
+			}
+			if !sent("force_private_reachability") {
+				incoming.ForcePrivateReachability = c.ForcePrivateReachability
+			}
+			// Durations: Validate clamps an out-of-range value back to its default,
+			// so an omitted one would silently overwrite a user-tuned timeout.
+			if !sent("hole_punch_timeout") {
+				incoming.HolePunchTimeout = c.HolePunchTimeout
+			}
+			if !sent("relay_upgrade_interval") {
+				incoming.RelayUpgradeInterval = c.RelayUpgradeInterval
+			}
+			if !sent("log_level") {
+				incoming.LogLevel = c.LogLevel
+			}
+			// transport_strategy is hard-rejected when empty, so an omission would
+			// 400 the whole save — it must fall back to the running value.
+			if !sent("transport_strategy") {
+				incoming.TransportStrategy = c.TransportStrategy
+			}
+			if !sent("bootstrap_peers") {
+				incoming.BootstrapPeers = c.BootstrapPeers
+			}
+			// Empty means "no servers" here, which breaks hole punching, so an
+			// omission must not clear the configured list.
+			if !sent("stun_servers") {
+				incoming.StunServers = c.StunServers
+			}
+			if !sent("turn_servers") {
+				incoming.TurnServers = c.TurnServers
+			}
+			if !sent("static_peers") {
+				incoming.StaticPeers = c.StaticPeers
 			}
 			// Never allow a request to disable auth via the WebUI itself.
 			if incoming.WebUI.AuthToken == "" {
@@ -1394,8 +1478,13 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed, use POST")
 			return
 		}
+		// The only handler in this file that decodes into an unbounded map, so
+		// it also needs the tightest body cap: an oversized body here allocates
+		// in proportion to it. The handler only reads two short string/bool
+		// fields.
 		var raw map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4*1024))
+		if err := dec.Decode(&raw); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON request body")
 			return
 		}

@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -97,6 +98,18 @@ type clientNodeInfo struct {
 }
 
 var peerInfoCache sync.Map // peer.ID -> clientNodeInfo
+
+// maxAuthStreamsInflight caps the number of concurrent PSK auth handshakes.
+// Every handler goroutine may be parked for the full 30s read deadline (a peer
+// that opens the stream and sends nothing), and RecordFailure's progressive
+// backoff makes each attempt sleep for seconds. Both rate limits are keyed per
+// identity, so an attacker that fans out parallel streams under freshly
+// generated libp2p identities pins one goroutine per stream — the per-IP and
+// per-peer-ID limits never trip. The cap is far above any real deployment's
+// auth load and bounds the parked-goroutine count regardless of fan-out.
+const maxAuthStreamsInflight = 64
+
+var authStreamInflight atomic.Int64
 
 const (
 	authProtocolID protocol.ID = "/p2ptap/auth/1.0.0"
@@ -655,6 +668,10 @@ type relayRouter struct {
 	meshStreams   map[peer.ID]network.Stream
 	acl           *pskACLFilter
 	pskEnabled    bool
+
+	// frameLimiter bounds each client's (and each mesh boot's) boot-relay frame
+	// rate. It is deliberately generous, so a healthy link is never touched.
+	frameLimiter *PeerRateLimiter
 }
 
 func newRelayRouter(acl *pskACLFilter, pskEnabled bool) *relayRouter {
@@ -663,8 +680,25 @@ func newRelayRouter(acl *pskACLFilter, pskEnabled bool) *relayRouter {
 		meshStreams:   make(map[peer.ID]network.Stream),
 		acl:           acl,
 		pskEnabled:    pskEnabled,
+		frameLimiter:  newPeerRateLimiter(bootRelayFrameRate, bootRelayFrameBurst),
 	}
 }
+
+// bootRelayFrameRate / bootRelayFrameBurst bound how many boot-relay frames a
+// single client (or mesh boot) may push per second. A gigabit L2 link carries
+// at most ~84k 1500-byte frames per second, so 50k/s never caps a real link;
+// it only bites on pathological tiny-frame floods, which would otherwise burn
+// the boot's CPU and amplify into backbone bandwidth at every mesh peer.
+const (
+	bootRelayFrameRate  = 50000.0
+	bootRelayFrameBurst = 100000.0
+)
+
+// bootRelayFrameMaxWait is how long a frame may wait for a token before it is
+// dropped. Waiting applies back-pressure instead of silently losing packets,
+// which an L2 tunnel has no way to recover; the bound keeps a pathological
+// sender from pinning the read goroutine indefinitely.
+const bootRelayFrameMaxWait = 100 * time.Millisecond
 
 func (r *relayRouter) registerClient(p peer.ID, s network.Stream) {
 	r.mu.Lock()
@@ -834,11 +868,21 @@ func makeBootRelayHandler(rr *relayRouter) func(network.Stream) {
 			_ = s.Close()
 		}()
 		buf := make([]byte, maxBootRelayEnvelope)
+		dropped := int64(0)
 		for {
 			_ = s.SetReadDeadline(time.Now().Add(5 * time.Minute))
 			n, err := readFrame(s, buf)
 			if err != nil || n == 0 {
 				return
+			}
+			// Frame rate limit: waiting applies back-pressure rather than
+			// silently dropping packets an L2 tunnel cannot recover.
+			if !rr.frameLimiter.Acquire(remotePeer, bootRelayFrameMaxWait) {
+				if drops := atomic.AddInt64(&dropped, 1); drops == 1 || drops%1024 == 0 {
+					log.Warn("[boot-relay] client %s at %d/s — dropped %d frames",
+						remotePeer.ShortString(), int(bootRelayFrameRate), drops)
+				}
+				continue
 			}
 			rr.route(buf[:n], false, remotePeer)
 		}
@@ -866,11 +910,22 @@ func makeBootRelayBackboneHandler(rr *relayRouter, hub *peekMapHub) func(network
 			_ = s.Close()
 		}()
 		buf := make([]byte, maxBootRelayEnvelope)
+		dropped := int64(0)
 		for {
 			_ = s.SetReadDeadline(time.Now().Add(5 * time.Minute))
 			n, err := readFrame(s, buf)
 			if err != nil || n == 0 {
 				return
+			}
+			// Frames arriving over the backbone are local-delivery-only, so a
+			// misbehaving mesh boot can flood only us — but it is still CPU and
+			// downstream bandwidth we did not ask for.
+			if !rr.frameLimiter.Acquire(remotePeer, bootRelayFrameMaxWait) {
+				if drops := atomic.AddInt64(&dropped, 1); drops == 1 || drops%1024 == 0 {
+					log.Warn("[boot-relay|mesh] boot %s at %d/s — dropped %d frames",
+						remotePeer.ShortString(), int(bootRelayFrameRate), drops)
+				}
+				continue
 			}
 			rr.route(buf[:n], true, remotePeer)
 		}
@@ -878,6 +933,31 @@ func makeBootRelayBackboneHandler(rr *relayRouter, hub *peekMapHub) func(network
 }
 
 const RelayCtrlProtocolID protocol.ID = "/p2ptap/relay-ctrl/1.0.0"
+
+// allowedRelayCtrlInnerProtos is the set of inner control protocols a relay-ctrl
+// tunnel may carry. The boot dials the target with hdr.Proto, and hdr.Proto
+// comes from attacker-controlled JSON — without this allowlist an authenticated
+// client can open a raw tunnel to a mesh peer on ANY protocol that peer
+// advertises, and the boot never checks the target-side PSK gate for it. The
+// set mirrors the node's dispatchRelayCtrlInner allowlist exactly: the boot
+// never terminates the inner protocol, so a proto the node would reject is
+// equally useless on the boot.
+var allowedRelayCtrlInnerProtos = map[protocol.ID]struct{}{
+	node.SeqSyncProtocolID:     {},
+	node.LSAProtocolID:         {},
+	meta.MetaProtocolID:        {},
+	node.EchoProtocolID:        {},
+	node.TapProbeAckProtocolID: {},
+}
+
+// maxRelayTunnels caps concurrent relay-ctrl tunnels. Every tunnel pins two
+// proxy goroutines plus one inbound and one outbound libp2p stream, and it is
+// opened by a client inside the PSK — so an authenticated node can exhaust the
+// boot's streams regardless of the auth limits above. The cap is well above any
+// real control-plane fan-out.
+const maxRelayTunnels = 256
+
+var relayTunnelsInflight atomic.Int64
 
 type RelayCtrlHeader struct {
 	Origin peer.ID `json:"origin"`
@@ -925,6 +1005,25 @@ func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter, hub *peekMapHub) func(
 			return
 		}
 
+		// hdr.Proto is attacker-controlled JSON. Without this gate an
+		// authenticated client can dial an arbitrary protocol at a mesh peer
+		// through the boot, since the boot never runs the target-side PSK gate
+		// for whatever the dial lands on.
+		if hdr.Proto != "" {
+			if _, ok := allowedRelayCtrlInnerProtos[protocol.ID(hdr.Proto)]; !ok {
+				log.Warn("[relay-ctrl] refusing tunnel: non-allowlisted inner proto %q (client %s)",
+					hdr.Proto, remotePeer.ShortString())
+				return
+			}
+		}
+
+		if n := relayTunnelsInflight.Add(1); n > maxRelayTunnels {
+			relayTunnelsInflight.Add(-1)
+			log.Warn("[relay-ctrl] refusing tunnel: %d already open (limit %d)", n-1, maxRelayTunnels)
+			return
+		}
+		defer relayTunnelsInflight.Add(-1)
+
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
@@ -963,25 +1062,86 @@ func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter, hub *peekMapHub) func(
 	}
 }
 
+// relayCtrlProxyBufSize bounds each proxy read. The inner control protocols are
+// length-prefixed and already bounded by readFrame, so the buffer only trades
+// syscalls for memory.
+const relayCtrlProxyBufSize = 64 << 10
+
+// relayCtrlTunnelIdleTimeout tears a relay-ctrl tunnel down once it has carried
+// no bytes in EITHER direction for this long. Without it a stalled inner
+// handshake pins both proxy goroutines and both streams until an endpoint dies.
+// 15 minutes comfortably covers the slowest legitimate inner exchange while
+// still bounding how long a half-open tunnel can squat.
+const relayCtrlTunnelIdleTimeout = 15 * time.Minute
+
+// relayCtrlTunnelIdleCheck is the watchdog poll interval. It is deliberately a
+// fraction of the timeout so a stalled tunnel dies soon after, not long after,
+// the threshold.
+const relayCtrlTunnelIdleCheck = 10 * time.Second
+
 func proxyStreams(s1, s2 network.Stream) {
+	var lastActivity atomic.Int64
+	lastActivity.Store(time.Now().UnixNano())
+	done := make(chan struct{})
+
+	// Watchdog: closing both streams makes both Reads below fail, which is what
+	// unwinds the tunnel. It only fires when BOTH directions are quiet, so a
+	// legitimately one-directional inner stream is not killed by silence on the
+	// return path.
+	go func() {
+		ticker := time.NewTicker(relayCtrlTunnelIdleCheck)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case now := <-ticker.C:
+				quiet := now.Sub(time.Unix(0, lastActivity.Load()))
+				if quiet > relayCtrlTunnelIdleTimeout {
+					log.Warn("[relay-ctrl] tunnel quiet for %s — tearing down", quiet.Round(time.Second))
+					_ = s1.Close()
+					_ = s2.Close()
+					return
+				}
+			}
+		}
+	}()
+
+	// copyTunnel drains src into dst. Close() — not CloseWrite() — signals the
+	// remote end (FIN/RESET) AND tears down the local read side, so the reverse
+	// goroutine's Read unblocks. Without the full Close, a peer that ignores the
+	// half-close FIN leaves it blocked on Read forever, pinning both streams and
+	// this proxy.
+	copyTunnel := func(dst, src network.Stream) {
+		buf := make([]byte, relayCtrlProxyBufSize)
+		for {
+			n, err := src.Read(buf)
+			if n > 0 {
+				lastActivity.Store(time.Now().UnixNano())
+				if _, werr := dst.Write(buf[:n]); werr != nil {
+					break
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+		_ = dst.Close()
+		_ = src.Close()
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(s2, s1)
-		// One direction EOF'd. Close() signals the remote end (FIN/RESET) AND
-		// tears down the local read side, so the reverse goroutine's io.Copy
-		// unblocks on the now-closed stream. Without the full Close, a peer
-		// that ignores the half-close FIN leaves the reverse goroutine blocked
-		// on io.Copy(s1, s2) forever, pinning both streams and this proxy.
-		_ = s2.Close()
+		copyTunnel(s2, s1)
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(s1, s2)
-		_ = s1.Close()
+		copyTunnel(s1, s2)
 	}()
 	wg.Wait()
+	close(done)
 }
 
 // bootRelayMeshUplinkLoop keeps a boot-relay backbone uplink open to ONE peer
@@ -2027,15 +2187,33 @@ type pskEntry struct {
 func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h host.Host, hub *peekMapHub, nodeName string) {
 	defer s.Close()
 
+	if n := authStreamInflight.Add(1); n > maxAuthStreamsInflight {
+		authStreamInflight.Add(-1)
+		log.Warn("[auth] rejected auth stream from %s: %d concurrent handshakes in flight (limit %d)",
+			s.Conn().RemotePeer().ShortString(), n-1, maxAuthStreamsInflight)
+		_, _ = s.Write([]byte{0x00}) // Auth failed response
+		return
+	}
+	defer authStreamInflight.Add(-1)
+
 	// Bound the auth handshake: an unauthenticated peer that opens the stream
 	// and sends nothing would otherwise pin this goroutine until the underlying
 	// connection is torn down. Reject a stalled handshake.
 	_ = s.SetReadDeadline(time.Now().Add(30 * time.Second))
 
 	remotePeer := s.Conn().RemotePeer()
+	// manet.ToIP returns the FIRST IP component of the multiaddr, so for a
+	// connection that traverses a circuit relay that is the RELAY's public IP,
+	// not the client's — banning it would ban every other client routed through
+	// the same relay. An attacker behind a shared public relay could therefore
+	// DoS all its neighbours by brute-forcing its own token. In that case the IP
+	// is not a usable identity key and is dropped from the ban lookup; the
+	// per-peer-ID half still applies and a relay cannot forge peer IDs.
 	phyIP := ""
-	if ip := node.ExtractIP(s.Conn().RemoteMultiaddr()); ip != nil {
-		phyIP = ip.String()
+	if ma := s.Conn().RemoteMultiaddr(); ma != nil && !strings.Contains(ma.String(), "/p2p-circuit/") {
+		if ip := node.ExtractIP(ma); ip != nil {
+			phyIP = ip.String()
+		}
 	}
 	log.Debug("[auth] incoming PSK auth request from %s via %s", remotePeer.String(), s.Conn().RemoteMultiaddr().String())
 
@@ -2187,7 +2365,9 @@ func printBootstrapBanner(h host.Host, name string, pskEnabled bool, webServer *
 	if pskEnabled {
 		fmt.Println(" Relay Access      : PSK authenticated peers only")
 	} else {
-		fmt.Println(" Relay Access      : OPEN (no PSK — use --psk to restrict)")
+		fmt.Println(" Relay Access      : OPEN (no PSK — add a \"psks\" entry to the")
+		fmt.Println("                     config file (-c) or set it in the WebUI to")
+		fmt.Println("                     restrict relay access to PSK peers)")
 	}
 	if webServer != nil {
 		fmt.Printf(" WebUI Dashboard   : http://%s\n", webServer.GetListenAddr())

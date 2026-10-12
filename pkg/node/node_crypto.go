@@ -223,11 +223,19 @@ func (n *Node) triggerPeerRekey(p peer.ID) {
 		}()
 		return
 	}
-	// FOLLOWER: nudge leader to initiate
+	// FOLLOWER: nudge leader to initiate. rekeyPeers is still registered here,
+	// because R10 above keys off it to stop encrypting past the nonce budget:
+	// a re-key IS in flight from this node's point of view (the nudge plus the
+	// escalation below), so without the flag a follower could keep sealing
+	// frames under an exhausted nonce budget indefinitely — only the leader's
+	// branch used to set it. Whoever owns the escalation deletes the flag when
+	// the round resolves, so the nudge owner and the flag owner may differ.
 	n.sendRekeyRequest(p)
+	n.rekeyPeers.Store(p, struct{}{})
 	if _, pending := n.rekeyEscalation.LoadOrStore(p, struct{}{}); !pending {
 		go func() {
 			defer n.rekeyEscalation.Delete(p)
+			defer n.rekeyPeers.Delete(p)
 			select {
 			case <-n.ctx.Done():
 				return

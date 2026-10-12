@@ -191,6 +191,129 @@ func TestPendingConfigKeepsActiveTokenUntilRestart(t *testing.T) {
 	}
 }
 
+// TestConfigSavePartialRequestCannotDowngradeSecurityFields guards the
+// regression where /api/config preserved omitted fields by testing whether the
+// incoming value was the zero value. A client that simply left a field out of
+// its JSON produces exactly that zero value, so omission was indistinguishable
+// from a deliberate request to clear it: a save that only changed node_name
+// switched the mesh firewall off, wiped the dashboard auth token, and removed
+// every advertised subnet and STUN server.
+func TestConfigSavePartialRequestCannotDowngradeSecurityFields(t *testing.T) {
+	baseline := config.DefaultConfig()
+	baseline.PSK = "running-mesh-secret-1"
+	baseline.WebUI.AuthToken = "running-dashboard-token"
+	baseline.ACL = config.ACLConfig{Enable: true, DefaultAction: "deny"}
+	baseline.Obfuscation = config.ObfuscationConfig{Enable: true, Mode: "auto"}
+	baseline.AdvertisedSubnets = []string{"192.168.1.0/24"}
+	baseline.AllowedSubnetPeers = []string{"*"}
+	baseline.AcceptAdvertisedSubnets = true
+	baseline.LogLevel = "debug"
+	baseline.StunServers = []string{"/udp/stun.l.google.com/19302"}
+	baseline.TurnServers = []string{"turn:turn.cloudflare.com:80"}
+	baseline.StaticPeers = []string{"/ip4/192.0.2.1/tcp/4001/p2p/QmNnooDu7bfjPFoTmoXMY5PeBKyy1EicV2g7HQ1b18423b"}
+	baseline.ExitNode = config.ExitNodeConfig{WANInterface: "auto"}
+
+	var persisted *config.Config
+	collector := NewStatsCollector()
+	collector.PersistConfig = func(cfg *config.Config) error {
+		copy := *cfg
+		persisted = &copy
+		return nil
+	}
+	srv, host := startConfigTestServerOnFreePort(t, collector, baseline)
+	defer srv.Close()
+
+	// A partial client: it changes the node name and MTU and says nothing else.
+	body := []byte(`{"node_name":"node-b","mtu":1300}`)
+	resp, err := http.Post("http://"+host+"/api/config?token="+srv.AuthToken(), "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, body=%s", resp.StatusCode, data)
+	}
+	if persisted == nil {
+		t.Fatal("save did not persist")
+	}
+	if persisted.NodeName != "node-b" || persisted.MTU != 1300 {
+		t.Fatalf("explicit changes lost: node_name=%q mtu=%d", persisted.NodeName, persisted.MTU)
+	}
+
+	checks := []struct {
+		name string
+		ok   bool
+	}{
+		{"web_ui.auth_token", persisted.WebUI.AuthToken == "running-dashboard-token"},
+		{"psk", persisted.PSK == "running-mesh-secret-1"},
+		{"acl", persisted.ACL.Enable && persisted.ACL.DefaultAction == "deny"},
+		{"obfuscation", persisted.Obfuscation.Enable && persisted.Obfuscation.Mode == "auto"},
+		{"advertised_subnets", len(persisted.AdvertisedSubnets) == 1 && persisted.AdvertisedSubnets[0] == "192.168.1.0/24"},
+		{"allowed_subnet_peers", len(persisted.AllowedSubnetPeers) == 1 && persisted.AllowedSubnetPeers[0] == "*"},
+		{"accept_advertised_subnets", persisted.AcceptAdvertisedSubnets},
+		{"log_level", persisted.LogLevel == "debug"},
+		{"transport_strategy", persisted.TransportStrategy == "best_path"},
+		{"bootstrap_peers", len(persisted.BootstrapPeers) == len(baseline.BootstrapPeers)},
+		{"stun_servers", len(persisted.StunServers) == 1 && persisted.StunServers[0] == "/udp/stun.l.google.com/19302"},
+		{"turn_servers", len(persisted.TurnServers) == 1 && persisted.TurnServers[0] == "turn:turn.cloudflare.com:80"},
+		{"static_peers", len(persisted.StaticPeers) == 1},
+		{"exit_node", persisted.ExitNode.WANInterface == "auto"},
+		{"enable_mdns", persisted.EnableMDNS},
+		{"discover_boot_mesh", persisted.DiscoverBootMesh},
+		{"hole_punch_timeout", persisted.HolePunchTimeout == baseline.HolePunchTimeout},
+	}
+	for _, c := range checks {
+		if !c.ok {
+			t.Errorf("%s wiped by a save that never mentioned it: %+v", c.name, persisted)
+		}
+	}
+}
+
+// TestConfigSaveExplicitEmptyListStillClears is the inverse guard: presence is
+// what makes a field authoritative, so a client that sends "acl": {} or an
+// empty rule list is deliberately reconfiguring the mesh and must not be
+// reverted to the running value.
+func TestConfigSaveExplicitEmptyListStillClears(t *testing.T) {
+	baseline := config.DefaultConfig()
+	baseline.WebUI.AuthToken = "running-dashboard-token"
+	baseline.ACL = config.ACLConfig{Enable: true, DefaultAction: "deny"}
+	baseline.AdvertisedSubnets = []string{"192.168.1.0/24"}
+
+	var persisted *config.Config
+	collector := NewStatsCollector()
+	collector.PersistConfig = func(cfg *config.Config) error {
+		copy := *cfg
+		persisted = &copy
+		return nil
+	}
+	srv, host := startConfigTestServerOnFreePort(t, collector, baseline)
+	defer srv.Close()
+
+	body := []byte(`{"acl":{"enable":false},"advertised_subnets":[]}`)
+	resp, err := http.Post("http://"+host+"/api/config?token="+srv.AuthToken(), "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, body=%s", resp.StatusCode, data)
+	}
+	if persisted == nil {
+		t.Fatal("save did not persist")
+	}
+	if persisted.ACL.Enable {
+		t.Errorf("explicit acl.disable reverted: %+v", persisted.ACL)
+	}
+	if len(persisted.AdvertisedSubnets) != 0 {
+		t.Errorf("explicit empty advertised_subnets reverted: %v", persisted.AdvertisedSubnets)
+	}
+	if persisted.WebUI.AuthToken == "" {
+		t.Error("auth token cleared by a save that only touched acl and subnets")
+	}
+}
+
 // TestConfigSaveValidationErrorDoesNotRepeatPrefix pins the message a client sees
 // for a rejected PSK. Config.Validate already starts with "invalid config:", and
 // both the HTTP handler and the interceptor used to wrap it with the same words,
