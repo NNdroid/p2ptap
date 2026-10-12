@@ -1399,22 +1399,37 @@ func main() {
 		libp2p.EnableRelay(),
 		libp2p.EnableHolePunching(),
 	}
-	if len(cfg.StunServers) > 0 || len(cfg.TurnServers) > 0 {
-		hostOpts = append(hostOpts, libp2p.Transport(
-			func(key crypto.PrivKey, psk pnet.PSK, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, ludp webrtc.ListenUDPFn, transportOpts ...webrtc.Option) (tpt.Transport, error) {
-				allOpts := transportOpts
-				if len(cfg.StunServers) > 0 {
-					allOpts = append(allOpts, webrtc.WithSTUNServers(cfg.StunServers))
-					log.Info("WebRTC configured with %d STUN server(s)", len(cfg.StunServers))
-				}
-				if len(cfg.TurnServers) > 0 {
-					allOpts = append(allOpts, webrtc.WithTURNServers(cfg.TurnServers))
-					log.Info("WebRTC configured with %d TURN server(s)", len(cfg.TurnServers))
-				}
-				return webrtc.New(key, psk, gater, rcmgr, ludp, allOpts...)
-			},
-		))
-	}
+	// WebRTC transport is registered UNCONDITIONALLY. Gating the whole
+	// registration on "do we have any STUN/TURN servers" silently deleted the
+	// /webrtc-direct listener whenever both lists were empty, while the
+	// ListenAddrs below still advertised one — peers saw an address and got a
+	// permanent connection-refused. ICE servers are optional inputs to the
+	// transport (none means host/reflexive candidates only), so only the
+	// individual options are conditional.
+	hostOpts = append(hostOpts, libp2p.Transport(
+		func(key crypto.PrivKey, psk pnet.PSK, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, ludp webrtc.ListenUDPFn, transportOpts ...webrtc.Option) (tpt.Transport, error) {
+			allOpts := transportOpts
+			if len(cfg.StunServers) > 0 {
+				allOpts = append(allOpts, webrtc.WithSTUNServers(cfg.StunServers))
+				log.Info("WebRTC configured with %d STUN server(s)", len(cfg.StunServers))
+			}
+			turnURLs, turnUser, turnCred, turnDropped := node.IceTURNConfig(cfg.TurnServers)
+			if len(turnURLs) > 0 {
+				allOpts = append(allOpts,
+					webrtc.WithTURNServers(turnURLs),
+					webrtc.WithTURNCredentials(turnUser, turnCred),
+				)
+				log.Info("WebRTC configured with %d TURN server(s) with ICE credentials", len(turnURLs))
+			}
+			if turnDropped > 0 {
+				log.Warn("%d TURN server(s) lack ?username=...&credential=... and are excluded from "+
+					"WebRTC ICE: pion rejects a credential-less TURN server and aborts the whole peer "+
+					"connection, which would take down every WebRTC link. They still serve QUIC relay "+
+					"allocation.", turnDropped)
+			}
+			return webrtc.New(key, psk, gater, rcmgr, ludp, allOpts...)
+		},
+	))
 
 	// QUIC transport with TURN relay override: when the QUIC ConnManager
 	// creates a UDP socket for a TURN relay address, return the pre-allocated

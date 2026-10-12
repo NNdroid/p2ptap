@@ -63,6 +63,47 @@ func tryKeepAlive(conn net.Conn, keepAlive bool) {
 			log.Error("failed set keepalive period", "error", err)
 		}
 	}
+
+	setKeepAliveIdle(conn, keepAlivePeriod)
+}
+
+// setKeepAliveIdle sets TCP_KEEPIDLE so that keepalive probing starts after
+// keepAlivePeriod of silence instead of after the kernel default (7200 s on
+// Linux).
+//
+// Without this, keepalive is configured but almost never fires: most NATs and
+// middleboxes destroy an idle TCP mapping within minutes, long before the first
+// probe is scheduled. The mapping is gone while both ends still believe the
+// connection is alive, so the link hangs indefinitely instead of failing fast —
+// and nothing on the Go side reports a failure, because the very next write is
+// what finally gets a RST. Setting the idle timer to the probe period keeps the
+// NAT mapping re-armed every interval and makes a dead link detectable.
+//
+// It must be applied through the raw socket because net.TCPConn exposes only
+// SetKeepAlive and SetKeepAlivePeriod, neither of which reaches the idle timer.
+func setKeepAliveIdle(conn net.Conn, idle time.Duration) {
+	rawConn, ok := conn.(interface{ RawConn() (syscall.RawConn, error) })
+	if !ok {
+		return
+	}
+	rc, err := rawConn.RawConn()
+	if err != nil {
+		return
+	}
+	sec := int(idle.Seconds())
+	if sec <= 0 {
+		sec = int(time.Second)
+	}
+	var sockErr error
+	if err := rc.Control(func(fd uintptr) {
+		sockErr = setKeepAliveParams(fd, sec, sec)
+	}); err != nil {
+		log.Debug("failed to reach raw socket for keepalive idle time", "error", err)
+		return
+	}
+	if sockErr != nil {
+		log.Debug("failed to set TCP keepalive idle time", "error", sockErr)
+	}
 }
 
 // try to set linger on the connection, if possible.

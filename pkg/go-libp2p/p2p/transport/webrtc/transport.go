@@ -101,6 +101,11 @@ type WebRTCTransport struct {
 	// turnServers is a list of TURN server URLs for ICE relay candidates.
 	// Empty means no TURN servers (ICE relies on host/reflexive candidates only).
 	turnServers []string
+	// turnUsername / turnCredential are the ICE credentials applied to every
+	// entry in turnServers. Both empty means no credentials were supplied, which
+	// is exactly the state pion refuses to build a peer connection from.
+	turnUsername string
+	turnCredential string
 
 	// dialerVersion picks which WebRTC Direct handshake to use when dialing: 1
 	// uses v1 (SDP munging), 2 uses v2 (no munging; the client password rides in
@@ -140,10 +145,32 @@ func WithSTUNServers(servers []string) Option {
 }
 
 // WithTURNServers configures TURN servers for ICE relay candidates.
-// URLs should be in the format "turn:host:port" or "turn:host:port?username=...&credential=...".
+// URLs should be in the format "turn:host:port".
+//
+// WebRTC mandates credentials on a TURN server, and pion enforces it hard: an
+// ICEServer with a turn:/turns: URL but an empty Username or Credential is
+// rejected by ICEServer.validate with ErrNoTurnCredentials, and
+// PeerConnection.initConfiguration aborts on the first invalid server. The
+// result is that the *entire* peer connection fails — so a TURN list passed
+// without WithTURNCredentials does not degrade gracefully, it disables all
+// WebRTC, including the STUN-only paths. Always pair this with
+// WithTURNCredentials.
 func WithTURNServers(servers []string) Option {
 	return func(t *WebRTCTransport) error {
 		t.turnServers = servers
+		return nil
+	}
+}
+
+// WithTURNCredentials supplies the ICE credentials for every TURN server
+// registered via WithTURNServers. The ICEServer entries built from those URLs
+// are tagged ICECredentialTypePassword with these values, which is what pion's
+// ICEServer.urls() requires in order to accept a turn:/turns: URL at all.
+// Ignored unless WithTURNServers is also set.
+func WithTURNCredentials(username, credential string) Option {
+	return func(t *WebRTCTransport) error {
+		t.turnUsername = username
+		t.turnCredential = credential
 		return nil
 	}
 }
@@ -251,10 +278,26 @@ func New(privKey ic.PrivKey, psk pnet.PSK, gater connmgr.ConnectionGater, rcmgr 
 		transport.webrtcConfig = config
 	}
 	if len(transport.turnServers) > 0 {
-		for _, srv := range transport.turnServers {
-			config.ICEServers = append(config.ICEServers, webrtc.ICEServer{
-				URLs: []string{srv},
-			})
+		if transport.turnUsername == "" || transport.turnCredential == "" {
+			// Do NOT emit these servers. A turn:/turns: ICEServer without both
+			// Username and Credential is rejected by pion's ICEServer.validate
+			// (ErrNoTurnCredentials), and PeerConnection.initConfiguration
+			// aborts on the first invalid server — which takes down every WebRTC
+			// dial and every inbound answer, including the STUN-only ones.
+			// Dropping them degrades to host/reflexive candidates instead.
+			log.Error("TURN servers configured without ICE credentials; dropping " +
+				"them, since a credential-less TURN server aborts every WebRTC " +
+				"peer connection. Call WithTURNCredentials.",
+				"count", len(transport.turnServers))
+		} else {
+			for _, srv := range transport.turnServers {
+				config.ICEServers = append(config.ICEServers, webrtc.ICEServer{
+					URLs:           []string{srv},
+					Username:       transport.turnUsername,
+					Credential:     transport.turnCredential,
+					CredentialType: webrtc.ICECredentialTypePassword,
+				})
+			}
 		}
 		transport.webrtcConfig = config
 	}

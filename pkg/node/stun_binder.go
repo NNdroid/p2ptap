@@ -242,7 +242,6 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 	var mu sync.Mutex
 
 	var udpDiscovered []multiaddr.Multiaddr
-	var tcpDiscovered []multiaddr.Multiaddr
 	var udpSuccesses, udpFailures int
 	var tcpSuccesses, tcpFailures int
 
@@ -313,38 +312,45 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 					ipPrefix = "/ip6/"
 				}
 
-				var ma multiaddr.Multiaddr
 				if isTCP {
-					// TCP STUN gives us our public IP, but the port is the
-					// ephemeral TCP source port — NOT a listening port.
-					// Peers can't dial it. Use port 0 so libp2p's DCUtR
-					// handles port selection during hole punching.
-					ma, err = multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/tcp/0", ipPrefix, addr.IP.String()))
-					if err != nil {
-						mu.Lock()
-						tcpFailures++
-						mu.Unlock()
-						continue
-					}
+					// TCP STUN proves TCP NAT reachability, which is what the
+					// counters feed (early termination below plus the cycle
+					// summary log). It produces NO advertised address, because
+					// nothing it reveals is dialable:
+					//
+					//   - The mapped port is the ephemeral SOURCE port of this
+					//     query, not one of our listener ports, so
+					//     /tcp/<that port> points nowhere.
+					//   - /tcp/0 is also not dialable. multiaddr turns it into
+					//     "tcp4 ip:0" for net.Dial, which fails EINVAL. QUIC has
+					//     explicit port-0 handling in quicreuse for this exact
+					//     case; the TCP transport has no such path and libp2p's
+					//     DCUtR relies on simultaneous open, which Go's
+					//     stdlib cannot express.
+					//
+					// The only way to learn a real reachable TCP port is
+					// PCP/UPnP, which NATPortMap already handles and advertises.
 					mu.Lock()
 					tcpSuccesses++
-					tcpDiscovered = append(tcpDiscovered, ma)
 					mu.Unlock()
-				} else {
-					// UDP STUN gives us the exact IP:port our NAT maps to —
-					// peers can send UDP packets there directly.
-					ma, err = multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/udp/%d/quic-v1", ipPrefix, addr.IP.String(), addr.Port))
-					if err != nil {
-						mu.Lock()
-						udpFailures++
-						mu.Unlock()
-						continue
-					}
-					mu.Lock()
-					udpSuccesses++
-					udpDiscovered = append(udpDiscovered, ma)
-					mu.Unlock()
+					log.Debug("TCP STUN reached %s via %s — TCP NAT reachable, no address advertised (no dialable port)",
+						addr.IP.String(), server)
+					continue
 				}
+
+				// UDP STUN gives us the exact IP:port our NAT maps to — peers
+				// can send UDP packets there directly.
+				ma, err := multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/udp/%d/quic-v1", ipPrefix, addr.IP.String(), addr.Port))
+				if err != nil {
+					mu.Lock()
+					udpFailures++
+					mu.Unlock()
+					continue
+				}
+				mu.Lock()
+				udpSuccesses++
+				udpDiscovered = append(udpDiscovered, ma)
+				mu.Unlock()
 				log.Debug("STUN discovered server-reflexive address: %s (via %s, tcp=%v)", ma.String(), server, isTCP)
 			}
 		}(server)
@@ -358,8 +364,11 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 
 	// Merge and store UDP addresses
 	mergeAndStoreSTUNAddrs(udpDiscovered, getSTUNReflexiveAddrs(), udpFailures)
-	// Merge and store TCP addresses
-	mergeAndStoreTCPSTUNAddrs(tcpDiscovered, getTCPStunReflexiveAddrs(), tcpFailures)
+	// TCP STUN yields no address to store (see the TCP branch of the query
+	// loop), so nil keeps the previous set unchanged — and the previous set is
+	// always empty, so this is a no-op that also keeps the failure counter
+	// flowing into the same reporting path as UDP.
+	mergeAndStoreTCPSTUNAddrs(nil, getTCPStunReflexiveAddrs(), tcpFailures)
 
 	return nil
 }

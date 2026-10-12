@@ -198,34 +198,82 @@ func parseTurnURL(s string) (*turnConfig, error) {
 		return nil, fmt.Errorf("invalid TURN URL %q: must start with 'turn:'", s)
 	}
 
-	u, err := url.Parse(s)
-	if err != nil {
-		return nil, fmt.Errorf("parse TURN URL %q: %w", s, err)
+	rest := strings.TrimPrefix(s, "turn:")
+
+	// "turn://host:port[?query]" is a real URL, so let net/url own it.
+	if strings.HasPrefix(rest, "//") {
+		u, err := url.Parse(s)
+		if err != nil {
+			return nil, fmt.Errorf("parse TURN URL %q: %w", s, err)
+		}
+		if u.Host == "" {
+			return nil, fmt.Errorf("TURN URL %q: missing server address", s)
+		}
+		cfg := &turnConfig{ServerAddr: u.Host}
+		if u.User != nil {
+			cfg.Username = u.User.Username()
+			if pwd, ok := u.User.Password(); ok {
+				cfg.Credential = pwd
+			}
+		}
+		applyTurnQuery(cfg, u.Query())
+		return cfg, nil
 	}
 
-	serverAddr := u.Host
-	if serverAddr == "" {
-		raw := strings.TrimPrefix(s, "turn:")
-		if idx := strings.Index(raw, "?"); idx > 0 {
-			serverAddr = raw[:idx]
+	// "turn:host:port[?query]" and "turn:user:pass@host:port[?query]" are the
+	// colon forms. Without "//" net/url treats them as opaque URLs and silently
+	// drops BOTH the userinfo and the query, so they must be split by hand —
+	// otherwise a correctly configured credential set is read as absent.
+	var cfg turnConfig
+	if at := strings.Index(rest, "@"); at >= 0 {
+		userinfo, afterAt := rest[:at], rest[at+1:]
+		rest = afterAt
+		if user, pass, ok := strings.Cut(userinfo, ":"); ok {
+			cfg.Username, cfg.Credential = user, pass
 		} else {
-			serverAddr = raw
+			cfg.Username = userinfo
 		}
 	}
-
-	if serverAddr == "" {
+	if q := strings.Index(rest, "?"); q >= 0 {
+		applyTurnQuery(&cfg, parseSimpleQuery(rest[q+1:]))
+		rest = rest[:q]
+	}
+	if rest == "" {
 		return nil, fmt.Errorf("TURN URL %q: missing server address", s)
 	}
+	cfg.ServerAddr = rest
+	return &cfg, nil
+}
 
-	cfg := &turnConfig{ServerAddr: serverAddr}
-
-	if u.RawQuery != "" {
-		query := u.Query()
-		cfg.Username = query.Get("username")
-		cfg.Credential = query.Get("credential")
+// applyTurnQuery fills in credentials from an ICE server query string. The
+// query wins over any userinfo, matching RFC 7861 precedence for the // form.
+func applyTurnQuery(cfg *turnConfig, q url.Values) {
+	if v := q.Get("username"); v != "" {
+		cfg.Username = v
 	}
+	if v := q.Get("credential"); v != "" {
+		cfg.Credential = v
+	} else if v := q.Get("password"); v != "" {
+		cfg.Credential = v
+	}
+}
 
-	return cfg, nil
+// parseSimpleQuery is url.Values.Parse without its error return: malformed
+// entries are skipped, which matches the forgiving parsing a config file
+// deserves.
+func parseSimpleQuery(raw string) url.Values {
+	values := url.Values{}
+	for _, pair := range strings.Split(raw, "&") {
+		if pair == "" {
+			continue
+		}
+		key, val, _ := strings.Cut(pair, "=")
+		if key == "" {
+			continue
+		}
+		values.Add(key, val)
+	}
+	return values
 }
 
 // startTURNBinder periodically allocates TURN relay addresses.

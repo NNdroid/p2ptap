@@ -1140,13 +1140,24 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 
 	yamuxOpt := *yamux.DefaultTransport
 	yamuxOpt.MaxStreamWindowSize = 16 * 1024 * 1024 // 16 MB stream window for Gigabit+ throughput
-	// Disable yamux's own keepalive: p2ptap has its own ping-pong keepalive loop
-	// every 10 seconds that is far more sophisticated (reconnect-aware, failure-counted).
-	// yamux's 30s keepalive sends a frame that competes with data frames on the TCP connection
-	// and can cause 10s stalls when the TCP send buffer is full during burst traffic.
-	yamuxOpt.EnableKeepAlive = false
-	// Keep write timeout tight: 5s means a truly wedged connection is detected
-	// within 5s (not 10s/30s), releasing the yamux send goroutine quickly.
+	// Keep yamux's own keepalive ENABLED. go-yamux runs its RTT-measurement
+	// pings unconditionally (startMeasureRTT, every MeasureRTTInterval), so this
+	// flag adds no extra frames on the wire. What it actually controls is only
+	// whether a *failed* ping closes the session. Left disabled, a half-dead
+	// TCP connection is never detected by the muxer: the measurement ping just
+	// times out and the error is discarded. p2ptap's own peerPingPongLoop does
+	// cover mesh peers, but it deliberately skips bootstrap peers — so without
+	// muxer-level keepalive a silently broken link to a bootstrap node (the one
+	// carrying the relay and the SeqSync control plane) stays half-open
+	// indefinitely and every stream on it hangs. Enabling it costs nothing and
+	// makes that link fail fast instead.
+	yamuxOpt.EnableKeepAlive = true
+	yamuxOpt.KeepAliveInterval = 30 * time.Second
+	// ConnectionWriteTimeout is the per-write safety valve: a write that stalls
+	// this long fails the whole session, muxed streams included. 5s (vs the 10s
+	// default) makes a genuinely wedged connection visible quickly. It applies
+	// to ordinary data writes as well as to keepalive pings, so it sets the
+	// burst tolerance of every multiplexed connection, not just keepalive.
 	yamuxOpt.ConnectionWriteTimeout = 5 * time.Second
 
 	setOverlayCIDRs(cfg.TapIP, cfg.TapIPv6)
@@ -1214,6 +1225,22 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		}),
 		libp2p.ConnectionGater(&overlayConnGater{}),
 	}
+
+	// ConnManager: without one, libp2p installs its built-in default, which
+	// trims the lowest-value peer's connections every 10 s once the watermark
+	// is exceeded. That is the wrong policy for a p2ptap mesh — see
+	// buildConnManager for why the bootstrap links are the ones that suffer.
+	connMgr, protectedPeers, err := buildConnManager(bootstrapRelays, cfg.StaticPeers)
+	if err != nil {
+		cancel()
+		if ownedTAP {
+			_ = tapDev.Close()
+		}
+		return nil, fmt.Errorf("build connection manager: %w", err)
+	}
+	log.Info("ConnManager %d/%d connections, %d peer(s) protected from trimming (bootstrap + static)",
+		connMgrLowWater, connMgrHighWater, protectedPeers)
+	opts = append(opts, libp2p.ConnectionManager(connMgr))
 
 	// Reachability: by default let AutoNAT auto-detect. A node with a public IP
 	// then advertises its direct addresses so peers can dial it DIRECTLY instead
@@ -1426,9 +1453,19 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 					allOpts = append(allOpts, webrtc.WithSTUNServers(cfg.StunServers))
 					log.Info("WebRTC configured with %d STUN server(s)", len(cfg.StunServers))
 				}
-				if len(cfg.TurnServers) > 0 {
-					allOpts = append(allOpts, webrtc.WithTURNServers(cfg.TurnServers))
-					log.Info("WebRTC configured with %d TURN server(s)", len(cfg.TurnServers))
+				turnURLs, turnUser, turnCred, turnDropped := IceTURNConfig(cfg.TurnServers)
+				if len(turnURLs) > 0 {
+					allOpts = append(allOpts,
+						webrtc.WithTURNServers(turnURLs),
+						webrtc.WithTURNCredentials(turnUser, turnCred),
+					)
+					log.Info("WebRTC configured with %d TURN server(s) with ICE credentials", len(turnURLs))
+				}
+				if turnDropped > 0 {
+					log.Warn("%d TURN server(s) lack ?username=...&credential=... and are excluded from " +
+						"WebRTC ICE: pion rejects a credential-less TURN server and aborts the whole peer " +
+						"connection, which would take down every WebRTC link. They still serve QUIC relay "+
+						"allocation.", turnDropped)
 				}
 				return webrtc.New(key, psk, gater, rcmgr, ProtectedListenUDP, allOpts...)
 			},

@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
-	manet "github.com/multiformats/go-multiaddr/net"
 	"github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 	"github.com/pion/logging"
 	"github.com/pion/turn/v4"
 )
@@ -178,7 +178,6 @@ func bootSTUNBindOnce(ctx context.Context, servers []string) error {
 	var mu sync.Mutex
 
 	var udpDiscovered []multiaddr.Multiaddr
-	var tcpDiscovered []multiaddr.Multiaddr
 	var udpSuccesses, tcpSuccesses, udpFailures, tcpFailures int
 
 	for _, server := range servers {
@@ -246,24 +245,26 @@ func bootSTUNBindOnce(ctx context.Context, servers []string) error {
 					ipPrefix = "/ip6/"
 				}
 
-				var ma multiaddr.Multiaddr
 				if isTCP {
-					ma, _ = multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/tcp/0", ipPrefix, addr.IP.String()))
-				} else {
-					ma, _ = multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/udp/%d/quic-v1", ipPrefix, addr.IP.String(), addr.Port))
+					// TCP STUN proves TCP NAT reachability but yields no address
+					// to advertise: the mapped port is the query's own ephemeral
+					// source port, and /tcp/0 is undialable (multiaddr turns it
+					// into "tcp4 ip:0", which fails EINVAL; only quicreuse has
+					// special port-0 handling). See stunBindOnce for the detail.
+					mu.Lock()
+					tcpSuccesses++
+					mu.Unlock()
+					continue
 				}
+
+				ma, _ := multiaddr.NewMultiaddr(fmt.Sprintf("%s%s/udp/%d/quic-v1", ipPrefix, addr.IP.String(), addr.Port))
 				if ma == nil {
 					continue
 				}
 
 				mu.Lock()
-				if isTCP {
-					tcpDiscovered = append(tcpDiscovered, ma)
-					tcpSuccesses++
-				} else {
-					udpDiscovered = append(udpDiscovered, ma)
-					udpSuccesses++
-				}
+				udpDiscovered = append(udpDiscovered, ma)
+				udpSuccesses++
 				mu.Unlock()
 			}
 		}(server)
@@ -272,21 +273,25 @@ func bootSTUNBindOnce(ctx context.Context, servers []string) error {
 	wg.Wait()
 
 	elapsed := time.Since(startTime)
-	if len(udpDiscovered) > 0 || len(tcpDiscovered) > 0 {
-		log.Info("Boot STUN bind cycle: %v (UDP: %d addrs, TCP: %d addrs)",
-			elapsed, len(udpDiscovered), len(tcpDiscovered))
+	if udpSuccesses > 0 || tcpSuccesses > 0 {
+		log.Info("Boot STUN bind cycle: %v (UDP: %d addr(s), TCP: %d server(s) reachable)",
+			elapsed, len(udpDiscovered), tcpSuccesses)
 	}
 
+	// TCP STUN confirms reachability but advertises nothing: there is no usable
+	// mapped address to publish (the mapped port is the query's ephemeral source
+	// port, and /tcp/0 is undialable). Report it to the binder as an empty set,
+	// gated on success rather than on the (always empty) discovery list.
 	udpFailCount := 0
-	if udpFailures > 0 && len(udpDiscovered) == 0 {
+	if udpFailures > 0 && udpSuccesses == 0 {
 		udpFailCount = udpFailures
 	}
 	tcpFailCount := 0
-	if tcpFailures > 0 && len(tcpDiscovered) == 0 {
+	if tcpFailures > 0 && tcpSuccesses == 0 {
 		tcpFailCount = tcpFailures
 	}
 	mergeAndStoreSTUNHelper("UDP STUN (boot)", udpDiscovered, getSTUNReflexiveAddrs(), udpFailCount, setSTUNReflexiveAddrs)
-	mergeAndStoreSTUNHelper("TCP STUN (boot)", tcpDiscovered, getTCPStunReflexiveAddrs(), tcpFailCount, setTCPStunReflexiveAddrs)
+	mergeAndStoreSTUNHelper("TCP STUN (boot)", nil, getTCPStunReflexiveAddrs(), tcpFailCount, setTCPStunReflexiveAddrs)
 	return nil
 }
 

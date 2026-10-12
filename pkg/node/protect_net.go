@@ -60,10 +60,38 @@ func (p *protectNet) ListenUDP(network string, locAddr *net.UDPAddr) (transport.
 }
 
 func (p *protectNet) ListenTCP(network string, laddr *net.TCPAddr) (transport.TCPListener, error) {
-	// Use the base implementation to avoid type-mismatch issues with
-	// pion's transport.TCPListener interface; the socket-control hook is
-	// applied via the base's internal net.ListenConfig.
-	return p.base.ListenTCP(network, laddr)
+	// Pin the listen socket too. pion's stdnet calls net.ListenTCP directly with
+	// no control hook, so an ICE TCP listener would follow the OS routing table
+	// — which, once the TAP is the default gateway, means binding onto the tunnel
+	// and publishing a candidate no peer can reach. listenerProtectControl is
+	// protocol-agnostic, so the same hook used by ListenPacket works here.
+	lc := net.ListenConfig{Control: listenerProtectControl}
+	listenAddr := (&net.TCPAddr{}).String()
+	if laddr != nil {
+		listenAddr = laddr.String()
+	}
+	l, err := lc.Listen(context.Background(), network, listenAddr)
+	if err != nil {
+		return nil, err
+	}
+	tl, ok := l.(*net.TCPListener)
+	if !ok {
+		l.Close()
+		return nil, fmt.Errorf("net.Listen returned %T, expected *net.TCPListener", l)
+	}
+	return protectTCPListener{tl}, nil
+}
+
+// protectTCPListener adapts *net.TCPListener to pion's transport.TCPListener.
+// *net.TCPConn already implements pion's TCPConn interface (it is what DialTCP
+// above returns directly), so this adapter only shadows AcceptTCP to match the
+// interface's return type.
+type protectTCPListener struct {
+	*net.TCPListener
+}
+
+func (l protectTCPListener) AcceptTCP() (transport.TCPConn, error) {
+	return l.TCPListener.AcceptTCP()
 }
 
 func (p *protectNet) Dial(network, address string) (net.Conn, error) {
