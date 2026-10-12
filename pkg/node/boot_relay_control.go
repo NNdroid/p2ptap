@@ -89,10 +89,14 @@ func newBootRelayCtrlConvID() []byte {
 
 // bootRelayCtrlStream is a network.Stream simulator that multiplexes ONE control
 // protocol conversation (SeqSync / LSA / Meta / Echo) over a persistent
-// boot-relay uplink. The custom boot is a relay-over-backbone bridge, NOT a
-// Circuit-Relay v2 node, so it has no relay-ctrl handler; instead we send
-// kind=Control boot-relay frames carrying the inner protocol bytes, and the
-// peer's downlink feeds the matching inbound stream's read buffer.
+// boot-relay uplink. The boot does run Circuit Relay v2 and does register a
+// /p2ptap/relay-ctrl/1.0.0 handler, but neither is the right transport here: a
+// circuit spans only one boot and cannot reach across the boot-to-boot backbone,
+// and a relay-ctrl tunnel through the boot pins a stream pair plus a goroutine
+// pair per handshake against the boot's tunnel cap. Instead we send
+// kind=Control boot-relay frames carrying the inner protocol bytes on the
+// uplink the data plane already owns, and the peer's downlink feeds the matching
+// inbound stream's read buffer.
 //
 // It is a fully transparent byte pipe: every Write ships the raw bytes as one
 // boot-relay frame, and the peer concatenates the frames' payloads in order into

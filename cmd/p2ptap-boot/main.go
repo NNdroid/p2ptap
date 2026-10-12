@@ -959,16 +959,31 @@ const maxRelayTunnels = 256
 
 var relayTunnelsInflight atomic.Int64
 
+// RelayCtrlHeader is the wire header of a relay-ctrl tunnel. The tags are the
+// mesh node's compact format (node.RelayCtrlHeader: o/t/p/h/s) — the boot and
+// the nodes share one protocol ID, so they must speak one dialect.
+//
+// Before this was aligned the boot used origin/target/proto/hops. Neither side
+// parsed the other's header (json drops unknown keys), so every relay-ctrl
+// header carried Origin == "" and was dropped as malformed at line 985 below:
+// relay-ctrl tunnels through the boot were dead in BOTH directions, not just in
+// a PSK network. There is deliberately no dual-dialect reader — encoding/json
+// binds a struct field to its FIRST json tag only, so "json:\"o\" json:\"origin\""
+// does not read either spelling — and the only writer of the long tags was a
+// pre-upgrade boot, which cannot be a relay-ctrl Target anyway (boots are not
+// mesh members, and this handler dials hdr.Target directly rather than choosing
+// a peer boot as the next hop), so no live peer boot sends the old dialect.
 type RelayCtrlHeader struct {
-	Origin peer.ID `json:"origin"`
-	Target peer.ID `json:"target"`
-	Proto  string  `json:"proto"`
-	Hops   uint8   `json:"hops"`
+	Origin peer.ID `json:"o"`
+	Target peer.ID `json:"t"`
+	Proto  string  `json:"p"`
+	Hops   uint8   `json:"h"`
+	Stamp  string  `json:"s,omitempty"`
 }
 
 // makeRelayCtrlHandler handles /p2ptap/relay-ctrl/1.0.0 control streams on the boot node.
 // It allows clients to establish overlay control tunnels (SeqSync / Meta / LSA) through the boot node.
-func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter, hub *peekMapHub) func(network.Stream) {
+func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter, hub *peekMapHub, entries []pskEntry) func(network.Stream) {
 	return func(s network.Stream) {
 		defer s.Close()
 		remotePeer := s.Conn().RemotePeer()
@@ -986,13 +1001,60 @@ func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter, hub *peekMapHub) func(
 			return
 		}
 
-		// Anti-spoofing: direct local client cannot initiate a control tunnel pretending to be another peer
-		if hub != nil && !hub.isMesh(remotePeer) && hdr.Origin != remotePeer {
-			log.Warn("[relay-ctrl] spoofing attempt: direct client %s claims origin %s; dropping", remotePeer.ShortString(), hdr.Origin.ShortString())
+		// ---- Origin-claim gate + PSK-keyed endorsement (node.RelayCtrlAttest) ----
+		// hdr.Origin is the peer the target must bind its per-peer state to (cipher
+		// slot, dedup anchor, meta identity). Without a credential on that claim an
+		// attacker who can open a relay-ctrl stream to a victim could set Origin to
+		// any legitimate mesh peer and run its handshake "as" that peer. The boot
+		// therefore stamps a claim it verified directly through the transport, and
+		// refuses to forward a claim it cannot verify.
+		//
+		// WITHOUT THIS THE BOOT IS A DEAD RELAY IN A PSK NETWORK: it rebuilt the
+		// header below with no Stamp, so the target saw Origin != transport peer
+		// with an empty stamp, node.verifyRelayCtrlStamp rejected it, and every
+		// seqsync/meta/echo tunnel through the boot was dropped at the last hop.
+		// The stamp is minted with the ORIGIN's network PSK: the mesh node mints
+		// with its single config PSK, and AllowConnect below already restricts the
+		// tunnel to the origin's own network, so both ends derive the same key.
+		netID := ""
+		if acl != nil {
+			netID = acl.NetworkOf(hdr.Origin)
+		}
+		psk := lookupStampPSK(entries, netID)
+
+		switch {
+		case hdr.Origin == remotePeer:
+			// Direct claim, verified by libp2p: endorse it. Empty psk (open mode or
+			// an unknown network) mints "" — correct, because in a PSK-less mesh
+			// stamps are neither minted nor required.
+			hdr.Stamp = node.StampRelayCtrlOrigin(psk, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto))
+		case node.VerifyRelayCtrlStamp(psk, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), hdr.Stamp):
+			// Already endorsed by an upstream first relay: carry the stamp through.
+			log.Debug("[relay-ctrl] endorsed tunnel %s -> %s relayed via %s (hops=%d)",
+				hdr.Origin.ShortString(), hdr.Target.ShortString(), remotePeer.ShortString(), hdr.Hops)
+		case hub != nil && hub.isMesh(remotePeer):
+			// A backbone boot relayed a claim it did not itself verify, and no
+			// valid endorsement came with it. Refusing here is what keeps the boot
+			// from being an open relay for origin forgery against the targets it
+			// dials directly; it also makes the boot consistent with the mesh
+			// node's transit gate (pkg/node/relay_ctrl.go).
+			log.Warn("[relay-ctrl] refused: peer %s claims origin %s with no valid endorsement",
+				remotePeer.ShortString(), hdr.Origin.ShortString())
+			return
+		default:
+			log.Warn("[relay-ctrl] spoofing attempt: direct client %s claims origin %s; dropping",
+				remotePeer.ShortString(), hdr.Origin.ShortString())
 			return
 		}
 
-		if acl != nil {
+		if acl != nil && acl.pskEnabled {
+			// The gate only exists when PSKs are configured. In open mode there is
+			// no handshake for IsAuthenticated to see, so it is false for every
+			// peer and this handler would silently drop all tunnels — exactly how
+			// the data-plane makeBootRelayHandler scopes the same check.
+			if !acl.IsAuthenticated(remotePeer) {
+				acl.waitForAuth(remotePeer, 2*time.Second)
+			}
 			if !acl.IsAuthenticated(remotePeer) {
 				return
 			}
@@ -1041,6 +1103,7 @@ func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter, hub *peekMapHub) func(
 				Target: hdr.Target,
 				Proto:  hdr.Proto,
 				Hops:   hdr.Hops + 1,
+				Stamp:  hdr.Stamp,
 			}
 			fb, _ := json.Marshal(final)
 			if err := writeFrame(sub, fb); err != nil {
@@ -1485,7 +1548,7 @@ func main() {
 	var pskEntries []pskEntry
 	if pskEnabled {
 		for _, p := range psks {
-			pskEntries = append(pskEntries, pskEntry{hash: computePSKHash(p), netID: networkIDFromPSK(p)})
+			pskEntries = append(pskEntries, pskEntry{hash: computePSKHash(p), netID: networkIDFromPSK(p), psk: p})
 		}
 		h.SetStreamHandler(authProtocolID, func(s network.Stream) {
 			handleAuthStream(s, pskEntries, aclFilter, h, hub, nodeNameVal)
@@ -1593,7 +1656,7 @@ func main() {
 	relayRouter := newRelayRouter(aclFilter, pskEnabled)
 	h.SetStreamHandler(BootRelayProtocolID, makeBootRelayHandler(relayRouter))
 	h.SetStreamHandler(BootRelayBackboneProtocolID, makeBootRelayBackboneHandler(relayRouter, hub))
-	h.SetStreamHandler(RelayCtrlProtocolID, makeRelayCtrlHandler(h, aclFilter, hub))
+	h.SetStreamHandler(RelayCtrlProtocolID, makeRelayCtrlHandler(h, aclFilter, hub, pskEntries))
 	fmt.Printf("[+] Boot-relay & relay-control handlers registered (protocols: %s, %s, %s)\n",
 		BootRelayProtocolID, BootRelayBackboneProtocolID, RelayCtrlProtocolID)
 
@@ -2187,6 +2250,27 @@ func networkIDFromPSK(psk string) string {
 type pskEntry struct {
 	hash  [32]byte
 	netID string
+	// psk keeps the plaintext PSK alongside its opaque network ID so a first
+	// relay can mint the relay-ctrl origin endorsement with the same key bytes
+	// a mesh node derives from its own single config PSK. The ACL map itself
+	// stores only the net ID, never this.
+	psk string
+}
+
+// lookupStampPSK returns the SHA-256 PSK key bytes for a network ID, or nil if
+// the network is unknown (open mode, or a network this boot does not serve). A
+// nil psk means "no stamp exists", which is exactly the PSK-less-mesh
+// behaviour, so the relay-ctrl handler needs no special case for open mode.
+func lookupStampPSK(entries []pskEntry, netID string) []byte {
+	if netID == "" {
+		return nil
+	}
+	for _, e := range entries {
+		if e.netID == netID {
+			return routing.PSKKeyBytes(e.psk)
+		}
+	}
+	return nil
 }
 
 // handleAuthStream handles incoming PSK authentication requests. It validates the

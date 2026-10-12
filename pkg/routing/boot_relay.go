@@ -16,13 +16,16 @@ import (
 // ever reads src/dst peer IDs + the netID from the header and forwards the
 // whole frame, so it does not care which kind a frame is.
 //
-// Why both kinds share one stream: a custom boot is NOT a Circuit-Relay v2 node,
-// so it has no relay-ctrl handler. Reaching a NAT'd peer through it therefore
-// cannot use the /p2p-circuit or /p2ptap/relay-ctrl/1.0.0 paths — the control
-// handshake must instead be tunneled over the very same boot-relay uplink the
-// data plane already uses, otherwise two NAT'd peers in the same PSK network
-// would learn each other via the peek-map but never establish a SeqSync cipher
-// (and every frame would die at the AEAD gate).
+// Why both kinds share one stream: the boot IS a Circuit-Relay v2 relay, but a
+// circuit spans only one boot and cannot cross the boot-to-boot backbone, and
+// the boot is not a mesh member so it never terminates a relay-ctrl tunnel.
+// Reaching a NAT'd peer through the boot therefore cannot use /p2p-circuit, and
+// /p2ptap/relay-ctrl/1.0.0 at the boot would add a stream pair per handshake
+// where the uplink already carries them multiplexed. The control handshake is
+// tunneled over the very same boot-relay uplink the data plane already uses,
+// otherwise two NAT'd peers in the same PSK network would learn each other via
+// the peek-map but never establish a SeqSync cipher (and every frame would die
+// at the AEAD gate).
 const (
 	BootRelayKindData    = byte(0) // inner payload = end-to-end-encrypted TAP frame
 	BootRelayKindControl = byte(1) // inner payload = raw control-protocol bytes

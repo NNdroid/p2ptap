@@ -53,11 +53,17 @@ func relayCtrlStampKey(psk []byte) []byte {
 	return h.Sum(nil)
 }
 
-// stampRelayCtrlOrigin mints the endorsement for an origin claim this node
-// just verified directly (Origin == transport peer). Returns "" in PSK-less
-// meshes (no stamps exist there, by design).
-func (n *Node) stampRelayCtrlOrigin(origin, target peer.ID, proto protocol.ID) string {
-	psk := pskSaltBytes(n)
+// mintRelayCtrlStamp mints the endorsement for an origin claim the caller just
+// verified directly (Origin == transport peer). psk is the SHA-256 PSK key
+// bytes as a mesh node derives them (routing.PSKKeyBytes). Returns "" when psk
+// is empty — no stamps exist in PSK-less meshes, by design.
+//
+// psk is a parameter, not a method receiver, because the custom boot node is a
+// FIRST relay for clients that never share a Node's config plumbing: it holds
+// the PSKs as a configured list and must mint stamps byte-identical to a mesh
+// node's. Keeping one implementation here is what guarantees that parity — a
+// second copy in cmd/p2ptap-boot would drift.
+func mintRelayCtrlStamp(psk []byte, origin, target peer.ID, proto protocol.ID) string {
 	if len(psk) == 0 {
 		return ""
 	}
@@ -72,19 +78,47 @@ func (n *Node) stampRelayCtrlOrigin(origin, target peer.ID, proto protocol.ID) s
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// verifyRelayCtrlStamp validates an endorsement received in a tunnel header.
-// In PSK-less meshes there are no stamps and none is required; in PSK meshes
-// an EMPTY stamp never verifies (old unstamped tunnels from a pre-upgrade
+// checkRelayCtrlStamp validates an endorsement received in a tunnel header. In
+// PSK-less meshes there are no stamps and none is required; in PSK meshes an
+// EMPTY stamp never verifies (old unstamped tunnels from a pre-upgrade
 // first-hop cannot attest — consistent with the documented PSK full-upgrade
 // requirement: those peers cannot derive matching keys either).
-func (n *Node) verifyRelayCtrlStamp(origin, target peer.ID, proto protocol.ID, stamp string) bool {
-	psk := pskSaltBytes(n)
+func checkRelayCtrlStamp(psk []byte, origin, target peer.ID, proto protocol.ID, stamp string) bool {
 	if len(psk) == 0 {
 		return true
 	}
 	if stamp == "" {
 		return false
 	}
-	want := n.stampRelayCtrlOrigin(origin, target, proto)
-	return hmac.Equal([]byte(stamp), []byte(want))
+	return hmac.Equal([]byte(stamp), []byte(mintRelayCtrlStamp(psk, origin, target, proto)))
+}
+
+// stampRelayCtrlOrigin mints the endorsement for an origin claim this node
+// just verified directly (Origin == transport peer). Returns "" in PSK-less
+// meshes (no stamps exist there, by design).
+func (n *Node) stampRelayCtrlOrigin(origin, target peer.ID, proto protocol.ID) string {
+	return mintRelayCtrlStamp(pskSaltBytes(n), origin, target, proto)
+}
+
+// verifyRelayCtrlStamp validates an endorsement received in a tunnel header.
+// See checkRelayCtrlStamp for the PSK-less / empty-stamp rules.
+func (n *Node) verifyRelayCtrlStamp(origin, target peer.ID, proto protocol.ID, stamp string) bool {
+	return checkRelayCtrlStamp(pskSaltBytes(n), origin, target, proto, stamp)
+}
+
+// StampRelayCtrlOrigin is the exported mint for first relays outside this
+// package — the custom boot node in particular, which terminates client
+// relay-ctrl tunnels and dials the target itself, so it is the first relay for
+// every target it serves. psk must be routing.PSKKeyBytes(the client's PSK).
+// Returns "" for an empty psk.
+func StampRelayCtrlOrigin(psk []byte, origin, target peer.ID, proto protocol.ID) string {
+	return mintRelayCtrlStamp(psk, origin, target, proto)
+}
+
+// VerifyRelayCtrlStamp is the exported check, mirroring stampRelayCtrlOrigin:
+// a first relay that mints with this package's StampRelayCtrlOrigin must verify
+// with this one so a boot cannot accept a stamp another boot minted under a
+// drifted derivation.
+func VerifyRelayCtrlStamp(psk []byte, origin, target peer.ID, proto protocol.ID, stamp string) bool {
+	return checkRelayCtrlStamp(psk, origin, target, proto, stamp)
 }

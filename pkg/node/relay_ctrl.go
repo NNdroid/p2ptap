@@ -72,10 +72,21 @@ func (n *Node) openControlStream(ctx context.Context, target peer.ID, proto prot
 	}
 	if hop := n.relayHopForTarget(target); hop != "" {
 		if n.isBootstrapPeer(hop) {
-			// Boot-relay control tunnel: the custom boot is a relay-over-backbone
-			// bridge, NOT a Circuit-Relay v2 node, so it has no relay-ctrl
-			// handler. Multiplex the inner control protocol onto the persistent
-			// boot-relay uplink as kind=Control frames instead.
+			// Boot-relay control tunnel: multiplex the inner control protocol
+			// onto the persistent boot-relay uplink as kind=Control frames
+			// rather than dialing RelayCtrlProtocolID at the boot.
+			//
+			// The custom boot is a relay-over-backbone bridge and NOT a mesh
+			// member, so it is never chosen as a relay-ctrl Target. It does
+			// register a /p2ptap/relay-ctrl/1.0.0 handler (cmd/p2ptap-boot
+			// makeRelayCtrlHandler) and can be dialed as a first hop — the two
+			// ends now speak one header dialect — but that is the wrong
+			// transport for the node's own control plane: the uplink is one
+			// stream per connected boot and every conversation is already
+			// multiplexed over it with its own convID, so nothing is set up
+			// per handshake. A relay-ctrl tunnel instead pins an inbound and
+			// an outbound stream plus a goroutine pair on the boot for the
+			// whole handshake and counts against the boot's maxRelayTunnels.
 			return n.openBootRelayControlStream(hop, target, proto)
 		}
 		return n.openRelayCtrlStream(ctx, hop, n.Host.ID(), target, proto, 1, "")
