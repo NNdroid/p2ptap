@@ -47,13 +47,22 @@ import (
 // (unauthenticated, as before). A capable node therefore signs every key it
 // offers, but only REQUIRES a signature when it has reason to believe the
 // counterpart is capable: the counterpart advertised HandshakeVer >= 1, we have
-// previously seen a valid signature from it (obfAuthSticky, so a peer cannot
-// retroactively downgrade once upgraded), or the operator has opted into
-// Obfuscation.RequireAuthKeyExchange. Against a legacy peer we accept
+// previously seen a valid signature from it (obfAuthSticky), or the operator has
+// opted into Obfuscation.RequireAuthKeyExchange. Against a legacy peer we accept
 // unauthenticated and log it, because breaking connectivity is worse than the
 // pre-existing exposure. A signature that is required but invalid fails CLOSED —
 // the cipher is never committed — so the attack outcome is a lost link that is
 // loudly logged, not a silently MITM'd one.
+//
+// Caveat on the sticky bit (do not read it as closing the downgrade window): it is
+// set only AFTER a signature verified, and a signature is only DEMANDED when
+// requireObfAuth already returned true — which, for a peer with no sticky bit and
+// no operator setting, happens only because the message advertised HandshakeVer >=
+// 1. So a peer that advertises no version and sends no signature can never have its
+// bit set, and a transit hop that strips both can still make a v1 peer look legacy.
+// The sticky bit therefore only stops a peer that has ALREADY advertised v1 from
+// later dropping the version; RequireAuthKeyExchange is the sole thing that closes
+// the window outright.
 const seqSyncAuthVersion = uint32(1)
 
 // obfPubSigDomain is prepended to the offered handshake public key before
@@ -156,11 +165,18 @@ func (n *Node) requireObfAuth(peer peer.ID, msg SeqSyncMsg) bool {
 }
 
 // markObfAuth records that peer demonstrated an authenticated key exchange. The
-// bit is intentionally sticky for the node's lifetime: once a peer has proven it
-// can sign, a later connection from the same peer must not be able to drop
-// HandshakeVer and silently fall back to an unauthenticated key exchange. It is
-// never deleted on disconnect (unlike the per-connection per-peer state), which
-// is exactly what keeps the downgrade window closed across reconnects.
+// bit is intentionally sticky for the node's lifetime and is never deleted on
+// disconnect (unlike the per-connection per-peer state), so the requirement
+// survives reconnects.
+//
+// Scope of the guarantee: it stops a peer that has ALREADY advertised
+// HandshakeVer >= 1 from later dropping the version. checkObfPubAuth only reaches
+// this call after demanding the signature, and that demand comes from
+// requireObfAuth — which, for a peer with no sticky bit and no operator setting, is
+// true only because the message advertised a version. A peer that advertises no
+// version and signs nothing can therefore never set its own bit, so a hop that
+// strips version and signature alike can still make it look legacy. That residual
+// window is RequireAuthKeyExchange's to close, not this one's.
 func (n *Node) markObfAuth(peer peer.ID) {
 	n.obfAuthSticky.Store(peer, true)
 }

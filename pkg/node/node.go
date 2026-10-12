@@ -544,10 +544,12 @@ type Node struct {
 	// obfAuthSticky remembers per peer whether an AUTHENTICATED (identity-signed)
 	// key exchange has ever been observed with that peer. Once set it never
 	// clears — deliberately NOT deleted on disconnect, unlike the per-connection
-	// per-peer state — so a peer that has proven it can sign cannot later drop
-	// SeqSyncMsg.HandshakeVer and silently fall back to an unauthenticated key
-	// exchange on a fresh connection. One bool per peer ID ever seen; see
-	// seqsync_auth.go for why the downgrade window matters.
+	// per-peer state — so a peer that has already advertised SeqSyncMsg.HandshakeVer
+	// cannot later drop it and silently fall back to an unauthenticated key
+	// exchange on a fresh connection. It does NOT cover a peer that has never
+	// advertised the version (a hop can strip version and signature together);
+	// that window is Obfuscation.RequireAuthKeyExchange's to close. One bool per
+	// peer ID ever seen; see seqsync_auth.go for the exact scope.
 	obfAuthSticky sync.Map // peer.ID -> bool
 	// handshakeFingerprint is the fingerprint of the most recent ephemeral key
 	// actually used in a completed handshake. Exposed via ObfFingerprint so the
