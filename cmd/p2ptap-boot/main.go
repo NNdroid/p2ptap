@@ -2087,6 +2087,16 @@ type seqSyncMsg struct {
 	ObfAlgos   []byte `json:"oas"` // nil
 	ObfMode    string `json:"ob"`  // ""
 	ObfPub     []byte `json:"opk"` // nil: encryption disabled
+
+	// Authenticated key exchange fields (node.SeqSyncMsg). Declared for wire
+	// format completeness only: the boot node is stateless for seqsync — it
+	// never derives a per-peer cipher, so it neither signs nor verifies them.
+	// These are left nil, and clients' signatures pass straight through: the
+	// relay-ctrl proxy below is byte-transparent, so a tunnelled seqsync keeps
+	// its auth fields intact all the way to the target node, which verifies.
+	HandshakeVer    uint32 `json:"hv"`
+	ObfPubSig       []byte `json:"opksig"`
+	ObfPubSignerPub []byte `json:"opksigner"`
 }
 
 // handleSeqSyncStream is the boot node's minimal seqsync responder. It speaks

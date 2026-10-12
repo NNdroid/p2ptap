@@ -541,6 +541,14 @@ type Node struct {
 	// the peer disconnects, so the next rotation still mints a FRESH key (PFS).
 	cachedHandshakeEph   map[peer.ID]*obfuscate.ObfKeyPair
 	cachedHandshakeEphMu sync.Mutex
+	// obfAuthSticky remembers per peer whether an AUTHENTICATED (identity-signed)
+	// key exchange has ever been observed with that peer. Once set it never
+	// clears — deliberately NOT deleted on disconnect, unlike the per-connection
+	// per-peer state — so a peer that has proven it can sign cannot later drop
+	// SeqSyncMsg.HandshakeVer and silently fall back to an unauthenticated key
+	// exchange on a fresh connection. One bool per peer ID ever seen; see
+	// seqsync_auth.go for why the downgrade window matters.
+	obfAuthSticky sync.Map // peer.ID -> bool
 	// handshakeFingerprint is the fingerprint of the most recent ephemeral key
 	// actually used in a completed handshake. Exposed via ObfFingerprint so the
 	// WebUI (and operators) can confirm every (re)connection negotiated a FRESH
@@ -1624,13 +1632,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		directConnected:     make(map[peer.ID]bool),
 		aclStats:            newACLStats(),
 		dispatchCh:          make(chan dispatchTask, 16384), // 16K frames: EPOLLET edge-triggered drain needs larger headroom
-		relayFallbackSem:    make(chan struct{}, 8),        // bounds concurrent relay fallback goroutines
-		tapWriteCh:          make(chan tapWriteJob, 4096),  // pooled overlay->TAP write queue (~8 MiB at 2K/frame)
+		relayFallbackSem:    make(chan struct{}, 8),         // bounds concurrent relay fallback goroutines
+		tapWriteCh:          make(chan tapWriteJob, 4096),   // pooled overlay->TAP write queue (~8 MiB at 2K/frame)
 		urgentWriteCh:       make(chan []byte, 128),         // urgent TAP-inject queue (diagnostics)
-		urgentDispatchCh:    make(chan dispatchTask, 128),  // urgent SEND queue (symmetric to receive)
-		probeReplyCh:        make(chan []byte, 8),          // TAP-probe echo-reply capture (see probeActive)
+		urgentDispatchCh:    make(chan dispatchTask, 128),   // urgent SEND queue (symmetric to receive)
+		probeReplyCh:        make(chan []byte, 8),           // TAP-probe echo-reply capture (see probeActive)
 		parsedListenAddrs:   addrs,                          // transport-filtered listen addrs for roam reconciliation
-		probeAckCh:          make(chan uint8, 4),           // TAP-probe peer-side ack (方案 B) + dst-IP flag
+		probeAckCh:          make(chan uint8, 4),            // TAP-probe peer-side ack (方案 B) + dst-IP flag
 		perPeerLastTx:       make(map[peer.ID]uint64),
 		perPeerLastRx:       make(map[peer.ID]uint64),
 		perPeerTxSpeed:      make(map[peer.ID]uint64),
@@ -2308,12 +2316,12 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				log.Info("Peer disconnected: %s via %s (transport lost, cleaning link-state & streams)", debounceID.String(), addrStr)
 				node.Router.RemoveDirectLink(debounceID)
 				node.MACTable.CleanPeer(debounceID)
-			node.Dispatcher.RemovePeer(debounceID)
-			node.removePeerObf(debounceID)
-			// Evict stale reconnect throttle entry to prevent unbounded map growth.
-			node.reconnectTimeMu.Lock()
-			delete(node.lastReconnectTime, debounceID)
-			node.reconnectTimeMu.Unlock()
+				node.Dispatcher.RemovePeer(debounceID)
+				node.removePeerObf(debounceID)
+				// Evict stale reconnect throttle entry to prevent unbounded map growth.
+				node.reconnectTimeMu.Lock()
+				delete(node.lastReconnectTime, debounceID)
+				node.reconnectTimeMu.Unlock()
 				// Drop cached persistent control streams so the next use re-opens cleanly.
 				node.lsaPool.Invalidate(debounceID)
 				node.metaPool.Invalidate(debounceID)
@@ -2704,7 +2712,6 @@ func (n *Node) isPeerReady(p peer.ID) bool {
 	}
 	return false
 }
-
 
 // peerHasCircuitRelayConn reports whether the given peer currently has at least
 // one live connection via a circuit-relay path. This is used to shorten retry

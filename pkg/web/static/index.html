@@ -1094,6 +1094,16 @@
                         <input type="checkbox" id="cfgStrictKeyNegotiation" class="p2p-switch ext158">
                     </div>
                 </div>
+                <!-- Require Authenticated Key Exchange -->
+                <div class="config-row ext159">
+                    <div>
+                        <div class="config-row-label ext160" data-i18n="obfs_auth_key_lbl">🔐 Require Authenticated Key Exchange</div>
+                        <div class="config-row-desc" data-i18n="obfs_auth_key_desc">Require every peer's ECDH key to be signed by its own identity key, so a transit relay cannot substitute its own key and sit in the middle of the encrypted link. Key signing is always on; this only requires it from peers that do not advertise support. Enable only after every peer is upgraded — legacy peers cannot sign and would lose encrypted connectivity.</div>
+                    </div>
+                    <div class="ext157">
+                        <input type="checkbox" id="cfgRequireAuthKeyExchange" class="p2p-switch ext158">
+                    </div>
+                </div>
             </div>
 
             <!-- ── Bootstrap Section ── -->

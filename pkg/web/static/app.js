@@ -604,6 +604,8 @@
                 obfs_allow_switch_lbl: "Allow Automatic Mode Switching",
                 obfs_strict_key_lbl: "Strict Key Negotiation (PFS)",
                 obfs_strict_key_desc: "Forbid falling back to the long-lived node key. Each peer pair must derive its own cipher from a one-shot ECDH ephemeral key; otherwise that peer stays plaintext. Hardens per-pair key isolation.",
+                obfs_auth_key_lbl: "Require Authenticated Key Exchange",
+                obfs_auth_key_desc: "Require every peer's ECDH key to be signed by its own identity key, so a transit relay cannot substitute its own key and sit in the middle of the encrypted link. Key signing is always on; this only requires it from peers that do not advertise support. Enable only after every peer is upgraded — legacy peers cannot sign and would lose encrypted connectivity.",
                 bootstrap_lbl: "Bootstrap Peers",
                 section_identity: "Node Identity",
                 section_identity_desc: "Name and encryption settings for this node",
@@ -1449,6 +1451,8 @@
                 obfs_allow_switch_lbl: "允许根据流量指纹自动切换模式",
                 obfs_strict_key_lbl: "严格密钥协商 (PFS)",
                 obfs_strict_key_desc: "禁止回退到长期节点密钥。每对 peer 必须用一次性 ECDH 临时密钥各自派生独立的加密套件，否则该 peer 保持明文。强化每对密钥隔离。",
+                obfs_auth_key_lbl: "要求认证密钥交换",
+                obfs_auth_key_desc: "要求每个 peer 的 ECDH 密钥都由其自身身份密钥签名，使中继跳无法替换自己的密钥而坐在加密链路中间。密钥签名始终开启；此选项只是要求未声明支持的 peer 也必须签名。仅在全部 peer 升级后启用 —— 旧版 peer 无法签名，会丢失加密连通性。",
                 bootstrap_lbl: "Bootstrap 中继节点",
                 section_identity: "节点身份",
                 section_identity_desc: "此节点的名称与加密设置",
@@ -2361,6 +2365,8 @@
                 obfs_allow_switch_lbl: "允許自動模式切換",
                 obfs_strict_key_lbl: "嚴格密鑰協商 (PFS)",
                 obfs_strict_key_desc: "禁止回退到長期節點密鑰。每對 peer 必須用一次性 ECDH 臨時密鑰各自派生獨立的加密套件，否則該 peer 保持明文。強化每對密鑰隔離。",
+                obfs_auth_key_lbl: "要求認證密鑰交換",
+                obfs_auth_key_desc: "要求每個 peer 的 ECDH 密鑰都由其自身身份密鑰簽名，使中繼跳無法替換自己的密鑰而坐在加密鏈路中間。密鑰簽名始終開啟；此選項只是要求未聲明支援的 peer 也必須簽名。僅在全部 peer 升級後啟用 —— 舊版 peer 無法簽名，會遺失加密連通性。",
                 obfs_auto_title: "🤖 自動偵測設定",
                 obfs_block_size_desc: "區塊模式的對齊粒度（位元組）",
                 obfs_block_size_lbl: "區塊對齊大小",
@@ -3102,6 +3108,8 @@
                 obfs_allow_switch_lbl: "自動モード切替を許可",
                 obfs_strict_key_lbl: "厳格な鍵ネゴシエーション (PFS)",
                 obfs_strict_key_desc: "長期ノード鍵へのフォールバックを禁止します。各ピア対はワンショット ECDH 一時鍵で独自の暗号を派生させる必要があり、そうでなければそのピアは平文のままです。ピアごとの鍵分離を強化します。",
+                obfs_auth_key_lbl: "認証付き鍵交換を必須とする",
+                obfs_auth_key_desc: "すべてのピアの ECDH 鍵を、そのピア自身の ID 鍵で署名することを必須とします。これにより、中継ホップが自分の鍵にすり替えて暗号リンクの真ん中に座ることができなくなります。鍵の署名は常にオンです。この設定はサポートを宣言しないピアに対する強制のみを行います。すべてのピアのアップグレード完了後にのみ有効にしてください。旧バージョンのピアは署名できず、暗号化された接続を失います。",
                 obfs_auto_title: "🤖 自動検出設定",
                 obfs_block_size_desc: "ブロックモードのアラインメント粒度（バイト）",
                 obfs_block_size_lbl: "ブロックアラインメントサイズ",
@@ -3909,6 +3917,8 @@
                 obfs_allow_switch_lbl: "Automatischen Moduswechsel erlauben",
                 obfs_strict_key_lbl: "Strenge Schlüsselaushandlung (PFS)",
                 obfs_strict_key_desc: "Fallback auf den langlebigen Knotenschlüssel verbieten. Jedes Peer-Paar muss einen eigenen Cipher aus einem einmaligen ECDH-Ephemeralschlüssel ableiten, sonst bleibt dieses Peer-Paar im Klartext. Härtet die Schlüsselisolation pro Peer.",
+                obfs_auth_key_lbl: "Authentifizierte Schlüsselaushandlung erforderlich",
+                obfs_auth_key_desc: "Fordert an, dass der ECDH-Schlüssel jedes Peers von seinem eigenen Identitätsschlüssel signiert wird, damit ein Transithop seinen eigenen Schlüssel einschleusen und sich in die Mitte der verschlüsselten Verbindung setzen kann. Das Schlüsselsignieren ist immer aktiviert; diese Option erzwingt es nur gegenüber Peers, die keine Unterstützung melden. Nur aktivieren, nachdem alle Peers aktualisiert wurden — ältere Peers können nicht signieren und verlieren die verschlüsselte Verbindung.",
                 obfs_auto_title: "🤖 Automatische Erkennung",
                 obfs_block_size_desc: "Ausrichtungsgranularität für Blockmodus (Bytes)",
                 obfs_block_size_lbl: "Block-Ausrichtungsgröße",
@@ -4716,6 +4726,8 @@
                 obfs_allow_switch_lbl: "Permitir cambio automático de modo",
                 obfs_strict_key_lbl: "Negociación estricta de claves (PFS)",
                 obfs_strict_key_desc: "Prohíbe retroceder a la clave de nodo de larga duración. Cada par de peers debe derivar su propio cifrado con una clave ECDH efímera de un solo uso; de lo contrario ese peer permanece en texto plano. Refuerza el aislamiento de claves por par.",
+                obfs_auth_key_lbl: "Requerir intercambio de claves autenticado",
+                obfs_auth_key_desc: "Exige que la clave ECDH de cada peer esté firmada con su propia clave de identidad, de modo que un salto de reenvío no pueda sustituir su propia clave y colocarse en el medio de la conexión cifrada. La firma de claves siempre está activada; esta opción solo la exige a los peers que no anuncian soporte. Actívala solo después de actualizar todos los peers: los peers antiguos no pueden firmar y perderían la conectividad cifrada.",
                 obfs_auto_title: "🤖 Detección automática",
                 obfs_block_size_desc: "Granularidad de alineación para modo bloque (bytes)",
                 obfs_block_size_lbl: "Tamaño de alineación de bloque",
@@ -5588,6 +5600,8 @@
                 obfs_allow_switch_lbl: "Autoriser le changement de mode automatique",
                 obfs_strict_key_lbl: "Négociation stricte des clés (PFS)",
                 obfs_strict_key_desc: "Interdit le repli sur la clé de nœud de longue durée. Chaque paire de pairs doit dériver sa propre cipher à partir d'une clé ECDH éphémère à usage unique ; sinon ce pair reste en texte clair. Renforce l'isolation des clés par paire.",
+                obfs_auth_key_lbl: "Exiger un échange de clés authentifié",
+                obfs_auth_key_desc: "Exige que la clé ECDH de chaque pair soit signée par sa propre clé d'identité, afin qu'un relais de transit ne puisse pas substituer sa propre clé et s'interposer dans la liaison chiffrée. La signature des clés est toujours activée ; cette option ne l'exige qu'auprès des pairs qui ne signalent pas de prise en charge. À n'activer qu'après la mise à jour de tous les pairs — les anciens pairs ne peuvent pas signer et perdraient la connectivité chiffrée.",
                 obfs_auto_title: "🤖 Détection automatique",
                 obfs_block_size_desc: "Granularité d'alignement pour le mode bloc (octets)",
                 obfs_block_size_lbl: "Taille d'alignement de bloc",
@@ -6074,6 +6088,7 @@
                 document.getElementById('cfgAutoThresholdBytes').value = obfs.auto_threshold_bytes || 65536;
                 document.getElementById('cfgAllowModeSwitch').checked = !!obfs.allow_mode_switch;
                 document.getElementById('cfgStrictKeyNegotiation').checked = !!obfs.strict_key_negotiation;
+                document.getElementById('cfgRequireAuthKeyExchange').checked = !!obfs.require_auth_key_exchange;
                 onObfsModeChange(); // show/hide mode-specific fields
                 // Paint the filled portion of any range slider (Jitter, Fixed Size)
                 // so the initial state isn't a blank track. updateRangeProgress is
@@ -6656,6 +6671,7 @@
                 ob.auto_threshold_bytes = parseInt(document.getElementById('cfgAutoThresholdBytes').value, 10) || 65536;
                 ob.allow_mode_switch = document.getElementById('cfgAllowModeSwitch').checked;
                 ob.strict_key_negotiation = document.getElementById('cfgStrictKeyNegotiation').checked;
+                ob.require_auth_key_exchange = document.getElementById('cfgRequireAuthKeyExchange').checked;
 
                 currentFullConfig.bootstrap_peers = cfgListBootstrap.map(s => (s == null ? '' : String(s)).trim()).filter(s => s.length > 0);
 

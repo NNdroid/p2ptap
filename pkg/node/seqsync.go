@@ -159,6 +159,17 @@ type SeqSyncMsg struct {
 	ObfAlgos   []byte `json:"oas"` // supported algorithm bytes (preference order)
 	ObfMode    string `json:"ob"`  // my outbound padding mode (informational)
 	ObfPub     []byte `json:"opk"` // my ephemeral ECDH(P256) public key; empty ⇒ encryption disabled
+
+	// Authenticated key exchange (see seqsync_auth.go). ObfPub is an ECDH
+	// public key with no identity bound to it, and the relay-ctrl transport
+	// authenticates the relay hop rather than the origin — so without these
+	// fields a transit hop could substitute ObfPub and MITM the session. The
+	// fix signs ObfPub with the sender's libp2p identity key, which a hop
+	// cannot forge. All three are additive: an older peer ignores them and the
+	// exchange degrades to the (previously-default) unauthenticated ECDH.
+	HandshakeVer    uint32 `json:"hv"`        // >= 1 ⇒ this sender signs ObfPub; 0 ⇒ legacy/unsigned
+	ObfPubSig       []byte `json:"opksig"`    // identity-key signature over ObfPub
+	ObfPubSignerPub []byte `json:"opksigner"` // the identity public key the signature is over
 }
 
 // generateConnEpoch returns a fresh random 12-bit epoch for this node instance.
@@ -225,10 +236,26 @@ func (n *Node) buildSeqSyncMsg(msgType string, p peer.ID, myPub []byte) SeqSyncM
 	m.ObfEnabled = n.obfKeyPair != nil && len(myPub) > 0
 	m.ObfMode = n.config().Obfuscation.Mode
 	// Embed the handshake's ephemeral public key exactly when a fresh key was
-	// minted for this message type (everything except "ready").
+	// minted for this message type (everything except "ready"), and sign it with
+	// the node's identity key so the recipient can bind it to the sender's
+	// identity instead of trusting whatever the transit hops relayed (see
+	// seqsync_auth.go).
 	if m.ObfEnabled && len(myPub) > 0 {
-		m.ObfPub = myPub
-		m.ObfAlgos = n.mySupportedAlgos()
+		if sig, signerPub, err := n.signObfPub(myPub); err != nil {
+			// A key exchange we cannot authenticate is worse than plaintext: it
+			// offers a key an active transit hop could substitute for its own.
+			// Refuse to offer encryption rather than offer a forgeable key.
+			log.Warn("SeqSync: cannot authenticate the key exchange for %s, offering plaintext: %v", p.String(), err)
+			m.ObfEnabled = false
+			m.ObfPub = nil
+			m.ObfAlgos = nil
+		} else {
+			m.ObfPub = myPub
+			m.ObfAlgos = n.mySupportedAlgos()
+			m.HandshakeVer = seqSyncAuthVersion
+			m.ObfPubSig = sig
+			m.ObfPubSignerPub = signerPub
+		}
 	}
 	return m
 }
@@ -272,6 +299,20 @@ func (n *Node) handleSeqSync(s network.Stream) {
 
 	switch msg.Type {
 	case "sync", "request":
+		// Authenticate the initiator's offered key BEFORE any cipher is derived
+		// from it or any per-peer state is anchored on the claim. Without this a
+		// transit hop can substitute its own ObfPub for the initiator's and the
+		// responder would commit a cipher the hop can also decrypt. A legacy
+		// peer (unsigned, no version advertised, never seen signing) is still
+		// accepted for interop — checkObfPubAuth decides that.
+		if err := n.checkObfPubAuth(remotePeer, msg); err != nil {
+			// Fail closed: refuse the round rather than committing a cipher from
+			// an unverified key. Closing without an ack makes the initiator treat
+			// this as a failed round and retry, so the link loses connectivity
+			// instead of serving MITM'd ciphertext.
+			log.Warn("SeqSync: refusing key exchange from %s — unauthenticated: %v", remotePeer, err)
+			return
+		}
 		// Ensure we ourselves have a (per-peer) epoch before replying.
 		n.ensureLocalEpoch(remotePeer)
 		// Anchor our dedup window to what the peer says it will send next,
@@ -583,6 +624,21 @@ func (n *Node) syncSeqToPeerAttempt(p peer.ID) error {
 		// strictly safer than silently desyncing the keys.)
 		log.Debug("SeqSync: no ack from %s — round NOT converged, reporting failure for retry: %v", p.String(), err)
 		return fmt.Errorf("SeqSync: initiator did not receive ack from %s: %w", p.String(), err)
+	}
+	// Authenticate the responder's offered key before any cipher is derived from
+	// it — the mirror of the responder-side guard in handleSeqSync. A transit
+	// hop that substitutes the responder's ObfPub cannot sign it, so this is
+	// what turns the relay-ctrl key-exchange MITM into a failed handshake.
+	//
+	// Fail closed with an error rather than marking the peer ready: SyncSeqToPeer
+	// then retries the round (bounded, 8× with backoff) and the peer is never
+	// considered connected with a cipher derived from an unverified key. The
+	// responder has already committed its own cipher by now, so it may briefly
+	// see decrypt failures from us until the next round converges — a visible,
+	// self-limiting degradation, never a silently MITM'd session.
+	if err := n.checkObfPubAuth(p, reply); err != nil {
+		log.Warn("SeqSync: refusing key exchange from %s — unauthenticated: %v", p.String(), err)
+		return fmt.Errorf("SeqSync: unauthenticated key exchange with %s: %w", p.String(), err)
 	}
 	n.anchorDedupForPeer(p, reply.MySeq, reply.ConnEpoch)
 	// Negotiate per-peer encryption from the peer's ECDH public key, using our
@@ -1080,9 +1136,22 @@ func seqSyncMsgSummary(m SeqSyncMsg) string {
 	if len(m.ObfPub) > 0 {
 		pubFP = obfuscate.KeyFingerprint(m.ObfPub)
 	}
-	return fmt.Sprintf("type=%s node=%s mySeq=%d epoch=%d obf=%v algos=[%s] obfPubFP=%s",
+	// auth says whether the offered key is identity-signed: "none" (no key
+	// offered), "vN" (signed, version advertised), or "legacy" (key offered
+	// unsigned — a pre-upgrade peer, or a downgrade attempt).
+	auth := "none"
+	if len(m.ObfPub) > 0 {
+		if m.HandshakeVer >= seqSyncAuthVersion {
+			auth = fmt.Sprintf("v%d", m.HandshakeVer)
+		} else if len(m.ObfPubSig) == 0 || len(m.ObfPubSignerPub) == 0 {
+			auth = "legacy"
+		} else {
+			auth = "signed-unversioned"
+		}
+	}
+	return fmt.Sprintf("type=%s node=%s mySeq=%d epoch=%d obf=%v algos=[%s] obfPubFP=%s auth=%s",
 		m.Type, shortPeerID(m.NodeID), m.MySeq, m.ConnEpoch, m.ObfEnabled,
-		algoListString(m.ObfAlgos), pubFP)
+		algoListString(m.ObfAlgos), pubFP, auth)
 }
 
 // readSeqSyncMsg decodes one SeqSyncMsg off the control stream and traces it on

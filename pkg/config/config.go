@@ -146,6 +146,28 @@ type ObfuscationConfig struct {
 	// than degrading to the shared long-lived node key. Enable for maximum
 	// key isolation; disable (default) for smoother interop with re-syncs.
 	StrictKeyNegotiation bool `json:"strict_key_negotiation"`
+
+	// RequireAuthKeyExchange (default false) makes an identity-signed key
+	// exchange MANDATORY for every peer, instead of only for peers that
+	// advertise HandshakeVer >= 1 or that have previously signed successfully.
+	//
+	// SeqSync's ECDH is unauthenticated by itself: a transit relay hop —
+	// which the libp2p transport authenticates, but whose Origin claim is not
+	// — can substitute its own ephemeral key for each peer's and land on two
+	// sessions it can both decrypt. The fix signs ObfPub with each peer's
+	// libp2p identity key (see pkg/node/seqsync_auth.go), which a hop cannot
+	// forge. Signing is always ON; this flag only controls whether a signature
+	// is REQUIRED when a peer does not advertise it.
+	//
+	// Left false (default) for interop: a legacy peer that predates the
+	// feature advertises no version, and requiring a signature there would
+	// refuse the handshake and drop encrypted connectivity across a mixed
+	// fleet. Set true on a fleet where EVERY peer has been upgraded — it is
+	// the only setting that closes the downgrade window on a first-ever
+	// contact, since per-peer stickiness cannot know about a peer it has
+	// never signed with. Enable for a hard boundary; disable for smoother
+	// rollout alongside older peers.
+	RequireAuthKeyExchange bool `json:"require_auth_key_exchange"`
 }
 
 // ACLRule defines a single access control rule for P2P mesh traffic (ZeroTier-style)
@@ -272,10 +294,10 @@ func DefaultConfig() *Config {
 		DiscoverBootMesh: true,
 		EnableMDNS:       true,
 		WebUI: WebUIConfig{
-			Enable:     true,
-			ListenIP:   "0.0.0.0",
-			ListenIPv6: "::",
-			Port:       80,
+			Enable:          true,
+			ListenIP:        "0.0.0.0",
+			ListenIPv6:      "::",
+			Port:            80,
 			PcapSampleEvery: 1,
 		},
 		Transports: TransportsConfig{
@@ -415,6 +437,11 @@ func DefaultConfig() *Config {
 			MaxFragSize:          0,
 			Algorithm:            "auto",
 			StrictKeyNegotiation: true,
+			// RequireAuthKeyExchange stays off by default: requiring a signature
+			// from a peer that predates the feature would refuse the handshake
+			// and drop encrypted connectivity across a mixed fleet. See the
+			// field doc for when to enable it.
+			RequireAuthKeyExchange: false,
 		},
 		ExitNode: ExitNodeConfig{
 			Enable:        false,
@@ -1185,6 +1212,7 @@ func UpdateConfigFileDelta(configPath string, incoming *Config) error {
 	obfsMap["max_frag_size"] = incoming.Obfuscation.MaxFragSize
 	obfsMap["algorithm"] = incoming.Obfuscation.Algorithm
 	obfsMap["strict_key_negotiation"] = incoming.Obfuscation.StrictKeyNegotiation
+	obfsMap["require_auth_key_exchange"] = incoming.Obfuscation.RequireAuthKeyExchange
 	rawMap["obfuscation"] = obfsMap
 
 	// ExitNode delta
