@@ -168,7 +168,10 @@ func (p *protectNet) Interfaces() ([]*transport.Interface, error) {
 	if err != nil {
 		return nil, err
 	}
-	physical := ifaces[:0]
+	// Allocate a fresh backing array. pion calls this concurrently from one
+	// goroutine per ICE agent, and filtering in place (ifaces[:0]) would write
+	// over elements another caller is still reading.
+	physical := make([]*transport.Interface, 0, len(ifaces))
 	for _, ifc := range ifaces {
 		if isVirtualInterface(ifc.Name) {
 			continue
