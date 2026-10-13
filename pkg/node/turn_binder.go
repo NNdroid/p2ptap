@@ -292,9 +292,10 @@ func (n *Node) startTURNBinder(ctx context.Context) {
 			log.Debug("TURN binder stopped")
 		}()
 
-		// Delay initial allocation to let the STUN binder finish its first
-		// cycle (which sets the NAT type) and avoid log spam from servers
-		// that require authentication.
+		// Delay the first cycle so the STUN binder has finished its first pass
+		// and set the NAT type: needsTURN() gates every allocation on it, so
+		// running immediately would always report "unknown" and try TURN even
+		// when hole punching would have worked.
 		select {
 		case <-ctx.Done():
 			return

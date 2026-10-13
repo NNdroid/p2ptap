@@ -1463,10 +1463,10 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 					log.Info("WebRTC configured with %d TURN server(s) with ICE credentials", len(turnURLs))
 				}
 				if turnDropped > 0 {
-					log.Warn("%d TURN server(s) lack ?username=...&credential=... and are excluded from " +
-						"WebRTC ICE: pion rejects a credential-less TURN server and aborts the whole peer " +
-						"connection, which would take down every WebRTC link. They still serve QUIC relay "+
-						"allocation.", turnDropped)
+					log.Warn("%d TURN server(s) lack ?username=...&credential=... and are excluded from "+
+						"WebRTC ICE: pion rejects a credential-less TURN server and aborts the whole peer "+
+						"connection, which would take down every WebRTC link. The QUIC relay binder skips "+
+						"them too — add credentials to use them.", turnDropped)
 				}
 				return webrtc.New(key, psk, gater, rcmgr, ProtectedListenUDP, allOpts...)
 			},

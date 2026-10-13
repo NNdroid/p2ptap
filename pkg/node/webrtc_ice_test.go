@@ -42,24 +42,26 @@ func TestIceTURNConfigStripsQueryProvesPionAcceptsTheResult(t *testing.T) {
 }
 
 // TestIceTURNConfigDropsCredentialLessServers is the regression test for the
-// "everything except QUIC barely connects" report. The default TurnServers list
-// is entirely credential-less, and passing it straight to pion made every
-// PeerConnection fail before ICE even started.
+// "everything except QUIC barely connects" report. The pre-2026-10 default
+// TurnServers list was entirely anonymous, and passing it straight to pion made
+// every PeerConnection fail before ICE even started. The default is empty now,
+// but a legacy config file (or a hand-edited one) can still carry such URLs, so
+// the drop has to keep working.
 func TestIceTURNConfigDropsCredentialLessServers(t *testing.T) {
-	defaults := []string{
+	anonymous := []string{
 		"turn:turn.cloud-rtc.com:80",
 		"turn:w1.xirsys.com:3478",
 		"turn:global.turn.twilio.com:3478",
 	}
-	urls, user, cred, dropped := IceTURNConfig(defaults)
+	urls, user, cred, dropped := IceTURNConfig(anonymous)
 	if len(urls) != 0 {
 		t.Fatalf("urls = %v, want none", urls)
 	}
 	if user != "" || cred != "" {
 		t.Fatalf("credentials = (%q,%q), want empty", user, cred)
 	}
-	if dropped != len(defaults) {
-		t.Fatalf("dropped = %d, want %d", dropped, len(defaults))
+	if dropped != len(anonymous) {
+		t.Fatalf("dropped = %d, want %d", dropped, len(anonymous))
 	}
 
 	// The shape p2ptap used to emit: STUN plus credential-less TURN. This is the
