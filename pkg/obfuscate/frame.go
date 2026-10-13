@@ -48,6 +48,75 @@ const (
 	MaxSealedFrameSize = MaxFrameSize + AEADTagSize
 )
 
+// --- Path-MTU frame budget ---
+//
+// Every obfuscate frame is carried inside the tunnel's transport datagrams, so
+// its size is bounded by the path MTU, not just by the 65535-byte PayloadLen
+// field. The budget is computed once here so that padding, fragmentation and
+// MSS clamping all agree on the same number instead of each hardcoding a
+// slightly different overhead: a frame that fits one datagram is fragmented by
+// nobody, and one that fits none is fragmented by everybody.
+const (
+	// PathMTU is the conservative end-to-end datagram budget: 1200 bytes leaves
+	// room under a 1500-byte link MTU for the outer encapsulation below. Lower
+	// configured tunnel MTUs are honoured instead of clamped up.
+	PathMTU = 1200
+
+	// OuterIPHeader is the outer IP header. 40 bytes covers an IPv4 header with
+	// options and is IPv6-safe (40 bytes exactly).
+	OuterIPHeader = 40
+	// OuterUDPHeader is the outer UDP header carrying the QUIC/WebRTC datagram.
+	OuterUDPHeader = 8
+	// OuterTransportHeader bounds the transport header inside the outer UDP
+	// datagram: a QUIC long header is up to 33 bytes (a short header is only
+	// 10), so 33 keeps the budget valid for both.
+	OuterTransportHeader = 33
+
+	// OuterEncapsulation is everything between the link MTU and the obfuscate
+	// frame itself.
+	OuterEncapsulation = OuterIPHeader + OuterUDPHeader + OuterTransportHeader
+
+	// MinFrameSize is the floor for a padded frame: below it the padding adds
+	// nothing but header overhead relative to the payload.
+	MinFrameSize = 512
+)
+
+// MaxFrameForPathMTU returns the largest PRE-seal obfuscate frame — HeaderLen
+// plus payload plus padding — that fits inside a single transport datagram of
+// the given path MTU. The AEAD tag is deducted up front because sealing happens
+// after packing, so the sealed frame is what actually goes on the wire.
+//
+// Returns 0 for a non-positive pathMTU, which callers must treat as "no budget
+// constraint" (tests and legacy callers that do not know their MTU).
+func MaxFrameForPathMTU(pathMTU int) int {
+	if pathMTU <= 0 {
+		return 0
+	}
+	if pathMTU > PathMTU {
+		pathMTU = PathMTU
+	}
+	n := pathMTU - OuterEncapsulation - AEADTagSize
+	if n < MinFrameSize {
+		n = MinFrameSize
+	}
+	return n
+}
+
+// MaxPayloadForPathMTU is the largest obfuscate FRAME PAYLOAD — the frame size
+// minus HeaderLen, so everything after the 15-byte header — that fits one
+// transport datagram. Callers that wrap the payload in their own headers (a
+// fragmentation header, an inner IP/TCP segment) subtract those from here.
+//
+// It exists to stop callers re-deriving the AEAD tag: it is already deducted by
+// MaxFrameForPathMTU, and subtracting it a second time understates the budget.
+func MaxPayloadForPathMTU(pathMTU int) int {
+	n := MaxFrameForPathMTU(pathMTU)
+	if n <= 0 {
+		return 0
+	}
+	return n - HeaderLen
+}
+
 // --- Structured SeqID layout (v1) ---
 //
 // The 8-byte SeqID is structured so the receiver can (a) identify the
@@ -257,6 +326,16 @@ type FramePacker struct {
 	// rewritten by SetSendAlgo from the config hot-reload goroutine while the
 	// data path reads it every frame, hence the atomic.
 	algo atomic.Uint32
+
+	// frameBudget is the largest frame padding may grow a payload to, derived
+	// from the tunnel MTU by SetFrameBudget. It is carried in packerParams so
+	// the Pack hot path reads it from the same immutable snapshot as the mode.
+	frameBudget int
+	// sizeConfigured reports whether FixedSize/MaxSize came from configuration.
+	// When false, applyDefaults owns them and re-derives them from frameBudget on
+	// every SetFrameBudget — otherwise the very first applyDefaults (which runs
+	// before the MTU is known) would pin them at the historic 1500 forever.
+	sizeConfigured bool
 }
 
 // NewFramePackerFull creates a FramePacker from full ObfuscationConfig.
@@ -278,6 +357,7 @@ func NewFramePackerFull(cfg *config.ObfuscationConfig) *FramePacker {
 	fp.AutoDetectInterval = cfg.AutoDetectInterval
 	fp.AutoThresholdBytes = cfg.AutoThresholdBytes
 	fp.AllowModeSwitch = cfg.AllowModeSwitch
+	fp.sizeConfigured = cfg.FixedSize > 0 || cfg.MaxSize > 0
 	fp.applyDefaults()
 	if fp.Mode == "auto" {
 		fp.auto.Store(newAutoState())
@@ -293,15 +373,52 @@ func (fp *FramePacker) applyDefaults() {
 	if fp.BlockSize <= 0 {
 		fp.BlockSize = 256
 	}
-	if fp.FixedSize <= 0 {
-		fp.FixedSize = 1500
-	}
 	if fp.MinSize <= 0 {
-		fp.MinSize = 512
+		fp.MinSize = MinFrameSize
+	}
+	if !fp.sizeConfigured {
+		// No configured sizes: the defaults are ours, so they follow the datagram
+		// budget. Re-derived on every call so a later SetFrameBudget moves them.
+		fp.FixedSize = fp.defaultFrameSize()
+		fp.MaxSize = fp.defaultFrameSize()
+		return
+	}
+	// Sizes were configured, so they are honoured as written; only a value that
+	// was left unset (the two can be configured independently) gets the default.
+	if fp.FixedSize <= 0 {
+		fp.FixedSize = fp.defaultFrameSize()
 	}
 	if fp.MaxSize <= 0 {
-		fp.MaxSize = 1500
+		fp.MaxSize = fp.defaultFrameSize()
 	}
+}
+
+// defaultFrameSize is the default padded frame size: the path-MTU budget when
+// SetFrameBudget has been called, otherwise the historic 1500. Padding to 1500
+// when the datagram budget is smaller only creates fragments, so the budget is
+// the right default. Explicit configuration always wins.
+func (fp *FramePacker) defaultFrameSize() int {
+	if fp.frameBudget > 0 {
+		return fp.frameBudget
+	}
+	return 1500
+}
+
+// SetFrameBudget constrains padding to frames that fit one transport datagram
+// for a tunnel of the given path MTU (see MaxFrameForPathMTU). It also
+// re-applies the size defaults, because the default fixed/max frame size IS the
+// budget; explicitly configured sizes are never touched. Call it after
+// NewFramePackerFull and after every UpdateConfig so a hot reload of the MTU is
+// picked up. A non-positive pathMTU clears the budget entirely.
+func (fp *FramePacker) SetFrameBudget(pathMTU int) {
+	if fp == nil {
+		return
+	}
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	fp.frameBudget = MaxFrameForPathMTU(pathMTU)
+	fp.applyDefaults()
+	fp.publishParamsLocked()
 }
 
 // SetSourceIdentity initialises the structured-SeqID source hash from this
@@ -423,6 +540,10 @@ type packerParams struct {
 	maxSize            int
 	autoDetectInterval int
 	allowModeSwitch    bool
+	// frameBudget caps the padded target size (see MaxFrameForPathMTU). Zero
+	// means "no cap", which is the state of a packer that was never told its
+	// tunnel MTU — tests and legacy callers.
+	frameBudget int
 }
 
 // paramsFromFieldsLocked snapshots the exported compatibility fields. The caller
@@ -438,6 +559,7 @@ func (fp *FramePacker) paramsFromFieldsLocked() packerParams {
 		maxSize:            fp.MaxSize,
 		autoDetectInterval: fp.AutoDetectInterval,
 		allowModeSwitch:    fp.AllowModeSwitch,
+		frameBudget:        fp.frameBudget,
 	}
 }
 
@@ -543,12 +665,12 @@ func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte,
 		targetSize = randomBetween(low, p.fixedSize) + randomJitter(p.jitterRange)
 	}
 
-	if targetSize < overhead {
-		targetSize = overhead
-	}
-	if targetSize > MaxFrameSize {
-		targetSize = MaxFrameSize
-	}
+	// clampFrameSize enforces the datagram budget on top of the size chosen
+	// above. Padding is a traffic-shaping knob, not a correctness one, so a
+	// configured fixed_size/max_size above the path-MTU budget used to inflate
+	// every small frame well past what one transport datagram can carry — extra
+	// fragments with no additional confidentiality or size-normalisation.
+	targetSize = clampFrameSize(targetSize, len(payload), p.frameBudget)
 	if len(outBuf) < targetSize {
 		return 0, ErrBufferTooSmall
 	}
@@ -605,20 +727,20 @@ func (fp *FramePacker) MaxPackedLen(payloadLen int) int {
 		b = max(b, fixed+jitter)
 		b = max(b, blockBound(payloadLen, block, jitter))
 		b = max(b, dynamicBound(payloadLen, minS, maxS))
-		return clampFrameSize(b, payloadLen)
+		return clampFrameSize(b, payloadLen, p.frameBudget)
 	}
 
 	switch mode {
 	case "none":
-		return clampFrameSize(overheadPlus(payloadLen), payloadLen)
+		return clampFrameSize(overheadPlus(payloadLen), payloadLen, p.frameBudget)
 	case "fixed":
-		return clampFrameSize(fixed+jitter, payloadLen)
+		return clampFrameSize(fixed+jitter, payloadLen, p.frameBudget)
 	case "block":
-		return clampFrameSize(blockBound(payloadLen, block, jitter), payloadLen)
+		return clampFrameSize(blockBound(payloadLen, block, jitter), payloadLen, p.frameBudget)
 	case "dynamic":
-		return clampFrameSize(dynamicBound(payloadLen, minS, maxS), payloadLen)
+		return clampFrameSize(dynamicBound(payloadLen, minS, maxS), payloadLen, p.frameBudget)
 	default: // "random" or unrecognised
-		return clampFrameSize(fixed+jitter, payloadLen)
+		return clampFrameSize(fixed+jitter, payloadLen, p.frameBudget)
 	}
 }
 
@@ -641,12 +763,20 @@ func dynamicBound(payloadLen, minS, maxS int) int {
 	return max(overhead, maxS)
 }
 
-// clampFrameSize mirrors Pack's own final guards: never below the bare overhead
-// for this payload, never above MaxFrameSize.
-func clampFrameSize(b, payloadLen int) int {
+// clampFrameSize is the single place the final size guards live, shared by Pack
+// and MaxPackedLen so the two can never disagree: never below the bare overhead
+// for this payload, never above the datagram budget when one is set, never above
+// MaxFrameSize.
+func clampFrameSize(b, payloadLen, budget int) int {
 	overhead := HeaderLen + payloadLen
 	if b < overhead {
 		b = overhead
+	}
+	if budget > 0 && b > budget {
+		// A payload that already exceeds the budget is left alone: it is
+		// fragmented by the transport either way, so shrinking it would only
+		// create more fragments.
+		b = max(budget, overhead)
 	}
 	if b > MaxFrameSize {
 		b = MaxFrameSize
@@ -935,6 +1065,7 @@ func (fp *FramePacker) UpdateConfig(cfg *config.ObfuscationConfig) {
 	fp.AutoDetectInterval = cfg.AutoDetectInterval
 	fp.AutoThresholdBytes = cfg.AutoThresholdBytes
 	fp.AllowModeSwitch = cfg.AllowModeSwitch
+	fp.sizeConfigured = cfg.FixedSize > 0 || cfg.MaxSize > 0
 	fp.applyDefaults()
 	if fp.Mode == "auto" && fp.auto.Load() == nil {
 		fp.auto.Store(newAutoState())

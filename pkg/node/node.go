@@ -81,11 +81,17 @@ type Node struct {
 	Config *config.Config
 	// configPtr is the atomically-swappable configuration snapshot that the
 	// data plane reads through n.config(). Hot-reload publishes a fresh
-	// *config.Config here; the exported Config field is kept pointing at the
-	// same value on every publish (see SetConfig) so init/control-time code and
-	// tests can still read it directly without a torn struct. Per-frame paths
-	// MUST go through config() to observe reloads race-free.
-	configPtr    atomic.Pointer[config.Config]
+	// *config.Config here; the exported Config field stays on the immutable
+	// construction-time baseline, so init/control-time code and tests that read
+	// Config directly never race with a reload. Per-frame paths MUST go through
+	// config() to observe reloads race-free.
+	//
+	// It is a *pointer* to the atomic so code that is built before the Node
+	// exists (the libp2p transport factories, which run inside libp2p.New) can
+	// capture the same slot and read a hot-reloaded config later. NewNode always
+	// allocates it; the nil fallbacks in config()/SetConfig exist only for test
+	// Nodes built with a bare &Node{}.
+	configPtr    *atomic.Pointer[config.Config]
 	TAP          tap.TAPDevice
 	MACTable     *vswitch.ShardedMACTable
 	Packer       *obfuscate.FramePacker
@@ -1188,6 +1194,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		boundSeen  = map[string]bool{}
 	)
 
+	// Shared configuration slot, published before libp2p.New runs. Transport
+	// factories below are built inside libp2p.New — before this Node exists —
+	// so they cannot reach n.config(); they read this same slot instead, which
+	// is why the WebRTC ICE server list can be hot-reloaded.
+	cfgSnapshot := new(atomic.Pointer[config.Config])
+	cfgSnapshot.Store(cfg)
+
 	opts := []libp2p.Option{
 		libp2p.Muxer("/yamux/1.0.0", &yamuxOpt),
 		// NoDelayDialRanker: our dialInParallel already does its own
@@ -1457,16 +1470,36 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 					return nil, err
 				}
 				allOpts := append(transportOpts, webrtc.WithNet(protectedNet))
+				// The STUN/TURN lists are resolved from the LIVE config snapshot for
+				// every new peer connection, so a WebUI edit of the server lists
+				// takes effect on the next handshake instead of needing a restart.
+				// The transport cannot read n.config() here — it is built inside
+				// libp2p.New, before this Node exists — so it reads cfgSnapshot,
+				// the same slot the Node's config() reads through.
+				allOpts = append(allOpts, webrtc.WithIceServers(
+					func() []string { return loadNodeConfig(cfgSnapshot, cfg).StunServers },
+					func() []string {
+						urls, _, _, _ := IceTURNConfig(loadNodeConfig(cfgSnapshot, cfg).TurnServers)
+						return urls
+					},
+					func() (string, string) {
+						_, username, credential, _ := IceTURNConfig(loadNodeConfig(cfgSnapshot, cfg).TurnServers)
+						return username, credential
+					},
+				))
+				// The three closures each read the slot independently, so a reload
+				// that lands between two reads could pair a new TURN list with the
+				// previous credentials for one connection. Benign: IceTURNConfig
+				// only accepts servers that all share one credential set, so the
+				// list and its credentials always change together, and a single
+				// mis-authenticated TURN attempt just falls back to the other
+				// servers. A shared provider closure would hide pion's types in
+				// this package to fix it, which is not worth it here.
 				if len(cfg.StunServers) > 0 {
-					allOpts = append(allOpts, webrtc.WithSTUNServers(cfg.StunServers))
 					log.Info("WebRTC configured with %d STUN server(s)", len(cfg.StunServers))
 				}
-				turnURLs, turnUser, turnCred, turnDropped := IceTURNConfig(cfg.TurnServers)
+				turnURLs, _, _, turnDropped := IceTURNConfig(cfg.TurnServers)
 				if len(turnURLs) > 0 {
-					allOpts = append(allOpts,
-						webrtc.WithTURNServers(turnURLs),
-						webrtc.WithTURNCredentials(turnUser, turnCred),
-					)
 					log.Info("WebRTC configured with %d TURN server(s) with ICE credentials", len(turnURLs))
 				}
 				if turnDropped > 0 {
@@ -1624,6 +1657,17 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	macTable := vswitch.NewMACTable()
 	obfCfg := cfg.Obfuscation
 	packer := obfuscate.NewFramePackerFull(&obfCfg)
+	// Padding is capped at the datagram budget derived from the tunnel MTU, so
+	// a frame is never inflated past what one transport datagram can carry.
+	// Report the cap when it actually bites: the config still says what the user
+	// asked for, the packer just cannot honour it.
+	if budget := obfuscate.MaxFrameForPathMTU(cfg.MTU); budget > 0 && (obfCfg.FixedSize > budget || obfCfg.MaxSize > budget) {
+		log.Warn("Obfuscation frame size exceeds the %d-byte datagram budget for MTU %d "+
+			"(fixed_size=%d, max_size=%d); padding is capped at the budget so frames "+
+			"are not needlessly fragmented. Lower fixed_size/max_size to silence this.",
+			budget, cfg.MTU, obfCfg.FixedSize, obfCfg.MaxSize)
+	}
+	packer.SetFrameBudget(cfg.MTU)
 	packer.SetSourceIdentity(h.ID().String())
 	dispatcher := NewStrategyDispatcher(h, cfg.TransportStrategy)
 	// SetNode called after node is constructed below (node var not yet in scope here).
@@ -1670,6 +1714,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		Host:                h,
 		DHT:                 kdht,
 		Config:              cfg,
+		configPtr:           cfgSnapshot,
 		TAP:                 tapDev,
 		MACTable:            macTable,
 		Packer:              packer,
@@ -1709,9 +1754,6 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		arpIndex:            &arpIndex{v4: make(map[uint32]arpIndexEntry), v6: make(map[[16]byte]arpIndexEntry)},
 		lsaCache:            make(map[peer.ID]*routing.LinkStatePayload),
 	}
-	// Publish the initial configuration snapshot into the atomic slot the data
-	// plane reads through config(). SetConfig (hot-reload) later swaps it.
-	node.configPtr.Store(cfg)
 	// Seed the LSA sequence counter from wall-clock nanoseconds so a RESTARTED
 	// node never re-uses a sequence its peers already recorded (they would
 	// reject every LSA from us as stale until CleanStaleNodes purged us, i.e.
@@ -1887,9 +1929,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		OnObfuscationChanged: func() {
 			cfg := node.config()
 			if node.Packer != nil {
-				node.Packer.UpdateConfig(&cfg.Obfuscation)
-				node.Packer.SetSendAlgo(node.sendAlgo())
-				log.Info("Obfuscation config hot-reloaded: mode=%s algo=%s", node.Packer.Mode, obfuscate.AlgoName(node.sendAlgo()))
+				node.applyObfuscationConfig(cfg)
 			}
 			// Obfuscation/transport state changed -> re-announce node info.
 			go node.publishPeekMapSelf()
@@ -2579,15 +2619,17 @@ func computeExitMSS(mtu int, obfMode string) int {
 	if mtu <= 0 {
 		mtu = 1500
 	}
-	pathMTU := 1200 // conservative QUIC path MTU
-	if mtu > pathMTU {
-		mtu = pathMTU
+	// The inner TCP segment (inner IP + inner TCP + MSS) travels as the payload
+	// of an obfuscate frame, so the shared datagram budget applies to it. The
+	// earlier flat "40" covered only the inner IP/TCP and silently skipped the
+	// outer IP/UDP/QUIC headers, so it over-advertised the MSS by the transport
+	// headers' worth and clamped segments still fragmented.
+	payload := obfuscate.MaxPayloadForPathMTU(mtu)
+	if payload <= 0 {
+		payload = 1500 - obfuscate.HeaderLen
 	}
-	// 40 (IP, v6-safe) + 20 (TCP) + obfuscate frame header + 16 (AEAD tag).
-	// The header is 15 bytes; the earlier hardcoded 14 over-advertised the MSS
-	// by one byte, so clamped segments still overflowed the tunnel by a byte.
-	overhead := 40 + 20 + obfuscate.HeaderLen + 16
-	mss := mtu - overhead
+	// 40 (inner IP, v6-safe) + 20 (inner TCP).
+	mss := payload - 40 - 20
 	if mss < 512 {
 		mss = 512
 	}

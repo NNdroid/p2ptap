@@ -85,11 +85,16 @@ const (
 
 type WebRTCTransport struct {
 	webrtcConfig webrtc.Configuration
-	rcmgr        network.ResourceManager
-	gater        connmgr.ConnectionGater
-	privKey      ic.PrivKey
-	noiseTpt     *noise.Transport
-	localPeerId  peer.ID
+
+	// iceServersProvider, when non-nil, resolves the ICE servers for every new
+	// peer connection (see configWithIceServers), so the STUN/TURN lists can be
+	// hot-reloaded without rebuilding the transport.
+	iceServersProvider func() []webrtc.ICEServer
+	rcmgr              network.ResourceManager
+	gater              connmgr.ConnectionGater
+	privKey            ic.PrivKey
+	noiseTpt           *noise.Transport
+	localPeerId        peer.ID
 
 	customNet pionnet.Net
 
@@ -104,7 +109,7 @@ type WebRTCTransport struct {
 	// turnUsername / turnCredential are the ICE credentials applied to every
 	// entry in turnServers. Both empty means no credentials were supplied, which
 	// is exactly the state pion refuses to build a peer connection from.
-	turnUsername string
+	turnUsername   string
 	turnCredential string
 
 	// dialerVersion picks which WebRTC Direct handshake to use when dialing: 1
@@ -173,6 +178,93 @@ func WithTURNCredentials(username, credential string) Option {
 		t.turnCredential = credential
 		return nil
 	}
+}
+
+// WithIceServers supplies the STUN/TURN configuration dynamically. Each of the
+// three functions is consulted for every NEW peer connection, so the lists can
+// be changed at runtime (config reload, WebUI edit) without rebuilding the
+// transport or restarting. Passing nil for an argument means "no such servers".
+//
+// WithSTUNServers/WithTURNServers/WithTURNCredentials stay available for
+// callers that have a fixed list; a provider set here overrides them, since it
+// is meant to subsume the static pair rather than supplement it.
+func WithIceServers(
+	stunServers func() []string,
+	turnServers func() []string,
+	turnCredentials func() (username, credential string),
+) Option {
+	return func(t *WebRTCTransport) error {
+		t.iceServersProvider = func() []webrtc.ICEServer {
+			var stun, turn []string
+			if stunServers != nil {
+				stun = stunServers()
+			}
+			if turnServers != nil {
+				turn = turnServers()
+			}
+			var username, credential string
+			if turnCredentials != nil {
+				username, credential = turnCredentials()
+			}
+			return buildIceServers(stun, turn, username, credential)
+		}
+		return nil
+	}
+}
+
+// buildIceServers converts the raw p2ptap-style STUN/TURN lists into pion ICE
+// servers. STUN entries may be multiaddr ("/udp/host/port"), already in pion
+// form ("stun:host:port"), or bare "host:port" / "host". TCP STUN servers are
+// skipped: WebRTC ICE only speaks UDP.
+func buildIceServers(stunServers, turnServers []string, username, credential string) []webrtc.ICEServer {
+	var out []webrtc.ICEServer
+	for _, srv := range stunServers {
+		// Skip TCP STUN servers (WebRTC ICE only supports UDP).
+		if strings.HasPrefix(srv, "/tcp/") {
+			continue
+		}
+		var url string
+		switch {
+		case strings.HasPrefix(srv, "/udp/"):
+			url = "stun:" + strings.Replace(strings.TrimPrefix(srv, "/udp/"), "/", ":", 1)
+		case strings.HasPrefix(srv, "stun:"):
+			url = srv
+		case !strings.Contains(srv, ":"):
+			url = "stun:" + srv + ":19302"
+		default:
+			url = "stun:" + srv
+		}
+		out = append(out, webrtc.ICEServer{URLs: []string{url}})
+	}
+	if len(turnServers) > 0 {
+		if username == "" || credential == "" {
+			// Do NOT emit these servers. A turn:/turns: ICEServer without both
+			// Username and Credential is rejected by pion's ICEServer.validate
+			// (ErrNoTurnCredentials), and PeerConnection.initConfiguration
+			// aborts on the first invalid server — which takes down every WebRTC
+			// dial and every inbound answer, including the STUN-only ones.
+			// Dropping them degrades to host/reflexive candidates instead.
+			// Debug level: buildIceServers runs once per peer connection when a
+			// WithIceServers provider is set, so an Error here would be logged for
+			// every handshake of a permanently misconfigured list. The caller that
+			// owns the configuration should report the misconfiguration once, at
+			// startup.
+			log.Debug("TURN servers configured without ICE credentials; dropping "+
+				"them, since a credential-less TURN server aborts every WebRTC "+
+				"peer connection",
+				"count", len(turnServers))
+		} else {
+			for _, srv := range turnServers {
+				out = append(out, webrtc.ICEServer{
+					URLs:           []string{srv},
+					Username:       username,
+					Credential:     credential,
+					CredentialType: webrtc.ICECredentialTypePassword,
+				})
+			}
+		}
+	}
+	return out
 }
 
 // WithDialerVersion picks which WebRTC Direct handshake to use when dialing. It
@@ -252,56 +344,27 @@ func New(privKey ic.PrivKey, psk pnet.PSK, gater connmgr.ConnectionGater, rcmgr 
 			return nil, err
 		}
 	}
-	// Add STUN servers for ICE candidate gathering if configured via WithSTUNServers.
-	// Convert multiaddr format ("/udp/host/port") to pion format ("stun:host:port").
-	if len(transport.stunServers) > 0 {
-		for _, srv := range transport.stunServers {
-			// Skip TCP STUN servers (WebRTC ICE only supports UDP)
-			if strings.HasPrefix(srv, "/tcp/") {
-				continue
-			}
-			var url string
-			if strings.HasPrefix(srv, "/udp/") {
-				srv = strings.TrimPrefix(srv, "/udp/")
-				url = "stun:" + strings.Replace(srv, "/", ":", 1)
-			} else if strings.HasPrefix(srv, "stun:") {
-				url = srv
-			} else if !strings.Contains(srv, ":") {
-				url = "stun:" + srv + ":19302"
-			} else {
-				url = "stun:" + srv
-			}
-			config.ICEServers = append(config.ICEServers, webrtc.ICEServer{
-				URLs: []string{url},
-			})
-		}
-		transport.webrtcConfig = config
-	}
-	if len(transport.turnServers) > 0 {
-		if transport.turnUsername == "" || transport.turnCredential == "" {
-			// Do NOT emit these servers. A turn:/turns: ICEServer without both
-			// Username and Credential is rejected by pion's ICEServer.validate
-			// (ErrNoTurnCredentials), and PeerConnection.initConfiguration
-			// aborts on the first invalid server — which takes down every WebRTC
-			// dial and every inbound answer, including the STUN-only ones.
-			// Dropping them degrades to host/reflexive candidates instead.
-			log.Error("TURN servers configured without ICE credentials; dropping " +
-				"them, since a credential-less TURN server aborts every WebRTC " +
-				"peer connection. Call WithTURNCredentials.",
-				"count", len(transport.turnServers))
-		} else {
-			for _, srv := range transport.turnServers {
-				config.ICEServers = append(config.ICEServers, webrtc.ICEServer{
-					URLs:           []string{srv},
-					Username:       transport.turnUsername,
-					Credential:     transport.turnCredential,
-					CredentialType: webrtc.ICECredentialTypePassword,
-				})
-			}
-		}
+	// Add STUN/TURN servers for ICE candidate gathering if configured via
+	// WithSTUNServers / WithTURNServers.
+	if servers := buildIceServers(transport.stunServers, transport.turnServers,
+		transport.turnUsername, transport.turnCredential); len(servers) > 0 {
+		config.ICEServers = servers
 		transport.webrtcConfig = config
 	}
 	return transport, nil
+}
+
+// configWithIceServers returns the peer-connection configuration with the ICE
+// servers resolved for THIS connection. A dynamic provider (WithIceServers)
+// wins so the lists can be changed at runtime; otherwise the static list built
+// at construction time is used.
+func (t *WebRTCTransport) configWithIceServers() webrtc.Configuration {
+	if t.iceServersProvider == nil {
+		return t.webrtcConfig
+	}
+	conf := t.webrtcConfig
+	conf.ICEServers = t.iceServersProvider()
+	return conf
 }
 
 func (t *WebRTCTransport) ListenOrder() int {
@@ -380,7 +443,7 @@ func (t *WebRTCTransport) listenSocket(socket net.PacketConn) (tpt.Listener, err
 		t,
 		listenerMultiaddr,
 		socket,
-		t.webrtcConfig,
+		t.configWithIceServers(),
 	)
 }
 
@@ -488,7 +551,7 @@ func (t *WebRTCTransport) dial(ctx context.Context, scope network.ConnManagement
 		return nil, err
 	}
 
-	w, err = newWebRTCConnection(settingEngine, t.webrtcConfig)
+	w, err = newWebRTCConnection(settingEngine, t.configWithIceServers())
 	if err != nil {
 		return nil, fmt.Errorf("instantiating peer connection failed: %w", err)
 	}

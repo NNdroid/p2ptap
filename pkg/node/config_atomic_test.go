@@ -31,7 +31,10 @@ func newConfigForAtomicTest() *config.Config {
 func TestConfigHotReloadVsDataPlaneReads(t *testing.T) {
 	n := &Node{}
 	cfg := newConfigForAtomicTest()
-	n.configPtr.Store(cfg)
+	// Allocate the slot up front, exactly as NewNode does, so the lazy
+	// allocation in SetConfig never runs under this test's concurrency.
+	n.configPtr = new(atomic.Pointer[config.Config])
+	n.SetConfig(cfg)
 	// Keep Config as the immutable construction-time baseline, exactly as NewNode
 	// does, so the mirror assertion below is meaningful.
 	n.Config = cfg
@@ -102,7 +105,7 @@ func TestConfigBaselineImmutableAcrossReload(t *testing.T) {
 	n := &Node{}
 	baseline := newConfigForAtomicTest()
 	n.Config = baseline
-	n.configPtr.Store(baseline)
+	n.SetConfig(baseline)
 
 	for i := 0; i < 100; i++ {
 		next := newConfigForAtomicTest()

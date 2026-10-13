@@ -365,6 +365,8 @@ func (n *Node) maxFragPayload() int {
 		if v > 1400 {
 			v = 1400
 		}
+		// An explicit MaxFragSize above the datagram budget is an escape hatch:
+		// it deliberately opts into transport fragmentation. Left untouched.
 		return v
 	}
 	mtu := 1500
@@ -374,18 +376,17 @@ func (n *Node) maxFragPayload() int {
 	if mtu <= 0 {
 		mtu = 1500
 	}
-	pathMTU := 1200
-	if mtu > pathMTU {
-		mtu = pathMTU
+	// Each re-obfuscated fragment becomes one obfuscate frame: obfuscate header
+	// + frag header + chunk, carried in a single transport datagram. The budget
+	// below is the payload allowance, so it already accounts for the frame
+	// header, the AEAD tag and the outer IP/UDP/QUIC headers.
+	payload := obfuscate.MaxPayloadForPathMTU(mtu)
+	if payload <= 0 {
+		payload = 1500 - obfuscate.HeaderLen
 	}
-	// overhead: QUIC/IP/UDP headroom(~40) + obfuscate frame header + AEAD tag
-	// + frag header(12). The obfuscate header is 15 bytes (obfuscate.HeaderLen);
-	// hardcoding 14 here oversized every fragment by exactly one byte, so a
-	// fragment that looked inside the path MTU was in fact one byte too large.
-	overhead := 40 + obfuscate.HeaderLen + 16 + fragHeaderLen
-	p := mtu - overhead
-	if p < 512 {
-		p = 512
+	p := payload - fragHeaderLen
+	if p < 256 {
+		p = 256
 	}
 	return p
 }

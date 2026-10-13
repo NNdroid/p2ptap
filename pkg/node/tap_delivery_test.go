@@ -71,7 +71,7 @@ func TestTapWriteEnforcesConfiguredMTU(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.MTU = 100
 	n := &Node{TAP: a, Config: cfg}
-	n.configPtr.Store(cfg)
+	n.SetConfig(cfg)
 
 	valid := make([]byte, 100+ethernetHeaderLen)
 	if wrote, err := n.tapWrite(valid); err != nil || wrote != len(valid) {

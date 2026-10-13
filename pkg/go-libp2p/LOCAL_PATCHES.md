@@ -2,7 +2,7 @@
 
 本目录通过 `go.mod` 的 `replace github.com/libp2p/go-libp2p v0.50.0 => ./pkg/go-libp2p`
 以源码形式参与构建。基线为上游 **v0.50.0**（2026-08-12 发布，当前最新版），
-在此之上维护了以下 10 处本地补丁。升级到未来版本（v0.51+）时，需要把这份清单
+在此之上维护了以下 11 处本地补丁。升级到未来版本（v0.51+）时，需要把这份清单
 中的补丁重新应用到新基线。
 
 ## 1. `p2p/host/basic/addrs_manager.go` — Android 接口地址提供者
@@ -106,6 +106,26 @@
 - `os.Executable()` → `os.Exit(1)`。上游原文写错了：`os.Executable()` 返回可执行文件路径
   后被丢弃，是一个空操作，multiaddr 组件注册失败时进程照旧继续启动。属上游遗留缺陷，
   本仓库顺带修掉（该分支实际不会触发）。
+
+## 11. `p2p/transport/webrtc/transport.go` — ICE 服务器列表可热更新（`WithIceServers`）
+
+- 抽出 `buildIceServers(stun, turn, username, credential)` 承载原有的
+  「p2ptap 风格 URL → pion ICEServer」转换（STUN 支持 `/udp/host/port`、`stun:host:port`、
+  裸 `host:port` 与补默认端口 19302，`/tcp/` 前缀一律跳过）；`New()` 里的静态分支改调它。
+- 新增 `WithIceServers(stunServers, turnServers func() []string,
+  turnCredentials func() (username, credential string))` 与 `iceServersProvider` 字段、
+  `configWithIceServers()`：每次新建 PeerConnection 都重新解析一次列表。
+  两个调用点（`newListener`、`newWebRTCConnection`）改用它。
+- 原因：transport 在 `libp2p.New` 内部构造，早于 `Node` 存在，工厂闭包只能捕获构造期的
+  配置快照——WebUI 改 STUN/TURN 列表后必须重启进程才生效。改为 provider 后，节点侧
+  （`pkg/node/node.go`）把共享的 `atomic.Pointer[config.Config]` slot 传进来，热重载即生效。
+  provider 非 nil 时**取代**静态三项（而非叠加），避免列表翻倍；nil 参数表示「没有该类服务器」，
+  不会在握手中途 panic。
+- 顺带把 `buildIceServers` 里「TURN 无凭据则丢弃」的日志从 `log.Error` 降为 `log.Debug`：
+  provider 模式下每次握手都会调用一次，常驻错误配置会变成每条连接一条 Error。配置侧的
+  一次性告警由 `pkg/node` 负责。
+- 回归测试：`transport_ice_servers_test.go`（URL 转换表、provider 按连接重解析、基座配置
+  不被污染、nil provider、provider 取代静态项）。
 
 ## 非代码附加目录
 
