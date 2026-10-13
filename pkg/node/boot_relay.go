@@ -507,13 +507,21 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 		n.dedupPeersMu.Unlock()
 	}
 	// Keep the same epoch/replay contract as the direct receive path.
-	if peerDedup.IsDuplicate(seqID) {
+	if dup, reason := peerDedup.IsDuplicateReason(seqID); dup {
 		n.Collector.RecordDedup()
 		// PERF: cached base58 — this is on every relayed frame (see peer_idstr.go).
 		n.Collector.RecordPeerDedup(n.peerIDString(srcPeer))
 		log.Debug("Duplicate relayed frame seq=%d from peer %s", seqID, srcPeer.String())
+		// Same classification as the direct path: only SameSeq is benign. The
+		// relay path runs the SAME dedup window, so it sees the same desync and
+		// must be able to heal it there too.
+		if reason != obfuscate.DedupDropSameSeq {
+			n.recordPeerDedupDesync(srcPeer, true)
+			n.maybeResyncOnDedupDesync(srcPeer)
+		}
 		return
 	}
+	n.recordPeerDedupDesync(srcPeer, false)
 	n.Collector.RecordRxSeq(n.peerIDString(srcPeer), seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
 
 	// ACL check — evaluate against the TRUE origin (srcPeer), not the relay
@@ -565,12 +573,19 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 	// Routing arbitration for relayed transit (mirrors the direct-Rx decision
 	// table): an Exit Node client only sinks frames genuinely for us.
 	if n.isExitNodeActive() {
+		// isMeshLocalIP is the single predicate, as on the direct path. The old
+		// check was "not our IP and not an advertised subnet", which made every
+		// group-addressed frame that arrived via a relay unreachable: mDNS,
+		// LLMNR, SSDP, MLD, DHCPv6 and IPv6 NS multicast are destinations that
+		// are never our own address and never sit in an advertised subnet, so
+		// service discovery died on the relay path even where the direct path
+		// delivered the same frame fine.
 		dstV4, dstV6 := frameDstIPs(tapPayload)
-		if dstV4 != nil && !dstV4.Equal(n.localV4IP) && n.lookupPeerMACByAdvertisedSubnet(dstV4) == nil {
+		if dstV4 != nil && !n.isMeshLocalIP(dstV4) {
 			log.Debug("Dropping relayed transit dstIP=%s: would mis-egress via local Exit Node", dstV4.String())
 			return
 		}
-		if dstV6 != nil && n.localV6IP != nil && !dstV6.Equal(n.localV6IP) && n.lookupPeerMACByAdvertisedSubnet(dstV6) == nil {
+		if dstV6 != nil && !n.isMeshLocalIP(dstV6) {
 			log.Debug("Dropping relayed transit dstIP=%s: would mis-egress via local Exit Node", dstV6.String())
 			return
 		}

@@ -613,6 +613,13 @@ type Node struct {
 	// triggered by sustained decryption failures, so a transient key desync
 	// cannot spawn a resync storm. peer.ID → time.Time of the last resync kick.
 	decryptResyncCooldown sync.Map
+	// peerDedupDesyncErrs is the reset-on-success window for dedup-side desyncs
+	// (frames that decrypt fine but are rejected for a stale epoch or a
+	// far-behind counter). It exists because the decrypt-fail window is invisible
+	// to those: a desynced peer's frames decrypt successfully, so they reset the
+	// decrypt counter to zero and hide the problem entirely. See
+	// maybeResyncOnDedupDesync. peer.ID → *atomic.Uint64.
+	peerDedupDesyncErrs sync.Map
 	// rekeyReqCooldown rate-limits the follower→leader rekeyReq nudge so a burst
 	// of decrypt failures cannot spam the leader with rekey requests. peer.ID →
 	// time.Time of the last nudge sent.
@@ -764,6 +771,31 @@ func (n *Node) recordPeerRxDecrypt(remotePeer peer.ID, ok bool) {
 			rv, _ = n.peerRxDecryptRecentErrs.LoadOrStore(remotePeer, &atomic.Uint64{})
 		}
 		rv.(*atomic.Uint64).Add(1)
+	}
+}
+
+// recordPeerDedupDesync records whether a frame from remotePeer was accepted by
+// the dedup window, in the same reset-on-success shape as
+// recordPeerRxDecrypt. bad=true is a stale-epoch or far-behind drop; bad=false
+// is a normal accept, which zeroes the window so a settled link cannot carry a
+// desync forever after a healed one.
+//
+// A benign SameSeq drop is passed as bad=false on purpose: it is redundant
+// multi-path delivery of a frame we already handed to TAP, and counting it as a
+// failure would make a healthy redundant-strategy link resync pointlessly.
+func (n *Node) recordPeerDedupDesync(remotePeer peer.ID, bad bool) {
+	v, loaded := n.peerDedupDesyncErrs.Load(remotePeer)
+	if !loaded {
+		v, _ = n.peerDedupDesyncErrs.LoadOrStore(remotePeer, &atomic.Uint64{})
+	}
+	if bad {
+		v.(*atomic.Uint64).Add(1)
+		return
+	}
+	// PERF: skip the atomic store when it is already zero, as in
+	// recordPeerRxDecrypt — that is the overwhelmingly common case.
+	if v.(*atomic.Uint64).Load() != 0 {
+		v.(*atomic.Uint64).Store(0)
 	}
 }
 
@@ -3094,6 +3126,7 @@ func (n *Node) removePeerObf(p peer.ID) {
 	n.handshakeMu.Delete(p)
 	n.peerLocalEpochs.Delete(p)
 	n.peerRxDecryptRecentErrs.Delete(p)
+	n.peerDedupDesyncErrs.Delete(p)
 	n.peerTxBytes.Delete(p)
 	n.peerRxBytes.Delete(p)
 	n.decryptResyncCooldown.Delete(p)

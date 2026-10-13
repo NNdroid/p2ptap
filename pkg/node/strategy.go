@@ -1083,7 +1083,15 @@ func (sd *StrategyDispatcher) BroadcastToAllPeers(ctx context.Context, data []by
 	cnt := sd.node.Packer.BumpCounter()
 	for pID := range peerIDs {
 		p := pID
-		if sd.node != nil && (!sd.node.canEgressToPeer(p) || sd.node.peerStalled(p)) {
+		// canEgressToPeer only. Deliberately NOT peerStalled: the stall breaker
+		// exists to stop one wedged peer's 2.5s write deadline from pinning a
+		// dispatch worker, and a broadcast send is not one of those — it is a
+		// detached goroutine with its own 1.5s context (below), so skipping it
+		// on a timeout buys nothing and costs the peer every group-addressed
+		// frame for the whole cooldown. ARP and MLD retry on ~1s intervals, so
+		// one write timeout silenced that peer's service discovery for 3+
+		// seconds, which reads as "some protocols don't work".
+		if sd.node != nil && !sd.node.canEgressToPeer(p) {
 			continue
 		}
 		localEpoch := uint64(0)

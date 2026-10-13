@@ -124,12 +124,33 @@ func (d *Deduplicator) SyncFrom(remoteSeq uint64) {
 	log.Debug("Dedup: SyncFrom remoteSeq=%d counter=%d epoch=%d", remoteSeq, c, d.expectedConnEpoch)
 }
 
+// DedupDropReason classifies why a frame was rejected, so a caller can tell a
+// harmless redundant-delivery duplicate from a protocol-level desync that needs
+// healing. The two are indistinguishable through IsDuplicate alone, which is
+// what let a stale-epoch desync run forever without anyone noticing: the frame
+// was well-formed and decrypted cleanly, so only the dedup window saw it.
+type DedupDropReason uint8
+
+const (
+	DedupDropNone       DedupDropReason = iota // accepted (not a drop)
+	DedupDropSameSeq                           // this counter was already delivered: redundant multi-path copy
+	DedupDropFarBehind                         // trails the live window beyond tolerance: replay, not reordering
+	DedupDropStaleEpoch                        // connEpoch mismatch: cross-session frame, or a sender out of step
+)
+
 // IsDuplicate returns true if seqID is a duplicate or a stale/cross-session
 // replay. Otherwise records it and returns false.
 func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
+	dup, _ := d.IsDuplicateReason(seqID)
+	return dup
+}
+
+// IsDuplicateReason is IsDuplicate with the drop classified. Use it on any path
+// where a drop should be able to trigger recovery: only SameSeq is benign.
+func (d *Deduplicator) IsDuplicateReason(seqID uint64) (bool, DedupDropReason) {
 	if seqID == 0 || !IsStructuredSeq(seqID) {
 		// Unstructured / raw frames: never dedup (handled upstream).
-		return false
+		return false, DedupDropNone
 	}
 
 	d.mu.Lock()
@@ -145,7 +166,7 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 	if d.epochSet && ConnEpochFromSeq(seqID) != d.expectedConnEpoch {
 		atomic.AddUint64(&d.replayDrops, 1)
 		log.Debug("Dedup: stale epoch drop seq=%d got=%d expect=%d", seqID, ConnEpochFromSeq(seqID), d.expectedConnEpoch)
-		return true
+		return true, DedupDropStaleEpoch
 	}
 
 	c := CounterFromSeq(seqID)
@@ -156,7 +177,7 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 		d.maxSeq = seqID
 		d.minCounter = (c - dedupWindow) & 0xFFFF
 		d.setBit(c)
-		return false
+		return false, DedupDropNone
 	}
 
 	// Decide direction and distance using the FULL 32-bit counter field.
@@ -193,7 +214,7 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 		d.maxSeq = seqID
 		d.minCounter = newMin
 		d.setBit(c)
-		return false
+		return false, DedupDropNone
 	}
 
 	// c trails maxC by behind32.
@@ -208,7 +229,7 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 	if behind32 > maxBehindTolerance {
 		atomic.AddUint64(&d.replayDrops, 1)
 		log.Debug("Dedup: far-behind replay drop behind=%d max=%d", behind32, maxC)
-		return true
+		return true, DedupDropFarBehind
 	}
 
 	// Inside live distance: a frame is a duplicate only if its specific
@@ -219,10 +240,10 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 	// connEpoch → replay drop). SyncFrom() positions maxSeq so the window does
 	// not start at 0 and marks the anchor bit.
 	if d.testBit(c) {
-		return true
+		return true, DedupDropSameSeq
 	}
 	d.setBit(c)
-	return false
+	return false, DedupDropNone
 }
 
 // dedupWindow is the out-of-order tolerance, in counters: how many counters

@@ -57,6 +57,51 @@ const minEthernetFrameLen = 34
 //
 // The copy is skipped when the relevant MAC already equals the target (no-op
 // rewrite) to avoid needless per-packet work and log noise.
+// isLocalSubnetIP reports whether dstIP is for THIS node or for a host on the
+// LAN this node fronts — i.e. a destination that must be rewritten to localMAC
+// so the kernel accepts it. It is deliberately narrower than isMeshLocalIP:
+// that one also covers 169.254/16, 255.255.255.255, group addresses and any IP
+// another mesh peer owns, all of which are mesh destinations and must NOT be
+// pulled into our own TAP. isLocalSubnetIP covers only the addresses we are
+// responsible for answering to.
+func (n *Node) isLocalSubnetIP(dstIP net.IP) bool {
+	if dstIP == nil {
+		return false
+	}
+	if ip4 := dstIP.To4(); ip4 != nil {
+		if n.localV4IP != nil && dstIP.Equal(n.localV4IP) {
+			return true
+		}
+		if n.localV4Net != nil && n.localV4Net.Contains(ip4) {
+			return true
+		}
+		return n.isLocalAdvertisedSubnet(dstIP)
+	}
+	if n.localV6IP != nil && dstIP.Equal(n.localV6IP) {
+		return true
+	}
+	if n.localV6Net != nil && n.localV6Net.Contains(dstIP) {
+		return true
+	}
+	return n.isLocalAdvertisedSubnet(dstIP)
+}
+
+// rewriteDstMACForExit picks the MAC a transit frame must be rewritten to while
+// Exit Node is configured, falling back to localMAC when no Exit peer MAC is
+// known (which is also the correct answer when we ARE the Exit server).
+func (n *Node) rewriteDstMACForExit(payload []byte, exitConfigured bool) {
+	exitMAC := n.localMAC
+	if !exitConfigured {
+		exitMAC = n.getExitPeerMAC()
+		if len(exitMAC) != 6 {
+			exitMAC = n.localMAC
+		}
+	}
+	if len(exitMAC) == 6 && !bytes.Equal(payload[0:6], exitMAC) {
+		copy(payload[0:6], exitMAC)
+	}
+}
+
 func (n *Node) rewriteRxDstMAC(payload []byte) {
 	if len(payload) < 34 || len(n.localMAC) != 6 {
 		return
@@ -64,67 +109,61 @@ func (n *Node) rewriteRxDstMAC(payload []byte) {
 	// Snapshot the mutable config once so the two IPv4/IPv6 exit-transit checks
 	// below observe one consistent reload (a mid-frame swap must not tear them).
 	c := n.config()
-	if binary.BigEndian.Uint16(payload[12:14]) == packet.EtherTypeIPv4 && n.localV4IP != nil {
-		dstIP := net.IP(payload[30:34])
-		if dstIP.Equal(n.localV4IP) || n.isLocalAdvertisedSubnet(dstIP) {
-			if !bytes.Equal(payload[0:6], n.localMAC) {
-				log.Debug("MAC rewrite IPv4 (local dst / subnet): dstIP=%s oldDstMAC=%s newDstMAC=%s", dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+	exitConfigured := c != nil && c.ExitNode.Enable
+	exitOn := n.isExitNodeActive() || exitConfigured
+
+	if ethType := binary.BigEndian.Uint16(payload[12:14]); ethType == packet.EtherTypeIPv4 || ethType == packet.EtherTypeARP {
+		// ARP carries its target at offset 38 with no 20-byte IP header in
+		// front; a reply echoes the requester's address there, so target == our
+		// IP means the reply is for us.
+		var dstIP net.IP
+		if ethType == packet.EtherTypeARP {
+			if len(payload) < 42 {
+				return
+			}
+			dstIP = net.IP(payload[38:42])
+		} else {
+			dstIP = net.IP(payload[30:34])
+		}
+		if dstIP == nil {
+			return
+		}
+		kind := "IPv4"
+		if ethType == packet.EtherTypeARP {
+			kind = "ARP"
+		}
+		if n.isLocalSubnetIP(dstIP) {
+			if !bytes.Equal(payload[0:6], n.localMAC) && !(ethType == packet.EtherTypeARP && isBroadcastOrMulticastMAC(payload[0:6])) {
+				log.Debug("MAC rewrite %s (local dst / subnet): dstIP=%s oldDstMAC=%s newDstMAC=%s", kind, dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
 				copy(payload[0:6], n.localMAC)
 			}
 			return
 		}
-		if (n.isExitNodeActive() || (c != nil && c.ExitNode.Enable)) &&
-			func() bool { mac, _ := n.lookupPeerMACByIPv4(dstIP); return mac == nil }() &&
-			n.lookupPeerMACByAdvertisedSubnet(dstIP) == nil {
-			exitMAC := n.localMAC
-			if !(c != nil && c.ExitNode.Enable) {
-				exitMAC = n.getExitPeerMAC()
-				if len(exitMAC) != 6 {
-					exitMAC = n.localMAC
-				}
-			}
-			if len(exitMAC) == 6 && !bytes.Equal(payload[0:6], exitMAC) {
-				log.Debug("MAC rewrite IPv4 (exit transit): dstIP=%s oldDstMAC=%s newDstMAC=%s", dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(exitMAC).String())
-				copy(payload[0:6], exitMAC)
-			}
+		// isMeshLocalIP, not the old ad-hoc "no peer owns this IP" test: that
+		// test handed 169.254/16, 255.255.255.255 and every group address to the
+		// Exit Node whenever one was active, so a pre-DHCP link-local host and a
+		// DHCP unicast-broadcast reply were pulled out of the mesh entirely.
+		// Frames to another peer's TAP IP are handled first by the MAC table
+		// lookup above, so nothing that belongs to a peer is ever Exit-hijacked.
+		if exitOn && !n.isMeshLocalIP(dstIP) {
+			log.Debug("MAC rewrite %s (exit transit): dstIP=%s oldDstMAC=%s newDstMAC=%s", kind, dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+			n.rewriteDstMACForExit(payload, exitConfigured)
 		}
 		return
 	}
-	if binary.BigEndian.Uint16(payload[12:14]) == packet.EtherTypeARP && n.localV4IP != nil && len(payload) >= 42 {
-		targetIP := net.IP(payload[38:42])
-		if targetIP.Equal(n.localV4IP) || n.isLocalAdvertisedSubnet(targetIP) {
-			if !isBroadcastOrMulticastMAC(payload[0:6]) && !bytes.Equal(payload[0:6], n.localMAC) {
-				log.Debug("MAC rewrite ARP (local dst / subnet): dstIP=%s oldDstMAC=%s newDstMAC=%s", targetIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
-				copy(payload[0:6], n.localMAC)
-			}
-			return
-		}
-	}
 
-	if binary.BigEndian.Uint16(payload[12:14]) == packet.EtherTypeIPv6 && n.localV6IP != nil && len(payload) >= 54 {
+	if binary.BigEndian.Uint16(payload[12:14]) == packet.EtherTypeIPv6 && len(payload) >= 54 {
 		dstIP := net.IP(payload[38:54])
-		if dstIP.Equal(n.localV6IP) || n.isLocalAdvertisedSubnet(dstIP) {
+		if n.isLocalSubnetIP(dstIP) {
 			if !bytes.Equal(payload[0:6], n.localMAC) {
 				log.Debug("MAC rewrite IPv6 (local dst / subnet): dstIP=%s oldDstMAC=%s newDstMAC=%s", dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
 				copy(payload[0:6], n.localMAC)
 			}
 			return
 		}
-
-		if (n.isExitNodeActive() || (c != nil && c.ExitNode.Enable)) &&
-			func() bool { mac, _ := n.lookupPeerMACByIPv6(dstIP); return mac == nil }() &&
-			n.lookupPeerMACByAdvertisedSubnet(dstIP) == nil {
-			exitMAC := n.localMAC
-			if !(c != nil && c.ExitNode.Enable) {
-				exitMAC = n.getExitPeerMAC()
-				if len(exitMAC) != 6 {
-					exitMAC = n.localMAC
-				}
-			}
-			if len(exitMAC) == 6 && !bytes.Equal(payload[0:6], exitMAC) {
-				log.Debug("MAC rewrite IPv6 (exit transit): dstIP=%s oldDstMAC=%s newDstMAC=%s", dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(exitMAC).String())
-				copy(payload[0:6], exitMAC)
-			}
+		if exitOn && !n.isMeshLocalIP(dstIP) {
+			log.Debug("MAC rewrite IPv6 (exit transit): dstIP=%s oldDstMAC=%s newDstMAC=%s", dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+			n.rewriteDstMACForExit(payload, exitConfigured)
 		}
 	}
 }
@@ -361,15 +400,28 @@ func (n *Node) handleStream(s network.Stream) {
 		}
 		// Only SeqSync may change an established epoch. A delayed data frame
 		// from an older session must not reset the current replay window.
-		if peerDedup.IsDuplicate(seqID) {
-
+		if dup, reason := peerDedup.IsDuplicateReason(seqID); dup {
 			n.Collector.RecordDedup()
 			// PERF: cached base58 (see peer_idstr.go) — pid.String() would cost
 			// ~933ns/2allocs on EVERY frame just to feed a bookkeeping call.
 			n.Collector.RecordPeerDedup(n.peerIDString(remotePeer))
 			log.Debug("Duplicate frame seq=%d from peer %s", seqID, remotePeer.String())
+			// A SameSeq drop is redundant multi-path delivery of a frame we
+			// already handed to TAP — nothing is wrong with the link. Any other
+			// reason means the sender is not aligned with the window we anchored
+			// for it, and unlike a decrypt failure this path used to have no
+			// recovery at all: the frame was perfectly well formed and opened
+			// cleanly, so every other subsystem read the link as healthy and
+			// nobody ever healed it.
+			if reason != obfuscate.DedupDropSameSeq {
+				n.recordPeerDedupDesync(remotePeer, true)
+				n.maybeResyncOnDedupDesync(remotePeer)
+			}
 			continue
 		}
+		// Accepted by the dedup window: reset the peer's desync window so a
+		// healed link cannot keep re-firing the resync forever.
+		n.recordPeerDedupDesync(remotePeer, false)
 		n.Collector.RecordRxSeq(n.peerIDString(remotePeer), seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
 
 		// ACL Firewall Filtering check

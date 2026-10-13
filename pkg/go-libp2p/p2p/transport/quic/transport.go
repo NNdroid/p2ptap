@@ -307,7 +307,18 @@ func (t *transport) Listen(addr ma.Multiaddr) (tpt.Listener, error) {
 		conf, _ := t.identity.ConfigForPeer("")
 		return conf, nil
 	}
-	tlsConf.NextProtos = []string{"h3"} // LOCAL PATCH: must match the `alpn` const in p2p/security/tls/crypto.go (see LOCAL_PATCHES.md). Upstream "libp2p" is DPI-visible in the QUIC Initial ClientHello. QUIC carries its muxer in-band, so this ALPN string is not used for muxer selection — it only needs to agree between our own listen/dial sides.
+	// LOCAL PATCH: "h3" first so a compatible peer still sees the DPI-neutral
+	// ALPN (upstream "libp2p" is DPI-visible in the QUIC Initial ClientHello);
+	// "libp2p" second so an UNPATCHED peer — whose listener only accepts
+	// "libp2p" — can still complete the handshake. QUIC carries its muxer
+	// in-band, so this string is never used for muxer selection.
+	//
+	// Advertising "h3" alone used to be a hard interop break: GetConfigForClient
+	// in quicreuse/listener.go rejects a hello whose SupportedProtos contain no
+	// registered protocol, and TLS fails there with no application-level log at
+	// all. A partial rollout of this fork therefore looked like "every peer I
+	// did not upgrade is unreachable on QUIC".
+	tlsConf.NextProtos = []string{"h3", "libp2p"}
 	udpAddr, version, err := quicreuse.FromQuicMultiaddr(addr)
 	if err != nil {
 		return nil, err

@@ -257,8 +257,11 @@ func TestRebuildARPIndexOverlappingSubnetArbitration(t *testing.T) {
 	macA := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x0a}
 	macB := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x0b}
 
-	// peer-A (10.0.0.0/8) contains peer-B's subnet (10.1.0.0/16). A is earlier
-	// in the allow list so it must win; B's overlapping subnet is suppressed.
+	// peer-A (10.0.0.0/8) strictly contains peer-B's subnet (10.1.0.0/16). A is
+	// earlier in the allow list, but that ordering must NOT decide routing here:
+	// containment is not ambiguity, the more specific prefix owns exactly the
+	// addresses it names. Both entries stay in the index, sorted longest-prefix
+	// first, so lookup resolves each address to whoever actually owns it.
 	n := newArbitrationNode(t,
 		[]string{pidStr("peer-A"), pidStr("peer-B")},
 		map[peer.ID]PeerMeta{
@@ -276,29 +279,37 @@ func TestRebuildARPIndexOverlappingSubnetArbitration(t *testing.T) {
 		t.Errorf("ResourceType = %q, want advertised_subnet_overlap", c.ResourceType)
 	}
 	if c.Resource != "10.1.0.0/16" {
-		t.Errorf("Resource = %q, want the LOSER's CIDR 10.1.0.0/16", c.Resource)
+		t.Errorf("Resource = %q, want the contained CIDR 10.1.0.0/16", c.Resource)
 	}
-	if c.Winner != pidStr("peer-A") || len(c.Losers) != 1 || c.Losers[0] != pidStr("peer-B") {
-		t.Errorf("verdict = winner=%q losers=%v, want peer-A beats peer-B", c.Winner, c.Losers)
+	if c.Winner != pidStr("peer-A") {
+		t.Errorf("Winner = %q, want peer-A (it owns the broader announcement)", c.Winner)
+	}
+	// Neither peer is suppressed, so nothing may be listed as a loser: the
+	// conflict exists purely for alerting. A non-empty Losers list would tell
+	// isSubnetRouteSuppressed to withdraw an OS route that is actually correct.
+	if len(c.Losers) != 0 {
+		t.Errorf("Losers = %v, want empty — containment suppresses nobody", c.Losers)
 	}
 
-	// The loser's overlapping subnet must be suppressed from the routing index:
-	// an IP inside 10.1.0.0/16 resolves to the WINNER (peer-A), not peer-B.
+	// The more specific prefix owns the contained range.
 	gotPID, gotMAC := n.resolvePeerIDByIP(net.ParseIP("10.1.5.9"))
-	if gotPID != pid("peer-A") {
-		t.Errorf("resolve(10.1.5.9) = %s, want peer-A (winner covers the overlap)", gotPID)
+	if gotPID != pid("peer-B") {
+		t.Errorf("resolve(10.1.5.9) = %s, want peer-B (the /16 is the longest match)", gotPID)
 	}
-	if !bytes.Equal(gotMAC, macA) {
-		t.Errorf("winner MAC = %v, want peer-A's MAC %v", gotMAC, macA)
+	if !bytes.Equal(gotMAC, macB) {
+		t.Errorf("resolved MAC = %v, want peer-B's MAC %v", gotMAC, macB)
+	}
+	// Outside the /16 the broader prefix still applies.
+	if gotPID, _ := n.resolvePeerIDByIP(net.ParseIP("10.2.5.9")); gotPID != pid("peer-A") {
+		t.Errorf("resolve(10.2.5.9) = %s, want peer-A (outside the contained /16)", gotPID)
 	}
 
-	// OS route for the losing subnet must be reported as suppressed.
-	if !n.isSubnetRouteSuppressed(pid("peer-B"), "10.1.0.0/16") {
-		t.Errorf("isSubnetRouteSuppressed(peer-B, 10.1.0.0/16) = false, want true")
+	// Neither side owns a suppressed route: the overlap is only informational.
+	if n.isSubnetRouteSuppressed(pid("peer-B"), "10.1.0.0/16") {
+		t.Errorf("isSubnetRouteSuppressed(peer-B, 10.1.0.0/16) = true, want false (the route is correct)")
 	}
-	// The winning subnet is NOT suppressed.
 	if n.isSubnetRouteSuppressed(pid("peer-A"), "10.0.0.0/8") {
-		t.Errorf("isSubnetRouteSuppressed(peer-A, 10.0.0.0/8) = true, want false (winner)")
+		t.Errorf("isSubnetRouteSuppressed(peer-A, 10.0.0.0/8) = true, want false")
 	}
 	t.Logf("[dup-ip] overlap conflict -> %+v", c)
 }

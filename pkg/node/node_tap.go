@@ -691,12 +691,10 @@ func (n *Node) processTapFrame(payload []byte) bool {
 	// Minimum valid Neighbor Solicitation is 78 bytes (14 eth + 40 IPv6 + 24
 	// NS base); the Source Link-Layer Address Option is optional, so we must
 	// not require the full 86-byte frame or we silently drop legitimate NS.
-	if len(payload) >= 78 &&
-		binary.BigEndian.Uint16(payload[12:14]) == packet.EtherTypeIPv6 &&
-		payload[20] == 58 &&
-		payload[54] == 135 {
+	if icmpOff := icmpv6Offset(payload); icmpOff >= 0 && icmpOff+24 <= len(payload) &&
+		payload[icmpOff] == 135 && payload[icmpOff+1] == 0 {
 
-		targetIPv6 := net.IP(payload[62:78])
+		targetIPv6 := net.IP(payload[icmpOff+8 : icmpOff+24])
 		senderIPv6 := net.IP(payload[22:38])
 		senderMAC := net.HardwareAddr(payload[6:12])
 		if log.IsDebug() {
@@ -1119,6 +1117,18 @@ func (n *Node) isMeshLocalIP(dstIP net.IP) bool {
 		if ip4[0] == 0xff && ip4[1] == 0xff && ip4[2] == 0xff && ip4[3] == 0xff {
 			return true
 		}
+		// 224.0.0.0/24 and 239.0.0.0/8 multicast is link-local service
+		// discovery, not WAN traffic: IGMP (224.0.0.1/2), mDNS (224.0.0.251),
+		// LLMNR (224.0.0.252), SSDP/UPnP (239.255.255.250). Before this, the
+		// whole range fell through to "not mesh-local" and so was handed to the
+		// Exit Node whenever one was active — while the IPv6 twin (ff02::fb)
+		// below was flooded to the mesh fine. The result was mDNS/SSDP working
+		// on IPv6 and dying on IPv4 on the very same link. Everything from
+		// 240.0.0.0/4 on is reserved, so it is treated the same way; 232-238/8
+		// is genuinely global multicast and still goes to the Exit Node.
+		if ip4[0] == 0xE0 || ip4[0] >= 0xEF {
+			return true
+		}
 		// 169.254/16 — the address an interface assigns before DHCP answers.
 		if ip4.IsLinkLocalUnicast() {
 			return true
@@ -1126,13 +1136,24 @@ func (n *Node) isMeshLocalIP(dstIP net.IP) bool {
 		if n.localV4Net != nil && n.localV4Net.Contains(ip4) {
 			return true
 		}
+		// The IPv6 branch below has this lookup and the IPv4 one did not, so a
+		// peer whose TAP address sits outside our subnet (no TapIP configured,
+		// or a mismatched prefix) was unreachable as a destination whenever its
+		// MAC was unknown or group-addressed.
+		if mac, _ := n.lookupPeerMACByIPv4(ip4); mac != nil {
+			return true
+		}
 		return n.lookupPeerIDByAdvertisedSubnet(ip4) != ""
 	}
 	if dstIP.IsMulticast() {
-		// ff02::/16 is link-local multicast (NDP, MLD, all-nodes/all-routers)
-		// and must stay on the mesh; ff0e::/16 internet multicast belongs to
-		// the Exit Node path.
-		if x := dstIP.To16(); x != nil && x[0] == 0xff && x[1] == 0x02 {
+		// ff01::/16 through ff07::/16 are interface/site/org-local multicast and
+		// must stay on the mesh: ff02:: is link-local (NDP, MLD, all-nodes/
+		// all-routers), ff05:: is site-local (all DHCP agents, ff05::1:3) and
+		// ff06:: is organization-local. ff08:: and above is global multicast and
+		// belongs to the Exit Node path. Only ff02:: was accepted before, which
+		// sent site-local DHCPv6 to the Exit Node whenever one was active and
+		// the mesh never saw it.
+		if x := dstIP.To16(); x != nil && x[0] == 0xff && x[1] <= 0x07 {
 			return true
 		}
 		return false
@@ -1147,4 +1168,49 @@ func (n *Node) isMeshLocalIP(dstIP net.IP) bool {
 		return true
 	}
 	return n.lookupPeerIDByAdvertisedSubnet(dstIP) != ""
+}
+
+// icmpv6Offset walks the IPv6 extension-header chain in a frame payload and
+// returns the offset of the first ICMPv6 header, or -1 when the frame is not
+// IPv6 or the next-header chain does not terminate at ICMPv6.
+//
+// The NDP proxy used to compare payload[20] == 58 and then read the NS target
+// at the fixed offset 62. That is only correct for an NS with no extension
+// headers: Hop-by-Hop Options, Destination Options, Routing, Fragment and AH are
+// all legal on an NS, and any one of them shifted BOTH the ICMPv6 type test and
+// the target offset. Such an NS fell out of proxying entirely — and unlike the
+// ICMPv6 echo case it had no multicast flood to fall back on, so a host whose
+// kernel prepended an extension header could never resolve a neighbour across
+// the mesh.
+//
+// Every extension header except ESP carries its own next-header field as the
+// last byte of the header, so the walk only needs each header's byte length.
+// AH is counted in 4-byte units with the 2-byte adjustment from RFC 4302, and
+// ESP is stopped at because its next header lives in an optional trailer.
+func icmpv6Offset(payload []byte) int {
+	if len(payload) < 56 || binary.BigEndian.Uint16(payload[12:14]) != packet.EtherTypeIPv6 {
+		return -1
+	}
+	// 54 = 14-byte Ethernet header + 40-byte IPv6 base header.
+	off := 54
+	nh := int(payload[20])
+	for nh != 58 {
+		var length int
+		switch nh {
+		case 0, 43, 60: // Hop-by-Hop Options, Routing, Destination Options
+			length = (int(payload[off+1])&0x0f + 1) * 8
+		case 44: // Fragment
+			length = 8
+		case 51: // AH
+			length = (int(payload[off+1])&0x3f + 1) * 4
+		default:
+			return -1
+		}
+		if off+length > len(payload) {
+			return -1
+		}
+		nh = int(payload[off+length-1])
+		off += length
+	}
+	return off
 }

@@ -189,6 +189,24 @@ func generateConnEpoch() uint64 {
 // while retaining the same in-memory cipher, so the peer re-anchors its dedup
 // window to the new epoch WITHOUT re-deriving the key.
 func (n *Node) ensureLocalEpoch(p peer.ID) uint64 {
+	// A retained, negotiated cipher is authoritative for the epoch we stamp
+	// into outbound frames — txEpochForPeer reads po.localEpoch. So the map
+	// below is only a cache for the not-yet-handshaken state, never a second
+	// source of truth. If it is regenerated while the cipher is retained, the
+	// two diverge for good: removePeerObf clears this map entry on every
+	// transport loss while deliberately keeping the cipher, so the next call
+	// would mint a fresh random epoch, a reconnect would advertise THAT epoch
+	// (epochSync / SeqSync), the peer would anchor its dedup window to it, and
+	// every data frame we then sent — still stamped with po.localEpoch — would
+	// be rejected as a stale epoch. Those frames decrypt fine, so the
+	// decrypt-fail self-heal never fires and the link is a permanent one-way
+	// black hole that every liveness probe reads as healthy.
+	if po := n.peerObf(p); po != nil && po.negotiated {
+		if v, ok := n.peerLocalEpochs.Load(p); !ok || v.(uint64) != po.localEpoch {
+			n.peerLocalEpochs.Store(p, po.localEpoch)
+		}
+		return po.localEpoch
+	}
 	if v, ok := n.peerLocalEpochs.Load(p); ok {
 		return v.(uint64)
 	}
@@ -200,10 +218,15 @@ func (n *Node) ensureLocalEpoch(p peer.ID) uint64 {
 // txEpochForPeer returns the per-peer anti-replay epoch stamped into frames sent
 // to peer p. It returns 0 (a valid epoch) when no cipher has been negotiated yet,
 // so the SeqID stays well-formed and the receiver's dedup accepts it on a
-// not-yet-epochSet window.
+// not-yet-epochSet window. It falls back to the map for the same reason as
+// ensureLocalEpoch above: the retained cipher can be garbage-collected while a
+// map entry survives, and the epoch we send must match the one SeqSync advertises.
 func (n *Node) txEpochForPeer(p peer.ID) uint64 {
 	if po := n.peerObf(p); po != nil {
 		return po.localEpoch
+	}
+	if v, ok := n.peerLocalEpochs.Load(p); ok {
+		return v.(uint64)
 	}
 	return 0
 }

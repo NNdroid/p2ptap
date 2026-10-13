@@ -122,7 +122,21 @@ func (l *listener) listen() {
 		candidate, err := l.mux.Accept(l.ctx)
 		if err != nil {
 			if l.ctx.Err() == nil {
-				log.Debug("accepting candidate failed", "error", err)
+				// Our context is still alive, so the mux died underneath us
+				// (a read error on its socket — e.g. the interface it was bound
+				// to went away). Without propagating that here we become a
+				// zombie: listen() returns but nobody cancels l.ctx, so Accept
+				// blocks forever, the swarm never sees ErrListenerClosed and
+				// keeps advertising an address that can no longer accept
+				// anything, and the mux's UDP socket is never closed. Cancel
+				// l.ctx to make Accept return ErrListenerClosed, and close the
+				// mux to release the socket. l.ctx is derived from
+				// context.Background(), not from mux.ctx, so this only stops
+				// accepting NEW candidates — it cannot take down connections
+				// that are already established.
+				log.Error("udpmux died under the listener; withdrawing it", "local_addr", l.mux.GetListenAddresses(), "error", err)
+				l.mux.Close()
+				l.cancel()
 			}
 			return
 		}

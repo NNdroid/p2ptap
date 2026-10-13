@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -246,12 +247,16 @@ func (n *Node) rebuildARPIndex() {
 // disjoint or one contains the other, so "overlap" is detected as one block
 // containing the other (equal blocks are exact duplicates).
 //
-// For every conflict the higher-priority peer — by the allowed_subnet_peers
-// ordering — keeps its subnet in the routing index; every lower-priority
-// overlapping peer is dropped so L2/L3 resolution stays deterministic instead
-// of silently falling through to last-writer-wins. The function returns the
-// surviving subnet entries plus the recorded conflicts (one per suppressed
-// loser), which the caller surfaces for alerting.
+// Only a byte-identical CIDR is ambiguous enough to warrant suppression: two
+// peers announcing the same /24 cannot be told apart by any prefix match, so the
+// lower-priority announcement is dropped. Strict containment (one prefix inside
+// another) is NOT ambiguous — the more specific prefix names exactly the
+// addresses it owns — so both entries are kept and longest-prefix wins at lookup
+// time (surviving is sorted below). Dropping the contained prefix used to
+// blackhole it outright: 10.0.1.0/24 behind peer B became unreachable the moment
+// peer A announced 10.0.0.0/16. Contained conflicts are still reported, with an
+// empty Losers list, so the overlap stays visible without telling
+// isSubnetRouteSuppressed to withdraw an OS route that is actually correct.
 //
 // A single peer advertising two overlapping prefixes of its own never conflicts
 // (a.pid == b.pid is skipped) — overlapping private LANs behind one node are
@@ -276,33 +281,35 @@ func (n *Node) resolveSubnetConflicts(allSubnets []arpSubnetEntry, order []strin
 				continue
 			}
 			winner, _, arbReason := arbitratePeers([]peer.ID{a.pid, b.pid}, order)
-			loserIdx := i
-			winnerIdx := j
+			var loser arpSubnetEntry
+			var loserIdx int
 			if winner == a.pid {
-				loserIdx = j
-				winnerIdx = i
+				loser, loserIdx = b, j
+			} else {
+				loser, loserIdx = a, i
 			}
-			if dropped[loserIdx] {
+			if cidrEqual(a.net, b.net) {
+				dropped[loserIdx] = true
+				conflicts = append(conflicts, buildConflict(
+					"advertised_subnet", a.net.String(),
+					[]peer.ID{a.pid, b.pid},
+					[]peer.ID{loser.pid},
+					winner, arbReason+" | subnet "+a.net.String()+
+						" is announced by both peers; lower-priority announcement suppressed from routing index",
+				))
 				continue
 			}
-			dropped[loserIdx] = true
-			loser := allSubnets[loserIdx]
-			winnerNet := allSubnets[winnerIdx].net
-
-			resourceType := "advertised_subnet_overlap"
-			resource := loser.net.String()
-			if cidrEqual(a.net, b.net) {
-				resourceType = "advertised_subnet"
-				resource = a.net.String()
+			winnerEntry := b
+			if winner == a.pid {
+				winnerEntry = a
 			}
-			reason := arbReason + " | subnet " + loser.net.String() +
-				" overlaps higher-priority subnet " + winnerNet.String() +
-				"; lower-priority subnet suppressed from routing index"
 			conflicts = append(conflicts, buildConflict(
-				resourceType, resource,
+				"advertised_subnet_overlap", loser.net.String(),
 				[]peer.ID{a.pid, b.pid},
-				[]peer.ID{loser.pid},
-				winner, reason,
+				nil,
+				winner, arbReason+" | subnet "+loser.net.String()+
+					" is contained in higher-priority subnet "+winnerEntry.net.String()+
+					"; both kept and longest-prefix match resolves the overlap",
 			))
 		}
 	}
@@ -313,6 +320,15 @@ func (n *Node) resolveSubnetConflicts(allSubnets []arpSubnetEntry, order []strin
 			surviving = append(surviving, e)
 		}
 	}
+	// Longest prefix first. Every lookup over idx.subnets returns the FIRST
+	// matching entry, so this ordering is what turns the scan into a
+	// longest-prefix match. Stable, so peers at equal prefix length keep their
+	// arbitration order.
+	sort.SliceStable(surviving, func(x, y int) bool {
+		ax, _ := surviving[x].net.Mask.Size()
+		ay, _ := surviving[y].net.Mask.Size()
+		return ax > ay
+	})
 	return surviving, conflicts
 }
 
@@ -705,11 +721,11 @@ func isSSRFBlockedAddr(a multiaddr.Multiaddr) bool {
 // through our own tunnel and creating a recursion loop.
 type overlayConnGater struct{}
 
-func (g *overlayConnGater) InterceptPeerDial(peer.ID) bool                         { return true }
+func (g *overlayConnGater) InterceptPeerDial(peer.ID) bool { return true }
 func (g *overlayConnGater) InterceptAddrDial(pid peer.ID, a multiaddr.Multiaddr) bool {
 	return !isOverlayMultiaddr(a)
 }
-func (g *overlayConnGater) InterceptAccept(cm network.ConnMultiaddrs) bool          { return true }
+func (g *overlayConnGater) InterceptAccept(cm network.ConnMultiaddrs) bool { return true }
 func (g *overlayConnGater) InterceptSecured(network.Direction, peer.ID, network.ConnMultiaddrs) bool {
 	return true
 }
@@ -1242,4 +1258,3 @@ const (
 	// isolation at the destination boot.
 	BootRelayProtocolID protocol.ID = "/p2ptap/boot-relay/1.0.0"
 )
-

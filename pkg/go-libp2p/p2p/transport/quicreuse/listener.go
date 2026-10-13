@@ -95,6 +95,16 @@ func (l *quicListener) Add(association any, tlsConf *tls.Config, allowWindowIncr
 	l.protocolsMu.Lock()
 	defer l.protocolsMu.Unlock()
 
+	// A dead listener's running channel is closed. Attaching to it would hand
+	// the caller a listener whose acceptLoopRunning is already closed, so every
+	// Accept fails at once and the address is unreachable for the rest of the
+	// process. Failing here loudly lets the transport drop the address instead.
+	select {
+	case <-l.running:
+		return nil, fmt.Errorf("quic listener on %s is closed", l.l.Addr())
+	default:
+	}
+
 	if len(tlsConf.NextProtos) == 0 {
 		return nil, errors.New("no ALPN found in tls.Config")
 	}
@@ -150,6 +160,12 @@ func (l *quicListener) Run() error {
 			if errors.Is(err, quic.ErrServerClosed) || strings.Contains(err.Error(), "use of closed network connection") {
 				return transport.ErrListenerClosed
 			}
+			// Previously this error was discarded outright: Run() returns, the
+			// entry stays in the ConnManager's table with a refcount > 0, and
+			// the next listener on this address reuses it — attaching protocols
+			// to a listener whose running channel is already closed, which made
+			// every Accept fail instantly and the address dead forever.
+			log.Error("quic listener accept failed; listener is dead and no longer accepting", "addr", l.l.Addr(), "error", err)
 			return err
 		}
 		proto := conn.ConnectionState().TLS.NegotiatedProtocol

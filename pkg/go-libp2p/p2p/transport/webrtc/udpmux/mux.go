@@ -22,7 +22,14 @@ var log = logging.Logger("webrtc-udpmux")
 // ReceiveBufSize is the size of the buffer used to receive packets from the PacketConn.
 // It is fine for this number to be higher than the actual path MTU as this value is not
 // used to decide the packet size on the write path.
-const ReceiveBufSize = 1500
+//
+// LOCAL PATCH: raised from 1500. A UDP ReadFrom into a buffer smaller than the
+// datagram silently truncates and reports no error, so any packet above 1500
+// bytes lost its tail with nothing to report the loss. pion reads its ICE
+// candidates into 8192-byte buffers, so the truncation happened here before
+// pion ever saw it and could only surface upstream as a stuck DTLS/SCTP
+// handshake with no diagnostic.
+const ReceiveBufSize = 65535
 
 // maxAddrsPerUfrag bounds the number of remote addresses we will track for a
 // single ufrag. ICE typically advertises a handful of candidates per session

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -373,32 +374,49 @@ func (n *Node) decryptPeerFrame(scratch []byte, data []byte, remotePeer peer.ID)
 	return dec, true, false
 }
 
-// maybeResyncOnDecryptFail triggers a background SeqSync re-handshake when a
-// peer's decryption failures accumulate.
-func (n *Node) maybeResyncOnDecryptFail(remotePeer peer.ID) {
+// maybeResyncPeer arms the SeqSync re-handshake once a per-peer failure counter
+// crosses its threshold. It returns false when it deliberately did NOT fire, so
+// a caller can stay quiet; true when it scheduled the re-handshake.
+//
+// Decrypt failures and dedup-desync failures are counted separately because they
+// are different failure modes, but both are healed by the same action — a fresh
+// SeqSync re-anchors ciphers AND dedup epochs on both ends — so they share this
+// threshold state machine instead of each growing one.
+func (n *Node) maybeResyncPeer(errs *sync.Map, remotePeer peer.ID) bool {
 	const (
 		threshold     = 16
 		cooldown      = 30 * time.Second
 		settleWindow  = 90 * time.Second
 		escalationCap = 64
 	)
-	rv, ok := n.peerRxDecryptRecentErrs.Load(remotePeer)
+	rv, ok := errs.Load(remotePeer)
 	if !ok {
-		return
+		return false
 	}
-	if v := rv.(*atomic.Uint64).Load(); v < threshold {
-		return
+	cnt := rv.(*atomic.Uint64)
+	if cnt.Load() < threshold {
+		return false
 	}
 	if t, ok := n.lastRekeySuccess.Load(remotePeer); ok {
-		if since := time.Since(t.(time.Time)); since < settleWindow && rv.(*atomic.Uint64).Load() < escalationCap {
-			return
+		if since := time.Since(t.(time.Time)); since < settleWindow && cnt.Load() < escalationCap {
+			return false
 		}
 	}
-	if v, loaded := n.decryptResyncCooldown.LoadOrStore(remotePeer, time.Now()); loaded {
-		if time.Since(v.(time.Time)) < cooldown {
-			return
+	if t, loaded := n.decryptResyncCooldown.LoadOrStore(remotePeer, time.Now()); loaded {
+		if time.Since(t.(time.Time)) < cooldown {
+			return false
 		}
 		n.decryptResyncCooldown.Store(remotePeer, time.Now())
+	}
+	return true
+}
+
+// maybeResyncOnDecryptFail triggers a background SeqSync re-handshake when a
+// peer's decryption failures accumulate.
+func (n *Node) maybeResyncOnDecryptFail(remotePeer peer.ID) {
+	rv, ok := n.peerRxDecryptRecentErrs.Load(remotePeer)
+	if !ok || !n.maybeResyncPeer(&n.peerRxDecryptRecentErrs, remotePeer) {
+		return
 	}
 	log.Info("Rx: %s has %d sustained decryption failures — triggering SeqSync re-handshake to re-anchor keys",
 		remotePeer.String(), rv.(*atomic.Uint64).Load())
@@ -410,6 +428,27 @@ func (n *Node) maybeResyncOnDecryptFail(remotePeer peer.ID) {
 		log.Info("Rx: %s decrypt-fail context — currentRxKeyFP=%s prevRxKeyFP=%s ring=%d algo=%s (fallback-opened frames so far may have kept link alive)",
 			remotePeer.String(), obfuscate.KeyFingerprint(po.rxKey), prevFP, len(po.rxRing), obfuscate.AlgoName(po.algo))
 	}
+	go n.ForceSyncSeq(remotePeer)
+}
+
+// maybeResyncOnDedupDesync is the dedup-side twin of maybeResyncOnDecryptFail.
+//
+// A frame rejected by the dedup window for a STALE EPOCH looks healthy to every
+// other subsystem: it decrypted cleanly (so recordPeerRxDecrypt recorded a
+// success and may even have reset the decrypt-fail counter), it arrived on a
+// live stream (so notePeerRx marked the peer reachable), and the ping/pong
+// liveness probe rides a plaintext echo that bypasses the encrypted data plane
+// entirely. Until now the ONLY observer of a dedup desync was this counter, and
+// nothing read it — so a sender whose epoch drifted from the window we anchored
+// was silently dropping every one of our frames, in one direction only, with no
+// error anywhere and no recovery. This makes that signal actionable.
+func (n *Node) maybeResyncOnDedupDesync(remotePeer peer.ID) {
+	rv, ok := n.peerDedupDesyncErrs.Load(remotePeer)
+	if !ok || !n.maybeResyncPeer(&n.peerDedupDesyncErrs, remotePeer) {
+		return
+	}
+	log.Info("Rx: %s has %d sustained dedup desyncs (frames we can decrypt but must drop) — triggering SeqSync re-handshake to re-anchor epochs",
+		remotePeer.String(), rv.(*atomic.Uint64).Load())
 	go n.ForceSyncSeq(remotePeer)
 }
 
