@@ -131,11 +131,9 @@ func (mux *UDPMux) GetConn(localUfrag string, addr net.Addr) (net.PacketConn, er
 
 // Close implements ice.UDPMux
 func (mux *UDPMux) Close() error {
-	select {
-	case <-mux.ctx.Done():
-		return nil
-	default:
-	}
+	// readLoop can cancel the mux context itself (after an unexpected read
+	// error), so the "already done" check must not short-circuit the socket
+	// close — otherwise a dead mux would leak its listening socket forever.
 	mux.cancel()
 	mux.socket.Close()
 	mux.wg.Wait()
@@ -165,6 +163,12 @@ func (mux *UDPMux) readLoop() {
 				log.Error("error reading from socket", "local_addr", mux.socket.LocalAddr(), "error", err)
 			}
 			pool.Put(buf)
+			// An unexpected read error means the mux is dead: no more incoming
+			// packets will ever arrive. Cancelling the mux context makes that
+			// observable — Accept and GetConn unblock with mux.ctx.Err()
+			// instead of blocking forever on an empty queue, and the caller can
+			// drop the listener and come back with a fresh socket.
+			mux.cancel()
 			return
 		}
 		buf = buf[:n]

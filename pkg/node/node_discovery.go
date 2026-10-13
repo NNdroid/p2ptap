@@ -137,10 +137,13 @@ func (n *Node) markRelayOnlyPeer(pID peer.ID) {
 }
 
 // clearRelayOnlyPeer removes the relay-only classification (e.g. once a direct
-// transport to the peer is established).
+// transport to the peer is established) and resets the upgrade backoff, so a
+// peer that later becomes reachable is not throttled by an old failure count.
 func (n *Node) clearRelayOnlyPeer(pID peer.ID) {
 	n.relayOnlyMu.Lock()
 	delete(n.relayOnlyPeers, pID)
+	delete(n.relayUpgradeFails, pID)
+	delete(n.relayUpgradeNext, pID)
 	n.relayOnlyMu.Unlock()
 }
 
@@ -149,6 +152,50 @@ func (n *Node) isRelayOnlyPeer(pID peer.ID) bool {
 	n.relayOnlyMu.RLock()
 	defer n.relayOnlyMu.RUnlock()
 	return n.relayOnlyPeers[pID]
+}
+
+// relayUpgradeCandidates returns the relay-only peers that should be tried for a
+// direct upgrade now, skipping peers still inside their exponential backoff.
+// Without this gate a peer that can never be reached directly is dialed on every
+// tick — one 15s dial plus an 8s DHT lookup each time, forever.
+func (n *Node) relayUpgradeCandidates(now time.Time) []peer.ID {
+	n.relayOnlyMu.RLock()
+	defer n.relayOnlyMu.RUnlock()
+	if len(n.relayOnlyPeers) == 0 {
+		return nil
+	}
+	var out []peer.ID
+	for pid := range n.relayOnlyPeers {
+		if next, ok := n.relayUpgradeNext[pid]; ok && now.Before(next) {
+			continue
+		}
+		out = append(out, pid)
+	}
+	return out
+}
+
+// noteRelayUpgradeResult updates the per-peer backoff. A single failure is
+// retried on the next tick; from the second consecutive failure onward the
+// interval doubles, capped, so an unreachable peer costs one attempt per
+// relayUpgradeMaxBackoff instead of one per tick.
+func (n *Node) noteRelayUpgradeResult(pid peer.ID, upgraded bool) {
+	n.relayOnlyMu.Lock()
+	defer n.relayOnlyMu.Unlock()
+	if upgraded {
+		delete(n.relayUpgradeFails, pid)
+		delete(n.relayUpgradeNext, pid)
+		return
+	}
+	fails := n.relayUpgradeFails[pid] + 1
+	n.relayUpgradeFails[pid] = fails
+	if fails < 2 {
+		return
+	}
+	backoff := relayUpgradeBaseBackoff << uint(fails-2)
+	if backoff > relayUpgradeMaxBackoff {
+		backoff = relayUpgradeMaxBackoff
+	}
+	n.relayUpgradeNext[pid] = time.Now().Add(backoff)
 }
 
 func (n *Node) getPeerLatency(pID peer.ID) int64 {

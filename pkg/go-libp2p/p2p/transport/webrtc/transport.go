@@ -47,7 +47,7 @@ func init() {
 	webrtcComponent, err = ma.NewComponent(ma.ProtocolWithCode(ma.P_WEBRTC_DIRECT).Name, "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
-		os.Executable()
+		os.Exit(1)
 	}
 }
 

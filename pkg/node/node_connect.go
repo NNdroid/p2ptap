@@ -134,6 +134,16 @@ func (n *Node) rediscoverPeer(pid peer.ID) {
 
 const relayAuthProtocol = "/p2ptap/auth/1.0.0"
 
+const (
+	// relayUpgradeBaseBackoff is the first backoff step after a failed
+	// direct-upgrade attempt; each further consecutive failure doubles it.
+	relayUpgradeBaseBackoff = time.Minute
+	// relayUpgradeMaxBackoff caps the exponential growth, so a peer that can
+	// never be reached directly is retried roughly once per half hour instead
+	// of once per tick.
+	relayUpgradeMaxBackoff = 30 * time.Minute
+)
+
 // relayOnlyDirectUpgradeLoop periodically attempts to upgrade relay-only peers
 // to a direct connection. It is the recovery path for the "pinned to relay"
 // state: once a direct connection succeeds, the ConnectedF handler calls
@@ -153,12 +163,7 @@ func (n *Node) relayOnlyDirectUpgradeLoop() {
 		case <-n.ctx.Done():
 			return
 		case <-ticker.C:
-			n.relayOnlyMu.RLock()
-			relayOnly := make([]peer.ID, 0, len(n.relayOnlyPeers))
-			for pid := range n.relayOnlyPeers {
-				relayOnly = append(relayOnly, pid)
-			}
-			n.relayOnlyMu.RUnlock()
+			relayOnly := n.relayUpgradeCandidates(time.Now())
 
 			// Parallel upgrades with a bounded semaphore: each attemptDirectUpgrade
 			// can take ~23s (8s DHT + 15s dial), so a serial loop of N peers can
@@ -179,7 +184,8 @@ func (n *Node) relayOnlyDirectUpgradeLoop() {
 				go func(pid peer.ID) {
 					defer wg.Done()
 					defer func() { <-sem }()
-					n.attemptDirectUpgrade(pid)
+					upgraded := n.attemptDirectUpgrade(pid)
+					n.noteRelayUpgradeResult(pid, upgraded)
 				}(pid)
 			}
 			wg.Wait()
@@ -189,7 +195,9 @@ func (n *Node) relayOnlyDirectUpgradeLoop() {
 
 // attemptDirectUpgrade performs one force-direct dial (no circuit addresses)
 // to a relay-only peer using its stored or DHT-rediscovered direct addresses.
-func (n *Node) attemptDirectUpgrade(pid peer.ID) {
+// It reports whether the peer is directly connected now, so the caller can
+// back off peers that repeatedly fail instead of retrying every tick.
+func (n *Node) attemptDirectUpgrade(pid peer.ID) bool {
 	// Direct candidates: peerstore addrs minus loopback minus circuit addrs.
 	addrs := filterUndialableAddrs(n.Host.Peerstore().Addrs(pid))
 	direct := make([]multiaddr.Multiaddr, 0, len(addrs))
@@ -212,7 +220,7 @@ func (n *Node) attemptDirectUpgrade(pid peer.ID) {
 		}
 	}
 	if len(direct) == 0 {
-		return
+		return false
 	}
 
 	direct = prioritizeMultiaddrs(direct)
@@ -228,12 +236,14 @@ func (n *Node) attemptDirectUpgrade(pid peer.ID) {
 	// (which would instantly "win" and report a false direct upgrade).
 	if err := n.Host.Connect(network.WithForceDirectDial(ctx, "p2ptap-relay-upgrade"), peer.AddrInfo{ID: pid, Addrs: direct}); err != nil {
 		log.Debug("Direct upgrade for relay-only peer %s failed this round: %v", pid.ShortString(), err)
-		return
+		return false
 	}
-	if n.isDirectlyConnected(pid) {
-		log.Info("Relay-only peer %s upgraded to DIRECT connection", pid.String())
-		n.clearRelayOnlyPeer(pid)
+	if !n.isDirectlyConnected(pid) {
+		return false
 	}
+	log.Info("Relay-only peer %s upgraded to DIRECT connection", pid.String())
+	n.clearRelayOnlyPeer(pid)
+	return true
 }
 
 // authenticateWithRelay performs PSK challenge-response with a relay/bootstrap server.

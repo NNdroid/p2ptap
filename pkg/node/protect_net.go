@@ -149,8 +149,33 @@ func (p *protectNet) ResolveTCPAddr(network, address string) (*net.TCPAddr, erro
 	return p.base.ResolveTCPAddr(network, address)
 }
 
+// Interfaces returns the physical interfaces visible for ICE candidate
+// gathering, hiding virtual tunnel adapters (the TAP/Wintun device).
+//
+// Without this filter pion's ICE agent enumerates the TAP as a host candidate
+// and opens its candidate sockets on that interface — so the advertised
+// candidate is an overlay address no external peer can reach, and the STUN
+// probes it sends go straight back into the tunnel instead of out the WAN.
+// Every connection attempt then spends the whole ICE budget on a candidate that
+// can never work, which is why WebRTC direct links fail between peers that are
+// behind a NAT or on a different LAN.
+//
+// Only virtual *names* are matched (see isVirtualInterface): RFC1918 LAN
+// addresses are deliberately kept, since filtering them by address would also
+// drop genuine LAN peer interfaces and break same-subnet direct connectivity.
 func (p *protectNet) Interfaces() ([]*transport.Interface, error) {
-	return p.base.Interfaces()
+	ifaces, err := p.base.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	physical := ifaces[:0]
+	for _, ifc := range ifaces {
+		if isVirtualInterface(ifc.Name) {
+			continue
+		}
+		physical = append(physical, ifc)
+	}
+	return physical, nil
 }
 
 func (p *protectNet) InterfaceByIndex(index int) (*transport.Interface, error) {

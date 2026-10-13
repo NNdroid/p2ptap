@@ -156,6 +156,13 @@ type Node struct {
 	// their end-to-end circuit is not silently cut on idle.
 	relayOnlyMu    sync.RWMutex
 	relayOnlyPeers map[peer.ID]bool
+	// relayUpgradeFails counts consecutive failed direct-upgrade attempts per
+	// peer and relayUpgradeNext records the earliest time the upgrade loop may
+	// retry that peer. Both are guarded by relayOnlyMu. They keep a peer that
+	// can never be reached directly from burning a dial (and an 8s DHT lookup)
+	// on every tick forever.
+	relayUpgradeFails map[peer.ID]int
+	relayUpgradeNext  map[peer.ID]time.Time
 	// relayCtrlSyncAt records the last time the relay-control reconciler kicked
 	// a control-plane sync (SeqSync + Meta) for a relay-only peer, so it can
 	// apply a per-peer cooldown instead of re-triggering every tick.
@@ -1510,6 +1517,18 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		log.Info("WebTransport transport DISABLED — no /webtransport/ listeners")
 	}
 
+	if !cfg.Transports.EnableQUICReuse && !cfg.Transports.EnableWebRTC &&
+		!cfg.Transports.EnableWebTransport && !cfg.Transports.EnableTCPReuse {
+		// With no transport registered, libp2p's FallbackDefaults kicks in and
+		// silently turns EVERY transport back on — QUIC, WebRTC, WebTransport,
+		// TCP and even WebSocket — plus its own wildcard listeners, none of which
+		// went through expandListenAddr or the socket-protection wrappers above.
+		// That defeats the whole point of disabling them, so surface it loudly.
+		log.Warn("All four transport switches are OFF: libp2p will fall back to its " +
+			"default transports (QUIC, WebRTC, WebTransport, TCP, WebSocket) with its own " +
+			"wildcard listeners, so nothing was actually disabled. Enable at least one.")
+	}
+
 	h, err := libp2p.New(opts...)
 	if err != nil {
 		cancel()
@@ -2549,7 +2568,7 @@ func (n *Node) SetupWebUI() error {
 // POSTROUTING chain so client tunnel traffic survives the real (reduced) path
 // MTU. We must NOT shrink the client's TAP MTU (#2 is explicitly forbidden), so
 // instead we advertise a smaller MSS. The actual wire path is a QUIC stream
-// (path MTU ~1200) plus obfuscation framing overhead (14-byte header + 16-byte
+// (path MTU ~1200) plus obfuscation framing overhead (15-byte header + 16-byte
 // AEAD tag) and IP/TCP headers, so the clamp must subtract that overhead;
 // otherwise large TCP segments get fragmented/blackholed through the tunnel and
 // web browsing / data exchange on the Exit Node client crawls.
@@ -2564,8 +2583,10 @@ func computeExitMSS(mtu int, obfMode string) int {
 	if mtu > pathMTU {
 		mtu = pathMTU
 	}
-	// 40 (IP, v6-safe) + 20 (TCP) + 14 (obfuscation header) + 16 (AEAD tag)
-	overhead := 40 + 20 + 14 + 16
+	// 40 (IP, v6-safe) + 20 (TCP) + obfuscate frame header + 16 (AEAD tag).
+	// The header is 15 bytes; the earlier hardcoded 14 over-advertised the MSS
+	// by one byte, so clamped segments still overflowed the tunnel by a byte.
+	overhead := 40 + 20 + obfuscate.HeaderLen + 16
 	mss := mtu - overhead
 	if mss < 512 {
 		mss = 512

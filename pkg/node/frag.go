@@ -378,9 +378,11 @@ func (n *Node) maxFragPayload() int {
 	if mtu > pathMTU {
 		mtu = pathMTU
 	}
-	// overhead: QUIC/IP/UDP headroom(~40) + obfuscate header(14) + AEAD(16)
-	// + frag header(12)
-	overhead := 40 + 14 + 16 + fragHeaderLen
+	// overhead: QUIC/IP/UDP headroom(~40) + obfuscate frame header + AEAD tag
+	// + frag header(12). The obfuscate header is 15 bytes (obfuscate.HeaderLen);
+	// hardcoding 14 here oversized every fragment by exactly one byte, so a
+	// fragment that looked inside the path MTU was in fact one byte too large.
+	overhead := 40 + obfuscate.HeaderLen + 16 + fragHeaderLen
 	p := mtu - overhead
 	if p < 512 {
 		p = 512

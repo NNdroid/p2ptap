@@ -50,17 +50,12 @@ func getNATType() int32 {
 	return detectedNATType.Load()
 }
 
-// setNATType stores a detected NAT type.
+// setNATType stores a detected NAT type. Plain atomic store, not CAS: every
+// STUN goroutine observes the same local endpoint, so they agree on the verdict
+// and re-detection must be able to move the value in either direction (roaming
+// to a symmetric NAT must not be blocked by an earlier "open" result).
 func setNATType(t int32) {
 	detectedNATType.Store(t)
-}
-
-// setNATTypeCAS atomically stores t only if the current value equals oldVal.
-// This prevents the check-then-set race in the STUN binder where concurrent
-// goroutines (one per STUN server) can overwrite each other's classification.
-// Returns true if the swap succeeded.
-func setNATTypeCAS(oldVal, t int32) bool {
-	return detectedNATType.CompareAndSwap(oldVal, t)
 }
 
 // needsTURN returns true if the detected NAT type requires TURN relay.
@@ -654,23 +649,28 @@ func sendSTUNBindingRequest(ctx context.Context, conn *net.UDPConn, localAddr *n
 	result := net.UDPAddr{IP: xa.IP, Port: xa.Port}
 
 	// NAT type inference — stored globally so the TURN binder can decide
-	// whether relay allocation is needed. Only set once (first successful
-	// query wins) to avoid races across concurrent goroutines. With a
-	// single-server STUN test, we can only distinguish open, cone (port
-	// preserved), and unknown. Port-changed is ambiguous (could be cone
-	// or symmetric), so we use natUnknown to conservatively keep TURN.
-	if detectedNATType.Load() == natUnknown {
-		if localAddr.IP.Equal(result.IP) {
-			log.Debug("STUN NAT type: open internet (no NAT) — server-reflexive == local address")
-			setNATTypeCAS(natUnknown, natOpen)
-		} else if localAddr.Port == result.Port {
-			log.Debug("STUN NAT type: restricted cone NAT (port preserved, IP changed)")
-			setNATTypeCAS(natUnknown, natCone)
-		} else {
-			log.Debug("STUN NAT type: unknown — port changed (local=%d, reflexive=%d), may be symmetric",
-				localAddr.Port, result.Port)
-			// Stay natUnknown — port-changed is ambiguous.
-		}
+	// whether relay allocation is needed. A single-server STUN test can only
+	// distinguish open, cone (port preserved) and port-changed. Port-changed
+	// is classified as symmetric NAT, which is the conservative call: a cone
+	// NAT with restricted port filtering needs no relay, but a symmetric NAT
+	// without one means every hole-punch attempt fails.
+	//
+	// Re-detection is allowed in both directions, not just from natUnknown.
+	// NAT topology changes when the node roams (Wi-Fi to cellular, VPN connect,
+	// carrier NAT change); a stale "open/cone" verdict would skip TURN
+	// permanently and the node could never traverse NATs again. All queries
+	// observe the same local endpoint, so concurrent goroutines agree and the
+	// last verdict simply wins.
+	if localAddr.IP.Equal(result.IP) {
+		log.Debug("STUN NAT type: open internet (no NAT) — server-reflexive == local address")
+		setNATType(natOpen)
+	} else if localAddr.Port == result.Port {
+		log.Debug("STUN NAT type: restricted cone NAT (port preserved, IP changed)")
+		setNATType(natCone)
+	} else {
+		log.Debug("STUN NAT type: symmetric NAT — port changed (local=%d, reflexive=%d)",
+			localAddr.Port, result.Port)
+		setNATType(natSymmetric)
 	}
 
 	return result, nil

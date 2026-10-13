@@ -104,7 +104,12 @@ func (s *stream) SetWriteDeadline(t time.Time) error {
 	defer s.mx.Unlock()
 	s.writeDeadline = t
 	s.notifyWriteStateChanged()
-	return nil
+	// Also propagate to the data channel. Without this a full send buffer leaves
+	// WriteMsg blocked inside the SCTP layer, where s.writeDeadline is never
+	// consulted, so the deadline never fires and the caller (plus every other
+	// stream sharing the data channel, including FIN_ACK control messages) stays
+	// wedged indefinitely.
+	return s.dataChannel.SetWriteDeadline(t)
 }
 
 // sendBufferSize() is the maximum data we enqueue on the underlying data channel for writes.

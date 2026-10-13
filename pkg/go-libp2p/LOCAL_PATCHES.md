@@ -2,7 +2,7 @@
 
 本目录通过 `go.mod` 的 `replace github.com/libp2p/go-libp2p v0.50.0 => ./pkg/go-libp2p`
 以源码形式参与构建。基线为上游 **v0.50.0**（2026-08-12 发布，当前最新版），
-在此之上维护了以下 7 处本地补丁。升级到未来版本（v0.51+）时，需要把这份清单
+在此之上维护了以下 10 处本地补丁。升级到未来版本（v0.51+）时，需要把这份清单
 中的补丁重新应用到新基线。
 
 ## 1. `p2p/host/basic/addrs_manager.go` — Android 接口地址提供者
@@ -80,6 +80,32 @@
 早期本补丁曾把 `SetDialServerName` 放在 `p2p/transport/quic` 包内、只在
 `dialWithScope` 注入——那会让 TCP-TLS 拨号漏掉 SNI,与”TLS/QUIC 同一配置”的意图不符。
 现统一收口到 `p2ptls.ConfigForPeer`,quic 侧不再持有 SNI 全局。
+
+## 8. `p2p/transport/webrtc/stream_write.go` — 写超时下传到 SCTP
+
+- `stream.SetWriteDeadline` 除写本地 `s.writeDeadline` 外，新增
+  `s.dataChannel.SetWriteDeadline(t)`。
+- 原因：本地 `writeDeadline` 只驱动 `Write()` 里 `availableSpace < minMessageSize`
+  的等待分支；一旦 `s.writer.WriteMsg` 因发送缓冲占满而阻塞在 SCTP 层，代码根本不在
+  `select` 里，本地超时永远不会触发。结果是一个满缓冲的 stream 会一直卡住，而同一条
+  data channel 上的其他 stream（包括 FIN_ACK 控制消息）一并被拖住。读侧
+  `stream_read.go` 是完整委托的，本补丁让写侧与读侧语义一致。
+
+## 9. `p2p/transport/webrtc/udpmux/mux.go` — readLoop 死亡可观测
+
+- `readLoop` 遇到非「已关闭」错误时，退出前调用 `mux.cancel()`；`Close()` 去掉
+  `ctx.Done()` 短路，改为无条件 `cancel()` + `socket.Close()`。
+- 原因：上游 `readLoop` 遇错只打一条 `log.Error` 就 return，mux 从此不再处理任何入站
+  包，而 `Accept` 只在 `mux.queue` 和 `mux.ctx.Done()` 之间 select——于是 `Accept` 永久
+  阻塞，入站 WebRTC 全部失效，唯一痕迹是那条日志。`Accept` 会拿到 `mux.ctx.Err()`，
+  调用方才能丢掉监听器重开 socket。第二处修正：readLoop 已自行 cancel 时上游 `Close` 会
+  提前 return 而不关 socket，泄漏监听 socket。
+
+## 10. `p2p/transport/webrtc/transport.go` — `init()` 里的笔误
+
+- `os.Executable()` → `os.Exit(1)`。上游原文写错了：`os.Executable()` 返回可执行文件路径
+  后被丢弃，是一个空操作，multiaddr 组件注册失败时进程照旧继续启动。属上游遗留缺陷，
+  本仓库顺带修掉（该分支实际不会触发）。
 
 ## 非代码附加目录
 
