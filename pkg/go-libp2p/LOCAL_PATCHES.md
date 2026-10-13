@@ -2,7 +2,7 @@
 
 本目录通过 `go.mod` 的 `replace github.com/libp2p/go-libp2p v0.50.0 => ./pkg/go-libp2p`
 以源码形式参与构建。基线为上游 **v0.50.0**（2026-08-12 发布，当前最新版），
-在此之上维护了以下 11 处本地补丁。升级到未来版本（v0.51+）时，需要把这份清单
+在此之上维护了以下 12 处本地补丁。升级到未来版本（v0.51+）时，需要把这份清单
 中的补丁重新应用到新基线。
 
 ## 1. `p2p/host/basic/addrs_manager.go` — Android 接口地址提供者
@@ -126,6 +126,31 @@
   一次性告警由 `pkg/node` 负责。
 - 回归测试：`transport_ice_servers_test.go`（URL 转换表、provider 按连接重解析、基座配置
   不被污染、nil provider、provider 取代静态项）。
+
+## 12. `p2p/net/swarm/swarm_dial.go` — 拨号取消不计入黑洞失败样本
+
+- `dialAddr` 末尾原为 `s.bhd.RecordResult(addr, err == nil)`，即任何错误都记一次网络失败，
+  取消也不例外。改为只按 `context.Cause(ctx)` 判定：`Cause == context.Canceled`（拨号被
+  swarm 自己取消）不记录，其余照旧记录。
+- 原因：同一 peer 的所有地址共用同一个 peer-dial ctx（`dial_worker.go` 中
+  `addrDial.ctx = req.ctx`），一个地址胜出后 dial worker 返回、ctx 被收回，其余仍在飞的
+  地址一律报「operation was canceled」。`swarm.NoDelayDialRanker` 让每个 peer 一轮同时发出
+  全部地址（QUIC v4/v6、WebTransport v4/v6、WebRTC v4/v6 共 6 个 UDP），于是健康节点一轮
+  就是 1 成功 + 5「失败」，成功率被压到约 15%；网格里只要混进几个 relay-only（对称 NAT、
+  无 TURN）peer，一轮 6 失败 0 成功，100 条窗口约 15 轮后跌破默认 5% 阈值，`FilterAddrs`
+  便剥掉**所有** peer 的**所有**公网 UDP 地址，`filterKnownUndialables` 返回
+  `ErrDialRefusedBlackHole`，99/100 的拨号在真正开始之前就被拒。失败日志只是 Debug，
+  整个过程在日志里完全看不到。
+- 只查 Cause、不看 err 的原因：peer-dial 预算到期时，OS 会把被打断的 connect 同样报成
+  `operation was canceled`，此时 `context.Cause` 才是 `deadline exceeded`。超时正是检测器
+  本该收集的信号；若按 err 判定，超时会被一并吞掉，样本窗口永远为空、状态永远停在
+  Probing，不可达地址再也不会被判定出来。
+- p2ptap 侧配套：`pkg/node/node.go` 把 UDP 计数器设为 `MinSuccesses: 0`（永不 block——打洞与
+  DCUtR 是到达对称 NAT peer 的唯一途径，且 relay 永远兜底，误 block 的代价只是浪费拨号时间
+  而非丢连通性），IPv6 保留默认 5。本补丁让剩下的 IPv6 过滤保持真实语义。
+- 回归测试：`black_hole_p2ptap_test.go`（`MinSuccesses=0` 永不 block；默认阈值确实会 block、
+  且一次成功只回到 Probing 而非直接 Allowed）；上游 `TestBlackHoledAddrBlocked` 在
+  Windows 上通过。
 
 ## 非代码附加目录
 

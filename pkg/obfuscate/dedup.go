@@ -66,8 +66,11 @@ func (d *Deduplicator) WindowUtilization() float64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	// Maintain the population when bits change instead of scanning all 1024
-	// words for the receive loop's per-packet telemetry.
-	return float64(d.seenCount) / float64(counterWindow*64)
+	// words for the receive loop's per-packet telemetry. Divide by the LIVE
+	// window, not the whole ring: seenCount only ever counts bits inside
+	// dedupWindow, so dividing by counterWindow*64 reported ~0.4% no matter how
+	// loaded the window was and hid the real reorder headroom.
+	return float64(d.seenCount) / float64(dedupWindow)
 }
 
 // SetConnEpoch records the per-connection epoch negotiated with this peer
@@ -172,16 +175,20 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 	if ahead32 < behind32 {
 		// c genuinely leads maxC. A short move slides the live window to
 		// [c-dedupWindow, c], evicting the counters that just fell off the
-		// lower edge so the bitmask never accumulates set bits forever. A
-		// large jump (resync, long silence) cannot be slid economically, so
-		// re-anchor instead.
+		// lower edge so the bitmask never accumulates set bits forever.
+		//
+		// A large jump is slid too, never clearAll'd: wiping the whole bitmap
+		// also wipes the counters that are still inside maxBehindTolerance
+		// (which equals dedupWindow), so a frame already delivered at
+		// counter c-k with k <= dedupWindow could not be told apart from a
+		// duplicate once maxC jumped past c. Sliding costs at most one ring of
+		// bit clears and leaves exactly [c-dedupWindow, c] preserved, which is
+		// the only range where a duplicate can still matter.
 		newMin := (c - dedupWindow) & 0xFFFF
-		if ahead32 <= dedupWindow {
-			d.evictRange(d.minCounter, newMin)
-		} else {
-			d.clearAll()
+		d.evictRange(d.minCounter, newMin)
+		if ahead32 > dedupWindow {
 			atomic.AddUint64(&d.windowRets, 1)
-			log.Debug("Dedup: large forward jump, re-anchor max=%d ahead=%d", seqID, ahead32)
+			log.Debug("Dedup: large forward jump, slid window max=%d ahead=%d", seqID, ahead32)
 		}
 		d.maxSeq = seqID
 		d.minCounter = newMin
@@ -218,18 +225,30 @@ func (d *Deduplicator) IsDuplicate(seqID uint64) bool {
 	return false
 }
 
-// dedupWindow is the out-of-order tolerance, in counters. Counters that fall
-// more than dedupWindow behind the current max are evicted from the bitmask so
-// the window stays bounded. Reduced from 16384 to 256 in Round 8: the old
-// value created a replay window spanning 16384→2^32 counters, while real
-// multi-path reordering is bounded by a few hundred frames.
-const dedupWindow = 256
+// dedupWindow is the out-of-order tolerance, in counters: how many counters
+// behind the current max a seen-counter is still remembered for. Counters that
+// fall further behind are evicted from the bitmask as the window slides, which
+// bounds the replay window.
+//
+// It MUST equal maxBehindTolerance. Below that, a counter that is still inside
+// the replay tolerance has already been evicted, so testBit reports "unseen"
+// and the frame is delivered a second time — a silent duplicate TAP write in
+// the (dedupWindow, maxBehindTolerance] band. Above it, the window would
+// remember counters that IsDuplicate would reject anyway, widening the replay
+// window for no reordering gain. Raised from 256 to 1024: at 256 counters a
+// 100 Mbps link covers about 25 ms of skew, which is smaller than one relay
+// hop, so real reordering already fell into the blind band.
+//
+// The recvd array is a fixed 65536-bit ring either way, so widening the window
+// costs no extra memory.
+const dedupWindow = maxBehindTolerance
 
 // maxBehindTolerance is the maximum number of counters a frame may trail the
 // current max before it is rejected as a replay. Frames this far behind are
 // not multi-path reordering — they are captured-and-replayed. The previous
 // code re-anchored and accepted any frame >= halfCounter (32768) behind,
-// creating a massive replay window.
+// creating a massive replay window. See dedupWindow for why it and the
+// eviction horizon must stay equal.
 const maxBehindTolerance = 1024
 
 // --- internal helpers ---

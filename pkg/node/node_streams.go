@@ -433,7 +433,7 @@ func (n *Node) handleStream(s network.Stream) {
 			// Unicast frames are handled by per-peer SeqID sliding window deduplication above.
 			if isBroadcastOrMulticastMAC(dstMAC) {
 				contentHash := fnvHash64(payload)
-				if n.bcastDedup.isDuplicate(contentHash) {
+				if n.bcastDedup.isDuplicate(remotePeer, contentHash) {
 					n.Collector.RecordDedup()
 					log.Debug("Content-dup broadcast frame hash=0x%x from peer %s dropped", contentHash, remotePeer.String())
 					continue

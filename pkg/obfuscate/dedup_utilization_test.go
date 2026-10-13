@@ -18,7 +18,9 @@ func TestDedupUtilizationMatchesBitmap(t *testing.T) {
 			population += uint64(bits.OnesCount64(word))
 		}
 		d.mu.Unlock()
-		want := float64(population) / float64(counterWindow*64)
+		// The denominator is the live window, not the whole ring: eviction keeps
+		// only dedupWindow counters, so utilization of a full window is 1.
+		want := float64(population) / float64(dedupWindow)
 		if got := d.WindowUtilization(); got != want {
 			t.Fatalf("utilization = %v, bitmap population = %d (want %v)", got, population, want)
 		}

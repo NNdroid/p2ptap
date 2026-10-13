@@ -30,10 +30,9 @@ const (
 	//   Magic(2) | SeqID(8) | ObfType(1) | PayloadLen(2) | PaddingLen(2)
 	// ObfType identifies the algorithm used to seal the payload (see crypto.go);
 	// the key is derived per-peer via ECDH and is NEVER on the wire.
-	HeaderLen         = 2 + 8 + 1 + 2 + 2 // = 15 bytes
-	MaxFrameSize      = 65535
-	MaxOutputSize     = MaxFrameSize
-	WindowSizeBitmask = 1024
+	HeaderLen     = 2 + 8 + 1 + 2 + 2 // = 15 bytes
+	MaxFrameSize  = 65535
+	MaxOutputSize = MaxFrameSize
 
 	// AEADTagSize is the authentication tag length of the per-peer ciphers
 	// (ChaCha20Poly1305 and AES-256-GCM). EncryptPayloadRegion appends exactly

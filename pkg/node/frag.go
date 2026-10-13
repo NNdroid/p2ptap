@@ -245,18 +245,35 @@ func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte, channel
 
 	key := reasmKey{peerID: remotePeer, origSeq: origSeq, channel: channel, epoch: epoch}
 	rb, ok := f.bufs[key]
-	if !ok || rb.deadline.Before(time.Now()) {
-			// Per-peer quota: reject if this peer has too many concurrent groups.
-		if !ok && f.perPeerGroups[remotePeer] >= maxReasmGroupsPerPeer {
+	if ok && rb.deadline.Before(time.Now()) {
+		// The group timed out but the sender retransmitted it under the same
+		// origSeq: sendRedundant and retryWithFreshStream re-emit the identical
+		// fragment set, and the send-side write deadline (2500 ms) outlives
+		// reasmTimeout (2 s). Release the stale group BEFORE reusing the key —
+		// overwriting it without decrementing leaks one quota slot per reuse,
+		// and once maxReasmGroupsPerPeer slots are leaked the guard below trips
+		// for good, dropping every fragment from this peer until a restart.
+		delete(f.bufs, key)
+		f.perPeerGroups[remotePeer]--
+		if f.perPeerGroups[remotePeer] == 0 {
+			delete(f.perPeerGroups, remotePeer)
+		}
+		ok = false
+	}
+	if !ok {
+		// Bound concurrent groups: evict the oldest group first so memory stays
+		// capped even between reaper ticks, and so a peer that has filled its
+		// quota can still make room by retiring its own expired group.
+		if len(f.bufs) >= maxReasmGroups {
+			f.evictOldestGroup()
+		}
+		// Per-peer quota: reject if this peer still has too many concurrent
+		// groups. Checked after the evict so the cap is a real ceiling rather
+		// than a spurious drop caused by the global limit.
+		if f.perPeerGroups[remotePeer] >= maxReasmGroupsPerPeer {
 			log.Debug("Rx: peer %s exceeded per-peer fragment group limit (%d); dropping",
 				remotePeer.ShortString(), maxReasmGroupsPerPeer)
 			return nil, false
-		}
-		// Bound concurrent groups: if we are at capacity, evict the oldest
-		// group before opening a new one so memory stays capped even between
-		// reaper ticks.
-		if !ok && len(f.bufs) >= maxReasmGroups {
-			f.evictOldestGroup()
 		}
 		rb = &reasmBuf{
 			total:    int(fragTotal),

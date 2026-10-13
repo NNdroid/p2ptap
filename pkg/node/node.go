@@ -874,21 +874,39 @@ type dispatchTask struct {
 // expiry eviction instead of a linear ring so lookups are O(1).
 const (
 	// bcastDedupTTL is how long a broadcast frame's hash suppresses an identical
-	// duplicate. It must exceed the worst case for the same frame to arrive over
-	// several peer streams (a few hundred ms of fan-out skew), but stay short
-	// enough that legitimately recurring frames (ARP, mDNS) are not suppressed.
+	// duplicate from a DIFFERENT peer. It must exceed the worst case for the same
+	// frame to arrive over several peer streams (a few hundred ms of fan-out
+	// skew), but stay short enough that legitimately recurring frames (ARP, mDNS,
+	// IPv6 Router Solicitation, MLD Report) are not suppressed for long.
 	bcastDedupTTL = 2 * time.Second
 	// bcastDedupMaxEntries caps the ring so a unique-content broadcast flood
 	// cannot grow it without bound.
 	bcastDedupMaxEntries = 1024
 )
 
-type bcastDedupRing struct {
-	mu      sync.Mutex
-	entries map[uint64]time.Time
+// bcastDedupEntry records when a content hash was first seen and by whom, so a
+// retransmit from the same source can be told apart from the same frame
+// arriving over a different path.
+type bcastDedupEntry struct {
+	at   time.Time
+	peer peer.ID
 }
 
-func (r *bcastDedupRing) isDuplicate(h uint64) bool {
+type bcastDedupRing struct {
+	mu      sync.Mutex
+	entries map[uint64]bcastDedupEntry
+}
+
+// isDuplicate reports whether content hash h should be suppressed for a frame
+// from `from`. A fresh entry from a DIFFERENT peer is the redundant copy we
+// want to drop. A fresh entry from the SAME peer is a retransmit and must be
+// delivered: its first copy reached us but the sender never saw the reply —
+// which is precisely the case a retransmit exists for. Keying the ring on the
+// hash alone collapsed those two situations, so an ARP / Router Solicitation /
+// MLD Report that Linux retries roughly every second was held back for the
+// whole TTL even though suppressing it could only make the operation fail
+// slower.
+func (r *bcastDedupRing) isDuplicate(from peer.ID, h uint64) bool {
 	if h == 0 {
 		return false
 	}
@@ -896,9 +914,15 @@ func (r *bcastDedupRing) isDuplicate(h uint64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.entries == nil {
-		r.entries = make(map[uint64]time.Time, 256)
+		r.entries = make(map[uint64]bcastDedupEntry, 256)
 	}
-	if at, ok := r.entries[h]; ok && now.Sub(at) < bcastDedupTTL {
+	if e, ok := r.entries[h]; ok && now.Sub(e.at) < bcastDedupTTL {
+		if e.peer == from {
+			// Same source retransmitting. Refresh so its next attempt is not
+			// rejected as a duplicate of itself either.
+			r.entries[h] = bcastDedupEntry{at: now, peer: from}
+			return false
+		}
 		return true
 	}
 	// Evict on EVERY insert at capacity, not only when the map first overflows.
@@ -907,8 +931,8 @@ func (r *bcastDedupRing) isDuplicate(h uint64) bool {
 	// expired yet, so every new hash is a miss and the ring silently stops
 	// filtering at exactly the moment it is most needed.
 	if len(r.entries) >= bcastDedupMaxEntries {
-		for k, t := range r.entries {
-			if now.Sub(t) >= bcastDedupTTL {
+		for k, e := range r.entries {
+			if now.Sub(e.at) >= bcastDedupTTL {
 				delete(r.entries, k)
 			}
 		}
@@ -926,7 +950,7 @@ func (r *bcastDedupRing) isDuplicate(h uint64) bool {
 			}
 		}
 	}
-	r.entries[h] = now
+	r.entries[h] = bcastDedupEntry{at: now, peer: from}
 	return false
 }
 
@@ -1209,6 +1233,27 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		// undoing all of our scoring. NoDelay preserves our order and dials
 		// all addrs simultaneously.
 		libp2p.SwarmOpts(swarm.WithDialRanker(swarm.NoDelayDialRanker)),
+		// The stock black hole counters (N=100, MinSuccesses=5) are tuned for
+		// the staggered dial ranker, where one peer round yields a few results.
+		// NoDelayDialRanker fires every address at delay 0, so one round yields
+		// six and a fleet with a handful of relay-only peers (symmetric NAT,
+		// no TURN) sinks the success ratio below 5% node-wide. The detector
+		// then strips every public UDP address for every peer, and the node
+		// silently degrades to relay+TCP for 99 of every 100 dial attempts
+		// with nothing in the logs.
+		//
+		// Disabling the UDP filter is the right call for a P2P VPN that always
+		// has a relay fallback, and it is backwards here: hole punching and
+		// DCUtR are the only way to reach a symmetric-NAT peer at all, so
+		// blocking public UDP is what makes them unreachable. Per-peer backoff
+		// in dial_worker already stops us hammering a peer we know is dead.
+		libp2p.SwarmOpts(swarm.WithUDPBlackHoleSuccessCounter(
+			&swarm.BlackHoleSuccessCounter{N: 100, MinSuccesses: 0, Name: "UDP"})),
+		// The IPv6 filter stays armed: a host on an IPv4-only network really
+		// does burn a dial on every IPv6 address, and dial_worker no longer
+		// counts the cancelled IPv6 leg as a network failure.
+		libp2p.SwarmOpts(swarm.WithIPv6BlackHoleSuccessCounter(
+			&swarm.BlackHoleSuccessCounter{N: 100, MinSuccesses: 5, Name: "IPv6"})),
 		libp2p.NATPortMap(),
 		libp2p.EnableNATService(),
 		libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
@@ -1226,7 +1271,9 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			boundMu.Unlock()
 
 			filtered := filterAdvertisedAddrs(addrs, cfg.TapIP, cfg.TapIPv6, cfg.WebUI.ListenIP, cfg.WebUI.ListenIPv6)
-			stunAddrs := getSTUNReflexiveAddrs()
+			// rebind each STUN-observed public IP onto our own listener ports —
+			// the port STUN reports belongs to a closed probe socket.
+			stunAddrs := reflexiveUDPAddrs(getSTUNReflexiveAddrs(), addrs)
 			if len(stunAddrs) > 0 {
 				log.Debug("AddrFactory: injecting %d STUN server-reflexive addr(s): %v", len(stunAddrs), stunAddrs)
 				filtered = append(filtered, stunAddrs...)

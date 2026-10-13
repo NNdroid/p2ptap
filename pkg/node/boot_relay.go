@@ -552,7 +552,10 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 	// Unicast frames are handled by per-peer SeqID sliding window deduplication.
 	if len(tapPayload) >= 6 && isBroadcastOrMulticastMAC(net.HardwareAddr(tapPayload[0:6])) {
 		contentHash := fnvHash64(tapPayload)
-		if n.bcastDedup.isDuplicate(contentHash) {
+		// srcPeer is the true originator, so a broadcast that reaches us directly
+		// and again relayed through another peer carries the same key and is
+		// still deduplicated.
+		if n.bcastDedup.isDuplicate(srcPeer, contentHash) {
 			n.Collector.RecordDedup()
 			log.Debug("Content-dup relayed broadcast frame hash=0x%x from peer %s dropped", contentHash, srcPeer.String())
 			return

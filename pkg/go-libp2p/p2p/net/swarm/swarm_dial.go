@@ -600,10 +600,33 @@ func (s *Swarm) dialAddr(ctx context.Context, p peer.ID, addr ma.Multiaddr, updC
 		connC, err = tpt.Dial(ctx, addr, p)
 	}
 
-	// We're recording any error as a failure here.
-	// Notably, this also applies to cancellations (i.e. if another dial attempt was faster).
-	// This is ok since the black hole detector uses a very low threshold (5%).
-	s.bhd.RecordResult(addr, err == nil)
+	// Record the outcome as a network result, but never let a *swarm-initiated
+	// cancellation* count as a failure. Every address of a peer is dialed with
+	// the same peer-dial ctx, so when one of them succeeds the dial worker
+	// returns, the peer-dial ctx is cancelled, and every sibling still in
+	// flight surfaces an "operation was canceled" error. That says nothing
+	// about whether the address is reachable. The stock ranker makes this
+	// harmless (the losers never start because the first dial already won),
+	// but a NoDelay ranker fires every address of a peer at delay 0, so one
+	// peer round would yield N-1 cancellations against a single success and
+	// silently poison the counter for every peer on the node.
+	//
+	// Only context.Cause is consulted, never err. When the peer-dial budget
+	// expires the OS also reports the interrupted connect as "operation was
+	// canceled", so matching on err would swallow genuine timeouts — the exact
+	// signal this detector exists to collect, and dropping it would leave the
+	// sample window empty forever, so the state could never leave Probing for
+	// an unreachable address. With cause == deadline exceeded the dial is a
+	// real attempt that failed, and it is recorded as one.
+	if err != nil {
+		if errors.Is(context.Cause(ctx), context.Canceled) {
+			// Lost the race, or the caller gave up: not a network result.
+		} else {
+			s.bhd.RecordResult(addr, false)
+		}
+	} else {
+		s.bhd.RecordResult(addr, true)
+	}
 
 	if err != nil {
 		if s.metricsTracer != nil {

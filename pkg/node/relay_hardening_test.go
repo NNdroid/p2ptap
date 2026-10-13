@@ -3,6 +3,7 @@ package node
 import (
 	"testing"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/test"
 
 	"p2ptap/pkg/config"
@@ -145,14 +146,15 @@ func TestCheckRelayTransitACLMatchesMatchACL(t *testing.T) {
 
 func TestBcastDedupRingSuppressesDuplicates(t *testing.T) {
 	r := &bcastDedupRing{}
-	if r.isDuplicate(0) || r.isDuplicate(0) {
+	a, b := peer.ID("peerA"), peer.ID("peerB")
+	if r.isDuplicate(a, 0) || r.isDuplicate(b, 0) {
 		t.Fatal("hash 0 must never be treated as a duplicate (empty content)")
 	}
-	if r.isDuplicate(42) {
+	if r.isDuplicate(a, 42) {
 		t.Fatal("first sighting of a hash must not be a duplicate")
 	}
-	if !r.isDuplicate(42) {
-		t.Fatal("an identical broadcast arriving again within the TTL must be suppressed")
+	if !r.isDuplicate(b, 42) {
+		t.Fatal("an identical broadcast from another peer within the TTL must be suppressed")
 	}
 }
 
@@ -166,9 +168,10 @@ func TestBcastDedupRingSuppressesDuplicates(t *testing.T) {
 // before the fix fails on the "grew past its cap" assertion.
 func TestBcastDedupRingEvictsAtCapacity(t *testing.T) {
 	r := &bcastDedupRing{}
+	a := peer.ID("peerA")
 
 	for i := 0; i < bcastDedupMaxEntries; i++ {
-		if r.isDuplicate(uint64(i + 1)) {
+		if r.isDuplicate(a, uint64(i+1)) {
 			t.Fatalf("first insert of hash %d unexpectedly treated as a duplicate", i+1)
 		}
 	}
@@ -179,7 +182,7 @@ func TestBcastDedupRingEvictsAtCapacity(t *testing.T) {
 	// Every entry was written a nanosecond ago, so the TTL sweep cannot free a
 	// single slot. Each insert must therefore force an eviction.
 	for i := 0; i < 500; i++ {
-		r.isDuplicate(uint64(bcastDedupMaxEntries + i + 1))
+		r.isDuplicate(a, uint64(bcastDedupMaxEntries+i+1))
 	}
 	if got := len(r.entries); got > bcastDedupMaxEntries {
 		t.Fatalf("ring grew past its cap: %d entries (cap %d)", got, bcastDedupMaxEntries)
@@ -187,10 +190,10 @@ func TestBcastDedupRingEvictsAtCapacity(t *testing.T) {
 
 	// The ring must still be accepting and suppressing entries after the churn,
 	// i.e. the half-eviction cannot have left it in a frozen state.
-	if r.isDuplicate(2000) {
+	if r.isDuplicate(a, 2000) {
 		t.Fatal("ring refused a brand-new hash after the churn; inserts are stuck")
 	}
-	if !r.isDuplicate(2000) {
+	if !r.isDuplicate(peer.ID("peerB"), 2000) {
 		t.Fatal("ring failed to suppress a repeat of a hash it just accepted; dedup is disabled")
 	}
 }

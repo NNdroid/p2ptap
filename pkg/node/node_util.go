@@ -543,6 +543,71 @@ func filterAdvertisedAddrs(addrs []multiaddr.Multiaddr, tapIP, tapIPv6, webUILis
 	return filtered
 }
 
+// reflexiveUDPAddrs pairs the public IP observed by STUN with the real bound
+// port of each of our own UDP listeners.
+//
+// STUN's reply is the mapped address of the throwaway socket the binder used
+// to probe, whose port no listener is bound to. Advertising it as-is puts an
+// address into identify that can never be dialed — and it is the only public
+// address a NATed node has, so every cross-NAT peer dials it, times out, and
+// settles for relay. The guaranteed failure also feeds the swarm's black hole
+// counter, and the holepuncher advertises the same dead port as its punch
+// target, so DCUtR can never succeed either.
+//
+// Only the IP is worth keeping. The port has to come from one of our own
+// listeners: that pairing is valid on a port-preserving NAT, which is exactly
+// the property STUN just proved (mapped port == local source port), and a
+// no-op anywhere else.
+func reflexiveUDPAddrs(stunAddrs, listeners []multiaddr.Multiaddr) []multiaddr.Multiaddr {
+	const udpTag = "/udp/"
+	type shape struct {
+		port  string
+		proto string
+	}
+	seen := map[string]bool{}
+	var shapes []shape
+	for _, a := range listeners {
+		s := a.String()
+		i := strings.Index(s, udpTag)
+		if i < 0 {
+			continue
+		}
+		rest := s[i+len(udpTag):]
+		slash := strings.IndexByte(rest, '/')
+		if slash < 0 {
+			continue
+		}
+		port, proto := rest[:slash], rest[slash:]
+		if port == "" || port == "0" {
+			continue
+		}
+		if seen[port+proto] {
+			continue
+		}
+		seen[port+proto] = true
+		shapes = append(shapes, shape{port: port, proto: proto})
+	}
+	if len(shapes) == 0 {
+		return nil
+	}
+	out := make([]multiaddr.Multiaddr, 0, len(stunAddrs)*len(shapes))
+	for _, sa := range stunAddrs {
+		s := sa.String()
+		i := strings.Index(s, udpTag)
+		if i < 0 {
+			continue
+		}
+		ipPrefix := s[:i] // "/ip4/<publicIP>" or "/ip6/<publicIP>"
+		for _, sh := range shapes {
+			ma, err := multiaddr.NewMultiaddr(ipPrefix + udpTag + sh.port + sh.proto)
+			if err != nil {
+				continue
+			}
+			out = append(out, ma)
+		}
+	}
+	return out
+}
 
 // overlayCIDRs holds the TAP/mesh CIDR ranges derived from the node's config.
 // Only addresses inside these ranges are treated as overlay (TAP-routed); other

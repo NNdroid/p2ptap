@@ -1025,24 +1025,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 		if n.isExitNodeActive() {
 			// Check if target IP is a Mesh / LAN Subnet IP vs an external Internet IP:
 			dstIP := extractFrameDstIP(payload)
-			isMeshOrSubnet := false
-			if dstIP != nil {
-				if dstIP.To4() != nil {
-					if n.localV4Net != nil && n.localV4Net.Contains(dstIP) {
-						isMeshOrSubnet = true
-					} else if pid := n.lookupPeerIDByAdvertisedSubnet(dstIP); pid != "" {
-						isMeshOrSubnet = true
-					}
-				} else {
-					if n.localV6Net != nil && n.localV6Net.Contains(dstIP) {
-						isMeshOrSubnet = true
-					} else if mac, _ := n.lookupPeerMACByIPv6(dstIP); mac != nil {
-						isMeshOrSubnet = true
-					} else if pid := n.lookupPeerIDByAdvertisedSubnet(dstIP); pid != "" {
-						isMeshOrSubnet = true
-					}
-				}
-			}
+			isMeshOrSubnet := n.isMeshLocalIP(dstIP)
 			// Only hijack to Exit Node if it's NOT a mesh/subnet IP (i.e. WAN/Internet traffic)
 			if !isMeshOrSubnet {
 				exitPeerID := n.Gateway.ActiveExitPeerID()
@@ -1078,22 +1061,14 @@ func (n *Node) processTapFrame(payload []byte) bool {
 		// and leaks destination metadata across the mesh.
 		if !isBroadcastOrMulticastMAC(dstMAC) {
 			dstIP := extractFrameDstIP(payload)
-			if dstIP != nil {
-				isMeshTarget := false
-				if dstIP.To4() != nil {
-					if n.localV4Net != nil && n.localV4Net.Contains(dstIP) {
-						isMeshTarget = true
-					}
-				} else {
-					if (n.localV6Net != nil && n.localV6Net.Contains(dstIP)) || dstIP.IsLinkLocalUnicast() {
-						isMeshTarget = true
-					}
-				}
-				if !isMeshTarget {
-					log.Debug("TAPFWD DROP: unroutable external unicast frame dstIP=%s dstMAC=%s without active exit node, suppressed from mesh flood",
-						dstIP.String(), dstMAC.String())
-					return true
-				}
+			// A frame with no IP at all (an ARP reply, any other L2 frame) is
+			// not "unroutable external" — flooding is its only delivery path,
+			// so it is never suppressed here.
+			if dstIP != nil && !n.isMeshLocalIP(dstIP) {
+				di := dstIP.String()
+				log.Debug("TAPFWD DROP: unroutable external unicast frame dstIP=%s dstMAC=%s without active exit node, suppressed from mesh flood",
+					di, dstMAC.String())
+				return true
 			}
 		}
 
@@ -1123,6 +1098,53 @@ func (n *Node) processTapFrame(payload []byte) bool {
 	return true
 }
 
-// lookupPeerMACByIPv6 searches peerMeta for a peer whose TapIPv6 matches the given
-// IPv6 address and returns its TapMAC.  Returns nil when no matching peer is found
-// or when the MAC cannot be parsed.
+// isMeshLocalIP reports whether dstIP is addressable inside the overlay: a
+// subnet this node owns, a subnet a peer advertises, or an address class that
+// only means anything on a LAN (limited broadcast, link-local, LAN multicast).
+// Frames for mesh-local destinations must be flooded to peers; everything else
+// is hijacked to the Exit Node when one is active, or dropped as unroutable.
+//
+// It is the single predicate for both decisions. The flood path used a
+// narrower one than the Exit Node block, and the difference silently dropped a
+// DHCP server's unicast-to-255.255.255.255 reply — the form a DHCP client
+// uses because it has no address yet — so DHCP never completed on a mesh
+// without an Exit Node.
+func (n *Node) isMeshLocalIP(dstIP net.IP) bool {
+	if dstIP == nil {
+		return false
+	}
+	if ip4 := dstIP.To4(); ip4 != nil {
+		// "Unicast broadcast": a DHCP server replies to 255.255.255.255 with
+		// the client's MAC because the client still has no address.
+		if ip4[0] == 0xff && ip4[1] == 0xff && ip4[2] == 0xff && ip4[3] == 0xff {
+			return true
+		}
+		// 169.254/16 — the address an interface assigns before DHCP answers.
+		if ip4.IsLinkLocalUnicast() {
+			return true
+		}
+		if n.localV4Net != nil && n.localV4Net.Contains(ip4) {
+			return true
+		}
+		return n.lookupPeerIDByAdvertisedSubnet(ip4) != ""
+	}
+	if dstIP.IsMulticast() {
+		// ff02::/16 is link-local multicast (NDP, MLD, all-nodes/all-routers)
+		// and must stay on the mesh; ff0e::/16 internet multicast belongs to
+		// the Exit Node path.
+		if x := dstIP.To16(); x != nil && x[0] == 0xff && x[1] == 0x02 {
+			return true
+		}
+		return false
+	}
+	if n.localV6Net != nil && n.localV6Net.Contains(dstIP) {
+		return true
+	}
+	if dstIP.IsLinkLocalUnicast() {
+		return true
+	}
+	if mac, _ := n.lookupPeerMACByIPv6(dstIP); mac != nil {
+		return true
+	}
+	return n.lookupPeerIDByAdvertisedSubnet(dstIP) != ""
+}
