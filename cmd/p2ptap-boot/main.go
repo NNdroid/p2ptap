@@ -1689,7 +1689,7 @@ func main() {
 			gPeerConnectTimes.Store(pID, time.Now())
 			// Determine transport name for the alert message.
 			transportName := "TCP"
-			switch node.TransportOf(conn.RemoteMultiaddr()) {
+			switch node.TransportOfConn(conn) {
 			case "quic":
 				transportName = "QUIC"
 			case "webrtc":

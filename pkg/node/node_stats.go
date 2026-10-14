@@ -369,7 +369,7 @@ func (n *Node) updateWebCollectorState() {
 					}
 				} else {
 					addr = ma.String() // prefer direct address for display
-					switch TransportOf(ma) {
+					switch TransportOfConn(c) {
 					case "quic":
 						transport = "QUIC"
 					case "webtransport":
@@ -1226,9 +1226,11 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 			if IsCircuitRelay(ma) {
 				transport = "Circuit Relay"
 			} else {
-				switch TransportOf(ma) {
+				switch TransportOfConn(conn) {
 				case "quic":
 					transport = "QUIC"
+				case "webtransport":
+					transport = "WebTransport"
 				case "webrtc":
 					transport = "WebRTC"
 				case "tcp":

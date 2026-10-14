@@ -9,6 +9,7 @@ import (
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/peer"
+	tpt "github.com/libp2p/go-libp2p/core/transport"
 	quic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	quicreuse "github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	webtransport "github.com/libp2p/go-libp2p/p2p/transport/webtransport"
@@ -103,7 +104,6 @@ func TestSharedQUICReuseSharesAPortBetweenQUICAndWebTransport(t *testing.T) {
 				} else if strings.Contains(s, "/quic-v1") {
 					haveQUIC = true
 				}
-
 			}
 			if !haveQUIC {
 				t.Fatalf("QUIC listener on the shared port is missing; advertised: %v\n"+
@@ -116,21 +116,154 @@ func TestSharedQUICReuseSharesAPortBetweenQUICAndWebTransport(t *testing.T) {
 					"quicreuse refused to register it", got)
 			}
 
+			// WebTransport refuses to dial an address without a /certhash/
+			// component — the dialer must state the certificate it expects to
+			// see — and the listener's advertised address is exactly the form a
+			// real peer would receive. Dial that one, not the bare listen addr.
+			wtDialAddr := ""
+			for _, s := range got {
+				if strings.Contains(s, "/quic-v1/webtransport") {
+					wtDialAddr = s
+					break
+				}
+			}
+			if wtDialAddr == "" {
+				t.Fatalf("no advertised WebTransport address to dial; advertised: %v", got)
+			}
+
 			// Both transports must actually be reachable through that one port.
 			dialer, err := libp2p.New(libp2p.NoListenAddrs)
 			if err != nil {
 				t.Fatalf("create dialer: %v", err)
 			}
 			t.Cleanup(func() { _ = dialer.Close() })
+			for _, tc := range []struct {
+				addr   string
+				expect string
+			}{
+				{quicAddr, "quic"},
+				{wtDialAddr, "webtransport"},
+			} {
+				// Wipe what the peerstore learned from the previous dial, so this
+				// Connect fans out across exactly one address and ConnsToPeer
+				// returns exactly the connection this address produced. Without
+				// that the swarm also redials the previous address and the check
+				// below cannot say which address a connection came from.
+				dialer.Peerstore().ClearAddrs(h.ID())
 
-			for _, aStr := range []string{quicAddr, wtAddr} {
 				if err := dialer.Connect(context.Background(), peer.AddrInfo{
 					ID:    h.ID(),
-					Addrs: []multiaddr.Multiaddr{mustMA(aStr)},
+					Addrs: []multiaddr.Multiaddr{mustMA(tc.addr)},
 				}); err != nil {
-					t.Fatalf("cannot connect via %s: %v", aStr, err)
+					t.Fatalf("cannot connect via %s: %v", tc.addr, err)
+				}
+				// Not enough that the connection came up: p2ptap must be able to
+				// TELL the two transports apart afterwards, because every peer
+				// list and per-transport counter in the WebUI is derived from it.
+				// TransportOfConn answers from ConnState().Transport, which the
+				// transport that carried the bytes wrote; the log line below also
+				// records what the address-based TransportOf would have said, so a
+				// fork change that stops recording /webtransport on the connection
+				// shows up here as a divergence rather than as a silent
+				// misclassification in the WebUI.
+				conns := dialer.Network().ConnsToPeer(h.ID())
+				if len(conns) == 0 {
+					t.Fatalf("no connection to %s after Connect", tc.addr)
+				}
+				for _, c := range conns {
+					if got := TransportOfConn(c); got != tc.expect {
+						t.Fatalf("dialing %s came up as transport %q (ConnState=%q), want %q",
+							tc.addr, got, c.ConnState().Transport, tc.expect)
+					}
+					t.Logf("addr=%s ConnState=%q TransportOf=%q TransportOfConn=%q",
+						c.RemoteMultiaddr(), c.ConnState().Transport,
+						TransportOf(c.RemoteMultiaddr()), TransportOfConn(c))
+				}
+				if err := dialer.Network().ClosePeer(h.ID()); err != nil {
+					t.Fatalf("close peer: %v", err)
 				}
 			}
 		})
+	}
+}
+
+// dialerNetwork exposes the swarm's dial-side transport chooser.
+type dialerNetwork interface {
+	TransportForDialing(multiaddr.Multiaddr) tpt.Transport
+}
+
+// TestDialTransportSelectionIsDeterministic pins dial-side transport selection
+// to a single answer per address. The swarm chooses by walking a Go map (see
+// pkg/go-libp2p/p2p/net/swarm/swarm_transport.go) and taking the FIRST transport
+// whose CanDial matches, so the choice is order-dependent: if QUIC's dialMatcher
+// ever started accepting a /quic-v1/webtransport address, roughly half of all
+// WebTransport dials would randomly go out as raw QUIC and arrive at an HTTP/3
+// listener. The dial would still "succeed" at the libp2p layer, so it presents
+// exactly as a protocol that only connects some of the time.
+//
+// QUIC's matcher is mafmt.And(mafmt.IP, mafmt.Base(UDP), mafmt.Base(QUIC_V1)):
+// mafmt.Base only matches a multiaddr whose ENTIRE protocol path is that single
+// protocol, and And requires the whole path to be consumed with no remainder, so
+// /udp/443/quic-v1/webtransport does not match. This test is the guard for that,
+// and it uses a host's REAL advertised addresses — which carry the /certhash/
+// suffix the peer actually dials — rather than hand-built ones.
+func TestDialTransportSelectionIsDeterministic(t *testing.T) {
+	port := freeUDPPort(t)
+	h, err := libp2p.New(
+		QUICReuseOption(func(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
+			return net.ListenUDP(network, laddr)
+		}),
+		libp2p.Transport(quic.NewTransport),
+		libp2p.Transport(webtransport.New),
+		libp2p.ListenAddrs(
+			mustMA(fmt.Sprintf("/ip4/127.0.0.1/udp/%d/quic-v1", port)),
+			mustMA(fmt.Sprintf("/ip4/127.0.0.1/udp/%d/quic-v1/webtransport", port)),
+		),
+	)
+	if err != nil {
+		t.Fatalf("create host: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	nw, ok := h.Network().(dialerNetwork)
+	if !ok {
+		t.Fatalf("network does not expose TransportForDialing")
+	}
+
+	portSlot := fmt.Sprintf("/udp/%d/", port)
+	var checked int
+	for _, a := range h.Addrs() {
+		if !strings.Contains(a.String(), portSlot) {
+			continue
+		}
+		wantPC := multiaddr.P_WEBTRANSPORT
+		if !strings.Contains(a.String(), "/quic-v1/webtransport") {
+			wantPC = multiaddr.P_QUIC_V1
+		}
+
+		const iterations = 500
+		picked := map[tpt.Transport]int{}
+		for i := 0; i < iterations; i++ {
+			tr := nw.TransportForDialing(a)
+			if tr == nil {
+				t.Fatalf("%s: no transport selected after %d lookups", a, i)
+			}
+			picked[tr]++
+		}
+		if len(picked) != 1 {
+			t.Fatalf("%s: transport selection is NON-DETERMINISTIC — %d distinct "+
+				"transports chosen over %d lookups", a, len(picked), iterations)
+		}
+		var got tpt.Transport
+		for got = range picked {
+		}
+		if gotPC := got.Protocols()[0]; gotPC != wantPC {
+			t.Fatalf("%s: selected transport protocol %d (%s), want %d",
+				a, gotPC, multiaddr.ProtocolWithCode(gotPC).Name, wantPC)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatalf("host advertised no addresses on port %d; advertised: %v", port, stringAddrs(h.Addrs()))
 	}
 }

@@ -385,7 +385,7 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 					physicalIP = ip.String()
 				}
 
-				switch node.TransportOf(ma) {
+				switch node.TransportOfConn(c) {
 				case "quic":
 					transport = "QUIC"
 				case "webrtc":

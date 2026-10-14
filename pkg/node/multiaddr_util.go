@@ -15,6 +15,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
@@ -43,6 +44,38 @@ func TransportOf(ma multiaddr.Multiaddr) string {
 		}
 	}
 	return transport
+}
+
+// TransportOfConn returns the canonical transport name for an ESTABLISHED
+// connection, using the same vocabulary as TransportOf.
+//
+// Prefer this over TransportOf(conn.RemoteMultiaddr()) for a live connection.
+// Today both happen to agree — the fork's WebTransport transport appends the
+// /webtransport component to the address it records, and every other transport
+// records its own component too — but that is an implementation detail of the
+// fork, not a libp2p guarantee. ConnState().Transport is written by the
+// transport that actually carried the bytes, so it stays correct if a future
+// upstream revision stops advertising the transport in the address. The two
+// stats collectors had drifted apart over this: collectProtocolChannelsAndStreams
+// had no "webtransport" arm at all and labelled every WebTransport link "P2P".
+func TransportOfConn(c network.Conn) string {
+	if ma := c.RemoteMultiaddr(); ma != nil && IsCircuitRelay(ma) {
+		return "circuit"
+	}
+	switch c.ConnState().Transport {
+	case "quic-v1", "quic":
+		return "quic"
+	case "webtransport":
+		return "webtransport"
+	case "webrtc-direct", "webrtc":
+		return "webrtc"
+	case "tcp":
+		return "tcp"
+	}
+	if ma := c.RemoteMultiaddr(); ma != nil {
+		return TransportOf(ma)
+	}
+	return ""
 }
 
 // IsCircuitRelay reports whether ma contains a /p2p-circuit/ component.
