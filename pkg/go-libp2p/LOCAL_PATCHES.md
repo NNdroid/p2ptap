@@ -2,7 +2,7 @@
 
 本目录通过 `go.mod` 的 `replace github.com/libp2p/go-libp2p v0.50.0 => ./pkg/go-libp2p`
 以源码形式参与构建。基线为上游 **v0.50.0**（2026-08-12 发布，当前最新版），
-在此之上维护了 **14 处**本地代码补丁（第 1–5、7、8–13、15、17 条）。
+在此之上维护了 **15 处**本地代码补丁（第 1–5、7、8–13、15、17、18 条）。
 
 第 **6**、**14**、**16** 条是「已实现但回退」的决策记录：代码已恢复上游原样，
 条目本身保留，说明**为什么不能这样改**——这三处都曾以「抗 DPI」或「提升可达性」
@@ -269,6 +269,30 @@
   故障只能表现为「某个地址的 QUIC 突然全部不通」，且没有对应日志可查。
 - 注：`log` 是包级变量 `var log = gologshim.Logger("quicreuse")`（定义在 `connmgr.go`），
   本补丁无需新增 import。
+
+## 18. `p2p/host/basic/addrs_manager.go` — HolePunchAddrs 必须带 certhash
+
+- `HolePunchAddrs()` 由 `slices.Clone(a.addrsFactory(addrs))` 改为
+  `a.applyAddrsFactory(addrs)`。
+- 原因：`addrsFactory` 的输出是这份列表里**唯一**绕过 `getLocalAddrs` 的部分，
+  而 certhash 正是在 `getLocalAddrs` 里经 `addCertHashes` 挂上的。`DirectAddrs()`
+  与 `observedAddrsManager.Addrs(1)` 都已经带 hash，只有工厂新造的地址（NAT 映射
+  端点、relay 端点）是裸的。
+- 为什么这是真缺陷：DCUtR 打洞时会把 `HolePunchAddrs()` 整体经 `/libp2p/dcutr`
+  发给对端，对端拿到的地址会**原样拨号**。而
+  `webRTCTransport.CanDial` 与 `IsWebtransportMultiaddr` 都要求 certhash 数 ≥ 1，
+  裸 `/webrtc-direct/`、`/webtransport/` 地址会被直接拒绝——于是打洞时
+  WebRTC/WebTransport 这一条腿静默丢失，QUIC/TCP/WS 照旧成功。表现是「同一个
+  对端有时打得通有时打不通」，且只在地址恰由工厂产生时才触发，所以很难归因。
+- 注意区分：上游 `HolePunchAddrs` 对**自己的**监听地址其实没问题（那些地址
+  已经过 `getLocalAddrs`）。真正的缺口只在工厂新增的地址上。当前 p2ptap 的
+  `AddrsFactory` 只注入 `/udp/<port>/quic-v1`，而本 fork 的 QUIC 不使用 certhash，
+  所以这个补丁目前更多是**封堵隐患**：一旦将来让工厂也注入 WebRTC/WebTransport
+  端点（例如给 WebRTC-only 对端提供 TURN 回退地址），不加这一行那批地址一定拨不通。
+- 回归用例：`p2p/host/basic/addrs_manager_test.go` 的
+  `TestHolePunchAddrsCarryCertHashes`——它让 `AddrsFactory` 额外注入一个只有工厂
+  知道的裸 `/webrtc-direct/` 端点，断言输出里每个 `webrtc-direct` 地址都带 hash。
+  本补丁前该用例失败、加回原始写法后立刻失败（两个方向都验证过）。
 
 ## 非代码附加目录
 
