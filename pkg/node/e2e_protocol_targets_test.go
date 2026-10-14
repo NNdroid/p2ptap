@@ -321,10 +321,24 @@ func setupProtocolPair(t *testing.T, spec transportSpec) *protocolPair {
 	nodeA.Start()
 	nodeB.Start()
 
-	// Bounded connect: Host.Connect with no deadline can block indefinitely on
-	// transports whose in-process ICE/DTLS never converges (WebRTC without
-	// usable TURN credentials is the usual case).
-	failHard := spec.name == "QUIC" || spec.name == "TCP"
+	// Bounded connect: Host.Connect with no deadline can block indefinitely, so
+	// every transport gets a deadline. Inside the deadline the outcome is a HARD
+	// FAILURE for every supported transport — a transport that cannot converge
+	// here is a defect, not an environment limitation.
+	//
+	// The failHard set used to exclude WebRTC, on the assumption that its
+	// in-process connect could not converge "without usable TURN credentials".
+	// That assumption hid a real defect: pion aborts a LITE ICE agent (which is
+	// what WebRTC Direct's listener is) as soon as it is handed an ICE server
+	// list, and DefaultConfig() ships thirteen STUN servers — so WebRTC was
+	// completely non-functional out of the box and the skip hid it from CI for
+	// months. Every transport now converges in this test, which is precisely
+	// the property the user-facing requirement "every supported overlay protocol
+	// must connect" demands, so a silent skip must not be available as an
+	// escape hatch again. The SKIP branch below stays for a genuinely degraded
+	// CI host, but it must be reviewed as an incident, not as an expected path.
+	failHard := spec.name == "QUIC" || spec.name == "TCP" ||
+		spec.name == "WebRTC" || spec.name == "WebTransport"
 	connectCtx, cancelConnect := context.WithTimeout(nodeA.ctx, 15*time.Second)
 	defer cancelConnect()
 	ti := nodeB.Host.Peerstore().PeerInfo(nodeB.Host.ID())
@@ -338,7 +352,9 @@ func setupProtocolPair(t *testing.T, spec transportSpec) *protocolPair {
 		t.Skipf("transport %s: in-process loopback connect did not converge in 15s (%v)", spec.name, err)
 	}
 
-	// Bounded overlay-encryption wait (both directions), same skip semantics.
+	// Bounded overlay-encryption wait (both directions), same hard-fail rule:
+	// the transport is not "connectable" until the obfuscation session is up in
+	// both directions, so this is gated on failHard too.
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		okA, _, encA := nodeA.obfStateForPeer(nodeB.Host.ID())

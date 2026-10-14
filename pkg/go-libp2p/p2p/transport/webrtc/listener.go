@@ -241,7 +241,29 @@ func (l *listener) setupConnection(
 		return nil, err
 	}
 
-	w, err = newWebRTCConnection(settingEngine, l.config)
+	// Never hand this (lite) agent the ICE server list. WebRTC Direct's listener
+	// is a LITE ICE agent, which per RFC 5245 publishes only host candidates, so
+	// pion builds its agent with CandidateTypes = [host] (see
+	// ICEGatherer.createAgent). ice.NewAgent then refuses to build an agent that
+	// was handed URLs it can never use:
+	//
+	//	if len(config.Urls) > 0 && !contains(srflx) && !contains(relay) {
+	//		return nil, ErrUselessUrlsProvided
+	//	}
+	//
+	// A lite agent has neither of those candidate types, so the error is
+	// guaranteed — and it is returned synchronously at agent construction, i.e.
+	// before the first ICE packet. That aborts every inbound WebRTC peer
+	// connection, so configuring even one STUN server silently disabled the
+	// whole listener; the default configuration ships eight UDP STUN servers.
+	// The servers are useless to a lite agent in any case: it can neither bind
+	// to a STUN server nor allocate a TURN relay, since both need the srflx and
+	// relay candidate types that would require SetLite(false). Dropping the list
+	// here instead keeps the dialer side unaffected, which IS a full agent and
+	// legitimately uses STUN/TURN.
+	config := l.config
+	config.ICEServers = nil
+	w, err = newWebRTCConnection(settingEngine, config)
 	if err != nil {
 		return nil, fmt.Errorf("instantiating peer connection failed: %w", err)
 	}
