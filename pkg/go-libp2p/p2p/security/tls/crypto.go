@@ -26,13 +26,16 @@ const certValidityPeriod = 100 * 365 * 24 * time.Hour // ~100 years
 const certificatePrefix = "libp2p-tls-handshake:"
 
 // alpn is the fallback ALPN advertised on the QUIC ClientHello when no muxer is
-// negotiated via ALPN. Upstream uses "libp2p"; because QUIC Initial packets are
-// encrypted only with the PUBLIC Initial salt, any DPI reads this ALPN and a
-// single "libp2p" match classifies the flow as libp2p. "h3" makes that field
-// indistinguishable from ordinary HTTP/3 at the same layer. LOCAL PATCH —
-// see pkg/go-libp2p/LOCAL_PATCHES.md (must stay in sync with the QUIC listener's
-// NextProtos in p2p/transport/quic/transport.go).
-const alpn string = "h3"
+// negotiated via ALPN.
+//
+// RETRACTED LOCAL PATCH (was "h3"). Offering "h3" made the QUIC listener
+// register an ALPN that WebTransport must also register, and quicreuse refuses
+// the second registration — so a node running both transports on one UDP port
+// lost one of them entirely. "libp2p" is upstream and is accepted by every
+// libp2p implementation, patched or not. The security transport still recognises
+// "h3" as a valid non-muxer ALPN (see transport.go) so WebTransport keeps
+// working. See LOCAL_PATCHES.md.
+const alpn string = "libp2p"
 
 var extensionID = getPrefixedExtensionID([]int{1, 1})
 var extensionCritical bool // so we can mark the extension critical in tests

@@ -3,7 +3,6 @@ package node
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -41,7 +40,6 @@ import (
 	webtransport "github.com/libp2p/go-libp2p/p2p/transport/webtransport"
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
-	quic "github.com/quic-go/quic-go"
 
 	"p2ptap/pkg/config"
 	"p2ptap/pkg/logger"
@@ -1472,20 +1470,19 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// gateway (exit node mode) the P2P control plane never loops back into the
 	// tunnel. This is the program-level "exclude all sockets from this process"
 	// mechanism that complements the per-endpoint host routes.
-	if cfg.Transports.EnableTCPReuse {
-		opts = append(opts, libp2p.Transport(tcpt.NewTCPTransport,
-			tcpt.WithDialerForAddr(func(raddr multiaddr.Multiaddr) (tcpt.ContextDialer, error) {
-				return &net.Dialer{
-					Timeout:   30 * time.Second,
-					KeepAlive: 15 * time.Second,
-					Control:   GetSocketControlHook(""),
-				}, nil
-			}),
-			tcpt.WithListenControl(listenerProtectControl),
-		))
-		log.Info("TCP transport registered (socket-protected)")
-	} else {
-		log.Info("TCP transport DISABLED — no /tcp/ listeners will be created, no /tcp/ dialing")
+	opts = append(opts, libp2p.Transport(tcpt.NewTCPTransport,
+		tcpt.WithDialerForAddr(func(raddr multiaddr.Multiaddr) (tcpt.ContextDialer, error) {
+			return &net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 15 * time.Second,
+				Control:   GetSocketControlHook(""),
+			}, nil
+		}),
+		tcpt.WithListenControl(listenerProtectControl),
+	))
+	log.Info("TCP transport registered (socket-protected)")
+	if !cfg.Transports.EnableTCPReuse {
+		log.Info("TCP listening DISABLED — no /tcp/ listeners, but the transport still dials /tcp/ addresses learned from peers")
 	}
 
 	// TLS ClientHello SNI: one setting covers BOTH security paths — TLS-over-TCP
@@ -1505,33 +1502,36 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// QUIC sockets to the physical interface, again preventing them from looping
 	// back into the TAP tunnel when it becomes the default gateway. This is the
 	// same program-level exclusion as the TCP path above but applied to UDP.
-	if cfg.Transports.EnableQUICReuse {
-		opts = append(opts, libp2p.Transport(
-			func(key crypto.PrivKey, _ *quicreuse.ConnManager, psk pnet.PSK, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, transportOpts ...quict.Option) (tpt.Transport, error) {
-				var srk quic.StatelessResetKey
-				var tk quic.TokenGeneratorKey
-				if _, err := rand.Read(srk[:]); err != nil {
-					return nil, err
-				}
-				if _, err := rand.Read(tk[:]); err != nil {
-					return nil, err
-				}
-				cm, err := quicreuse.NewConnManager(srk, tk, quicreuse.OverrideListenUDP(func(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
-					if conn, ok := getTURNRelayConn(laddr.String()); ok {
-						log.Debug("QUIC ConnManager: using TURN relay connection for %s", laddr.String())
-						return conn, nil
-					}
-					return ProtectedListenUDP(network, laddr)
-				}))
-				if err != nil {
-					return nil, err
-				}
-				return quict.NewTransport(key, cm, psk, gater, rcmgr, transportOpts...)
-			},
-		))
-		log.Info("QUIC transport registered (socket-protected)")
-	} else {
-		log.Info("QUIC transport DISABLED — no /quic-v1/ listeners, no QUIC hole-punching")
+	//
+	// QUIC and WebTransport are BOTH quicreuse users and must share ONE
+	// ConnManager, which is how upstream lets /udp/N/quic-v1 and
+	// /udp/N/quic-v1/webtransport bind the same socket and demultiplex incoming
+	// connections by ALPN. Registering the manager through QUICReuse (instead of
+	// building it inside the transport constructors, as the old code did) hands
+	// one instance to both and keeps libp2p's ConnContext / VerifySourceAddress
+	// wiring intact — see QUICReuseOption for the full failure mode each of those
+	// defects produced.
+	//
+	// Registered unconditionally, not gated on the enable flags. This fork has no
+	// DisableTransport, so a "disabled" transport is only stripped of its
+	// listeners — it is still constructed from defaults.go and can still DIAL.
+	// Gating the manager on the flags meant a config that disabled both QUIC and
+	// WebTransport silently fell back to libp2p's stock ConnManager, whose
+	// sockets are NOT bound to the physical interface. In Exit Node mode, where
+	// the TAP is the default gateway, those dials would loop back into the
+	// tunnel. Always wiring the protected manager keeps every QUIC and
+	// WebTransport socket — listening or dialing, enabled or not — on the
+	// physical interface.
+	opts = append(opts, QUICReuseOption(protectedListenUDPForQUIC))
+
+	opts = append(opts, libp2p.Transport(
+		func(key crypto.PrivKey, cm *quicreuse.ConnManager, psk pnet.PSK, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, transportOpts ...quict.Option) (tpt.Transport, error) {
+			return quict.NewTransport(key, cm, psk, gater, rcmgr, transportOpts...)
+		},
+	))
+	log.Info("QUIC transport registered (socket-protected, shares one ConnManager with WebTransport)")
+	if !cfg.Transports.EnableQUICReuse {
+		log.Info("QUIC listening DISABLED — no /quic-v1/ listeners, but the transport still dials /quic-v1/ addresses learned from peers")
 	}
 
 	// Socket protection for WebRTC (UDP): the ICE agent creates its own UDP
@@ -1539,106 +1539,88 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// listen/dial socket to the physical interface, mirroring the QUIC/TCP
 	// protection so WebRTC ICE candidate traffic never loops into the TAP tunnel
 	// under Exit Node. The listen socket additionally uses ProtectedListenUDP so a
-	// concrete listen IP binds to its own NIC (true multi-NIC inbound).
-	// Registration is gated by EnableWebRTC.
-	if cfg.Transports.EnableWebRTC {
-		opts = append(opts, libp2p.Transport(
-			func(key crypto.PrivKey, psk pnet.PSK, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, _ webrtc.ListenUDPFn, transportOpts ...webrtc.Option) (tpt.Transport, error) {
-				protectedNet, err := NewProtectNet()
-				if err != nil {
-					return nil, err
-				}
-				allOpts := append(transportOpts, webrtc.WithNet(protectedNet))
-				// The STUN/TURN lists are resolved from the LIVE config snapshot for
-				// every new peer connection, so a WebUI edit of the server lists
-				// takes effect on the next handshake instead of needing a restart.
-				// The transport cannot read n.config() here — it is built inside
-				// libp2p.New, before this Node exists — so it reads cfgSnapshot,
-				// the same slot the Node's config() reads through.
-				allOpts = append(allOpts, webrtc.WithIceServers(
-					func() []string { return loadNodeConfig(cfgSnapshot, cfg).StunServers },
-					func() []string {
-						urls, _, _, _ := IceTURNConfig(loadNodeConfig(cfgSnapshot, cfg).TurnServers)
-						return urls
-					},
-					func() (string, string) {
-						_, username, credential, _ := IceTURNConfig(loadNodeConfig(cfgSnapshot, cfg).TurnServers)
-						return username, credential
-					},
-				))
-				// The three closures each read the slot independently, so a reload
-				// that lands between two reads could pair a new TURN list with the
-				// previous credentials for one connection. Benign: IceTURNConfig
-				// only accepts servers that all share one credential set, so the
-				// list and its credentials always change together, and a single
-				// mis-authenticated TURN attempt just falls back to the other
-				// servers. A shared provider closure would hide pion's types in
-				// this package to fix it, which is not worth it here.
-				if len(cfg.StunServers) > 0 {
-					log.Info("WebRTC configured with %d STUN server(s)", len(cfg.StunServers))
-				}
-				turnURLs, _, _, turnDropped := IceTURNConfig(cfg.TurnServers)
-				if len(turnURLs) > 0 {
-					log.Info("WebRTC configured with %d TURN server(s) with ICE credentials", len(turnURLs))
-				}
-				if turnDropped > 0 {
-					log.Warn("%d TURN server(s) lack ?username=...&credential=... and are excluded from "+
-						"WebRTC ICE: pion rejects a credential-less TURN server and aborts the whole peer "+
-						"connection, which would take down every WebRTC link. The QUIC relay binder skips "+
-						"them too — add credentials to use them.", turnDropped)
-				}
-				return webrtc.New(key, psk, gater, rcmgr, ProtectedListenUDP, allOpts...)
-			},
-		))
-		log.Info("WebRTC transport registered (socket-protected)")
-	} else {
-		log.Info("WebRTC transport DISABLED — no /webrtc-direct/ listeners")
+	// concrete listen IP binds to its own NIC (true multi-NIC inbound). Like the
+	// QUIC manager above this is unconditional, so a disabled WebRTC still dials
+	// through the protected transport.Net instead of pion's unbound stock one.
+	opts = append(opts, libp2p.Transport(
+		func(key crypto.PrivKey, psk pnet.PSK, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, _ webrtc.ListenUDPFn, transportOpts ...webrtc.Option) (tpt.Transport, error) {
+			protectedNet, err := NewProtectNet()
+			if err != nil {
+				return nil, err
+			}
+			allOpts := append(transportOpts, webrtc.WithNet(protectedNet))
+			// The STUN/TURN lists are resolved from the LIVE config snapshot for
+			// every new peer connection, so a WebUI edit of the server lists
+			// takes effect on the next handshake instead of needing a restart.
+			// The transport cannot read n.config() here — it is built inside
+			// libp2p.New, before this Node exists — so it reads cfgSnapshot,
+			// the same slot the Node's config() reads through.
+			allOpts = append(allOpts, webrtc.WithIceServers(
+				func() []string { return loadNodeConfig(cfgSnapshot, cfg).StunServers },
+				func() []string {
+					urls, _, _, _ := IceTURNConfig(loadNodeConfig(cfgSnapshot, cfg).TurnServers)
+					return urls
+				},
+				func() (string, string) {
+					_, username, credential, _ := IceTURNConfig(loadNodeConfig(cfgSnapshot, cfg).TurnServers)
+					return username, credential
+				},
+			))
+			// The three closures each read the slot independently, so a reload
+			// that lands between two reads could pair a new TURN list with the
+			// previous credentials for one connection. Benign: IceTURNConfig
+			// only accepts servers that all share one credential set, so the
+			// list and its credentials always change together, and a single
+			// mis-authenticated TURN attempt just falls back to the other
+			// servers. A shared provider closure would hide pion's types in
+			// this package to fix it, which is not worth it here.
+			if len(cfg.StunServers) > 0 {
+				log.Info("WebRTC configured with %d STUN server(s)", len(cfg.StunServers))
+			}
+			turnURLs, _, _, turnDropped := IceTURNConfig(cfg.TurnServers)
+			if len(turnURLs) > 0 {
+				log.Info("WebRTC configured with %d TURN server(s) with ICE credentials", len(turnURLs))
+			}
+			if turnDropped > 0 {
+				log.Warn("%d TURN server(s) lack ?username=...&credential=... and are excluded from "+
+					"WebRTC ICE: pion rejects a credential-less TURN server and aborts the whole peer "+
+					"connection, which would take down every WebRTC link. The QUIC relay binder skips "+
+					"them too — add credentials to use them.", turnDropped)
+			}
+			return webrtc.New(key, psk, gater, rcmgr, ProtectedListenUDP, allOpts...)
+		},
+	))
+	log.Info("WebRTC transport registered (socket-protected)")
+	if !cfg.Transports.EnableWebRTC {
+		log.Info("WebRTC listening DISABLED — no /webrtc-direct/ listeners, but the transport still dials /webrtc-direct/ addresses learned from peers")
 	}
 
-	// Socket protection for WebTransport (QUIC-over-HTTP/3): it reuses the same
-	// quicreuse.ConnManager machinery as the QUIC transport, so by constructing
-	// its ConnManager with OverrideListenUDP(ProtectedListenUDP) every
-	// WebTransport socket is already bound to the physical interface.
-	// Registration is gated by EnableWebTransport.
-	if cfg.Transports.EnableWebTransport {
-		opts = append(opts, libp2p.Transport(
-			func(key crypto.PrivKey, psk pnet.PSK, _ *quicreuse.ConnManager, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, transportOpts ...webtransport.Option) (tpt.Transport, error) {
-				var srk quic.StatelessResetKey
-				var tk quic.TokenGeneratorKey
-				if _, err := rand.Read(srk[:]); err != nil {
-					return nil, err
-				}
-				if _, err := rand.Read(tk[:]); err != nil {
-					return nil, err
-				}
-				cm, err := quicreuse.NewConnManager(srk, tk, quicreuse.OverrideListenUDP(func(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
-					if conn, ok := getTURNRelayConn(laddr.String()); ok {
-						log.Debug("QUIC ConnManager: using TURN relay connection for %s", laddr.String())
-						return conn, nil
-					}
-					return ProtectedListenUDP(network, laddr)
-				}))
-				if err != nil {
-					return nil, err
-				}
-				return webtransport.New(key, psk, cm, gater, rcmgr, transportOpts...)
-			},
-		))
-		log.Info("WebTransport transport registered (socket-protected)")
-	} else {
-		log.Info("WebTransport transport DISABLED — no /webtransport/ listeners")
+	// WebTransport (QUIC-over-HTTP/3) reuses the same quicreuse.ConnManager as
+	// the QUIC transport above — injected, never built here — so both share
+	// sockets and demultiplex by ALPN instead of racing the kernel over the same
+	// address.
+	opts = append(opts, libp2p.Transport(
+		func(key crypto.PrivKey, psk pnet.PSK, cm *quicreuse.ConnManager, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, transportOpts ...webtransport.Option) (tpt.Transport, error) {
+			return webtransport.New(key, psk, cm, gater, rcmgr, transportOpts...)
+		},
+	))
+	log.Info("WebTransport transport registered (shares the QUIC ConnManager)")
+	if !cfg.Transports.EnableWebTransport {
+		log.Info("WebTransport listening DISABLED — no /quic-v1/webtransport/ listeners, but the transport still dials WebTransport addresses learned from peers")
 	}
 
 	if !cfg.Transports.EnableQUICReuse && !cfg.Transports.EnableWebRTC &&
 		!cfg.Transports.EnableWebTransport && !cfg.Transports.EnableTCPReuse {
-		// With no transport registered, libp2p's FallbackDefaults kicks in and
-		// silently turns EVERY transport back on — QUIC, WebRTC, WebTransport,
-		// TCP and even WebSocket — plus its own wildcard listeners, none of which
-		// went through expandListenAddr or the socket-protection wrappers above.
-		// That defeats the whole point of disabling them, so surface it loudly.
-		log.Warn("All four transport switches are OFF: libp2p will fall back to its " +
-			"default transports (QUIC, WebRTC, WebTransport, TCP, WebSocket) with its own " +
-			"wildcard listeners, so nothing was actually disabled. Enable at least one.")
+		// All four listeners are gone, which makes this node dial-only: it can
+		// reach peers via any address they advertise but nothing can reach it
+		// directly, so every path degrades to relay / hole-punching.
+		//
+		// The transports themselves are still registered above (socket-protected),
+		// so libp2p's FallbackDefaults cannot smuggle in an unprotected QUIC,
+		// WebRTC, WebTransport or TCP. WebSocket is the one it still adds; that is
+		// harmless here because no /ws/ address is ever configured.
+		log.Warn("All four transport switches are OFF: no listeners, so this node is " +
+			"dial-only and will rely entirely on relay or hole-punching to be reached.")
 	}
 
 	h, err := libp2p.New(opts...)
@@ -1684,6 +1666,14 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	case len(boundParts) > 0:
 		log.Warn("Host bound %d listener(s) %v but advertises none — every listener is loopback or TAP-only, so no other machine can dial this node. Configure a listen address on a routable interface (or a wildcard one, which expands to the physical NICs).",
 			len(boundParts), boundParts)
+	case !cfg.Transports.EnableTCPReuse && !cfg.Transports.EnableQUICReuse &&
+		!cfg.Transports.EnableWebRTC && !cfg.Transports.EnableWebTransport:
+		// Every transport switch is off, so zero listeners is what was asked
+		// for, not a bind failure: this node is dial-only and is reached only
+		// through relay or hole-punching. A dial-only libp2p host is perfectly
+		// functional, so do not fail the node for it.
+		log.Warn("Host has no listeners by design (all transport switches OFF): this " +
+			"node is dial-only and can only be reached via relay or hole-punching.")
 	default:
 		// Clean up resources before returning the error: cancel the context
 		// (stops any goroutines started so far), close the host (releases

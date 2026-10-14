@@ -2,9 +2,12 @@
 
 本目录通过 `go.mod` 的 `replace github.com/libp2p/go-libp2p v0.50.0 => ./pkg/go-libp2p`
 以源码形式参与构建。基线为上游 **v0.50.0**（2026-08-12 发布，当前最新版），
-在此之上维护了以下 **16 处**本地代码补丁。第 17 条是一段「已实现但回退」的
-决策记录，供未来升级时参考，不是代码补丁。升级到未来版本（v0.51+）时，需要把
-这份清单中的代码补丁重新应用到新基线。
+在此之上维护了 **14 处**本地代码补丁（第 1–5、7、8–13、15、17 条）。
+
+第 **6**、**14**、**16** 条是「已实现但回退」的决策记录：代码已恢复上游原样，
+条目本身保留，说明**为什么不能这样改**——这三处都曾以「抗 DPI」或「提升可达性」
+为名落地，最后都演变成某个协议彻底不可达，重读条目可以避免重蹈覆辙。
+升级到未来版本（v0.51+）时，只需重新应用真正存在的代码补丁。
 
 ## 1. `p2p/host/basic/addrs_manager.go` — Android 接口地址提供者
 
@@ -56,7 +59,14 @@
   QUIC listener 的 `GetConfigForClient` 会对 hello 的 `SupportedProtos` 做**注册协议白名单**
   校验，遇到只广告 `"libp2p"` 的未升级对端会直接 `no supported protocol found` 拒绝，
   TLS 握手在那一步失败且**没有任何应用层日志**——部分升级时表现为「没升级的那些 peer
-  的 QUIC 全部永久不通」。因此必须同时广告两个 ALPN（补丁 14）。
+  的 QUIC 全部永久不通」。因此当时改为同时广告两个 ALPN（补丁 14）。
+
+- **撤回（2026-10，见补丁 14）**：上面这条「必须双广告」的结论同样是错的，它假设
+  QUIC 与 WebTransport 各持一个 ConnManager、两个 listener 互不可见。一旦两者共享
+  同一个 `quicreuse.ConnManager`（上游默认做法，本项目也已如此，见
+  `pkg/node/transport_options.go`），两个 listener 就合并成一个，`h3` 必然冲突，
+  其中一个协议直接消失。现已改回上游的 `"libp2p"`。混版互通问题也随之消失——
+  未升级对端本就广告 `"libp2p"`。
 
 ## 7. `p2p/security/tls/sni.go`（新文件）+ `crypto.go` + `transport.go` + `p2p/transport/quic/transport.go` — 统一 SNI
 
@@ -175,22 +185,40 @@
   `l.mux.Accept` 的等待，已建立的 PeerConnection/DTLS/SCTP 用的是各自独立的 ctx，
   因此这里最多是「停止接受新 candidate」，既不会切断现有连接，也不会影响出站拨号。
 
-## 14. `p2p/transport/quic/transport.go` — QUIC ALPN 双广告（`h3` + `libp2p`）
+## 14. `p2p/transport/quic/transport.go` — 曾「QUIC ALPN 双广告（`h3` + `libp2p`）」，已回退
 
-- listener 的 `NextProtos` 由 `[]string{"h3"}` 改为 `[]string{"h3", "libp2p"}`，
-  `"h3"` 仍排在第一位。
-- 原因：本仓库把 QUIC 与 WebTransport 拆成两个独立的 `quicreuse.NewConnManager`
-  （绕开两者在 connmgr 里按 ALPN 建键的冲突），QUIC 的 `GetConfigForClient` 于是只对
-  QUIC 侧注册的协议做白名单校验。未升级的对端只广告 `"libp2p"`，白名单里没有 →
-  `no supported protocol found` → TLS 握手失败，且 `quicreuse.Run()` 把这类错误直接
-  return，`connmgr.go` 里 `go cl.Run()` 丢弃返回值，**全程无任何应用层日志**。结果是
-  「只要没升级的那个 peer，QUIC 就永久不通」，一次部分升级就把整个 mesh 切半。
-- 保留 `"h3"` 在首位：DPI 中性由**广告列表的第一个元素**决定（客户端 Initial 的
-  ALPN 数组首个即 `"h3"`），所以抗 DPI 属性不变；追加 `"libp2p"` 只作兼容兜底。
-- 为什么不影响 muxer 选择：QUIC 的 muxer 走带内协商，与 ALPN 无关；
-  `p2p/security/tls/transport.go` 的 TCP-TLS 侧本来就把 `"h3"` 与 `"libp2p"` 都归一化为
-  空协议名，不受影响。WebTransport 注册的是 `http3.NextProtoH3`（同样是 `"h3"`），
-  但它有自己独立的 ConnManager，两边互不可见。
+- 原补丁把 listener 的 `NextProtos` 由 `[]string{"h3"}` 改为
+  `[]string{"h3", "libp2p"}`，`"h3"` 仍排首位（抗 DPI 由首元素决定），
+  `"libp2p"` 只作兼容兜底。**现已恢复上游的 `[]string{"libp2p"}`。**
+
+- 为什么要撤回：`quicreuse` 按 ALPN 做**连接复用与分流**，一个
+  `quicreuse.Listener` 上每个 ALPN 只能被注册一次（`listener.go` 的
+  `Add()` 对已注册协议直接 `already listening for protocol h3` 报错）。
+  WebTransport 的 ALPN 是 `"h3"`，**不可更改**（HTTP/3 协议强制）。于是：
+  - QUIC 与 WebTransport 共享同一个 ConnManager 时（上游默认，本项目亦如此），
+    两者落在同一个 listener 上，后注册的那个直接失败，**整个协议从这个地址上消失**；
+  - 更糟的是失败发生在 `Add()` 内部，`Transport.Listen` 拿到错误后该地址
+    仍可能出现在通告列表里，表现就是「对端看得到地址，但连不上」，且无任何日志。
+  这不是概率性劣化，而是配置了 QUIC+WebTransport 同端口时 100% 掉一个协议。
+
+- 为什么没有折中方案：想保留抗 DPI，就必须让 QUIC 广告一个非 `"libp2p"` 的
+  ALPN；而 QUIC 与 WebTransport 只要共享 socket，ALPN 就**必须互不相交**。
+  WebTransport 占了 `"h3"`，QUIC 就只剩 `"libp2p"`（或任何其他字符串，但那样
+  既不被上游接受，也没有抗 DPI 意义）。两条路互斥，本项目选择可达性。
+
+- 混版互通同样不再有问题：未升级对端广告的正是 `"libp2p"`，与本项目一致。
+  补丁 6 里为了解决「未升级对端被拒」而引入的双广告，其前提（两个独立
+  ConnManager）在本项目里已经不成立，因此那个问题不复存在。
+
+- 副作用（如实记录）：**丢失 QUIC 流量的 ALPN 级抗 DPI**。QUIC Initial 用公开
+  salt 加密，DPI 仍可读出 `"libp2p"`。补丁 7 的 SNI 伪装仍然生效，是唯一保留的
+  抗 DPI 手段。若要恢复抗 DPI，只能让 QUIC 独占端口、WebTransport 另起端口，
+  并接受两者无法共用一个 UDP 端口的限制。
+
+- 回归测试：`pkg/node/transport_options_test.go` 的
+  `TestSharedQUICReuseSharesAPortBetweenQUICAndWebTransport`（含 reuseport 开/关两种
+  子用例）锁住「同端口上 QUIC 与 WebTransport 同时可监听、可同时拨通」，
+  谁再把 ALPN 改成含 `"h3"` 就会在这里失败。
 
 ## 15. `p2p/transport/webrtc/udpmux/mux.go` — 接收缓冲 1500 → 65535
 

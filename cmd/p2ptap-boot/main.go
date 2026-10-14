@@ -45,7 +45,6 @@ import (
 	quicreuse "github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	webrtc "github.com/libp2p/go-libp2p/p2p/transport/webrtc"
 	"github.com/multiformats/go-multiaddr"
-	quic "github.com/quic-go/quic-go"
 )
 
 var log = logger.New("Boot")
@@ -1437,26 +1436,24 @@ func main() {
 	// because the relay address is not a local address). Without this
 	// override the boot server advertises TURN relay addresses via
 	// AddrsFactory but peers can never actually connect to them via QUIC.
+	//
+	// The manager is built through node.QUICReuseOption, the same constructor
+	// the p2ptap node uses, so the two binaries share one wiring of
+	// ConnContext / VerifySourceAddress and one idea of which listener owns
+	// which ALPN. With VerifySourceAddress unset quicreuse's own anti-spoofing
+	// rate limiter REJECTS every inbound connection above its 1000-connection
+	// burst rather than verifying it; the boot server is the one node every
+	// peer dials at once, so that is exactly where an inbound burst would be
+	// hard-refused with no log line.
+	hostOpts = append(hostOpts, node.QUICReuseOption(func(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
+		if conn, ok := node.GetTURNRelayConn(laddr.String()); ok {
+			log.Debug("QUIC ConnManager: using TURN relay connection for %s", laddr.String())
+			return conn, nil
+		}
+		return net.ListenUDP(network, laddr)
+	}))
 	hostOpts = append(hostOpts, libp2p.Transport(
-		func(key crypto.PrivKey, _ *quicreuse.ConnManager, psk pnet.PSK, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, transportOpts ...quict.Option) (tpt.Transport, error) {
-			var srk quic.StatelessResetKey
-			var tk quic.TokenGeneratorKey
-			if _, err := rand.Read(srk[:]); err != nil {
-				return nil, err
-			}
-			if _, err := rand.Read(tk[:]); err != nil {
-				return nil, err
-			}
-			cm, err := quicreuse.NewConnManager(srk, tk, quicreuse.OverrideListenUDP(func(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
-				if conn, ok := node.GetTURNRelayConn(laddr.String()); ok {
-					log.Debug("QUIC ConnManager: using TURN relay connection for %s", laddr.String())
-					return conn, nil
-				}
-				return net.ListenUDP(network, laddr)
-			}))
-			if err != nil {
-				return nil, err
-			}
+		func(key crypto.PrivKey, cm *quicreuse.ConnManager, psk pnet.PSK, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, transportOpts ...quict.Option) (tpt.Transport, error) {
 			return quict.NewTransport(key, cm, psk, gater, rcmgr, transportOpts...)
 		},
 	))
