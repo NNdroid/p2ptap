@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	tpt "github.com/libp2p/go-libp2p/core/transport"
 	quic "github.com/libp2p/go-libp2p/p2p/transport/quic"
@@ -64,31 +65,53 @@ func stringAddrs(addrs []multiaddr.Multiaddr) []string {
 //     transport that registers second silently loses its listener while its
 //     address is still advertised. This test fails if that is reintroduced; see
 //     the retraction note in pkg/go-libp2p/LOCAL_PATCHES.md.
+//
+// newSharedPortHost builds a host that listens for QUIC and WebTransport on the
+// SAME UDP port, and returns it with the two listen addresses and the port
+// slot for matching them against advertised addresses.
+//
+// freeUDPPort releases its port before returning, so a busy CI machine can hand
+// the same number to someone else in the meantime. Retry on "address already in
+// use" — but not on any other error, which is a real registration defect and
+// must fail fast rather than be retried away.
+func newSharedPortHost(t *testing.T, reuseport bool) (host.Host, string, string, string) {
+	t.Helper()
+	extra := []quicreuse.Option(nil)
+	if !reuseport {
+		extra = append(extra, quicreuse.DisableReuseport())
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		port := freeUDPPort(t)
+		quicAddr := fmt.Sprintf("/ip4/127.0.0.1/udp/%d/quic-v1", port)
+		wtAddr := fmt.Sprintf("/ip4/127.0.0.1/udp/%d/quic-v1/webtransport", port)
+
+		h, err := libp2p.New(
+			QUICReuseOption(func(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
+				return net.ListenUDP(network, laddr)
+			}, extra...),
+			libp2p.Transport(quic.NewTransport),
+			libp2p.Transport(webtransport.New),
+			libp2p.ListenAddrs(mustMA(quicAddr), mustMA(wtAddr)),
+		)
+		if err == nil {
+			return h, quicAddr, wtAddr, fmt.Sprintf("/udp/%d/", port)
+		}
+		if !strings.Contains(err.Error(), "in use") {
+			t.Fatalf("create host: %v", err)
+		}
+		lastErr = err
+	}
+	t.Fatalf("create host: port was still held after 8 free ports, last error: %v", lastErr)
+	return nil, "", "", ""
+}
+
 func TestSharedQUICReuseSharesAPortBetweenQUICAndWebTransport(t *testing.T) {
 	for _, reuseport := range []bool{false, true} {
 		reuseport := reuseport
 		t.Run(fmt.Sprintf("reuseport=%t", reuseport), func(t *testing.T) {
-			port := freeUDPPort(t)
-			portSlot := fmt.Sprintf("/udp/%d/", port)
-			quicAddr := fmt.Sprintf("/ip4/127.0.0.1/udp/%d/quic-v1", port)
-			wtAddr := fmt.Sprintf("/ip4/127.0.0.1/udp/%d/quic-v1/webtransport", port)
-
-			extra := []quicreuse.Option(nil)
-			if !reuseport {
-				extra = append(extra, quicreuse.DisableReuseport())
-			}
-
-			h, err := libp2p.New(
-				QUICReuseOption(func(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
-					return net.ListenUDP(network, laddr)
-				}, extra...),
-				libp2p.Transport(quic.NewTransport),
-				libp2p.Transport(webtransport.New),
-				libp2p.ListenAddrs(mustMA(quicAddr), mustMA(wtAddr)),
-			)
-			if err != nil {
-				t.Fatalf("create host: %v", err)
-			}
+			h, quicAddr, _, portSlot := newSharedPortHost(t, reuseport)
 			t.Cleanup(func() { _ = h.Close() })
 
 			// Advertised addresses are suffixed with /certhash/ per registered
@@ -132,11 +155,19 @@ func TestSharedQUICReuseSharesAPortBetweenQUICAndWebTransport(t *testing.T) {
 			}
 
 			// Both transports must actually be reachable through that one port.
-			dialer, err := libp2p.New(libp2p.NoListenAddrs)
-			if err != nil {
-				t.Fatalf("create dialer: %v", err)
-			}
-			t.Cleanup(func() { _ = dialer.Close() })
+			// A FRESH dialer per case, rather than one host reused with
+			// ClearAddrs/ClosePeer between dials. This fork's host.Connect does
+			// not dial the addresses it is given: it absorbs them into the
+			// peerstore and then dials by peer ID (see
+			// pkg/go-libp2p/p2p/host/basic/basic_host.go), so the peerstore is
+			// the dialer's real source of truth. ClosePeer triggers address-book
+			// cleanup for the peer, and under -race on macOS that cleanup can
+			// land after the next Connect's AddAddrs, leaving the peerstore
+			// empty and surfacing "no addresses" for an address that is
+			// perfectly dialable — a false failure of a protocol that works.
+			// A fresh dialer has no prior state to clean up, and ConnsToPeer
+			// returns exactly the one connection this address produced, so the
+			// transport attribution below stays unambiguous.
 			for _, tc := range []struct {
 				addr   string
 				expect string
@@ -144,12 +175,11 @@ func TestSharedQUICReuseSharesAPortBetweenQUICAndWebTransport(t *testing.T) {
 				{quicAddr, "quic"},
 				{wtDialAddr, "webtransport"},
 			} {
-				// Wipe what the peerstore learned from the previous dial, so this
-				// Connect fans out across exactly one address and ConnsToPeer
-				// returns exactly the connection this address produced. Without
-				// that the swarm also redials the previous address and the check
-				// below cannot say which address a connection came from.
-				dialer.Peerstore().ClearAddrs(h.ID())
+				dialer, err := libp2p.New(libp2p.NoListenAddrs)
+				if err != nil {
+					t.Fatalf("create dialer: %v", err)
+				}
+				t.Cleanup(func() { _ = dialer.Close() })
 
 				if err := dialer.Connect(context.Background(), peer.AddrInfo{
 					ID:    h.ID(),
@@ -179,9 +209,9 @@ func TestSharedQUICReuseSharesAPortBetweenQUICAndWebTransport(t *testing.T) {
 						c.RemoteMultiaddr(), c.ConnState().Transport,
 						TransportOf(c.RemoteMultiaddr()), TransportOfConn(c))
 				}
-				if err := dialer.Network().ClosePeer(h.ID()); err != nil {
-					t.Fatalf("close peer: %v", err)
-				}
+				// No ClosePeer here: the dialer's own Close in the cleanup is
+				// enough, and closing the peer between cases is what makes the
+				// peerstore race above reachable.
 			}
 		})
 	}
@@ -208,21 +238,7 @@ type dialerNetwork interface {
 // and it uses a host's REAL advertised addresses — which carry the /certhash/
 // suffix the peer actually dials — rather than hand-built ones.
 func TestDialTransportSelectionIsDeterministic(t *testing.T) {
-	port := freeUDPPort(t)
-	h, err := libp2p.New(
-		QUICReuseOption(func(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
-			return net.ListenUDP(network, laddr)
-		}),
-		libp2p.Transport(quic.NewTransport),
-		libp2p.Transport(webtransport.New),
-		libp2p.ListenAddrs(
-			mustMA(fmt.Sprintf("/ip4/127.0.0.1/udp/%d/quic-v1", port)),
-			mustMA(fmt.Sprintf("/ip4/127.0.0.1/udp/%d/quic-v1/webtransport", port)),
-		),
-	)
-	if err != nil {
-		t.Fatalf("create host: %v", err)
-	}
+	h, _, _, portSlot := newSharedPortHost(t, true)
 	t.Cleanup(func() { _ = h.Close() })
 
 	nw, ok := h.Network().(dialerNetwork)
@@ -230,7 +246,6 @@ func TestDialTransportSelectionIsDeterministic(t *testing.T) {
 		t.Fatalf("network does not expose TransportForDialing")
 	}
 
-	portSlot := fmt.Sprintf("/udp/%d/", port)
 	var checked int
 	for _, a := range h.Addrs() {
 		if !strings.Contains(a.String(), portSlot) {
@@ -264,6 +279,6 @@ func TestDialTransportSelectionIsDeterministic(t *testing.T) {
 		checked++
 	}
 	if checked == 0 {
-		t.Fatalf("host advertised no addresses on port %d; advertised: %v", port, stringAddrs(h.Addrs()))
+		t.Fatalf("host advertised no addresses on %s; advertised: %v", portSlot, stringAddrs(h.Addrs()))
 	}
 }
