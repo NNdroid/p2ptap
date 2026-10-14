@@ -255,3 +255,22 @@ diff -rq "$UP" pkg/go-libp2p --exclude=".git"
 ```
 
 预期结果：仅上列文件存在差异。升级基线后重新执行本 diff，确认补丁全部迁移且无遗漏。
+
+## 修改本目录前必须本地跑上游测试
+
+本目录是嵌套 module（有自己的 `go.mod`），`go test ./...` 在主仓**不会**进入这里，
+上游测试也**刻意不纳入 CI**。这曾经是实际坑：一处 `p2p/protocol/holepunch/svc.go`
+补丁通过了主仓全部测试与 CI，却稳定破坏 3 个上游用例（`TestDirectDialWorks`、
+`TestEndToEndSimConnect` 两个子用例、`TestEndToEndSimConnectQUICReuse`），
+直到本地显式运行 fork 测试才被发现。
+
+改动本目录任何文件后，推送前必须本地执行：
+
+```bash
+cd pkg/go-libp2p
+go build ./...
+go vet ./p2p/transport/... ./p2p/protocol/... ./p2p/security/... ./p2p/net/...
+go test ./p2p/transport/... ./p2p/protocol/... ./p2p/security/... ./p2p/net/... -count=1
+```
+
+其中 `p2p/net/swarm` 约 40s、`p2p/transport/webrtc` 约 12s、`protocol/holepunch` 约 6s。
