@@ -55,6 +55,17 @@ jobs:
       - name: Cross-Compile Build Verification
         run: go build -v -o p2ptap_test_bin ./cmd/p2ptap
 
+      # Android cross-compile, with the -checklinkname=0 linker flag that the
+      # AAR build depends on. Without it the link fails with
+      # "github.com/wlynxg/anet: invalid reference to net.zoneCache", an error
+      # that is impossible to diagnose from the message alone — the script
+      # carries the explanation and prints it if the flag is ever lost. See
+      # scripts/build-android-check.sh. Runs on every OS in the matrix because
+      # cross-compilation is host-independent, and it needs neither the NDK nor
+      # CGO.
+      - name: Cross-Compile Android Build Verification
+        run: bash scripts/build-android-check.sh
+
   # ── Race detector gate ────────────────────────────────────────────────────
   # Catches data races / concurrency bugs (the items flagged in the concurrency
   # audit) on every supported platform. The race runtime needs cgo, so each OS
