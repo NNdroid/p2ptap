@@ -37,6 +37,14 @@ const (
 	natUnknown                // Unknown — need TURN as fallback
 )
 
+// stunFailedCycles counts consecutive STUN bind cycles in which EVERY query
+// failed. A total wipeout leaves the node with no server-reflexive address, so
+// hole punching has nothing to punch from and NAT traversal silently degrades.
+// It has to be visible at the shipped default log level (info): it used to live
+// only in the per-cycle Debug line, so an operator saw nothing and the node
+// simply stopped connecting to peers behind NAT.
+var stunFailedCycles atomic.Int64
+
 // detectedNATType stores the last detected NAT type from STUN responses.
 // Default is natUnknown, which means TURN is always attempted (safe fallback).
 var detectedNATType atomic.Int32
@@ -130,9 +138,13 @@ func (n *Node) startSTUNBinder(ctx context.Context) {
 		bindCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
-		log.Debug("STUN binder: performing initial bind")
+		log.Info("STUN binder: performing initial bind")
 		if err := n.stunBindOnce(bindCtx); err != nil {
-			log.Debug("STUN binder initial bind failed: %v", err)
+			// A failed FIRST bind means the node has no server-reflexive address at
+			// all, so hole punching and relay selection are both degraded for
+			// however long STUN stays unreachable. That is not recoverable by the
+			// node itself, so it must reach an operator at LogLevel "info".
+			log.Warn("STUN initial bind failed (NAT type stays %s): %v", natTypeName(detectedNATType.Load()), err)
 		}
 
 		// Adaptive rebind: track consecutive stable cycles to decide interval.
@@ -356,6 +368,19 @@ func (n *Node) stunBindOnce(ctx context.Context) error {
 	elapsed := time.Since(startTime)
 	log.Debug("STUN bind cycle completed in %v: UDP %d/%d, TCP %d/%d",
 		elapsed, udpSuccesses, udpSuccesses+udpFailures, tcpSuccesses, tcpSuccesses+tcpFailures)
+
+	// Zero successes out of every server is a different failure from "a few
+	// servers are down" — the node then has no server-reflexive address at all,
+	// so hole punching has nothing to punch from. Count consecutive wipeouts so
+	// the operator can tell transient from permanent, and reset on recovery.
+	attempted := udpSuccesses + udpFailures + tcpSuccesses + tcpFailures
+	if udpSuccesses == 0 && tcpSuccesses == 0 && attempted > 0 {
+		wipeouts := stunFailedCycles.Add(1)
+		log.Warn("STUN wipeout (cycle %d in a row): 0/%d UDP and 0/%d TCP servers answered — no server-reflexive address, NAT type is %s",
+			wipeouts, udpSuccesses+udpFailures, tcpSuccesses+tcpFailures, natTypeName(detectedNATType.Load()))
+	} else if udpSuccesses > 0 || tcpSuccesses > 0 {
+		stunFailedCycles.Store(0)
+	}
 
 	// Merge and store UDP addresses
 	mergeAndStoreSTUNAddrs(udpDiscovered, getSTUNReflexiveAddrs(), udpFailures)

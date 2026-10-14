@@ -906,3 +906,73 @@ func testReachability(
 		t.Fatalf("failed addrs check for combination: %d", combination)
 	}
 }
+
+// TestHolePunchAddrsCarryCertHashes pins the invariant that every address in
+// HolePunchAddrs is dialable as-is. The puncher exchanges these addresses with its peer
+// over /libp2p/dcutr, and each side then dials whatever it received — so an address must
+// carry whatever its transport requires. webRTCTransport.CanDial and
+// IsWebtransportMultiaddr both reject an address with zero certhashes.
+//
+// DirectAddrs() and the observed addrs are already hashed by getLocalAddrs, so the only
+// unhashed input is what the AddrsFactory invents. That is the case this test exercises:
+// a NAT-mapped WebRTC endpoint that exists ONLY in the factory. A raw addrsFactory call
+// passes it through bare and the WebRTC leg of the punch becomes undialable;
+// applyAddrsFactory routes it through the same factory->certhash pipeline the rest of the
+// address book uses.
+func TestHolePunchAddrsCarryCertHashes(t *testing.T) {
+	const certHash = "uEiAsGPzpiPGQzSlVHRXrUCT5EkTV7YFrV4VZ3hpEKTd_zg"
+	listenWrtc := ma.StringCast("/ip4/2.2.2.2/udp/8080/webrtc-direct")
+	// A bare WebRTC endpoint only the factory knows about — the case that matters,
+	// because nothing else in the address book has seen it.
+	factoryWrtc := ma.StringCast("/ip4/2.2.2.2/udp/9090/webrtc-direct")
+	privateAddr := ma.StringCast("/ip4/100.100.100.101/udp/8080/quic-v1")
+
+	am := newAddrsManagerTestCase(t, addrsManagerArgs{
+		ListenAddrs: func() []ma.Multiaddr {
+			return []ma.Multiaddr{
+				ma.StringCast("/ip4/2.2.2.2/udp/8080/quic-v1"),
+				listenWrtc,
+				privateAddr,
+			}
+		},
+		AddrsFactory: func(addrs []ma.Multiaddr) []ma.Multiaddr {
+			return append(addrs, factoryWrtc)
+		},
+		// Stands in for swarm.AddCertHashes: attach a hash to the addresses a
+		// cert-using transport serves, leave the rest alone.
+		AddCertHashes: func(addrs []ma.Multiaddr) []ma.Multiaddr {
+			for i, addr := range addrs {
+				s := addr.String()
+				if strings.Contains(s, "webrtc-direct") || strings.Contains(s, "webtransport") {
+					addrs[i] = ma.StringCast(s + "/certhash/" + certHash)
+				}
+			}
+			return addrs
+		},
+	})
+	am.updateAddrsSync()
+
+	addrs := am.HolePunchAddrs()
+	require.NotEmpty(t, addrs, "no public addresses returned")
+
+	var bareWrtc, privateLeaked, factoryHashed bool
+	for _, addr := range addrs {
+		s := addr.String()
+		if strings.Contains(s, "webrtc-direct") && !strings.Contains(s, "/certhash/") {
+			bareWrtc = true
+		}
+		if strings.HasPrefix(s, factoryWrtc.String()) && strings.Contains(s, "/certhash/") {
+			factoryHashed = true
+		}
+		if manet.IsPrivateAddr(addr) {
+			privateLeaked = true
+		}
+	}
+	require.False(t, privateLeaked,
+		"a private address leaked into the hole-punch exchange: %v", addrs)
+	require.False(t, bareWrtc,
+		"a /webrtc-direct/ hole-punch address was exchanged without a /certhash/, so the "+
+			"peer cannot dial it back (webRTCTransport.CanDial requires at least one): %v", addrs)
+	require.True(t, factoryHashed,
+		"the factory-provided WebRTC endpoint was dropped or left unhashed: %v", addrs)
+}

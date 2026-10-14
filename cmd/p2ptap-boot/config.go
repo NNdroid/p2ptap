@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 )
 
 // BootConfig is the JSON configuration for the standalone p2ptap bootstrap /
@@ -39,6 +40,13 @@ type BootConfig struct {
 	// See pkg/config.DefaultConfig for the full server list.
 	StunServers []string `json:"stun_servers,omitempty"`
 	TurnServers []string `json:"turn_servers,omitempty"`
+
+	// HolePunchTimeout bounds the direct dial the puncher makes after it has
+	// exchanged hole-punch addresses with a peer. It must match the mesh node's
+	// value, which defaults to 15s: the boot answers the punch, so a boot that
+	// dials with a shorter timeout gives up before the peer behind symmetric NAT
+	// finishes bringing its socket up. JSON serializes it as nanoseconds.
+	HolePunchTimeout time.Duration `json:"hole_punch_timeout"`
 }
 
 // DefaultBootConfig returns the configuration used on first run / when fields
@@ -85,7 +93,8 @@ func DefaultBootConfig() *BootConfig {
 		// Empty on purpose. TURN requires authentication, so anonymous entries
 		// can never allocate a relay port and only burn an allocation cycle.
 		// Fill this in with a real URL carrying ?username=...&credential=....
-		TurnServers: []string{},
+		TurnServers:      []string{},
+		HolePunchTimeout: 15 * time.Second,
 	}
 }
 
@@ -106,6 +115,12 @@ func LoadBootConfig(path string) (*BootConfig, error) {
 	cfg := DefaultBootConfig()
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	// Same guard as the mesh node's config: JSON encodes time.Duration as
+	// nanoseconds, so an operator who meant "15 seconds" writes 15 and gets 15
+	// nanoseconds — a punch that gives up before the socket is even open.
+	if cfg.HolePunchTimeout < 100*time.Millisecond || cfg.HolePunchTimeout > 120*time.Second {
+		cfg.HolePunchTimeout = 15 * time.Second
 	}
 	return cfg, nil
 }

@@ -41,6 +41,7 @@ import (
 	tpt "github.com/libp2p/go-libp2p/core/transport"
 	connmgr "github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
+	"github.com/libp2p/go-libp2p/p2p/protocol/holepunch"
 	quict "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	quicreuse "github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	webrtc "github.com/libp2p/go-libp2p/p2p/transport/webrtc"
@@ -1396,7 +1397,10 @@ func main() {
 		libp2p.NATPortMap(),
 		libp2p.EnableNATService(),
 		libp2p.EnableRelay(),
-		libp2p.EnableHolePunching(),
+		// libp2p's built-in default is 10s and the mesh node dials with 15s, so
+		// the boot was aborting its side of a punch before a peer behind symmetric
+		// NAT had finished bringing its socket up. Keep the two in lockstep.
+		libp2p.EnableHolePunching(holepunch.DirectDialTimeout(cfg.HolePunchTimeout)),
 	}
 	// WebRTC transport is registered UNCONDITIONALLY. Gating the whole
 	// registration on "do we have any STUN/TURN servers" silently deleted the
@@ -1440,11 +1444,9 @@ func main() {
 	// The manager is built through node.QUICReuseOption, the same constructor
 	// the p2ptap node uses, so the two binaries share one wiring of
 	// ConnContext / VerifySourceAddress and one idea of which listener owns
-	// which ALPN. With VerifySourceAddress unset quicreuse's own anti-spoofing
-	// rate limiter REJECTS every inbound connection above its 1000-connection
-	// burst rather than verifying it; the boot server is the one node every
-	// peer dials at once, so that is exactly where an inbound burst would be
-	// hard-refused with no log line.
+	// which ALPN. VerifySourceAddress must stay set: the boot server is the one
+	// node every peer dials at once, so address validation is the only thing
+	// standing between an unauthenticated inbound packet and a full connection.
 	hostOpts = append(hostOpts, node.QUICReuseOption(func(network string, laddr *net.UDPAddr) (net.PacketConn, error) {
 		if conn, ok := node.GetTURNRelayConn(laddr.String()); ok {
 			log.Debug("QUIC ConnManager: using TURN relay connection for %s", laddr.String())
@@ -1527,7 +1529,12 @@ func main() {
 	relayRes.ReservationTTL = 1 * time.Hour
 	relayRes.MaxReservations = 1024
 	relayRes.MaxCircuits = 1024
-	relayRes.MaxReservationsPerPeer = 16
+	// Note: relay.Resources.MaxReservationsPerPeer is deliberately NOT set. It is
+	// marked Deprecated in libp2p ("We only need 1 reservation per peer") and the
+	// field is never read by any limiter — constraints.Reserve removes the peer's
+	// existing reservation before appending the new one, so the enforced per-peer
+	// cap is 1 regardless of this value. Setting it to 16 here made the WebUI
+	// advertise 16 reservations per peer that the relay could never grant.
 	relayRes.MaxReservationsPerIP = 64
 	// MaxReservationsPerASN is silently left at libp2p's default of 32, which
 	// means all peers behind a single ISP ASN (office networks, CGNAT, mobile
@@ -1549,10 +1556,15 @@ func main() {
 		relay.WithResources(relayRes),
 	)
 	if err != nil {
-		fmt.Printf("Warning: Circuit Relay v2 init error: %v\n", err)
-	} else {
-		fmt.Println("[+] Circuit Relay v2 enabled with ACL and resource limits")
+		// A boot whose circuit relay failed to initialise is not a working relay.
+		// It would still serve the p2ptap overlay relay, keep the WebUI happy, and
+		// print the "Circuit Relay v2 enabled" banner — so peers behind symmetric
+		// NAT would time out against a server that claims to relay for them. Fail
+		// the process instead of advertising a broken capability.
+		fmt.Printf("Error starting Circuit Relay v2: %v\n", err)
+		os.Exit(1)
 	}
+	fmt.Println("[+] Circuit Relay v2 enabled with ACL and resource limits")
 
 	// 4. Register PSK authentication stream handler. Each configured PSK becomes
 	//    one network; a handshake token is accepted if it matches ANY PSK, and
@@ -1798,6 +1810,7 @@ func main() {
 			pskCount:    len(psks),
 			acl:         aclFilter,
 			hub:         hub,
+			relayRes:    relayRes,
 			relayRouter: relayRouter,
 			meshInfos:   meshInfos,
 			geoIP:       gGeoIP,
@@ -1861,6 +1874,7 @@ type bootDataProviderImpl struct {
 	pskCount    int
 	acl         *pskACLFilter
 	hub         *peekMapHub
+	relayRes    relay.Resources
 	relayRouter *relayRouter
 	meshInfos   []peer.AddrInfo
 	geoIP       *GeoIPResolver
@@ -1872,6 +1886,28 @@ type bootDataProviderImpl struct {
 
 func (p *bootDataProviderImpl) GetHost() host.Host {
 	return p.h
+}
+
+// GetRelayLimits reports the circuit relay's actual resource limits, read off the
+// relay.Resources this server was built with. It exists because the dashboard used
+// to hard-code libp2p's defaults, which disagree with what the boot enforces.
+func (p *bootDataProviderImpl) GetRelayLimits() bootweb.RelayStatsDTO {
+	d := bootweb.RelayStatsDTO{
+		Enabled:         true,
+		MaxCircuits:     p.relayRes.MaxCircuits,
+		MaxReservations: p.relayRes.MaxReservations,
+		// Enforced per-peer cap is 1 (see the MaxReservationsPerPeer note where
+		// relayRes is built); the field itself is dead code in libp2p.
+		MaxPerPeer:        1,
+		MaxPerIP:          p.relayRes.MaxReservationsPerIP,
+		MaxPerASN:         p.relayRes.MaxReservationsPerASN,
+		ReservationTTLSec: int(p.relayRes.ReservationTTL.Seconds()),
+	}
+	if p.relayRes.Limit != nil {
+		d.DurationLimitSec = int(p.relayRes.Limit.Duration.Seconds())
+		d.DataLimitMB = int(p.relayRes.Limit.Data / (1 << 20))
+	}
+	return d
 }
 
 func (p *bootDataProviderImpl) GetNodeName() string {
@@ -2479,10 +2515,14 @@ func printBootstrapBanner(h host.Host, name string, pskEnabled bool, webServer *
 		fmt.Printf(" WebUI Dashboard   : http://%s\n", webServer.GetListenAddr())
 		// Token is already printed at startup; avoid repeating it in the banner.
 	}
+	// Mirror the WebUI dashboard: MaxPerPeer is 1 because libp2p's
+	// MaxReservationsPerPeer field is deprecated and never enforced — the limiter
+	// removes a peer's old reservation before granting a new one, so 16 was a
+	// number we never granted.
 	relayLimits := []string{
 		"MaxReservations=1024", "MaxCircuits=1024",
-		"MaxPerPeer=16", "MaxPerIP=64",
-		"ConnDuration=5m", "ConnData=512MiB",
+		"MaxPerPeer=1", "MaxPerIP=64", "MaxPerASN=256",
+		"ReservationTTL=1h", "ConnDuration=5m", "ConnData=512MiB",
 	}
 	fmt.Printf(" Relay Limits      : %s\n", strings.Join(relayLimits, ", "))
 	fmt.Println(" Copy-paste any of the following Multiaddrs into your")

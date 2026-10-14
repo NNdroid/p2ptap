@@ -278,11 +278,10 @@ func parseSimpleQuery(raw string) url.Values {
 
 // startTURNBinder periodically allocates TURN relay addresses.
 //
-// NAT-type-aware: if the STUN binder detected an open or cone NAT, TURN is
-// skipped entirely — hole punching works without relay. TURN is only
-// allocated for symmetric NAT or unknown type (the safe fallback).
-// The NAT type is re-checked each cycle, so if the network changes, the
-// binder adapts automatically.
+// This only runs when TurnServers was configured, so an allocation here is
+// something the user asked for. The NAT verdict is logged for diagnosis but
+// never gates the allocation and never removes existing relays — see the
+// comment in the loop below for why treating it as a veto lost connectivity.
 func (n *Node) startTURNBinder(ctx context.Context) {
 	go func() {
 		defer n.wg.Done()
@@ -292,10 +291,10 @@ func (n *Node) startTURNBinder(ctx context.Context) {
 			log.Debug("TURN binder stopped")
 		}()
 
-		// Delay the first cycle so the STUN binder has finished its first pass
-		// and set the NAT type: needsTURN() gates every allocation on it, so
-		// running immediately would always report "unknown" and try TURN even
-		// when hole punching would have worked.
+		// Delay the first cycle so the STUN binder has finished its first pass and
+		// the reflexive addrs exist before relay endpoints are registered on top of
+		// them — the relay address is only useful once the AddrsFactory has
+		// published anything at all.
 		select {
 		case <-ctx.Done():
 			return
@@ -315,21 +314,21 @@ func (n *Node) startTURNBinder(ctx context.Context) {
 			default:
 			}
 
-			// Skip TURN if the NAT type doesn't need it — open/cone NATs
-			// can hole-punch directly, saving relay resources.
+			// The NAT verdict is advisory only — it explains whether relay is *needed*,
+			// it must never veto an allocation or tear one down. This binder only
+			// runs when TurnServers was configured, so the user explicitly asked for
+			// relay endpoints; the classification that could deny them is a single
+			// server-reflexive observation, which can only separate open, cone and
+			// port-changed and which is re-derived every cycle, so it can flip both
+			// ways with no warning. Skipping here was already a bug (a cone verdict
+			// vetoed relay the user asked for); tearing the relays down on top of
+			// it made the flip destructive — a peer behind symmetric NAT needs the
+			// relay endpoint while hole punching is what carries the data, so
+			// removing it is how a node goes from "connects via relay" to "never
+			// connects". Log the verdict instead and let hole punching and relay
+			// coexist; relay is a fallback resource, not the data path.
 			if !needsTURN() {
-				log.Debug("TURN bind cycle skipped: NAT type is %s (no relay needed)", natTypeName(detectedNATType.Load()))
-				// Clean up any existing TURN relays since they're no longer needed.
-				removeAllTURNClients()
-				removeAllTURNRelayConns()
-				setTURNRelayAddrs(nil)
-				select {
-				case <-ctx.Done():
-					return
-				case <-permTicker.C:
-				case <-ticker.C:
-				}
-				continue
+				log.Debug("NAT type is %s — relay not strictly required, but TurnServers was configured so allocating anyway", natTypeName(detectedNATType.Load()))
 			}
 
 			if err := n.turnBindOnce(ctx); err != nil {

@@ -131,19 +131,12 @@ func StartBootTURNBinder(ctx context.Context, h host.Host, servers []string) {
 			default:
 			}
 
-			// Skip TURN if the NAT type doesn't need it.
+			// Same rule as the client TURN binder: the NAT verdict is advisory.
+			// A boot server that configures TURN is explicitly asking for relay
+			// endpoints, so a single server-reflexive classification must neither
+			// deny them nor withdraw them.
 			if !needsTURN() {
-				log.Debug("Boot TURN bind cycle skipped: NAT type is %s (no relay needed)", natTypeName(detectedNATType.Load()))
-				removeAllTURNClients()
-				removeAllTURNRelayConns()
-				setTURNRelayAddrs(nil)
-				select {
-				case <-ctx.Done():
-					return
-				case <-permTicker.C:
-				case <-ticker.C:
-				}
-				continue
+				log.Debug("Boot NAT type is %s — relay not strictly required, but TurnServers was configured so allocating anyway", natTypeName(detectedNATType.Load()))
 			}
 
 			if err := bootTURNBindOnce(ctx, h, servers); err != nil {

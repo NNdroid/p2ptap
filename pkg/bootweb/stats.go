@@ -76,13 +76,16 @@ type SubnetRouteDTO struct {
 
 // RelayStatsDTO holds Circuit Relay v2 stats and resource limits.
 type RelayStatsDTO struct {
-	MaxCircuits        int `json:"max_circuits"`
-	MaxReservations    int `json:"max_reservations"`
-	ActiveReservations int `json:"active_reservations"`
-	MaxPerPeer         int `json:"max_per_peer"`
-	MaxPerIP           int `json:"max_per_ip"`
-	DurationLimitSec   int `json:"duration_limit_sec"`
-	DataLimitMB        int `json:"data_limit_mb"`
+	Enabled            bool `json:"enabled"`
+	MaxCircuits        int  `json:"max_circuits"`
+	MaxReservations    int  `json:"max_reservations"`
+	ActiveReservations int  `json:"active_reservations"`
+	MaxPerPeer         int  `json:"max_per_peer"`
+	MaxPerIP           int  `json:"max_per_ip"`
+	MaxPerASN          int  `json:"max_per_asn"`
+	ReservationTTLSec  int  `json:"reservation_ttl_sec"`
+	DurationLimitSec   int  `json:"duration_limit_sec"`
+	DataLimitMB        int  `json:"data_limit_mb"`
 }
 
 // PeekMapStatsDTO holds pub/sub topology channel status.
@@ -227,6 +230,7 @@ type BootDataProvider interface {
 	GetRecentAlerts() []AlertEventDTO
 	// New methods for enhanced dashboard modules
 	GetRelaySessions() []RelaySessionDTO
+	GetRelayLimits() RelayStatsDTO
 	GetGeoNodes() []GeoNodeDTO
 	GetGeoArcs() []GeoArcDTO
 	GetTrafficHistory() []TrafficPoint
@@ -506,6 +510,7 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 
 	// Collect new module data
 	relaySessions := p.GetRelaySessions()
+	relayLimits := p.GetRelayLimits()
 	geoNodes := p.GetGeoNodes()
 	geoArcs := p.GetGeoArcs()
 	trafficHistory := p.GetTrafficHistory()
@@ -515,17 +520,23 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 	return BootDashboardDTO{
 		Server: serverInfo,
 		Relay: RelayStatsDTO{
-			// These match libp2p's DefaultResources() — see
-			// pkg/go-libp2p/p2p/protocol/circuitv2/relay/resources.go.
-			// p2ptap enables the relay via libp2p.EnableRelay() with no
-			// custom limiter, so these are the actual enforced values.
-			MaxCircuits:        16, // per-peer circuit cap (was 1024)
-			MaxReservations:    128, // total relay slots (was 1024)
+			// Limits come from the live relay.Resources the relay was built with,
+			// not from a copy of libp2p's DefaultResources(). These used to be
+			// hard-coded to 16/128/1/8/120s/0MB while the boot sized the relay at
+			// 1024/1024/64/256/300s/512MiB, so the dashboard showed a relay that
+			// looked nearly saturated when it was carrying under 1% of capacity —
+			// the operator reads "out of relay slots" into a completely empty
+			// reservation table.
+			Enabled:            relayLimits.Enabled,
+			MaxCircuits:        relayLimits.MaxCircuits,
+			MaxReservations:    relayLimits.MaxReservations,
 			ActiveReservations: len(peersList),
-			MaxPerPeer:         1, // reservation per peer (was 16)
-			MaxPerIP:           8, // reservations per IP (was 64)
-			DurationLimitSec:   120, // 2 min connection lifetime (was 300)
-			DataLimitMB:        0, // 128KB default rounds to 0 MB
+			MaxPerPeer:         relayLimits.MaxPerPeer,
+			MaxPerIP:           relayLimits.MaxPerIP,
+			MaxPerASN:          relayLimits.MaxPerASN,
+			ReservationTTLSec:  relayLimits.ReservationTTLSec,
+			DurationLimitSec:   relayLimits.DurationLimitSec,
+			DataLimitMB:        relayLimits.DataLimitMB,
 		},
 		PeekMap: PeekMapStatsDTO{
 			ActiveListeners: p.GetPeekMapListenerCount(),
@@ -552,4 +563,3 @@ func formatShortPeerID(pid peer.ID) string {
 	}
 	return s[:7] + "..." + s[len(s)-6:]
 }
-

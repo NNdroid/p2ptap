@@ -487,7 +487,17 @@ func (a *addrsManager) applyAddrsFactory(addrs []ma.Multiaddr) []ma.Multiaddr {
 // suitable for hole punching.
 func (a *addrsManager) HolePunchAddrs() []ma.Multiaddr {
 	addrs := a.DirectAddrs()
-	addrs = slices.Clone(a.addrsFactory(addrs))
+	// applyAddrsFactory, NOT the raw addrsFactory: the factory's output is the
+	// only part of this list that bypasses getLocalAddrs, where certhashes get
+	// attached. DirectAddrs() and the observed addrs below are already hashed,
+	// but an address the factory invents (a NAT-mapped or relay endpoint) is
+	// not. webRTCTransport.CanDial and IsWebtransportMultiaddr both reject an
+	// address carrying zero certhashes, so a bare /webrtc-direct/ or
+	// /webtransport/ address handed to the peer over /libp2p/dcutr can never be
+	// dialed back and the punch silently loses that leg. Route the factory's
+	// output through the same factory→certhash pipeline the rest of the address
+	// book uses, so everything here is dialable as-is.
+	addrs = a.applyAddrsFactory(addrs)
 	// AllAddrs may ignore observed addresses in favour of NAT mappings.
 	// Use both for hole punching.
 	if a.observedAddrsManager != nil {

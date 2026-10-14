@@ -29,6 +29,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/pnet"
 	tpt "github.com/libp2p/go-libp2p/core/transport"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	autorelay "github.com/libp2p/go-libp2p/p2p/host/autorelay"
 	yamux "github.com/libp2p/go-libp2p/p2p/muxer/yamux"
 	"github.com/libp2p/go-libp2p/p2p/net/swarm"
 	"github.com/libp2p/go-libp2p/p2p/protocol/holepunch"
@@ -1364,10 +1365,32 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				holepunch.DirectDialTimeout(cfg.HolePunchTimeout),
 			),
 		)
-		// Enable AutoRelay with bootstrap peers as static relay servers
+		// Enable AutoRelay with bootstrap peers as static relay servers.
+		//
+		// The size of the static list must NOT drive how eager AutoRelay is.
+		// WithStaticRelays sets minCandidates AND desiredRelays to the number of
+		// relays, so with the nine default bootstrap peers the finder would wait
+		// for nine connected candidates before taking its first reservation, then
+		// hold a three-minute boot delay on top of that, then strive to keep nine
+		// simultaneous reservations alive. A peer behind symmetric NAT has nothing
+		// but relay, so while the finder waits it is simply invisible. Two
+		// reservations is enough redundancy; libp2p ships that as the default
+		// precisely because more buys nothing but resource use. The overrides are
+		// passed into EnableAutoRelayWithStaticRelays, which PREPENDS
+		// WithStaticRelays, so everything here wins.
 		if len(bootstrapRelays) > 0 {
-			opts = append(opts, libp2p.EnableAutoRelayWithStaticRelays(bootstrapRelays))
-			log.Info("AutoRelay enabled with %d static relay servers", len(bootstrapRelays))
+			wantRelays := len(bootstrapRelays)
+			if wantRelays > 2 {
+				wantRelays = 2
+			}
+			opts = append(opts, libp2p.EnableAutoRelayWithStaticRelays(bootstrapRelays,
+				autorelay.WithBootDelay(0),
+				autorelay.WithMinCandidates(1),
+				autorelay.WithMaxCandidates(len(bootstrapRelays)),
+				autorelay.WithNumRelays(wantRelays),
+				autorelay.WithBackoff(5*time.Minute),
+			))
+			log.Info("AutoRelay enabled with %d static relay servers (targeting %d reservation(s), no boot delay)", len(bootstrapRelays), wantRelays)
 		} else {
 			log.Warn("No bootstrap peers configured — NAT traversal via relay will be unavailable")
 		}
