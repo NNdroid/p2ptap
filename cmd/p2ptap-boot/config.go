@@ -116,6 +116,17 @@ func LoadBootConfig(path string) (*BootConfig, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	// BootConfig has no transports field, so a "transports" block in this file is
+	// silently dropped — and it is easy to write one, because the mesh node's
+	// config.json carries the same key and this binary now listens on every
+	// protocol the mesh node can. Copying a setting across the two files would
+	// look like it took effect while the boot keeps listening on all four.
+	var probe struct {
+		Transports json.RawMessage `json:"transports"`
+	}
+	if err := json.Unmarshal(data, &probe); err == nil && probe.Transports != nil {
+		fmt.Printf("Warning: ignoring \"transports\" in %s — the boot server has no transport switches, so QUIC, WebRTC, WebTransport and TCP always listen. That key belongs in the mesh node's config.json.\n", path)
+	}
 	// Same guard as the mesh node's config: JSON encodes time.Duration as
 	// nanoseconds, so an operator who meant "15 seconds" writes 15 and gets 15
 	// nanoseconds — a punch that gives up before the socket is even open.

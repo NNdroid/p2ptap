@@ -44,7 +44,9 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/protocol/holepunch"
 	quict "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	quicreuse "github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
+	tcpt "github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	webrtc "github.com/libp2p/go-libp2p/p2p/transport/webrtc"
+	webtransport "github.com/libp2p/go-libp2p/p2p/transport/webtransport"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -1460,6 +1462,36 @@ func main() {
 		},
 	))
 	log.Info("QUIC transport registered (with TURN relay support)")
+
+	// TCP transport. Boot has no TAP interface, so there is no tunnel to keep P2P
+	// traffic out of and no socket-protection hook to wire — only the dialer
+	// timeouts, which must match the mesh node so a peer's half of a TCP dial is
+	// not abandoned while the boot is still accepting it.
+	hostOpts = append(hostOpts, libp2p.Transport(tcpt.NewTCPTransport,
+		tcpt.WithDialerForAddr(func(raddr multiaddr.Multiaddr) (tcpt.ContextDialer, error) {
+			return &net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 15 * time.Second,
+			}, nil
+		}),
+	))
+	log.Info("TCP transport registered")
+
+	// WebTransport (/udp/N/quic-v1/webtransport) reuses the same quicreuse
+	// ConnManager as the QUIC transport above — injected by QUICReuseOption,
+	// never built here — so both share sockets and demultiplex incoming
+	// connections by ALPN instead of racing the kernel over the same address.
+	//
+	// Without this registration a /quic-v1/webtransport entry in listen_addrs is
+	// silently dropped by libp2p: the address is never advertised, so peers on
+	// networks that block QUIC but allow HTTP/3 had no reachable path to the
+	// boot at all, even though the default config configured a listener for it.
+	hostOpts = append(hostOpts, libp2p.Transport(
+		func(key crypto.PrivKey, psk pnet.PSK, cm *quicreuse.ConnManager, gater libp2pconnmgr.ConnectionGater, rcmgr network.ResourceManager, transportOpts ...webtransport.Option) (tpt.Transport, error) {
+			return webtransport.New(key, psk, cm, gater, rcmgr, transportOpts...)
+		},
+	))
+	log.Info("WebTransport transport registered (shares the QUIC ConnManager)")
 
 	// AddrsFactory: filter loopback and append STUN/TURN reflexive + relay
 	// addresses so peers behind NAT can reach this boot server.

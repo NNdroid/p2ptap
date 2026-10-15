@@ -17,7 +17,10 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
+	"p2ptap/pkg/logger"
 )
+
+var log = logger.New("Config")
 
 // WebUIConfig defines Web Dashboard options
 type WebUIConfig struct {
@@ -419,6 +422,7 @@ func LoadConfigFromFile(path string) (*Config, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON config %s: %w", path, err)
 	}
+	warnOmittedTransportSwitches(data)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config %s: %w", path, err)
@@ -431,6 +435,55 @@ func LoadConfigFromFile(path string) (*Config, error) {
 	tightenExistingPerm(path, cfg)
 
 	return cfg, nil
+}
+
+// warnOmittedTransportSwitches surfaces the merge footgun that seeding
+// DefaultConfig() before json.Unmarshal creates. Unmarshal only overwrites keys
+// that are actually present, so a transports block that lists some enable_*
+// switches leaves the rest at DefaultConfig()'s "all on" value. An operator who
+// writes
+//
+//	{"transports": {"enable_webtransport": true}}
+//
+// intending "WebTransport only" gets all four transports listening, because
+// enable_quic_reuse / enable_webrtc / enable_tcp_reuse were absent and kept the
+// default true. A transports block reads like a whitelist but behaves like a
+// partial override.
+//
+// Fully omitting the key stays silent: that is a deliberate "give me the
+// defaults" request, and flagging it would warn on every first run.
+func warnOmittedTransportSwitches(data []byte) {
+	missing := omittedTransportSwitches(data)
+	if len(missing) == 0 {
+		return
+	}
+	log.Warn("transports block omits %s, so those switches inherit the DefaultConfig value (true) and are STILL LISTENING — a transports block is not a whitelist, list all four enable_* keys to state intent",
+		strings.Join(missing, ", "))
+}
+
+// omittedTransportSwitches reports which transport enable_* keys a transports
+// block failed to state. Empty means nothing to warn about: no transports block
+// at all (a deliberate request for defaults), or a block that states all four.
+func omittedTransportSwitches(data []byte) []string {
+	var raw struct {
+		Transports map[string]json.RawMessage `json:"transports"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil || raw.Transports == nil {
+		return nil
+	}
+	switches := []string{"enable_quic_reuse", "enable_webrtc", "enable_webtransport", "enable_tcp_reuse"}
+	var present, missing []string
+	for _, key := range switches {
+		if _, ok := raw.Transports[key]; ok {
+			present = append(present, key)
+		} else {
+			missing = append(missing, key)
+		}
+	}
+	if len(present) == 0 || len(missing) == 0 {
+		return nil
+	}
+	return missing
 }
 
 func GenerateRandomMAC() string {
