@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"strings"
@@ -139,15 +140,11 @@ func (s *Server) Start() error {
 	}
 	s.listener = ln
 
-	mux := http.NewServeMux()
-
-	// Static web assets
-	mux.HandleFunc("/", s.handleIndex)
-
-	// API endpoints
-	mux.HandleFunc("/api/auth/verify", s.handleAuthVerify)
-	mux.HandleFunc("/api/stats", s.requireAuth(s.handleStats))
-	mux.HandleFunc("/api/logs", s.requireAuth(s.handleLogs))
+	mux, err := s.buildMux()
+	if err != nil {
+		ln.Close()
+		return err
+	}
 
 	s.httpServer = &http.Server{
 		Handler:      mux,
@@ -164,6 +161,65 @@ func (s *Server) Start() error {
 	return nil
 }
 
+// buildMux wires the dashboard shell, the embedded static assets and the
+// /api/* surface. Factored out of Start so the test drives the real routing
+// instead of hand-building an approximation of it.
+func (s *Server) buildMux() (*http.ServeMux, error) {
+	mux := http.NewServeMux()
+
+	// Embedded dashboard assets are served by the stdlib file server so the
+	// browser gets a real Content-Type (and a 301 that canonicalises
+	// /index.html to /) instead of one hand-set per request. /api/* stays
+	// under requireAuth; the dashboard shell loads unauthenticated so the
+	// auth modal can prompt for the token.
+	//
+	// No gzip here: pkg/web keeps its pooling gzip middleware rather than
+	// this package duplicating it, and this dashboard is an operator tool
+	// normally reached on the LAN. Worth revisiting if the boot WebUI ever
+	// has to be exposed over a WAN link.
+	staticSub, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		return nil, fmt.Errorf("boot webui: fs.Sub(static): %w", err)
+	}
+	fileSrv := http.FileServer(http.FS(staticSub))
+
+	// Favicon: inline SVG so the browser doesn't log a 404 for /favicon.ico.
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		setSecurityHeaders(w)
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><circle cx="16" cy="16" r="14" fill="#0ea5e9"/><path d="M17.5 6 9 18h5.2L12.5 26 21 14h-5.2z" fill="#ffffff"/></svg>`))
+	})
+
+	// Catch-all: unknown /api/* paths get a JSON 404 so the WebUI can tell a
+	// stale binary apart from a genuinely missing endpoint; everything else
+	// falls through to the embedded static files.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		setSecurityHeaders(w)
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("API endpoint '%s' not found on running p2ptap-boot process", r.URL.Path),
+			})
+			return
+		}
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			// The auth-prompt page must not be cached, otherwise a token
+			// change is invisible until a hard refresh.
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		fileSrv.ServeHTTP(w, r)
+	})
+
+	// API endpoints
+	mux.HandleFunc("/api/auth/verify", s.handleAuthVerify)
+	mux.HandleFunc("/api/stats", s.requireAuth(s.handleStats))
+	mux.HandleFunc("/api/logs", s.requireAuth(s.handleLogs))
+
+	return mux, nil
+}
+
 // Stop gracefully shuts down the HTTP server.
 func (s *Server) Stop(ctx context.Context) error {
 	s.mu.Lock()
@@ -172,22 +228,6 @@ func (s *Server) Stop(ctx context.Context) error {
 		return s.httpServer.Shutdown(ctx)
 	}
 	return nil
-}
-
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	setSecurityHeaders(w)
-	if r.URL.Path != "/" && r.URL.Path != "/index.html" {
-		http.NotFound(w, r)
-		return
-	}
-	data, err := staticFS.ReadFile("static/index.html")
-	if err != nil {
-		http.Error(w, "Index file not found", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
 }
 
 func (s *Server) checkAuth(r *http.Request) bool {

@@ -64,18 +64,76 @@ func TestBootWebAuthAndStats(t *testing.T) {
 
 	server := NewServer(mockProvider, "127.0.0.1:0", "secret123")
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", server.handleIndex)
-	mux.HandleFunc("/api/auth/verify", server.handleAuthVerify)
-	mux.HandleFunc("/api/stats", server.requireAuth(server.handleStats))
-	mux.HandleFunc("/api/logs", server.requireAuth(server.handleLogs))
+	mux, err := server.buildMux()
+	if err != nil {
+		t.Fatalf("buildMux: %v", err)
+	}
 
-	// 1. Test Index HTML
+	// 1. Test Index HTML — unauthenticated by design, and never cached so a
+	// token change is visible without a hard refresh.
 	req := httptest.NewRequest("GET", "/", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK for index, got %d", w.Code)
+	}
+	if w.Header().Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Errorf("expected text/html; charset=utf-8, got %q", w.Header().Get("Content-Type"))
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("expected Cache-Control no-store on the auth-prompt page, got %q", w.Header().Get("Cache-Control"))
+	}
+
+	// 1b. Static assets resolve through the file server with a real
+	// Content-Type instead of a hand-set one.
+	for path, wantType := range map[string]string{
+		"/styles.css": "text/css; charset=utf-8",
+		"/app.js":     "application/javascript",
+		"/i18n.js":    "application/javascript",
+	} {
+		req := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 for %s, got %d", path, w.Code)
+		}
+		if got := w.Header().Get("Content-Type"); got != wantType {
+			t.Errorf("%s: expected Content-Type %q, got %q", path, wantType, got)
+		}
+		if len(w.Body.Bytes()) == 0 {
+			t.Errorf("%s: empty body", path)
+		}
+	}
+
+	// 1c. A stale binary should answer unknown /api/* paths as JSON so the
+	// dashboard can distinguish "endpoint missing" from "wrong address".
+	req = httptest.NewRequest("GET", "/api/nope", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown api path, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("expected JSON 404 body, got Content-Type %q", ct)
+	}
+
+	// 1d. The favicon handler replaces the browser's /favicon.ico 404.
+	req = httptest.NewRequest("GET", "/favicon.ico", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "image/svg+xml" {
+		t.Errorf("favicon: expected 200 image/svg+xml, got %d %q", w.Code, w.Header().Get("Content-Type"))
+	}
+
+	// 1e. Security headers land on the unauthenticated shell too.
+	req = httptest.NewRequest("GET", "/", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("expected X-Content-Type-Options nosniff, got %q", got)
+	}
+	if got := w.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("expected X-Frame-Options DENY, got %q", got)
 	}
 
 	// 2. Test Stats without Auth -> expect 401
