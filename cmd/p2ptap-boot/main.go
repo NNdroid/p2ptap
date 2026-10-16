@@ -39,6 +39,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/pnet"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	tpt "github.com/libp2p/go-libp2p/core/transport"
+	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
 	connmgr "github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 	"github.com/libp2p/go-libp2p/p2p/protocol/holepunch"
@@ -75,6 +76,17 @@ var (
 // frames. The constant is rounded up to 66000 for headroom; the extra 330
 // bytes are negligible at one allocation per stream.
 const maxBootRelayEnvelope = 66000
+
+// relayConnLowWater and relayConnHighWater are this relay's connection
+// envelope. They are handed to BOTH the connection manager (which trims back
+// toward the low water mark) and the resource manager (which hard-rejects
+// above the high water mark) so the two managers cannot silently disagree
+// about how many connections the relay is allowed to hold. See
+// relayResourceManager for why the two must be given the same number.
+const (
+	relayConnLowWater  = 2048
+	relayConnHighWater = 8192
+)
 
 // Global subsystems initialized in main() and used by bootDataProviderImpl.
 var (
@@ -1397,12 +1409,17 @@ func main() {
 	// a periodic echo keepalive (relayKeepaliveLoop) that keeps NAT/firewall UDP
 	// mappings open and surfaces dead links.
 	cm, err := connmgr.NewConnManager(
-		2048, 8192,
+		relayConnLowWater, relayConnHighWater,
 		connmgr.WithGracePeriod(30*time.Second),
 		connmgr.WithSilencePeriod(time.Hour),
 	)
 	if err != nil {
 		fmt.Printf("Error building connection manager: %v\n", err)
+		os.Exit(1)
+	}
+	rm, err := relayResourceManager()
+	if err != nil {
+		fmt.Printf("Error building resource manager: %v\n", err)
 		os.Exit(1)
 	}
 	// WebRTC transport with STUN/TURN servers — replaces the stock WebRTC
@@ -1413,6 +1430,7 @@ func main() {
 		libp2p.Identity(privKey),
 		libp2p.ListenAddrs(mAddrs...),
 		libp2p.ConnectionManager(cm),
+		libp2p.ResourceManager(rm),
 		libp2p.NATPortMap(),
 		libp2p.EnableNATService(),
 		libp2p.EnableRelay(),
@@ -2586,6 +2604,37 @@ func printBootstrapBanner(h host.Host, name string, pskEnabled bool, webServer *
 		fmt.Printf("   \"%s/p2p/%s\",\n", a.String(), h.ID())
 	}
 	fmt.Println("=========================================================")
+}
+
+// relayResourceManager builds the resource manager for this relay.
+//
+// libp2p's default resource manager auto-scales EVERY limit off totalMemory/8,
+// so on a small host the system connection cap collapses far below the
+// connection manager's high water mark: 1974 MB of RAM yields 158 connections
+// against a high water mark of 8192. libp2p then logs
+// "rcmgr limit conflicts with connmgr limit" and enforces the LOWER of the
+// two, so 158 becomes the real ceiling and the envelope this relay was tuned
+// for is unreachable.
+//
+// The system connection envelope is therefore pinned to relayConnHighWater, the
+// same number handed to the connection manager, so the two cannot silently
+// disagree. Everything else stays auto-scaled: memory, fd, streams and all
+// per-peer / per-protocol limits keep their host-derived backstops, so an
+// uncooperative peer still cannot exhaust the box.
+func relayResourceManager() (network.ResourceManager, error) {
+	scaling := rcmgr.DefaultLimits
+	// The same per-service / per-protocol limits the default resource manager
+	// installs (identify, ping, autonat, holepunch, circuit relay). Without
+	// them the relay service would fall back to the generic stream limits.
+	libp2p.SetDefaultServiceLimits(&scaling)
+	limits := rcmgr.PartialLimitConfig{
+		System: rcmgr.ResourceLimits{
+			Conns:         relayConnHighWater,
+			ConnsInbound:  relayConnHighWater,
+			ConnsOutbound: relayConnHighWater,
+		},
+	}.Build(scaling.AutoScale())
+	return rcmgr.NewResourceManager(rcmgr.NewFixedLimiter(limits))
 }
 
 // verifyListeners reports every configured listen address that did not actually
