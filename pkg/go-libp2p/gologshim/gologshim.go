@@ -217,7 +217,14 @@ var ConfigFromEnv func() *Config = sync.OnceValue(func() *Config {
 })
 
 func parseIPFSGoLogEnv(loggingLevelEnvStr string) (slog.Level, map[string]slog.Level, error) {
-	fallbackLvl := slog.LevelError
+	// Upstream defaults to slog.LevelError, which silently filters out every
+	// Warn libp2p emits — including swarm.Listen's "listening failed", the only
+	// signal that a transport is registered but can never bind. A boot server
+	// that lost its /tcp/ and /quic-v1/webtransport/ listeners emitted no such
+	// line for its whole lifetime. Warn surfaces these without adding noise: a
+	// healthy mesh emits almost none. GOLOG_LOG_LEVEL still overrides, including
+	// per-system values like "swarm2=debug".
+	fallbackLvl := slog.LevelWarn
 	var systemToLevel map[string]slog.Level
 	if loggingLevelEnvStr != "" {
 		for kvs := range strings.SplitSeq(loggingLevelEnvStr, ",") {

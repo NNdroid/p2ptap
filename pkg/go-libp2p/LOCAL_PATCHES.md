@@ -2,7 +2,7 @@
 
 本目录通过 `go.mod` 的 `replace github.com/libp2p/go-libp2p v0.50.0 => ./pkg/go-libp2p`
 以源码形式参与构建。基线为上游 **v0.50.0**（2026-08-12 发布，当前最新版），
-在此之上维护了 **15 处**本地代码补丁（第 1–5、7、8–13、15、17、18 条）。
+在此之上维护了 **16 处**本地代码补丁（第 1–5、7、8–13、15、17–19 条）。
 
 第 **6**、**14**、**16** 条是「已实现但回退」的决策记录：代码已恢复上游原样，
 条目本身保留，说明**为什么不能这样改**——这三处都曾以「抗 DPI」或「提升可达性」
@@ -293,6 +293,34 @@
   `TestHolePunchAddrsCarryCertHashes`——它让 `AddrsFactory` 额外注入一个只有工厂
   知道的裸 `/webrtc-direct/` 端点，断言输出里每个 `webrtc-direct` 地址都带 hash。
   本补丁前该用例失败、加回原始写法后立刻失败（两个方向都验证过）。
+
+## 19. `gologshim/gologshim.go` — 默认日志级别 Error → Warn
+
+- `parseIPFSGoLogEnv` 的空环境变量回退值由 `slog.LevelError` 改为 `slog.LevelWarn`。
+- 原因：libp2p 不用 `slog.Default()`，各包用自己的 `gologshim.Logger(system)`，
+  其级别只认 `GOLOG_LOG_LEVEL`，未设置时回退到 **Error**。于是 libp2p 发出的
+  **每一条 Warn 都被静默丢弃**。
+- 最严重的受害者是 `p2p/net/swarm/swarm_listen.go` 的
+  `log.Warn("listening failed", ...)`：当一个 transport 已注册但地址绑定失败
+  （如端口占用、协议层叠错误被校验漏掉）时，这是**唯一**的征兆，而
+  `swarm.Listen` 只在「全部地址都失败」时才返回 error，部分失败对调用方完全不可见。
+  实际事故：`p2ptap-boot` 早期版本只注册了 QUIC + WebRTC 两个 transport，
+  `/tcp/` 与 `/quic-v1/webtransport/` 两个监听地址从头到尾没有监听器，
+  进程整个生命周期内一条 "listening failed" 都没有出现在 journalctl 里，
+  故障只能靠外部端口扫描发现。
+- 为什么不是把该处 Warn 改成 Error：全仓有 97 处非测试 Warn 调用点（GC 失败、
+  地址解析失败、慢消费者等），都是真运维告警，只是被同一道闸门一并吞掉。
+  这里改默认级别是根因修复；逐点升级会在下次上游新增 Warn 时复发。
+- 兼容性：`GOLOG_LOG_LEVEL` 显式设置时仍然优先生效（包括 `swarm2=debug` 这类
+  按系统细分的写法），本补丁只改变「未设置时」的行为。日志目标仍是 `os.Stderr`，
+  格式不变，因此 systemd journal / 容器日志无需任何调整。
+- 与第 17 条的关系：第 17 条把 `quicreuse` 的 accept 失败从上游的静默 `return err`
+  升级为一条日志，并**故意选 Error 级别**以保证在默认级别下可见——正因为这道闸门
+  存在。本补丁落地后，那条 Error 依旧可见，语义不变。
+- 上游测试改动：`gologshim/gologshim_test.go` 的
+  `TestParseIPFSGoLogEnv/empty_string_uses_default_level` 把期望值从
+  `slog.LevelError` 改为 `slog.LevelWarn`——该用例正是把上游默认级别钉死的断言，
+  不跟着改必失败。其余三个子用例都显式传入级别字符串，不受影响。
 
 ## 非代码附加目录
 

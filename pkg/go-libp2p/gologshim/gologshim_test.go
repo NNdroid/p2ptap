@@ -184,9 +184,11 @@ func TestParseIPFSGoLogEnv(t *testing.T) {
 		wantErr        bool
 	}{
 		{
+			// Local patch #19: upstream pins slog.LevelError here, which silently
+			// drops every Warn libp2p emits (see LOCAL_PATCHES.md).
 			name:           "empty string uses default level",
 			input:          "",
-			wantFallback:   slog.LevelError,
+			wantFallback:   slog.LevelWarn,
 			wantSubsystems: nil,
 			wantErr:        false,
 		},

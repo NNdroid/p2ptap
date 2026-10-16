@@ -53,6 +53,16 @@ import (
 var log = logger.New("Boot")
 var bootAlerts = bootweb.NewAlertBuffer(300)
 
+// boundAddrs records every listener libp2p actually opened, captured by the
+// AddrsFactory before it drops loopback. The AddrsFactory runs concurrently
+// with the rest of startup, so every reader takes boundMu. verifyListeners
+// compares it to the configured listen_addrs after libp2p.New; without that
+// check a listener that never bound is indistinguishable from a healthy boot.
+var (
+	boundMu    sync.Mutex
+	boundAddrs []multiaddr.Multiaddr
+)
+
 // maxBootRelayEnvelope is the largest possible boot-relay frame on the wire:
 //
 //	obfuscate.MaxSealedFrameSize (65551) + relay header (~98B for two 46-char
@@ -1360,11 +1370,18 @@ func main() {
 	var mAddrs []multiaddr.Multiaddr
 	for _, aStr := range listenAddrs {
 		if err := node.ValidateListenAddr(aStr); err != nil {
-			fmt.Printf("Warning: invalid listen address %q skipped: %v\n", aStr, err)
+			log.Warn("invalid listen address %q skipped, so nothing will listen on it: %v", aStr, err)
 			continue
 		}
 		ma, _ := multiaddr.NewMultiaddr(aStr)
 		mAddrs = append(mAddrs, ma)
+	}
+	// A boot server with no valid listener serves nothing — it would still start
+	// its WebUI, print the relay banner and look healthy while every peer behind
+	// NAT times out against it. Fail here instead.
+	if len(mAddrs) == 0 {
+		fmt.Printf("Error: every listen address in %s failed validation, so this boot server would have no listener at all. Fix listen_addrs.\n", *configPath)
+		os.Exit(1)
 	}
 
 	// Build Host with Public Server Options for NAT Traversal
@@ -1497,6 +1514,9 @@ func main() {
 	// addresses so peers behind NAT can reach this boot server.
 	hostOpts = append(hostOpts, libp2p.AddrsFactory(
 		func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
+			boundMu.Lock()
+			boundAddrs = append(boundAddrs, addrs...)
+			boundMu.Unlock()
 			// Drop loopback — it's never useful for external peers.
 			filtered := make([]multiaddr.Multiaddr, 0, len(addrs)+8)
 			for _, a := range addrs {
@@ -1528,6 +1548,8 @@ func main() {
 		fmt.Printf("Error starting bootstrap host: %v\n", err)
 		os.Exit(1)
 	}
+
+	verifyListeners(mAddrs)
 
 	// Start STUN/TURN binders — these discover the boot server's reflexive
 	// addresses so peers behind NAT can reach it. The AddrsFactory above
@@ -2564,6 +2586,66 @@ func printBootstrapBanner(h host.Host, name string, pskEnabled bool, webServer *
 		fmt.Printf("   \"%s/p2p/%s\",\n", a.String(), h.ID())
 	}
 	fmt.Println("=========================================================")
+}
+
+// verifyListeners reports every configured listen address that did not actually
+// bind, so a silently missing listener can never again look like a healthy boot.
+//
+// Without this check the failure is invisible end to end: swarm.Listen logs one
+// failed address at Warn and returns an error only when *every* address fails,
+// so libp2p.New succeeds, the relay banner prints, and the server accepts peers
+// on the transports that did bind. That is exactly how this boot lost its /tcp/
+// and /quic-v1/webtransport/ listeners — the config asked for four protocols and
+// the process reported no problem at all.
+//
+// Matching is on transport + port, not IP, because a wildcard configured address
+// (/ip4/0.0.0.0, /ip6/::) is bound per physical interface and is reported with
+// NIC IPs. An IP comparison would flag every wildcard listener as missing.
+//
+// Callers pass the addrs that already passed ValidateListenAddr: an addr that
+// was rejected at parse time can never bind, and warning twice about it would
+// only bury the real signal.
+func verifyListeners(configured []multiaddr.Multiaddr) {
+	boundMu.Lock()
+	bound := make([]multiaddr.Multiaddr, 0, len(boundAddrs))
+	seen := make(map[string]struct{}, len(boundAddrs))
+	for _, a := range boundAddrs {
+		if _, dup := seen[a.String()]; dup {
+			continue
+		}
+		seen[a.String()] = struct{}{}
+		bound = append(bound, a)
+	}
+	boundMu.Unlock()
+
+	for _, want := range configured {
+		wf, wp := transportAndPort(want)
+		if wf == "" {
+			continue
+		}
+		boundIt := false
+		for _, got := range bound {
+			gf, gp := transportAndPort(got)
+			if gf == wf && wp != "" && wp == gp {
+				boundIt = true
+				break
+			}
+		}
+		if !boundIt {
+			log.Warn("configured listen address %q did not bind — no listener came up for it. Check that the port is free and that the transport layering is right (WebTransport needs /udp/<port>/quic-v1/webtransport, WebRTC needs /udp/<port>/webrtc-direct).", want)
+		}
+	}
+}
+
+// transportAndPort returns the transport family and port of a listen address.
+func transportAndPort(a multiaddr.Multiaddr) (family, port string) {
+	family = node.TransportOf(a)
+	if p, _ := a.ValueForProtocol(multiaddr.P_TCP); p != "" {
+		port = p
+	} else if p, _ := a.ValueForProtocol(multiaddr.P_UDP); p != "" {
+		port = p
+	}
+	return family, port
 }
 
 // relayKeepaliveLoop periodically echo-pings every currently connected peer to
