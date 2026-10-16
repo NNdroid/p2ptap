@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"mime"
 	"net"
 	"net/http"
 	"strings"
@@ -177,6 +178,16 @@ func (s *Server) buildMux() (*http.ServeMux, error) {
 	// this package duplicating it, and this dashboard is an operator tool
 	// normally reached on the LAN. Worth revisiting if the boot WebUI ever
 	// has to be exposed over a WAN link.
+	//
+	// Pin .js before the file server sees it. mime.TypeByExtension resolves
+	// through the platform MIME database, so /app.js announced itself as
+	// "text/javascript; charset=utf-8" on Linux and "application/javascript"
+	// on Windows — the same binary serving two different Content-Types.
+	// AddExtensionType runs after initMime and overwrites the platform entry.
+	if err := mime.AddExtensionType(".js", "application/javascript"); err != nil {
+		return nil, fmt.Errorf("boot webui: mime.AddExtensionType: %w", err)
+	}
+
 	staticSub, err := fs.Sub(staticFS, "static")
 	if err != nil {
 		return nil, fmt.Errorf("boot webui: fs.Sub(static): %w", err)

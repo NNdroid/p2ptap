@@ -85,7 +85,11 @@ func TestBootWebAuthAndStats(t *testing.T) {
 	}
 
 	// 1b. Static assets resolve through the file server with a real
-	// Content-Type instead of a hand-set one.
+	// Content-Type instead of a hand-set one. These are asserted exactly
+	// because buildMux pins .js via mime.AddExtensionType — without the pin
+	// the same asset answers "text/javascript; charset=utf-8" on Linux and
+	// "application/javascript" on Windows, and the assertion would pass on
+	// one runner and fail on the other.
 	for path, wantType := range map[string]string{
 		"/styles.css": "text/css; charset=utf-8",
 		"/app.js":     "application/javascript",
