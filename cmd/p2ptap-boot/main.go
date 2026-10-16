@@ -41,6 +41,7 @@ import (
 	tpt "github.com/libp2p/go-libp2p/core/transport"
 	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
 	connmgr "github.com/libp2p/go-libp2p/p2p/net/connmgr"
+	circuit "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/proto"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 	"github.com/libp2p/go-libp2p/p2p/protocol/holepunch"
 	quict "github.com/libp2p/go-libp2p/p2p/transport/quic"
@@ -86,6 +87,28 @@ const maxBootRelayEnvelope = 66000
 const (
 	relayConnLowWater  = 2048
 	relayConnHighWater = 8192
+
+	// The relay's own capacity envelope (relay.Resources). Every resource
+	// manager limit below is DERIVED from these rather than set independently,
+	// so the relay cannot advertise a circuit budget its resource manager
+	// silently refuses.
+	relayMaxCircuits     = 1024
+	relayMaxReservations = 1024
+	relayBufferSize      = 8192
+
+	// relayStreamPerDir is the resource manager's stream ceiling in ONE
+	// direction. Each relayed circuit holds one inbound stream (the hop from
+	// the source) and one outbound stream (the stop to the destination), so
+	// MaxCircuits needs MaxCircuits streams per direction before auth,
+	// boot-relay tunnel and control streams are even counted; the second copy
+	// of MaxCircuits is headroom for those, which share the same connections.
+	relayStreamPerDir = 2 * relayMaxCircuits
+
+	// relayCircuitMemory bounds the buffered bytes the circuit relay may hold:
+	// a read and a write buffer of relayBufferSize per relayed connection, plus
+	// the hop/stop framing buffers that sit on top of them. Derived rather than
+	// hard-coded so it tracks BufferSize and MaxCircuits.
+	relayCircuitMemory = 4 * relayMaxCircuits * relayBufferSize
 )
 
 // Global subsystems initialized in main() and used by bootDataProviderImpl.
@@ -1599,8 +1622,8 @@ func main() {
 	// Duration/Data still bound abusive single streams.
 	relayRes := relay.DefaultResources()
 	relayRes.ReservationTTL = 1 * time.Hour
-	relayRes.MaxReservations = 1024
-	relayRes.MaxCircuits = 1024
+	relayRes.MaxReservations = relayMaxReservations
+	relayRes.MaxCircuits = relayMaxCircuits
 	// Note: relay.Resources.MaxReservationsPerPeer is deliberately NOT set. It is
 	// marked Deprecated in libp2p ("We only need 1 reservation per peer") and the
 	// field is never read by any limiter — constraints.Reserve removes the peer's
@@ -1617,7 +1640,7 @@ func main() {
 	relayRes.MaxReservationsPerASN = 256
 	// BufferSize defaults to 2048 bytes per relayed connection, which throttles
 	// throughput on high-bandwidth links. Raise it for a dedicated relay.
-	relayRes.BufferSize = 8192
+	relayRes.BufferSize = relayBufferSize
 	relayRes.Limit = &relay.RelayLimit{
 		Duration: 5 * time.Minute,
 		Data:     1 << 29, // 512 MiB per relay connection (↑ from 128MiB for better throughput)
@@ -2618,20 +2641,49 @@ func printBootstrapBanner(h host.Host, name string, pskEnabled bool, webServer *
 //
 // The system connection envelope is therefore pinned to relayConnHighWater, the
 // same number handed to the connection manager, so the two cannot silently
-// disagree. Everything else stays auto-scaled: memory, fd, streams and all
-// per-peer / per-protocol limits keep their host-derived backstops, so an
-// uncooperative peer still cannot exhaust the box.
+// disagree. Everything else stays auto-scaled: memory, fd and all per-peer /
+// per-protocol limits keep their host-derived backstops, so an uncooperative
+// peer still cannot exhaust the box.
+//
+// The stream ceilings are the same disease in the stream dimension, and they
+// are pinned too. Streams are limited at THREE levels, all of them auto-scaled
+// off memory, and all three must clear MaxCircuits for a circuit to be granted:
+// on a 1974 MB host the relay service caps streams at 317 and each circuit
+// protocol at 793, so the relay refused circuits at 317 while the WebUI still
+// reported MaxCircuits=1024. Only per-Peer caps stay auto-scaled on purpose:
+// they are the fairness guard that keeps one peer from taking the whole relay.
 func relayResourceManager() (network.ResourceManager, error) {
 	scaling := rcmgr.DefaultLimits
 	// The same per-service / per-protocol limits the default resource manager
 	// installs (identify, ping, autonat, holepunch, circuit relay). Without
 	// them the relay service would fall back to the generic stream limits.
 	libp2p.SetDefaultServiceLimits(&scaling)
+
+	// System memory and fd stay auto-scaled: they are the OOM and fd backstops.
+	system := rcmgr.ResourceLimits{
+		Conns:           relayConnHighWater,
+		ConnsInbound:    relayConnHighWater,
+		ConnsOutbound:   relayConnHighWater,
+		Streams:         2 * relayStreamPerDir,
+		StreamsInbound:  relayStreamPerDir,
+		StreamsOutbound: relayStreamPerDir,
+	}
+	// The relay service and the two circuit protocols are subsets of system
+	// streams, so they need the same envelope, and their memory too -- at the
+	// auto-scaled 19 MiB the memory limit would become the new silent cap
+	// immediately after the stream limit is raised.
+	circuits := rcmgr.ResourceLimits{
+		Streams:         2 * relayStreamPerDir,
+		StreamsInbound:  relayStreamPerDir,
+		StreamsOutbound: relayStreamPerDir,
+		Memory:          rcmgr.LimitVal64(relayCircuitMemory),
+	}
 	limits := rcmgr.PartialLimitConfig{
-		System: rcmgr.ResourceLimits{
-			Conns:         relayConnHighWater,
-			ConnsInbound:  relayConnHighWater,
-			ConnsOutbound: relayConnHighWater,
+		System:  system,
+		Service: map[string]rcmgr.ResourceLimits{relay.ServiceName: circuits},
+		Protocol: map[protocol.ID]rcmgr.ResourceLimits{
+			circuit.ProtoIDv2Hop:  circuits,
+			circuit.ProtoIDv2Stop: circuits,
 		},
 	}.Build(scaling.AutoScale())
 	return rcmgr.NewResourceManager(rcmgr.NewFixedLimiter(limits))
