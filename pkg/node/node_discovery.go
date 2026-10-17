@@ -186,6 +186,14 @@ func (n *Node) noteRelayUpgradeResult(pid peer.ID, upgraded bool) {
 		delete(n.relayUpgradeNext, pid)
 		return
 	}
+	// Neither map is allocated by NewNode (tests build bare &Node{}), so the
+	// first failed upgrade would write into a nil map and panic the engine.
+	if n.relayUpgradeFails == nil {
+		n.relayUpgradeFails = make(map[peer.ID]int)
+	}
+	if n.relayUpgradeNext == nil {
+		n.relayUpgradeNext = make(map[peer.ID]time.Time)
+	}
 	fails := n.relayUpgradeFails[pid] + 1
 	n.relayUpgradeFails[pid] = fails
 	if fails < 2 {
