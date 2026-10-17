@@ -175,14 +175,20 @@ func pidsToStrings(pids []peer.ID) []string {
 	return out
 }
 
-// allowedSubnetOrder returns the arbitration priority list. A nil Config (e.g.
-// in unit tests or before configuration load) yields a nil slice, which
+// allowedSubnetOrder returns the arbitration priority list. A nil config
+// (e.g. in unit tests or before configuration load) yields a nil slice, which
 // arbitratePeers treats as "no ordered preference".
+//
+// Reads the live snapshot, not the construction-time baseline: subnet ROUTING
+// (isSubnetPeerAllowed) already honoured hot reloads, so reading n.Config here
+// made the same change look partially applied — routing accepted the new peer
+// set while IP-conflict arbitration kept ranking against the boot value.
 func (n *Node) allowedSubnetOrder() []string {
-	if n.Config == nil {
+	cfg := n.config()
+	if cfg == nil {
 		return nil
 	}
-	return n.Config.AllowedSubnetPeers
+	return cfg.AllowedSubnetPeers
 }
 
 // GetDuplicateIPConflicts returns a snapshot of the currently detected

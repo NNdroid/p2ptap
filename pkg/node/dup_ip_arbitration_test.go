@@ -332,3 +332,41 @@ func TestIsSubnetRouteSuppressedNoConflict(t *testing.T) {
 		t.Errorf("unrelated CIDR must NOT be suppressed")
 	}
 }
+
+// TestAllowedSubnetOrderHonoursHotReload pins the split-brain reload fix.
+// Subnet ROUTING already read the live snapshot, so a saved allowed_subnet_peers
+// change took effect there while arbitration kept ranking against the
+// construction-time baseline — the change looked half-applied. Both must move
+// together, or a saved list change silently keeps the boot order deciding who
+// wins a duplicate IP.
+func TestAllowedSubnetOrderHonoursHotReload(t *testing.T) {
+	n := newArbitrationNode(t,
+		[]string{pidStr("peer-A"), pidStr("peer-B")},
+		nil,
+	)
+	if got := n.allowedSubnetOrder(); len(got) != 2 || got[0] != pidStr("peer-A") {
+		t.Fatalf("baseline order = %v, want peer-A first", got)
+	}
+
+	// Simulate applyHotReload: publish a new snapshot without touching Config.
+	n.SetConfig(&config.Config{
+		AcceptAdvertisedSubnets: true,
+		AllowedSubnetPeers:      []string{pidStr("peer-B"), pidStr("peer-C")},
+	})
+
+	got := n.allowedSubnetOrder()
+	if len(got) != 2 || got[0] != pidStr("peer-B") || got[1] != pidStr("peer-C") {
+		t.Fatalf("order after hot reload = %v, want [peer-B peer-C] — arbitration kept the boot baseline", got)
+	}
+}
+
+func TestAllowedSubnetOrderNilConfig(t *testing.T) {
+	if got := (&Node{}).allowedSubnetOrder(); got != nil {
+		t.Fatalf("nil config must yield a nil order, got %v", got)
+	}
+	// No published snapshot either: fall back to the baseline, still nil.
+	n := &Node{Config: &config.Config{}}
+	if got := n.allowedSubnetOrder(); got != nil {
+		t.Fatalf("empty baseline must yield a nil order, got %v", got)
+	}
+}

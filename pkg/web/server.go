@@ -2364,55 +2364,9 @@ func (g *gzipStaticWriter) Flush() {
 // "applied successfully" that would silently mislead the operator (e.g. editing
 // transports.tls_server_name / disable_relay / TAP address).
 func restartRequiredFields(old, new *config.Config) []string {
-	if old == nil || new == nil {
-		return nil
-	}
-	var out []string
-	add := func(name string, changed bool) {
-		if changed {
-			out = append(out, name)
-		}
-	}
-	add("tap_name", old.TapName != new.TapName)
-	add("tap_ip", old.TapIP != new.TapIP)
-	add("tap_ipv6", old.TapIPv6 != new.TapIPv6)
-	add("tap_mac", old.TapMAC != new.TapMAC)
-	add("mtu", old.MTU != new.MTU)
-	add("driver_type", old.DriverType != new.DriverType)
-	add("listen_addrs", !stringSliceEqual(old.ListenAddrs, new.ListenAddrs))
-	add("transports", old.Transports != new.Transports)
-	add("bootstrap_peers", !stringSliceEqual(old.BootstrapPeers, new.BootstrapPeers))
-	add("static_peers", !stringSliceEqual(old.StaticPeers, new.StaticPeers))
-	add("enable_mdns", old.EnableMDNS != new.EnableMDNS)
-	// Changing the PSK invalidates every PSK-bound per-peer key; it is applied at
-	// startup (transport pnet + SeqSync salt), so it needs a restart.
-	add("psk", old.PSK != new.PSK)
-	add("transport_strategy", old.TransportStrategy != new.TransportStrategy)
-	// Only the WebUI bind/port/enable/token need a restart: the running Server
-	// resolves its bearer token once at startup; pcap_sample_every is read
-	// live and stays excluded.
-	add("web_ui", old.WebUI.Enable != new.WebUI.Enable ||
-		old.WebUI.ListenIP != new.WebUI.ListenIP ||
-		old.WebUI.ListenIPv6 != new.WebUI.ListenIPv6 ||
-		old.WebUI.Port != new.WebUI.Port ||
-		old.WebUI.AuthToken != new.WebUI.AuthToken)
-	// The fields below are enforced from the construction-time Config baseline
-	// (their consumers read n.Config, which never moves during the process),
-	// so a hot save silently changes NOTHING until restart — the UI must say
-	// so (node_name still updates the local display live via the collector,
-	// but peer-anchored identity — meta/peek-map/LSA — keeps the boot value).
-	add("node_name", old.NodeName != new.NodeName)
-	return out
-}
-
-func stringSliceEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	// Kept as a thin wrapper so the three /api/config call sites read naturally,
+	// but the list itself lives in config.RestartRequiredFields. Duplicating it
+	// here is exactly how the Android build ended up with a second, hand-written
+	// copy that classified eight user-visible fields as hot-reloadable.
+	return config.RestartRequiredFields(old, new)
 }
