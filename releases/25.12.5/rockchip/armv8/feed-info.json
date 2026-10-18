@@ -3,7 +3,7 @@
   "openwrt_version": "25.12.5",
   "target": "rockchip",
   "subtarget": "armv8",
-  "source_commit": "b9b814c5c4618ec3d252f6d0088f7681ae0836da",
-  "source_version": "v1.0.20261017.163-b9b814c",
+  "source_commit": "42f46623f46f5f4b5928c24598a16d19568cfc48",
+  "source_version": "v1.0.20261018.165-42f4662",
   "package_count": 5
 }
