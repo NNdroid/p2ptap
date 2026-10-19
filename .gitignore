@@ -18,6 +18,9 @@
 /bin/
 /dist/
 
+# Design mockups, kept locally as reference rather than versioned
+mockup/
+
 *.log
 
 .codebuddy/
