@@ -380,6 +380,14 @@ type Node struct {
 	relayHopRx   atomic.Pointer[map[peer.ID]*atomic.Int64]
 	relayHopRxMu sync.Mutex // structural (CoW) changes only; never taken per frame
 
+	// peerRxTransport records HOW the last inbound frame from each peer arrived
+	// (transport label + overlay hop). It is the return-side twin of
+	// describeTransportPath — see peer_rx_transport.go for why the two must be
+	// tracked separately in an asymmetric-routing mesh. Same CoW shape as
+	// peerLastRx.
+	peerRxTransport   atomic.Pointer[map[peer.ID]*rxTransportInfo]
+	peerRxTransportMu sync.Mutex // structural (CoW) changes only; never taken per frame
+
 	// peerStall records peers whose last stream write hit the write deadline,
 	// so dispatch workers can skip them briefly instead of blocking. See
 	// markPeerStalled in node_dispatch.go for why this protects global
@@ -3325,13 +3333,25 @@ type TopologyNode struct {
 	// crossed before reaching us. 0 = same cluster as the boot it was heard
 	// from; 1+ = federated in from a remote cluster.
 	BootHops int `json:"boot_hops"`
-	// TransportPath is the ACTUAL transport currently carrying traffic to this
-	// node: "direct", "circuit-relay", "overlay-relay", or "" when we hold no
-	// connection at all (node known only from the link-state graph / peek-map).
+	// TransportPath is the ACTUAL transport currently carrying our OUTBOUND
+	// egress to this node: "direct", "circuit-relay", "overlay-relay", or ""
+	// when we hold no connection at all (node known only from the link-state
+	// graph / peek-map).
 	TransportPath string `json:"transport_path"`
 	// RelayHop is the peer ID of the overlay relay hop in use, when
 	// TransportPath is "overlay-relay". Empty otherwise.
 	RelayHop string `json:"relay_hop"`
+	// ReturnTransport is the transport this node's INBOUND frames most recently
+	// arrived over — the return-side twin of TransportPath. Each node in an
+	// asymmetric-routing mesh picks its own egress, so these two routinely
+	// disagree (we send it direct while it sends us over a relay, or vice
+	// versa); only carrying both makes that readable. Observed from the frames
+	// themselves, not inferred. Empty when no inbound frame was seen within the
+	// return-path liveness window, i.e. the medium is genuinely unknown.
+	ReturnTransport string `json:"return_transport,omitempty"`
+	// ReturnRelayHop is the hop that carried this node's last inbound frame,
+	// when ReturnTransport is "overlay-relay". Empty otherwise.
+	ReturnRelayHop string `json:"return_relay_hop,omitempty"`
 }
 
 // TopologyCluster summarises one boot cluster in the mesh. Computed server-side
@@ -3565,6 +3585,14 @@ func (n *Node) GetTopology() TopologyResponse {
 			tn.Cluster = localCluster
 		}
 		tn.TransportPath, tn.RelayHop = n.describeTransportPath(pid)
+		// Return side: observed from the inbound frames themselves, so it can
+		// legitimately differ from TransportPath in an asymmetric-routing mesh.
+		if rt, rh := n.peerRxTransportPath(pid, returnPathAliveWindow); rt != "" {
+			tn.ReturnTransport = rt
+			if rh != "" {
+				tn.ReturnRelayHop = rh.String()
+			}
+		}
 		resp.Nodes = append(resp.Nodes, tn)
 	}
 	// Mark relay nodes: those that are a parent of some other node (transit).
@@ -3682,8 +3710,12 @@ func (n *Node) localBootCluster() string {
 	return discovered
 }
 
-// describeTransportPath reports how traffic to pID actually travels right now,
-// and (for overlay-relayed peers) through which hop.
+// describeTransportPath reports how OUR OUTBOUND TRAFFIC to pID actually travels
+// right now, and (for overlay-relayed peers) through which hop. This is the
+// egress half only — it is computed from our route table plus our live libp2p
+// connections. The return half (how pID's frames reach US) is observed from the
+// frames themselves and is exposed separately as ReturnTransport / ReturnRelayHop
+// via peerRxTransportPath; in an asymmetric-routing mesh the two differ.
 //
 // Order matters: an overlay relay hop is checked FIRST because a relay-only peer
 // can simultaneously have a circuit-relay libp2p connection registered as a

@@ -407,8 +407,10 @@ func (n *Node) handleBootRelayDownlink(s network.Stream, boot peer.ID) {
 		}
 		// Return-path liveness and provenance tracking: only record after
 		// successful decryption and unpack, so a malformed or undecryptable
-		// frame cannot keep a stale peer connection alive.
-		n.notePeerRx(srcPeer)
+		// frame cannot keep a stale peer connection alive. The frame travelled
+		// relay-over-backbone through boot, so that boot is the hop the return
+		// side actually used.
+		n.notePeerRxTransport(srcPeer, "overlay-relay", boot)
 		if boot != "" && boot != srcPeer {
 			n.recordPeekMapOrigin(srcPeer, boot, 1, false)
 		}
@@ -486,8 +488,9 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 		n.relayDiag.originPsk()
 		return
 	}
-	// Valid end-to-end frame: record return-path liveness and success
-	n.notePeerRx(srcPeer)
+	// Valid end-to-end frame: record return-path liveness and success. Via peer
+	// is the carrier of this frame, so it is the hop the return side used.
+	n.notePeerRxTransport(srcPeer, "overlay-relay", viaPeer)
 	if viaPeer != "" && viaPeer != srcPeer {
 		n.recordPeekMapOrigin(srcPeer, viaPeer, 1, false)
 	}

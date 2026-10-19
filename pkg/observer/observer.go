@@ -318,6 +318,19 @@ type PeerInfoDTO struct {
 	ReturnPath       string `json:"return_path"`
 	ReturnPathDetail string `json:"return_path_detail"` // e.g. "回程正常 · 3 秒前收到帧" / "回程断 · 18 秒无回程帧"
 	LastRxISO        string `json:"last_rx_iso"`        // RFC3339 of last inbound frame; "" if never received
+	// ReturnTransport is the transport the peer's INBOUND frames most recently
+	// arrived over, observed from the frames themselves: "direct", "circuit-relay"
+	// or "overlay-relay". This is the asymmetric-routing counterpart of the
+	// OUTBOUND Transport/TransportPriority columns above — those describe the
+	// path WE send over, ReturnTransport describes the path it sends US over.
+	// Each node picks its own egress, so the two routinely disagree (we send it
+	// over a live direct link while it sends us over an overlay relay, or vice
+	// versa). Empty means no inbound frame was seen within the return-path
+	// liveness window: the medium is genuinely unknown, not known-direct.
+	ReturnTransport string `json:"return_transport,omitempty"`
+	// ReturnRelayHop is the peer ID of the hop that carried the peer's last
+	// inbound frame, when ReturnTransport is "overlay-relay". Empty otherwise.
+	ReturnRelayHop string `json:"return_relay_hop,omitempty"`
 	// TapMAC is the peer's ADVERTISED TAP MAC from its synced metadata — what we
 	// *believe* its TAP device uses. Compare against ObservedTapMAC to detect a
 	// broadcast-vs-actual mismatch (a common silent TAP break).

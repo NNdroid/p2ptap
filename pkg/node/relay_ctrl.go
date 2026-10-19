@@ -193,7 +193,10 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 				hdr.Origin, remotePeer, protocol.ID(hdr.Proto))
 			return
 		}
-		n.notePeerRx(origPID)
+		// The control tunnel arrived over the overlay envelope carried by
+		// remotePeer, so that hop is what origPID's return side used — even when
+		// origPID holds a live direct connection to us we do not use.
+		n.notePeerRxTransport(origPID, "overlay-relay", remotePeer)
 		if remotePeer != "" && remotePeer != origPID {
 			n.recordPeekMapOrigin(origPID, remotePeer, int(hdr.Hops), false)
 		}

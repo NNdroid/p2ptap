@@ -77,9 +77,10 @@ func (n *Node) deriveConnSignals(pID peer.ID) peerConnSignals {
 	s := peerConnSignals{}
 	for _, c := range n.Host.Network().ConnsToPeer(pID) {
 		s.connCount++
-		if strings.Contains(c.RemoteMultiaddr().String(), "/p2p-circuit") {
+		switch transportLabelForConn(c) {
+		case "circuit-relay":
 			s.hasRelay = true
-		} else {
+		default:
 			s.hasDirect = true
 		}
 	}
@@ -598,6 +599,27 @@ func (n *Node) updateWebCollectorState() {
 		// Return-path liveness (asymmetric routing): independent of ConnState.
 		rpStatus, rpDetail, rpLastRxISO := n.deriveReturnPath(pID, role)
 
+		// Return-path MEDIUM: HOW the last inbound frame arrived. Observed from
+		// the frames themselves, so it can legitimately differ from this peer's
+		// OUTBOUND Transport/TransportPriority above — the whole point of
+		// reporting both halves in an asymmetric-routing mesh. Appended to
+		// rpDetail so the existing "回程状态" column gains this without a client
+		// change, and exposed as its own field for structured consumers.
+		rpTransport, rpRelayHop := "", ""
+		if rt, rh := n.peerRxTransportPath(pID, returnPathAliveWindow); rt != "" {
+			rpTransport = rt
+			if rh != "" {
+				rpRelayHop = rh.String()
+			}
+			suffix := "via " + rt
+			if rh != "" {
+				suffix += " " + n.relayHopLabel(rh)
+			}
+			if rpDetail != "" {
+				rpDetail += " · " + suffix
+			}
+		}
+
 		// TAP data-path health (observed MAC vs advertised + last probe outcome).
 		tapStatus, tapDetail := n.deriveTapPath(pID)
 		observedMAC := n.observedTapMACFrom(pID)
@@ -775,6 +797,8 @@ func (n *Node) updateWebCollectorState() {
 			ReturnPath:        rpStatus,
 			ReturnPathDetail:  rpDetail,
 			LastRxISO:         rpLastRxISO,
+			ReturnTransport:   rpTransport,
+			ReturnRelayHop:    rpRelayHop,
 			TapMAC:            tapMAC,
 			ObservedTapMAC:    observedMACStr,
 			TapMACMismatch:    tapMACMismatch,

@@ -629,6 +629,37 @@ const pingPongReadTimeout = 6 * time.Second   // read echo timeout (supports WAN
 const pingPongMaxFailures = 2
 const pingPongMaxConcurrent = 8 // max concurrent peer probes per tick
 
+// pingPongReconnectQuietWindow is how recently a peer must have sent us an
+// inbound DATA frame for its echo failures to be treated as "the echo stream
+// broke" (refresh the stream, keep the negotiated cipher) rather than "the peer
+// is dead" (reconnectPeer).
+//
+// The window is deliberately wide because reconnectPeer is not a link teardown
+// — it is a full state reset: Dispatcher.RemovePeer, echoPool.Invalidate,
+// clearCachedHandshakeEph, peerReady.Delete and ClosePeer. That wipes the
+// negotiated SeqSync cipher and forces a complete re-handshake, and for a
+// relay-only peer that round trip costs the entire relay-upgrade latency. An
+// echo stream fails for transient reasons (a GC pause, an unrelated burst)
+// while the peer's data path is perfectly healthy, so a peer that has sent us
+// even one frame inside this window is treated as live and we refresh only the
+// echo stream.
+//
+// It deliberately equals returnPathAliveWindow, the same package constant the
+// WebUI return-path verdict uses: there is one notion of "this peer's return
+// path is dead" in the engine, so the UI never claims a peer is healthier than
+// we are willing to assume on its behalf. A peer that has sent nothing inside
+// the window AND whose echo fails twice is treated as genuinely dead — which is
+// the failure mode this probe exists to detect.
+const pingPongReconnectQuietWindow = returnPathAliveWindow
+
+// pingPongShouldReconnect reports whether an echo failure may escalate to
+// reconnectPeer, or must be satisfied by refreshing only the echo stream. See
+// pingPongReconnectQuietWindow for why a peer with recent inbound data must
+// never be re-handshaken just because its echo stream stalled.
+func (n *Node) pingPongShouldReconnect(pid peer.ID) bool {
+	return !n.peerRxWithin(pid, pingPongReconnectQuietWindow)
+}
+
 // pingPongFailCounter returns pid's fail counter from the current published
 // snapshot, or nil if the peer has no entry yet. Lock-free (hot-path reader).
 func (n *Node) pingPongFailCounter(pid peer.ID) *atomic.Int32 {
@@ -732,9 +763,12 @@ func (n *Node) assertBootRelayUplinkHealth() {
 }
 
 // peerPingPongLoop sends echo-based keepalive pings to all connected non-bootstrap
-// peers every 5 seconds.  After 3 consecutive timeouts the peer is forcibly
-// disconnected and reconnected.  This provides fast dead-connection detection
-// (5-15s) vs. the 30s health-check loop which also probes but more slowly.
+// peers every PingPongKeepaliveInterval (10s, ±20% jitter). After
+// pingPongMaxFailures (2) consecutive timeouts the peer is reconnected — unless
+// it has sent us inbound data within pingPongReconnectQuietWindow, in which case
+// only the echo stream is refreshed. This provides fast dead-connection
+// detection (~20-30s) vs. the 30s health-check loop which also probes but more
+// slowly.
 //
 // All peers are probed concurrently (capped at pingPongMaxConcurrent) to prevent
 // a single slow peer from blocking the entire probe cycle and causing false
@@ -899,18 +933,21 @@ func (n *Node) pingPongProbePeer(pid peer.ID) {
 	n.recordPeerRTTProbe(pid, rttSourceP2PEcho, 0, false)
 	fc := n.pingPongFailCounterFor(pid).Add(1)
 	if fc >= pingPongMaxFailures {
-		if n.peerRxWithin(pid, 45*time.Second) {
-			// Inbound data frames are actively arriving or arrived recently from pid!
-			// The data-plane return path is healthy. Only the echo stream had an issue.
-			// Do NOT tear down the working connection!
-			log.Debug("Ping-pong echo stream failed for %s, but inbound data frames arrived recently; refreshing echo stream instead of reconnecting", pid.ShortString())
+		if !n.pingPongShouldReconnect(pid) {
+			// Inbound data frames are actively arriving or arrived recently from
+			// pid! The data-plane return path is healthy — only the echo stream
+			// had an issue. Do NOT tear down the working connection: reconnectPeer
+			// would wipe the negotiated SeqSync cipher and force a full
+			// re-handshake over a path that is demonstrably alive.
+			log.Debug("Ping-pong echo stream failed for %s, but inbound data arrived within %s; refreshing echo stream instead of reconnecting",
+				pid.ShortString(), pingPongReconnectQuietWindow)
 			n.echoPool.Invalidate(pid)
 			n.pingPongFailCounterFor(pid).Store(0)
 			return
 		}
 
-		log.Warn("Ping-pong keepalive failed %d times for %s — no recent inbound frames; triggering reconnect",
-			fc, pid.String())
+		log.Warn("Ping-pong keepalive failed %d times for %s — no inbound frames within %s; triggering reconnect",
+			fc, pid.String(), pingPongReconnectQuietWindow)
 		if hop := n.relayHopForTarget(pid); hop != "" && n.isBootstrapPeer(hop) {
 			log.Warn("Ping-pong keepalive failed %d times for relay peer %s via boot %s — re-verifying boot uplink",
 				fc, pid.ShortString(), hop.ShortString())
@@ -919,9 +956,12 @@ func (n *Node) pingPongProbePeer(pid peer.ID) {
 		n.reconnectPeer(pid)
 		n.deletePingPongFailCount(pid)
 	} else if fc == 1 {
-		// WebRTC connections recover faster: reconnect immediately on first failure
-		// instead of waiting for 2 failures × 10s = 20s.
-		if n.hasWebRTCConn(pid) {
+		// WebRTC connections recover faster: reconnect immediately on first
+		// failure instead of waiting for 2 failures × 10s = 20s. But not when
+		// the peer has demonstrably sent us data recently — then the WebRTC
+		// leg that broke is the echo stream, and reconnectPeer's cipher wipe is
+		// pure cost.
+		if n.hasWebRTCConn(pid) && n.pingPongShouldReconnect(pid) {
 			log.Debug("WebRTC ping-pong failed for %s — reconnecting immediately", pid.ShortString())
 			n.reconnectPeer(pid)
 			n.deletePingPongFailCount(pid)

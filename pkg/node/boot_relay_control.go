@@ -406,7 +406,9 @@ func (n *Node) deliverBootRelayControl(finalDst, srcPeer peer.ID, proto protocol
 	if proto == "" {
 		return
 	}
-	n.notePeerRx(srcPeer)
+	// Boot-relay control plane: viaBoot is the carrier, i.e. the hop this peer's
+	// return side actually used.
+	n.notePeerRxTransport(srcPeer, "overlay-relay", viaBoot)
 	if viaBoot != "" && viaBoot != srcPeer {
 		n.recordPeekMapOrigin(srcPeer, viaBoot, 1, false)
 	}

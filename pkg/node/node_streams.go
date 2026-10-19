@@ -240,8 +240,10 @@ func (n *Node) handleStream(s network.Stream) {
 		if n.protoTracker != nil {
 			n.protoTracker.Data.RecordRx(1, uint64(readN))
 		}
-		// Return-path liveness: an inbound frame directly from remotePeer proves its return path is alive
-		n.notePeerRx(remotePeer)
+		// Return-path liveness: an inbound frame directly from remotePeer proves
+		// its return path is alive. Annotate the transport too, so the WebUI can
+		// show WHICH of possibly-several live connections carried it back.
+		n.notePeerRxTransport(remotePeer, transportLabelForConn(s.Conn()), "")
 
 		// PERF: per-frame path. peer.String() is base58 (~930ns, 2 allocs) and
 		// is evaluated at the call site regardless of log level, so guard it.
@@ -1166,8 +1168,10 @@ func (n *Node) handleRelayStream(s network.Stream) {
 		// Return-path liveness signal: we just received a frame ORIGINATING at
 		// srcPeer (even if we are merely forwarding it), so its return path to
 		// us is currently alive. Recorded for the ping-pong probe's outbound-vs-
-		// return distinction in an asymmetric-routing mesh.
-		n.notePeerRx(srcPeer)
+		// return distinction in an asymmetric-routing mesh. The frame reached us
+		// over the overlay envelope carried by remotePeer, so annotate that hop —
+		// srcPeer may well have its own live direct connection to us unused.
+		n.notePeerRxTransport(srcPeer, "overlay-relay", remotePeer)
 		// relayHopRx: the hop (remotePeer) itself just carried a frame to us. A
 		// pure-forwarding hop is never srcPeer, so this is the only signal that
 		// advances for it — relayStreamPool anchors its failure-streak clear on
