@@ -83,6 +83,15 @@ const (
 	metricsBackoffMaxSteps = 30
 )
 
+// retryExitNode paces itself at exitNodeRetryEvery for exitNodeRetryMax
+// attempts: fifteen seconds for thirty minutes. Long enough for a peer that
+// announces itself slowly, short enough that a genuinely offline peer stops
+// being chased within a session.
+const (
+	exitNodeRetryEvery = 15 * time.Second
+	exitNodeRetryMax   = 120
+)
+
 // InterfaceProvider supplies local network interface IP addresses from Android Java runtime.
 type InterfaceProvider interface {
 	GetInterfaceAddresses() string // returns JSON array of IP strings e.g. ["192.168.1.100", "2408:..."]
@@ -460,21 +469,19 @@ func Start(cfgJSON string, tunFd int) error {
 	activeCollector = collector
 	n.Start()
 
+	// The exit gateway is set up before metricsLoop starts reporting, and the
+	// context below is what tears it down, so create it here.
+	ctx, cancel := context.WithCancel(context.Background())
+	metricsCancel = cancel
+
 	if cfgJSON != "" {
 		var rawMap map[string]any
 		if err := json.Unmarshal([]byte(cfgJSON), &rawMap); err == nil {
 			if exitPeer, ok := rawMap["exit_node_peer"].(string); ok && strings.TrimSpace(exitPeer) != "" {
-				if err := setExitNodeLocked(n, exitPeer, "", ""); err != nil {
-					log.Warn("android: failed to initialize exit node %s: %v", exitPeer, err)
-				} else {
-					log.Info("android: exit node initialized to %s", exitPeer)
-				}
+				configureExitNode(ctx, n, exitPeer)
 			}
 		}
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	metricsCancel = cancel
 
 	mu.Unlock()
 	// Emit the RUNNING state outside mu: a synchronous JNI call under the
@@ -1085,6 +1092,76 @@ func SetExitNode(peerID, tapIPv4, tapIPv6 string) error {
 	n := instance
 	mu.Unlock()
 	return setExitNodeLocked(n, peerID, tapIPv4, tapIPv6)
+}
+
+// configureExitNode activates the peer the app selected as the exit gateway.
+//
+// The first attempt happens straight after Start() returns, which is normally
+// too early: the peer's metadata - the TAP IP the gateway routes through - is
+// still arriving, so the call fails with "no TAP IP provided". Retrying is what
+// turns a selected exit node into one that survives a restart instead of
+// sitting at "unavailable" until someone re-selects it by hand.
+func configureExitNode(ctx context.Context, n *node.Node, peerID string) {
+	target := strings.TrimSpace(peerID)
+	if err := setExitNodeLocked(n, target, "", ""); err != nil {
+		log.Warn("android: exit node %s not initialized: %v", target, err)
+	}
+	if exitNodeActive(n, target) {
+		log.Info("android: exit node initialized to %s", target)
+		return
+	}
+	log.Info("android: exit node %s selected but not active yet; retrying until its peer metadata arrives", target)
+	go retryExitNode(ctx, n, target)
+}
+
+// exitNodeActive reports whether the gateway is actually routing through peerID.
+//
+// The error from setExitNodeLocked cannot answer this: it returns nil for a
+// no-op, and the gateway accepts a target it has not yet connected to, so a nil
+// error is not evidence that the exit node came up.
+func exitNodeActive(n *node.Node, peerID string) bool {
+	if n == nil || n.Gateway == nil {
+		return false
+	}
+	return n.Gateway.ActiveExitPeerID() == strings.TrimSpace(peerID)
+}
+
+// retryExitNode keeps trying to activate a selected exit node until it comes
+// up, the node is torn down, or the schedule is spent.
+//
+// The schedule is slow and long rather than fast and short. A peer on the other
+// side of a NAT may take several minutes to announce itself, and a retry that
+// gave up after a few seconds is exactly what leaves the app showing
+// "unavailable" forever after a reboot. Each attempt is side-effect free while
+// the peer is still unknown: the gateway rejects it before mutating anything.
+func retryExitNode(ctx context.Context, n *node.Node, peerID string) {
+	for attempt := 1; attempt <= exitNodeRetryMax; attempt++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(exitNodeRetryEvery):
+		}
+		mu.Lock()
+		stillUs := instance == n
+		mu.Unlock()
+		if !stillUs {
+			return
+		}
+		err := setExitNodeLocked(n, peerID, "", "")
+		if exitNodeActive(n, peerID) {
+			log.Info("android: exit node %s active after %d retry attempt(s)", peerID, attempt)
+			return
+		}
+		// One trail in logcat is worth having, but a peer that never comes up
+		// is not worth a warning every fifteen seconds for half an hour.
+		if attempt == exitNodeRetryMax {
+			log.Error("android: exit node %s still not active after %d retry attempts: %v", peerID, exitNodeRetryMax, err)
+			return
+		}
+		if log.IsDebug() {
+			log.Debug("android: exit node %s not active on retry %d/%d: %v", peerID, attempt, exitNodeRetryMax, err)
+		}
+	}
 }
 
 func setExitNodeLocked(n *node.Node, peerID, tapIPv4, tapIPv6 string) error {
