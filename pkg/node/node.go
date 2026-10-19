@@ -1238,10 +1238,10 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 
 	setOverlayCIDRs(cfg.TapIP, cfg.TapIPv6)
 
-	log.Info("Transport config: TCP=%v QUIC=%v WebRTC=%v WebTransport=%v DisableRelay=%v",
+	log.Info("Transport config: TCP=%v QUIC=%v WebRTC=%v WebTransport=%v circuit-relay=%v hole-punching=%v",
 		cfg.Transports.EnableTCPReuse, cfg.Transports.EnableQUICReuse,
 		cfg.Transports.EnableWebRTC, cfg.Transports.EnableWebTransport,
-		cfg.Transports.DisableRelay)
+		cfg.Transports.CircuitRelayEnabled(), cfg.Transports.HolePunchingEnabled())
 
 	// The AddrsFactory closure is the one place that sees every listener address
 	// libp2p reports BEFORE filterAdvertisedAddrs drops loopback and TAP addrs.
@@ -1360,19 +1360,23 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		opts = append(opts, libp2p.ForceReachabilityPrivate())
 	}
 
-	// Circuit relay + DCUtR hole-punching. Gated by Transports.DisableRelay so a
-	// direct-only experiment can confirm whether a slow/reachable peer was being
-	// auto-relayed through a static relay (disable_relay=true → that peer becomes
-	// unreachable instead of slow). p2ptap's own overlay relay is unaffected.
-	if cfg.Transports.DisableRelay {
-		log.Warn("DisableRelay=true: libp2p circuit-relay, AutoRelay and hole-punching are OFF (direct-only mode). Peers behind symmetric NAT may become unreachable.")
-	} else {
-		opts = append(opts,
-			libp2p.EnableRelay(),
-			libp2p.EnableHolePunching(
+	// Circuit relay and DCUtR hole-punching, gated independently. disable_relay
+	// is the legacy umbrella that still turns both off; disable_circuit_relay and
+	// disable_hole_punching split them, so a one-sided diagnosis is possible
+	// (disable circuit relay to confirm a peer was auto-relayed, or disable
+	// hole-punching to confirm connections came from punches). p2ptap's own
+	// overlay relay (OverlayRelayProtocolID) is never gated here.
+	if off := cfg.Transports.DisabledRelayFeatures(); len(off) > 0 {
+		log.Warn("Relay features OFF: %s. Peers behind symmetric NAT may become unreachable.",
+			strings.Join(off, " and "))
+	}
+	if cfg.Transports.CircuitRelayEnabled() {
+		opts = append(opts, libp2p.EnableRelay())
+		if cfg.Transports.HolePunchingEnabled() {
+			opts = append(opts, libp2p.EnableHolePunching(
 				holepunch.DirectDialTimeout(cfg.HolePunchTimeout),
-			),
-		)
+			))
+		}
 		// Enable AutoRelay with bootstrap peers as static relay servers.
 		//
 		// The size of the static list must NOT drive how eager AutoRelay is.

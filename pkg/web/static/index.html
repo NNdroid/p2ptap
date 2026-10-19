@@ -975,11 +975,29 @@
                 </div>
                 <div class="config-row">
                     <div>
-                        <div class="config-row-label" data-i18n="cfg_disable_relay_lbl">Disable Circuit Relay (diagnostic)</div>
-                        <div class="config-row-desc" data-i18n="cfg_disable_relay_desc">Turn OFF libp2p circuit-relay client/service, AutoRelay &amp; DCUtR hole-punching. Requires restart. If a slow peer becomes unreachable with this ON, it was being auto-relayed through a static relay. Does NOT touch p2ptap's own overlay relay.</div>
+                        <div class="config-row-label" data-i18n="cfg_disable_relay_lbl">Direct-Only Mode (all relaying OFF)</div>
+                        <div class="config-row-desc" data-i18n="cfg_disable_relay_desc">Turns OFF both libp2p circuit-relay (client/service, AutoRelay) and DCUtR hole-punching. Diagnostic: if a slow peer becomes unreachable with this ON, it was being auto-relayed through a static relay. Overrides the two finer toggles below. Does NOT touch p2ptap's own overlay relay.</div>
                     </div>
                     <div class="ext157">
                         <input type="checkbox" id="cfgDisableRelay" class="p2p-switch ext158">
+                    </div>
+                </div>
+                <div class="config-row">
+                    <div>
+                        <div class="config-row-label" data-i18n="cfg_disable_circuit_relay_lbl">Disable circuit relay only</div>
+                        <div class="config-row-desc" data-i18n="cfg_disable_circuit_relay_desc">Turns OFF libp2p circuit-relay client/service and AutoRelay, leaving DCUtR hole-punching on. Ignored while Direct-Only Mode above is ON.</div>
+                    </div>
+                    <div class="ext157">
+                        <input type="checkbox" id="cfgDisableCircuitRelay" class="p2p-switch ext158">
+                    </div>
+                </div>
+                <div class="config-row">
+                    <div>
+                        <div class="config-row-label" data-i18n="cfg_disable_hole_punching_lbl">Disable hole-punching only</div>
+                        <div class="config-row-desc" data-i18n="cfg_disable_hole_punching_desc">Turns OFF DCUtR hole-punching, leaving circuit relay and AutoRelay on. Diagnostic in the other direction: if peers stop connecting after this, the connections were coming from hole punches rather than relays. Ignored while Direct-Only Mode above is ON.</div>
+                    </div>
+                    <div class="ext157">
+                        <input type="checkbox" id="cfgDisableHolePunching" class="p2p-switch ext158">
                     </div>
                 </div>
                 <div class="config-row">

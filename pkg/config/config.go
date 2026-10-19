@@ -72,13 +72,25 @@ type TransportsConfig struct {
 	EnableWebRTC       bool `json:"enable_webrtc"`
 	EnableWebTransport bool `json:"enable_webtransport"`
 	EnableTCPReuse     bool `json:"enable_tcp_reuse"`
-	// DisableRelay turns OFF libp2p circuit-relay client/service, AutoRelay
-	// and DCUtR hole-punching. Use as a diagnostic: if a peer that was reachable
-	// (but slow, e.g. hundreds of ms) becomes UNREACHABLE with this on, it was
-	// being auto-relayed through a static relay peer. Does NOT affect p2ptap's
-	// own overlay relay (OverlayRelayProtocolID) — that path is still visible
-	// in the WebUI routes table.
+	// DisableRelay is the legacy umbrella for both flags below: it still turns OFF
+	// circuit relay AND hole-punching, so existing configs keep working. Prefer the
+	// two specific flags when you only want to disable one. Use as a diagnostic:
+	// if a peer that was reachable (but slow, e.g. hundreds of ms) becomes
+	// UNREACHABLE with this on, it was being auto-relayed through a static relay
+	// peer. Does NOT affect p2ptap's own overlay relay (OverlayRelayProtocolID) —
+	// that path is still visible in the WebUI routes table, and has never been
+	// gated by any flag.
 	DisableRelay bool `json:"disable_relay"`
+	// DisableCircuitRelay turns OFF libp2p circuit-relay client/service and
+	// AutoRelay only, leaving DCUtR hole-punching on. AutoRelay is bundled in
+	// because a node that cannot act as a relay client has no use for reserving
+	// one.
+	DisableCircuitRelay bool `json:"disable_circuit_relay"`
+	// DisableHolePunching turns OFF DCUtR hole-punching only, leaving circuit
+	// relay and AutoRelay on. This is the knob for the opposite diagnosis: if a
+	// peer stops connecting after this is set, the connections were coming from
+	// hole punches rather than relays.
+	DisableHolePunching bool `json:"disable_hole_punching"`
 	// TLSServerName sets the TLS server_name (SNI) placed on OUTGOING handshakes —
 	// both TLS-over-TCP (the default security module) and QUIC. Empty (default)
 	// sends no server_name, matching upstream libp2p. Set it to a plausible
@@ -98,6 +110,35 @@ type TransportsConfig struct {
 	// known tunnel/exfil shape; prefer a domain you actually own, and weigh
 	// against the static TLSServerName option.
 	TLSSNISuffix string `json:"tls_sni_suffix"`
+}
+
+// CircuitRelayEnabled reports whether libp2p circuit relay and AutoRelay should
+// be enabled. DisableRelay is the legacy umbrella and still means "all relaying
+// off", so it wins over the specific flag.
+func (t TransportsConfig) CircuitRelayEnabled() bool {
+	return !t.DisableRelay && !t.DisableCircuitRelay
+}
+
+// HolePunchingEnabled reports whether DCUtR hole-punching should be enabled.
+// See CircuitRelayEnabled for why DisableRelay wins.
+func (t TransportsConfig) HolePunchingEnabled() bool {
+	return !t.DisableRelay && !t.DisableHolePunching
+}
+
+// RelayModeNames returns the operator-facing labels of whichever relay features
+// are disabled, for log lines. Empty when everything is enabled.
+func (t TransportsConfig) DisabledRelayFeatures() []string {
+	var off []string
+	if t.DisableRelay {
+		return []string{"circuit relay + AutoRelay", "hole punching"}
+	}
+	if t.DisableCircuitRelay {
+		off = append(off, "circuit relay + AutoRelay")
+	}
+	if t.DisableHolePunching {
+		off = append(off, "hole punching")
+	}
+	return off
 }
 
 // ExitNodeConfig defines options for node acting as an Exit Node gateway
@@ -325,11 +366,13 @@ func DefaultConfig() *Config {
 			PcapSampleEvery: 1,
 		},
 		Transports: TransportsConfig{
-			EnableQUICReuse:    true,
-			EnableWebRTC:       true,
-			EnableWebTransport: true,
-			EnableTCPReuse:     true,
-			DisableRelay:       false,
+			EnableQUICReuse:     true,
+			EnableWebRTC:        true,
+			EnableWebTransport:  true,
+			EnableTCPReuse:      true,
+			DisableRelay:        false,
+			DisableCircuitRelay: false,
+			DisableHolePunching: false,
 		},
 		TransportStrategy: "best_path",
 		NodeName:          hostName,

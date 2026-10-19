@@ -617,8 +617,12 @@
                 loglevel_desc: "Controls verbosity of console output",
                 enable_mdns_lbl: "Enable mDNS LAN Discovery",
                 enable_mdns_desc: "Auto-discover peers on the same LAN via mDNS (local network only)",
-                cfg_disable_relay_lbl: "Disable Circuit Relay (diagnostic)",
-                cfg_disable_relay_desc: "Turn OFF libp2p circuit-relay client/service, AutoRelay & DCUtR hole-punching. Requires restart. If a slow peer becomes unreachable with this ON, it was being auto-relayed through a static relay. Does NOT touch p2ptap's own overlay relay.",
+                cfg_disable_relay_lbl: "Direct-Only Mode (all relaying OFF)",
+                cfg_disable_relay_desc: "Turns OFF both libp2p circuit-relay (client/service, AutoRelay) and DCUtR hole-punching. Requires restart. If a slow peer becomes unreachable with this ON, it was being auto-relayed through a static relay. Overrides the two finer toggles below. Does NOT touch p2ptap's own overlay relay.",
+                cfg_disable_circuit_relay_lbl: "Disable circuit relay only",
+                cfg_disable_circuit_relay_desc: "Turns OFF libp2p circuit-relay client/service and AutoRelay, leaving DCUtR hole-punching on. Requires restart. Ignored while Direct-Only Mode above is ON.",
+                cfg_disable_hole_punching_lbl: "Disable hole-punching only",
+                cfg_disable_hole_punching_desc: "Turns OFF DCUtR hole-punching, leaving circuit relay and AutoRelay on. Requires restart. If peers stop connecting after this, the connections were coming from hole punches rather than relays. Ignored while Direct-Only Mode above is ON.",
                 cfg_tls_sni_lbl: "TLS/QUIC SNI (outgoing)",
                 cfg_tls_sni_desc: "Static server_name sent on every outbound TLS/QUIC handshake so the mesh resembles ordinary HTTP/3 to a DPI. Empty = no SNI (upstream default). Cosmetic only — peers are authenticated via the signed certificate, never the SNI. Requires restart.",
                 cfg_tls_sni_suffix_lbl: "TLS SNI suffix (per-peer)",
@@ -1464,8 +1468,12 @@
                 loglevel_desc: "控制控制台日志输出的详细程度",
                 enable_mdns_lbl: "启用 mDNS 局域网节点发现",
                 enable_mdns_desc: "通过 mDNS 自动发现同一局域网内的节点（仅限本地网络）",
-                cfg_disable_relay_lbl: "禁用标准中继 (排障诊断)",
-                cfg_disable_relay_desc: "关闭 libp2p 标准 circuit-relay 客户端/服务端、AutoRelay 和 DCUtR 打洞。需重启生效。若开启后某些慢节点无法访问，说明原先通过静态中继转发。不影响 p2ptap 自有骨干中继。",
+                cfg_disable_relay_lbl: "仅直连模式 (关闭全部中继)",
+                cfg_disable_relay_desc: "同时关闭 libp2p 标准 circuit-relay（客户端/服务端、AutoRelay）和 DCUtR 打洞。需重启生效。若开启后某些慢节点无法访问，说明原先通过静态中继转发。会覆盖下方两个更细的开关。不影响 p2ptap 自有骨干中继。",
+                cfg_disable_circuit_relay_lbl: "仅关闭标准中继",
+                cfg_disable_circuit_relay_desc: "关闭 libp2p 标准 circuit-relay 客户端/服务端和 AutoRelay，保留 DCUtR 打洞。需重启生效。上方仅直连模式开启时此项无效。",
+                cfg_disable_hole_punching_lbl: "仅关闭打洞",
+                cfg_disable_hole_punching_desc: "关闭 DCUtR 打洞，保留 circuit-relay 和 AutoRelay。需重启生效。若开启后节点无法连接，说明原连接来自打洞而非中继。上方仅直连模式开启时此项无效。",
                 cfg_tls_sni_lbl: "TLS/QUIC SNI（出站）",
                 cfg_tls_sni_desc: "在每次出站 TLS/QUIC 握手上发送的静态 server_name，使网格对 DPI 更像普通 HTTP/3。留空＝不发 SNI（上游默认）。仅外观——对端通过签名证书认证，从不校验 SNI。需重启生效。",
                 cfg_tls_sni_suffix_lbl: "TLS SNI 后缀（按对端）",
@@ -2153,8 +2161,12 @@
                 loglevel_desc: "控制主控台日誌輸出的詳細程度",
                 enable_mdns_lbl: "啟用 mDNS 區域網路節點發現",
                 enable_mdns_desc: "透過 mDNS 自動發現同一區域網路內的節點（僅限本地網路）",
-                cfg_disable_relay_lbl: "停用標準中繼 (排障診斷)",
-                cfg_disable_relay_desc: "關閉 libp2p 標準 circuit-relay 客戶端/服務端、AutoRelay 與 DCUtR 打洞。需重啟生效。若開啟後某些慢節點無法連線，說明原先透過靜態中繼轉發。不影響 p2ptap 自有骨幹中繼。",
+                cfg_disable_relay_lbl: "僅直連模式 (關閉全部中繼)",
+                cfg_disable_relay_desc: "同時關閉 libp2p 標準 circuit-relay（客戶端/服務端、AutoRelay）和 DCUtR 打洞。需重啟生效。若開啟後某些慢節點無法連線，說明原先透過靜態中繼轉發。會覆蓋下方兩個較細的開關。不影響 p2ptap 自有骨幹中繼。",
+                cfg_disable_circuit_relay_lbl: "僅關閉標準中繼",
+                cfg_disable_circuit_relay_desc: "關閉 libp2p 標準 circuit-relay 客戶端/服務端和 AutoRelay，保留 DCUtR 打洞。需重啟生效。上方僅直連模式開啟時此項無效。",
+                cfg_disable_hole_punching_lbl: "僅關閉打洞",
+                cfg_disable_hole_punching_desc: "關閉 DCUtR 打洞，保留 circuit-relay 和 AutoRelay。需重啟生效。若開啟後節點無法連線，說明原連線來自打洞而非中繼。上方僅直連模式開啟時此項無效。",
                 cfg_tls_sni_lbl: "TLS/QUIC SNI（出站）",
                 cfg_tls_sni_desc: "在每次出站 TLS/QUIC 握手發送的靜態 server_name，使網格對 DPI 更像普通 HTTP/3。留空＝不發 SNI（上游預設）。僅外觀——對端透過簽章憑證認證，從不校驗 SNI。需重啟生效。",
                 cfg_tls_sni_suffix_lbl: "TLS SNI 後綴（按對端）",
@@ -2900,8 +2912,12 @@
                 loglevel_desc: "コンソール出力の詳細度を制御",
                 enable_mdns_lbl: "mDNS LAN ノード検出を有効化",
                 enable_mdns_desc: "mDNS で同一 LAN 内のノードを自動検出します（ローカルネットワークのみ）",
-                cfg_disable_relay_lbl: "標準リレーを無効化 (診断用)",
-                cfg_disable_relay_desc: "libp2pの標準circuit-relayクライアント/サービス、AutoRelayおよびDCUtRホールパンチングを無効化します（要再起動）。p2ptap独自のオーバーレイリレーには影響しません。",
+                cfg_disable_relay_lbl: "ダイレクト専用モード (全中継OFF)",
+                cfg_disable_relay_desc: "libp2pの標準circuit-relay（クライアント/サービス、AutoRelay）とDCUtRホールパンチングを両方無効化します（要再起動）。有効化した後に遅いピアが到達不可になれば、以前は静的リレー経由で自動中継されていました。下の2つの細かいトグルを上書きします。p2ptap独自のオーバーレイリレーには影響しません。",
+                cfg_disable_circuit_relay_lbl: "標準リレーのみ無効化",
+                cfg_disable_circuit_relay_desc: "libp2pの標準circuit-relayクライアント/サービスとAutoRelayを無効化し、DCUtRホールパンチングは維持します（要再起動）。上のダイレクト専用モードがON中は無視されます。",
+                cfg_disable_hole_punching_lbl: "ホールパンチングのみ無効化",
+                cfg_disable_hole_punching_desc: "DCUtRホールパンチングを無効化し、circuit-relayとAutoRelayは維持します（要再起動）。設定後にピアが接続できなくなれば、接続は中継ではなくホールパンチ由来でした。上のダイレクト専用モードがON中は無視されます。",
                 cfg_tls_sni_lbl: "TLS/QUIC SNI（送信時）",
                 cfg_tls_sni_desc: "すべての送信 TLS/QUIC ハンドシェークで送る静的 server_name。DPI に対して通常の HTTP/3 に似せます。空＝SNI なし（上流の既定）。外見上のもののみ——ピアは署名済み証明書で認証され、SNI は検証されません。要再起動。",
                 cfg_tls_sni_suffix_lbl: "TLS SNI サフィックス（ピア別）",
@@ -3709,8 +3725,12 @@
                 loglevel_desc: "Steuert die Ausführlichkeit der Konsolenausgabe",
                 enable_mdns_lbl: "mDNS LAN-Knotenerkennung aktivieren",
                 enable_mdns_desc: "Erkennt Peers im selben LAN automatisch via mDNS (nur lokales Netzwerk)",
-                cfg_disable_relay_lbl: "Circuit-Relay deaktivieren (Diagnose)",
-                cfg_disable_relay_desc: "Deaktiviert libp2p Circuit-Relay, AutoRelay & DCUtR Hole-Punching (Neustart erforderlich). Hat keine Auswirkungen auf das p2ptap-Overlay-Relay.",
+                cfg_disable_relay_lbl: "Nur Direktmodus (alles Relaying aus)",
+                cfg_disable_relay_desc: "Schaltet sowohl libp2p Circuit-Relay (Client/Service, AutoRelay) als auch DCUtR Hole-Punching aus (Neustart erforderlich). Wenn ein langsamer Peer damit unerreichbar wird, wurde er zuvor durch einen statischen Relay automatisch weitergeleitet. Überschreibt die beiden feineren Schalter unten. Hat keine Auswirkungen auf das p2ptap-Overlay-Relay.",
+                cfg_disable_circuit_relay_lbl: "Nur Circuit-Relay deaktivieren",
+                cfg_disable_circuit_relay_desc: "Deaktiviert libp2p Circuit-Relay Client/Service und AutoRelay, lässt DCUtR Hole-Punching an (Neustart erforderlich). Wird ignoriert, solange der Nur-Direktmodus oben aktiv ist.",
+                cfg_disable_hole_punching_lbl: "Nur Hole-Punching deaktivieren",
+                cfg_disable_hole_punching_desc: "Deaktiviert DCUtR Hole-Punching, lässt Circuit-Relay und AutoRelay an (Neustart erforderlich). Wenn Peers danach nicht mehr verbinden, stammen die Verbindungen aus Hole-Punches statt aus Relays. Wird ignoriert, solange der Nur-Direktmodus oben aktiv ist.",
                 cfg_tls_sni_lbl: "TLS/QUIC-SNI (ausgehend)",
                 cfg_tls_sni_desc: "Statischer server_name bei jedem ausgehenden TLS/QUIC-Handshake, damit der Mesh für DPI wie normales HTTP/3 wirkt. Leer = kein SNI (Upstream-Standard). Nur optisch — Gegenstellen werden über das signierte Zertifikat authentifiziert, nie über den SNI. Neustart erforderlich.",
                 cfg_tls_sni_suffix_lbl: "TLS-SNI-Suffix (pro Gegenstelle)",
@@ -4518,8 +4538,12 @@
                 loglevel_desc: "Controla el nivel de detalle de la salida de consola",
                 enable_mdns_lbl: "Habilitar detección de nodos LAN por mDNS",
                 enable_mdns_desc: "Descubre automáticamente nodos en la misma LAN vía mDNS (solo red local)",
-                cfg_disable_relay_lbl: "Desactivar Circuit Relay (diagnóstico)",
-                cfg_disable_relay_desc: "Desactiva el cliente/servicio circuit-relay libp2p, AutoRelay y perforación DCUtR (requiere reinicio). No afecta al relé de superposición de p2ptap.",
+                cfg_disable_relay_lbl: "Solo modo directo (todo el releo OFF)",
+                cfg_disable_relay_desc: "Desactiva tanto el circuit-relay libp2p (cliente/servicio, AutoRelay) como la perforación DCUtR (requiere reinicio). Si un peer lento se vuelve inaccesible con esto activado, antes se retransmitía automáticamente por un relay estático. Sobrescribe los dos conmutadores más finos de abajo. No afecta al relé de superposición de p2ptap.",
+                cfg_disable_circuit_relay_lbl: "Desactivar solo circuit relay",
+                cfg_disable_circuit_relay_desc: "Desactiva el cliente/servicio circuit-relay libp2p y AutoRelay, dejando la perforación DCUtR activa (requiere reinicio). Se ignora mientras el modo solo directo de arriba esté activado.",
+                cfg_disable_hole_punching_lbl: "Desactivar solo perforación",
+                cfg_disable_hole_punching_desc: "Desactiva la perforación DCUtR, dejando circuit relay y AutoRelay activos (requiere reinicio). Si los peers dejan de conectarse después, las conexiones provenían de perforaciones y no de relés. Se ignora mientras el modo solo directo de arriba esté activado.",
                 cfg_tls_sni_lbl: "SNI TLS/QUIC (saliente)",
                 cfg_tls_sni_desc: "server_name estático enviado en cada handshake TLS/QUIC saliente para que la malla parezca HTTP/3 normal ante un DPI. Vacío = sin SNI (valor de upstream). Solo cosmético: los pares se autentican mediante el certificado firmado, nunca por el SNI. Requiere reinicio.",
                 cfg_tls_sni_suffix_lbl: "Sufijo SNI TLS (por par)",
@@ -5368,8 +5392,12 @@
                 loglevel_desc: "Contrôle la verbosité de la sortie console",
                 enable_mdns_lbl: "Activer la découverte de nœuds LAN via mDNS",
                 enable_mdns_desc: "Découvre automatiquement les nœuds du même LAN via mDNS (réseau local uniquement)",
-                cfg_disable_relay_lbl: "Désactiver Circuit Relay (diagnostic)",
-                cfg_disable_relay_desc: "Désactive le client/service circuit-relay libp2p, AutoRelay et perforation DCUtR (redémarrage requis). N'affecte pas le relais propre à p2ptap.",
+                cfg_disable_relay_lbl: "Mode direct uniquement (tout relais OFF)",
+                cfg_disable_relay_desc: "Désactive à la fois le circuit-relay libp2p (client/service, AutoRelay) et la perforation DCUtR (redémarrage requis). Si un pair lent devient inaccessible avec ceci activé, il était auparavant retransmis automatiquement par un relais statique. Écrase les deux interrupteurs plus fins ci-dessous. N'affecte pas le relais propre à p2ptap.",
+                cfg_disable_circuit_relay_lbl: "Désactiver seulement le circuit relay",
+                cfg_disable_circuit_relay_desc: "Désactive le client/service circuit-relay libp2p et AutoRelay, en conservant la perforation DCUtR (redémarrage requis). Ignoré tant que le mode direct ci-dessus est activé.",
+                cfg_disable_hole_punching_lbl: "Désactiver seulement la perforation",
+                cfg_disable_hole_punching_desc: "Désactive la perforation DCUtR, en conservant le circuit relay et AutoRelay (redémarrage requis). Si les pairs cessent de se connecter après cela, les connexions provenaient de perforations et non de relais. Ignoré tant que le mode direct ci-dessus est activé.",
                 cfg_tls_sni_lbl: "SNI TLS/QUIC (sortant)",
                 cfg_tls_sni_desc: "server_name statique envoyé à chaque poignée de main TLS/QUIC sortante pour que le maillage ressemble à du HTTP/3 normal face à un DPI. Vide = pas de SNI (défaut amont). Purement cosmétique — les pairs sont authentifiés via le certificat signé, jamais le SNI. Redémarrage requis.",
                 cfg_tls_sni_suffix_lbl: "Suffixe SNI TLS (par pair)",
@@ -6069,6 +6097,10 @@
                 if (disableRelayEl) {
                     disableRelayEl.checked = !!transports.disable_relay;
                 }
+                const disableCircuitRelayEl = document.getElementById('cfgDisableCircuitRelay');
+                if (disableCircuitRelayEl) disableCircuitRelayEl.checked = !!transports.disable_circuit_relay;
+                const disableHolePunchingEl = document.getElementById('cfgDisableHolePunching');
+                if (disableHolePunchingEl) disableHolePunchingEl.checked = !!transports.disable_hole_punching;
                 const sniEl = document.getElementById('cfgTlsServerName');
                 if (sniEl) sniEl.value = transports.tls_server_name || '';
                 const sniSuffixEl = document.getElementById('cfgTlsSniSuffix');
@@ -6654,6 +6686,10 @@
                 if (!currentFullConfig.transports) currentFullConfig.transports = {};
                 const disableRelayEl = document.getElementById('cfgDisableRelay');
                 if (disableRelayEl) currentFullConfig.transports.disable_relay = disableRelayEl.checked;
+                const circuitRelayEl = document.getElementById('cfgDisableCircuitRelay');
+                if (circuitRelayEl) currentFullConfig.transports.disable_circuit_relay = circuitRelayEl.checked;
+                const holePunchingEl = document.getElementById('cfgDisableHolePunching');
+                if (holePunchingEl) currentFullConfig.transports.disable_hole_punching = holePunchingEl.checked;
                 const sniEl = document.getElementById('cfgTlsServerName');
                 if (sniEl) currentFullConfig.transports.tls_server_name = sniEl.value.trim();
                 const sniSuffixEl = document.getElementById('cfgTlsSniSuffix');

@@ -3,6 +3,7 @@ package P2PTap
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 
 	"p2ptap/pkg/config"
 )
@@ -35,6 +36,57 @@ func ValidateConfig(cfgJSON string) error {
 // NormalizePeerAddress validates an address for a static/bootstrap list.
 func NormalizePeerAddress(address string) (string, error) {
 	return config.NormalizePeerAddress(address)
+}
+
+// Plan verdicts returned by PlanReload.
+const (
+	PlanVerdictNoop    = "noop"    // nothing changed
+	PlanVerdictReload  = "reload"  // apply without tearing the node down
+	PlanVerdictRestart = "restart" // rebuild required
+)
+
+// PlanReload reports whether replacing oldJSON with newJSON needs the node
+// rebuilt from scratch, or can be applied onto the running process.
+//
+// The field list lives in config.RestartRequiredFields and nowhere else: Android
+// used to keep its own copy of that list in Kotlin, and the two drifted (it
+// demanded a restart for ACL and advertised-subnet changes that the engine
+// demonstrably hot-reloads, via the OnSubnetsChanged callback). Exporting the
+// verdict instead of the list means a new engine-side restart-required field
+// reaches every client automatically.
+//
+// It deliberately returns only a verdict, not the field names: a stale or
+// malformed caller should not have to understand the engine's field taxonomy to
+// decide what to do with a VPN.
+func PlanReload(oldJSON, newJSON string) string {
+	if newJSON == "" {
+		return PlanVerdictNoop
+	}
+	if oldJSON == "" {
+		// Nothing known to be running. The caller cannot hot-reload onto a config
+		// it has not told us about, so it must start the node from newJSON.
+		return PlanVerdictRestart
+	}
+	new, err := parseConfig(newJSON)
+	if new == nil || err != nil {
+		// Cannot tell. Reporting "reload" for a candidate we could not parse would
+		// be the dangerous half of this bug class — a change that looks applied and
+		// is not. "restart" surfaces the same validation error at Start, which
+		// validates the same JSON through parseConfig.
+		return PlanVerdictRestart
+	}
+	old, err := parseConfig(oldJSON)
+	if old == nil || err != nil {
+		// The running config is unknown or unreadable; treat it as a cold start.
+		return PlanVerdictRestart
+	}
+	if len(config.RestartRequiredFields(old, new)) > 0 {
+		return PlanVerdictRestart
+	}
+	if reflect.DeepEqual(old, new) {
+		return PlanVerdictNoop
+	}
+	return PlanVerdictReload
 }
 
 // mergeHotReload preserves every running-config field the caller did not
