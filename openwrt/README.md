@@ -23,7 +23,7 @@ apk add p2ptap luci-app-p2ptap luci-i18n-p2ptap-zh-cn
 
 ## 自动发布
 
-`OpenWrt 25.12 Signed APK Feed` 支持标签、main 或当前开发分支的代码推送、手动运行以及 Release 工作流调用。各目标共用一次解析的包版本；所有目标成功并通过签名检查后，才更新 `openwrt-feed` 分支。发布保留其他 OpenWrt 版本目录。
+`OpenWrt 25.12 Signed APK Feed` 在 `v*` 标签推送时运行，也可手动运行或由 Release 工作流调用；不监听 main 或分支推送。手动运行时 `publish_feed` 可设为否，此时只产出构建 artifact，不更新分支、不发布签名仓库。各目标共用一次解析的包版本；所有目标成功并通过签名检查后，才更新 `openwrt-feed` 分支。发布保留其他 OpenWrt 版本目录。
 
 签名配置位于 **NNdroid/p2ptap** 仓库的 Settings → Secrets and variables → Actions：
 
