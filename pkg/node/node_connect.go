@@ -127,7 +127,7 @@ func (n *Node) rediscoverPeer(pid peer.ID) {
 		return
 	}
 	log.Info("Rediscovery learned %d fresh address(es) for %s", len(info.Addrs), pid.String())
-	n.Host.Peerstore().AddAddrs(pid, info.Addrs, 10*time.Minute)
+	n.Host.Peerstore().AddAddrs(pid, info.Addrs, relayRediscoveryAddrTTL)
 	// Re-dial through the normal path (self-limited by semaphore + in-flight guard).
 	_ = n.dialInParallel(n.ctx, info, "rediscover")
 }
@@ -142,7 +142,26 @@ const (
 	// never be reached directly is retried roughly once per half hour instead
 	// of once per tick.
 	relayUpgradeMaxBackoff = 30 * time.Minute
+	// relayRediscoveryAddrTTL is how long addresses learned from a DHT
+	// rediscovery stay cached. Shorter than peerstore.AddressTTL (1h): a DHT
+	// record is a point-in-time view of what the peer advertised, so a stale
+	// mapping is rediscovered in 10 minutes instead of being re-dialled for an
+	// hour.
+	relayRediscoveryAddrTTL = 10 * time.Minute
 )
+
+// directCandidates keeps only addrs that are not circuit-relay hops. The
+// relay-upgrade dial is forced direct, so a /p2p-circuit addr can never succeed
+// there and would only be dialed before failing.
+func directCandidates(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
+	out := make([]multiaddr.Multiaddr, 0, len(addrs))
+	for _, a := range addrs {
+		if !strings.Contains(a.String(), "/p2p-circuit") {
+			out = append(out, a)
+		}
+	}
+	return out
+}
 
 // relayOnlyDirectUpgradeLoop periodically attempts to upgrade relay-only peers
 // to a direct connection. It is the recovery path for the "pinned to relay"
@@ -199,24 +218,21 @@ func (n *Node) relayOnlyDirectUpgradeLoop() {
 // back off peers that repeatedly fail instead of retrying every tick.
 func (n *Node) attemptDirectUpgrade(pid peer.ID) bool {
 	// Direct candidates: peerstore addrs minus loopback minus circuit addrs.
-	addrs := filterUndialableAddrs(n.Host.Peerstore().Addrs(pid))
-	direct := make([]multiaddr.Multiaddr, 0, len(addrs))
-	for _, a := range addrs {
-		if !strings.Contains(a.String(), "/p2p-circuit") {
-			direct = append(direct, a)
-		}
-	}
+	direct := directCandidates(filterUndialableAddrs(n.Host.Peerstore().Addrs(pid)))
+
+	// No usable direct addrs (expired TTL): rediscover via DHT. Only addrs that
+	// came out of the DHT are re-registered below — the ones already in the
+	// peerstore need no re-registration, and re-registering them would renew
+	// their TTL on every failed attempt, so a dead NAT mapping would be cached
+	// forever and this lookup could never run again.
+	var fresh []multiaddr.Multiaddr
 	if len(direct) == 0 && n.DHT != nil {
-		// No usable direct addrs (expired TTL): rediscover via DHT.
 		ctx, cancel := context.WithTimeout(n.ctx, 8*time.Second)
 		info, err := n.DHT.FindPeer(ctx, pid)
 		cancel()
 		if err == nil {
-			for _, a := range filterUndialableAddrs(info.Addrs) {
-				if !strings.Contains(a.String(), "/p2p-circuit") {
-					direct = append(direct, a)
-				}
-			}
+			fresh = directCandidates(filterUndialableAddrs(info.Addrs))
+			direct = append(direct, fresh...)
 		}
 	}
 	if len(direct) == 0 {
@@ -224,7 +240,9 @@ func (n *Node) attemptDirectUpgrade(pid peer.ID) bool {
 	}
 
 	direct = prioritizeMultiaddrs(direct)
-	n.Host.Peerstore().AddAddrs(pid, direct, peerstore.AddressTTL)
+	if len(fresh) > 0 {
+		n.Host.Peerstore().AddAddrs(pid, fresh, relayRediscoveryAddrTTL)
+	}
 
 	timeout := n.config().HolePunchTimeout
 	if timeout <= 0 || timeout > 120*time.Second {
