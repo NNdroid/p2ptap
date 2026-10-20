@@ -387,7 +387,7 @@ jobs:
             https://github.com/NNdroid/p2ptap/tree/openwrt-feed
 
             x86/64 repository:
-            https://raw.githubusercontent.com/NNdroid/p2ptap/openwrt-feed/releases/25.12.5/x86/64/packages.adb
+            https://raw.githubusercontent.com/NNdroid/p2ptap/openwrt-feed/releases/25.12.6/x86/64/packages.adb
           files: |
             release-assets/*
           overwrite_files: true

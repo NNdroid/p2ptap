@@ -86,7 +86,7 @@ jobs:
           OPENWRT_FEED_SIGNING_KEY_B64: ${{ secrets.OPENWRT_FEED_SIGNING_KEY_B64 }}
           OPENWRT_FEED_PUBLIC_KEY_B64: ${{ vars.OPENWRT_FEED_PUBLIC_KEY_B64 }}
           INPUT_VERSION: ${{ needs.prepare.outputs.version }}
-          OPENWRT_VERSION: '25.12.5'
+          OPENWRT_VERSION: '25.12.6'
           OPENWRT_TARGET: ${{ matrix.target }}
           OPENWRT_SUBTARGET: ${{ matrix.subtarget }}
           OPENWRT_WORK_DIR: ${{ runner.temp }}/p2ptap-feed-${{ matrix.target }}-${{ matrix.subtarget }}
@@ -134,7 +134,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           OPENWRT_FEED_PUBLIC_KEY_B64: ${{ vars.OPENWRT_FEED_PUBLIC_KEY_B64 }}
-          OPENWRT_VERSION: '25.12.5'
+          OPENWRT_VERSION: '25.12.6'
           INPUT_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
