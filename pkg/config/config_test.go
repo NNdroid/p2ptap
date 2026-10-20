@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -22,6 +23,27 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("Expected default WebUI port 80, got %d", cfg.WebUI.Port)
 	} else {
 		t.Logf("[config] ✓ default WebUI.Port=%d", cfg.WebUI.Port)
+	}
+	if cfg.RelayUpgradeInterval != 30*time.Second {
+		t.Errorf("Expected default RelayUpgradeInterval 30s, got %v", cfg.RelayUpgradeInterval)
+	}
+	if cfg.RelayUpgradeMaxBackoff != 30*time.Minute {
+		t.Errorf("Expected default RelayUpgradeMaxBackoff 30m, got %v", cfg.RelayUpgradeMaxBackoff)
+	}
+}
+
+// Validate must repair a missing cap so a config.json that predates the field
+// is not read as "no backoff at all".
+func TestConfigValidationRepairsMissingRelayUpgradeMaxBackoff(t *testing.T) {
+	for _, v := range []time.Duration{0, -time.Minute} {
+		cfg := DefaultConfig()
+		cfg.RelayUpgradeMaxBackoff = v
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() on %v failed: %v", v, err)
+		}
+		if cfg.RelayUpgradeMaxBackoff != 30*time.Minute {
+			t.Errorf("input %v: expected 30m after Validate, got %v", v, cfg.RelayUpgradeMaxBackoff)
+		}
 	}
 }
 

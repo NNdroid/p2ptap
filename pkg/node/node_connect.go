@@ -142,6 +142,11 @@ const (
 	// never be reached directly is retried roughly once per half hour instead
 	// of once per tick.
 	relayUpgradeMaxBackoff = 30 * time.Minute
+	// Bound the configured cap to a meaningful range. Below the base step a cap
+	// cannot be reached, so it silently disables the throttle; beyond a few hours
+	// a peer that regained a direct path would wait that long to be upgraded.
+	relayUpgradeMaxBackoffMin = 10 * time.Second
+	relayUpgradeMaxBackoffMax = 6 * time.Hour
 	// relayRediscoveryAddrTTL is how long addresses learned from a DHT
 	// rediscovery stay cached. Shorter than peerstore.AddressTTL (1h): a DHT
 	// record is a point-in-time view of what the peer advertised, so a stale
@@ -149,6 +154,15 @@ const (
 	// hour.
 	relayRediscoveryAddrTTL = 10 * time.Minute
 )
+
+// resolveRelayUpgradeMaxBackoff turns the configured cap into one the backoff
+// actually honours.
+func resolveRelayUpgradeMaxBackoff(v time.Duration) time.Duration {
+	if v < relayUpgradeMaxBackoffMin || v > relayUpgradeMaxBackoffMax {
+		return relayUpgradeMaxBackoff
+	}
+	return v
+}
 
 // directCandidates keeps only addrs that are not circuit-relay hops. The
 // relay-upgrade dial is forced direct, so a /p2p-circuit addr can never succeed
@@ -167,9 +181,13 @@ func directCandidates(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 // to a direct connection. It is the recovery path for the "pinned to relay"
 // state: once a direct connection succeeds, the ConnectedF handler calls
 // clearRelayOnlyPeer and the Router link flips from LinkCircuit to LinkDirect.
-// The retry interval is configurable via Config.RelayUpgradeInterval (default 30s).
+// The retry interval is Config.RelayUpgradeInterval (default 30s) and the
+// failure backoff is capped by Config.RelayUpgradeMaxBackoff (default 30m).
 func (n *Node) relayOnlyDirectUpgradeLoop() {
 	defer n.wg.Done()
+	// The ticker cadence is frozen at loop start: time.NewTicker cannot be
+	// resized, so relay_upgrade_interval needs a restart. The backoff cap is read
+	// per tick below and is live-reloadable instead.
 	interval := n.config().RelayUpgradeInterval
 	if interval < 5*time.Second || interval > 120*time.Second {
 		interval = 30 * time.Second
@@ -182,6 +200,7 @@ func (n *Node) relayOnlyDirectUpgradeLoop() {
 		case <-n.ctx.Done():
 			return
 		case <-ticker.C:
+			maxBackoff := n.config().RelayUpgradeMaxBackoff
 			relayOnly := n.relayUpgradeCandidates(time.Now())
 
 			// Parallel upgrades with a bounded semaphore: each attemptDirectUpgrade
@@ -204,7 +223,7 @@ func (n *Node) relayOnlyDirectUpgradeLoop() {
 					defer wg.Done()
 					defer func() { <-sem }()
 					upgraded := n.attemptDirectUpgrade(pid)
-					n.noteRelayUpgradeResult(pid, upgraded)
+					n.noteRelayUpgradeResult(pid, upgraded, maxBackoff)
 				}(pid)
 			}
 			wg.Wait()

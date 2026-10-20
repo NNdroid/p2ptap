@@ -18,7 +18,7 @@ func TestNoteRelayUpgradeResultOnBareNode(t *testing.T) {
 	pid := peer.ID("12D3KooWRelayOnlyPeerRegression01")
 
 	for fails := 1; fails <= 7; fails++ {
-		n.noteRelayUpgradeResult(pid, false)
+		n.noteRelayUpgradeResult(pid, false, relayUpgradeMaxBackoff)
 
 		if got := n.relayUpgradeFails[pid]; got != fails {
 			t.Fatalf("failure %d: count = %d, want %d", fails, got, fails)
@@ -41,14 +41,14 @@ func TestNoteRelayUpgradeResultOnBareNode(t *testing.T) {
 	}
 
 	// Steady state: an unreachable peer costs one attempt per cap, not per tick.
-	n.noteRelayUpgradeResult(pid, false)
+	n.noteRelayUpgradeResult(pid, false, relayUpgradeMaxBackoff)
 	if deadline := time.Until(n.relayUpgradeNext[pid]); deadline > relayUpgradeMaxBackoff+time.Second {
 		t.Fatalf("backoff deadline %v exceeds the %v cap", deadline, relayUpgradeMaxBackoff)
 	}
 
 	// A successful upgrade clears both the count and the backoff, so a peer that
 	// later becomes reachable is not throttled by its old failures.
-	n.noteRelayUpgradeResult(pid, true)
+	n.noteRelayUpgradeResult(pid, true, relayUpgradeMaxBackoff)
 	if got := n.relayUpgradeFails[pid]; got != 0 {
 		t.Fatalf("upgrade cleared, but failure count is still %d", got)
 	}
@@ -68,7 +68,7 @@ func TestRelayUpgradeBackoffCannotOverflow(t *testing.T) {
 	pid := peer.ID("12D3KooWRelayOnlyPeerOverflow1")
 
 	for call := 1; call <= 100; call++ {
-		n.noteRelayUpgradeResult(pid, false)
+		n.noteRelayUpgradeResult(pid, false, relayUpgradeMaxBackoff)
 		if got := n.relayUpgradeFails[pid]; got != call {
 			t.Fatalf("call %d: count = %d", call, got)
 		}
@@ -86,6 +86,58 @@ func TestRelayUpgradeBackoffCannotOverflow(t *testing.T) {
 	}
 }
 
+// resolveRelayUpgradeMaxBackoff keeps a configured cap inside the range the
+// backoff can honour: below the base step no cap is ever reached, which would
+// silently disable the throttle; past a few hours a peer that regained a direct
+// path would wait that long to be upgraded.
+func TestResolveRelayUpgradeMaxBackoffClamps(t *testing.T) {
+	for _, v := range []time.Duration{
+		0,
+		-time.Minute,
+		time.Second,
+		relayUpgradeMaxBackoffMin - 1,
+		relayUpgradeMaxBackoffMax + 1,
+		24 * time.Hour,
+	} {
+		if got := resolveRelayUpgradeMaxBackoff(v); got != relayUpgradeMaxBackoff {
+			t.Fatalf("clamp(%v) = %v, want the %v default", v, got, relayUpgradeMaxBackoff)
+		}
+	}
+	for _, v := range []time.Duration{
+		relayUpgradeMaxBackoffMin,
+		5 * time.Minute,
+		relayUpgradeMaxBackoff,
+		relayUpgradeMaxBackoffMax,
+	} {
+		if got := resolveRelayUpgradeMaxBackoff(v); got != v {
+			t.Fatalf("clamp(%v) = %v, want unchanged", v, got)
+		}
+	}
+}
+
+// The cap is a live value, not a compile-time constant: a 2-minute cap must be
+// honoured for the whole failure streak, not only until the 30-minute default
+// would have kicked in.
+func TestRelayUpgradeBackoffHonoursConfiguredCap(t *testing.T) {
+	const limit = 2 * time.Minute
+	n := &Node{}
+	pid := peer.ID("12D3KooWRelayOnlyPeerCapLimit1")
+
+	for call := 1; call <= 10; call++ {
+		n.noteRelayUpgradeResult(pid, false, limit)
+		if call < 2 {
+			continue
+		}
+		deadline := time.Until(n.relayUpgradeNext[pid])
+		if deadline <= 0 {
+			t.Fatalf("call %d: non-positive backoff %v", call, deadline)
+		}
+		if deadline > limit+time.Second {
+			t.Fatalf("call %d: backoff %v exceeds the configured %v cap", call, deadline, limit)
+		}
+	}
+}
+
 // A success on a peer that was never recorded must not allocate either map: the
 // clear path is a no-op on nil maps (delete is safe), which keeps the common
 // case from churning allocations.
@@ -93,7 +145,7 @@ func TestNoteRelayUpgradeSuccessDoesNotAllocate(t *testing.T) {
 	n := &Node{}
 	pid := peer.ID("12D3KooWRelayOnlyPeerSuccess0001")
 
-	n.noteRelayUpgradeResult(pid, true)
+	n.noteRelayUpgradeResult(pid, true, relayUpgradeMaxBackoff)
 
 	if n.relayUpgradeFails != nil || n.relayUpgradeNext != nil {
 		t.Fatal("successful upgrade on an unrecorded peer must not allocate the backoff maps")
@@ -111,7 +163,7 @@ func TestRelayOnlyBookkeepingOnBareNode(t *testing.T) {
 	if !n.isRelayOnlyPeer(pid) {
 		t.Fatal("peer marked relay-only but isRelayOnlyPeer reports false")
 	}
-	n.noteRelayUpgradeResult(pid, false)
+	n.noteRelayUpgradeResult(pid, false, relayUpgradeMaxBackoff)
 	n.clearRelayOnlyPeer(pid)
 
 	if n.isRelayOnlyPeer(pid) {
@@ -135,10 +187,10 @@ func TestRelayUpgradeCandidatesHonourBackoff(t *testing.T) {
 	now := time.Now()
 	assertCandidates(t, n, now, []peer.ID{throttled, free}, "with no failures recorded")
 
-	n.noteRelayUpgradeResult(throttled, false) // fails=1: still eligible
+	n.noteRelayUpgradeResult(throttled, false, relayUpgradeMaxBackoff) // fails=1: still eligible
 	assertCandidates(t, n, now, []peer.ID{throttled, free}, "after one failure (no backoff yet)")
 
-	n.noteRelayUpgradeResult(throttled, false) // fails=2: 1m backoff starts
+	n.noteRelayUpgradeResult(throttled, false, relayUpgradeMaxBackoff) // fails=2: 1m backoff starts
 	assertCandidates(t, n, now, []peer.ID{free}, "inside the backoff window")
 
 	assertCandidates(t, n, now.Add(relayUpgradeBaseBackoff+time.Minute),

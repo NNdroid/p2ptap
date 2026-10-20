@@ -297,6 +297,12 @@ type Config struct {
 	// direct connection upgrade. Default: 30s. Shorter intervals improve direct
 	// connection recovery speed but increase background dial activity.
 	RelayUpgradeInterval time.Duration `json:"relay_upgrade_interval"`
+	// RelayUpgradeMaxBackoff caps the exponential backoff of repeated failed
+	// direct-upgrade attempts. Default: 30m. A peer that can never be reached
+	// directly is retried about once per cap; lower it to recover sooner when a
+	// relay-only peer regains a direct path, raise it to reduce background dial
+	// activity against peers that are permanently relay-bound.
+	RelayUpgradeMaxBackoff time.Duration `json:"relay_upgrade_max_backoff"`
 }
 
 // DefaultConfig returns a sane default configuration
@@ -416,8 +422,9 @@ func DefaultConfig() *Config {
 		// entry and aborts the whole peer connection). Fill this in with a real
 		// turn:<host>:<port>?username=<user>&credential=<pass> URL from a TURN
 		// provider you own; see TurnServers in the config docs.
-		TurnServers:          []string{},
-		RelayUpgradeInterval: 30 * time.Second,
+		TurnServers:            []string{},
+		RelayUpgradeInterval:   30 * time.Second,
+		RelayUpgradeMaxBackoff: 30 * time.Minute,
 		Obfuscation: ObfuscationConfig{
 			Enable:               true,
 			Mode:                 "random",
@@ -806,6 +813,9 @@ func (c *Config) Validate() error {
 	}
 	if c.RelayUpgradeInterval <= 0 {
 		c.RelayUpgradeInterval = 30 * time.Second
+	}
+	if c.RelayUpgradeMaxBackoff <= 0 {
+		c.RelayUpgradeMaxBackoff = 30 * time.Minute
 	}
 
 	// --- STUN servers ---

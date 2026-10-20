@@ -74,6 +74,22 @@ func TestRestartRequiredFieldsConstructionTime(t *testing.T) {
 	}
 }
 
+// relay_upgrade_interval is restart-required because the ticker is created once
+// at loop start, but relay_upgrade_max_backoff is read on every tick, so it is
+// hot-reloadable. Pinning the split here keeps a later edit from "tidying" the
+// cap into the restart list on the strength of its sibling.
+func TestRestartRequiredFieldsRelayUpgradeMaxBackoffIsHot(t *testing.T) {
+	base := DefaultConfig()
+
+	newCfg := *base
+	newCfg.RelayUpgradeMaxBackoff = 5 * time.Minute
+	assertNoField(t, RestartRequiredFields(base, &newCfg), "relay_upgrade_max_backoff")
+
+	newCfg = *base
+	newCfg.RelayUpgradeInterval += time.Second
+	assertHasField(t, RestartRequiredFields(base, &newCfg), "relay_upgrade_interval")
+}
+
 // TestRestartRequiredFieldsTransports is the regression net for the Android
 // build: eight transport-derived fields were classified hot-reloadable there,
 // though every one is consumed once at libp2p host construction. The web-side

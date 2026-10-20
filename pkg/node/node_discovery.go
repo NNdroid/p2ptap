@@ -176,9 +176,9 @@ func (n *Node) relayUpgradeCandidates(now time.Time) []peer.ID {
 
 // noteRelayUpgradeResult updates the per-peer backoff. A single failure is
 // retried on the next tick; from the second consecutive failure onward the
-// interval doubles, capped, so an unreachable peer costs one attempt per
-// relayUpgradeMaxBackoff instead of one per tick.
-func (n *Node) noteRelayUpgradeResult(pid peer.ID, upgraded bool) {
+// interval doubles, capped at maxBackoff, so an unreachable peer costs one
+// attempt per cap instead of one per tick.
+func (n *Node) noteRelayUpgradeResult(pid peer.ID, upgraded bool, maxBackoff time.Duration) {
 	n.relayOnlyMu.Lock()
 	defer n.relayOnlyMu.Unlock()
 	if upgraded {
@@ -205,11 +205,12 @@ func (n *Node) noteRelayUpgradeResult(pid peer.ID, upgraded bool) {
 	// (relayUpgradeBaseBackoff << fails) does overflow — time.Duration is int64
 	// nanoseconds and time.Minute<<28 already wraps, so a peer that failed for
 	// ~11h would get a *negative* backoff and be dialled on every tick forever.
+	backoffCap := resolveRelayUpgradeMaxBackoff(maxBackoff)
 	backoff := relayUpgradeBaseBackoff
 	for i := fails - 2; i > 0; i-- {
 		backoff *= 2
-		if backoff > relayUpgradeMaxBackoff {
-			backoff = relayUpgradeMaxBackoff
+		if backoff > backoffCap {
+			backoff = backoffCap
 			break
 		}
 	}
