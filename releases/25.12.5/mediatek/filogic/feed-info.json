@@ -3,7 +3,7 @@
   "openwrt_version": "25.12.5",
   "target": "mediatek",
   "subtarget": "filogic",
-  "source_commit": "42f46623f46f5f4b5928c24598a16d19568cfc48",
-  "source_version": "v1.0.20261018.165-42f4662",
+  "source_commit": "2ad93b8eeda65e81b74cb92e6eca37a10ad80f3f",
+  "source_version": "v1.0.20261020.169-2ad93b8",
   "package_count": 5
 }
