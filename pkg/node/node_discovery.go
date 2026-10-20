@@ -199,9 +199,19 @@ func (n *Node) noteRelayUpgradeResult(pid peer.ID, upgraded bool) {
 	if fails < 2 {
 		return
 	}
-	backoff := relayUpgradeBaseBackoff << uint(fails-2)
-	if backoff > relayUpgradeMaxBackoff {
-		backoff = relayUpgradeMaxBackoff
+	// Double from the second consecutive failure onward, capping at the max.
+	// This cannot overflow: a value already below the cap stays below it after
+	// one doubling step that we cut short. The shift form
+	// (relayUpgradeBaseBackoff << fails) does overflow — time.Duration is int64
+	// nanoseconds and time.Minute<<28 already wraps, so a peer that failed for
+	// ~11h would get a *negative* backoff and be dialled on every tick forever.
+	backoff := relayUpgradeBaseBackoff
+	for i := fails - 2; i > 0; i-- {
+		backoff *= 2
+		if backoff > relayUpgradeMaxBackoff {
+			backoff = relayUpgradeMaxBackoff
+			break
+		}
 	}
 	n.relayUpgradeNext[pid] = time.Now().Add(backoff)
 }

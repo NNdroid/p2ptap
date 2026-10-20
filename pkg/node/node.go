@@ -2521,6 +2521,12 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				node.MACTable.CleanPeer(debounceID)
 				node.Dispatcher.RemovePeer(debounceID)
 				node.removePeerObf(debounceID)
+				// A departed peer has no working path, so it no longer qualifies as
+				// "relay-only". Without this the entry survives forever: the upgrade
+				// loop keeps dialing it and the ping-pong probe keeps re-establishing
+				// a circuit to a peer that left the mesh. markRelayOnlyPeer re-adds
+				// it the moment a circuit transport comes back.
+				node.clearRelayOnlyPeer(debounceID)
 				// Evict stale reconnect throttle entry to prevent unbounded map growth.
 				node.reconnectTimeMu.Lock()
 				delete(node.lastReconnectTime, debounceID)

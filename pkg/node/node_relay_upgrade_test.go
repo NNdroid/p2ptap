@@ -57,6 +57,35 @@ func TestNoteRelayUpgradeResultOnBareNode(t *testing.T) {
 	}
 }
 
+// Regression test: time.Duration is int64 nanoseconds, so the old shift form
+// relayUpgradeBaseBackoff << (fails-2) overflows at fails=30 and wraps to a
+// negative value. A negative backoff stored as the next allowed attempt lands in
+// the past, so relayUpgradeCandidates stops throttling the peer — after ~11h of
+// consecutive failures (the cap holds from fails=7) a permanently unreachable
+// peer would be dialed on every tick for the rest of the node's life.
+func TestRelayUpgradeBackoffCannotOverflow(t *testing.T) {
+	n := &Node{}
+	pid := peer.ID("12D3KooWRelayOnlyPeerOverflow1")
+
+	for call := 1; call <= 100; call++ {
+		n.noteRelayUpgradeResult(pid, false)
+		if got := n.relayUpgradeFails[pid]; got != call {
+			t.Fatalf("call %d: count = %d", call, got)
+		}
+		if call < 2 {
+			// The first failure is retried immediately: no backoff yet.
+			continue
+		}
+		deadline := time.Until(n.relayUpgradeNext[pid])
+		if deadline <= 0 {
+			t.Fatalf("call %d: non-positive backoff %v (overflow)", call, deadline)
+		}
+		if deadline > relayUpgradeMaxBackoff+time.Second {
+			t.Fatalf("call %d: backoff %v exceeds the %v cap", call, deadline, relayUpgradeMaxBackoff)
+		}
+	}
+}
+
 // A success on a peer that was never recorded must not allocate either map: the
 // clear path is a no-op on nil maps (delete is safe), which keeps the common
 // case from churning allocations.
