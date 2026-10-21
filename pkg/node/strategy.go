@@ -1314,6 +1314,42 @@ func (sd *StrategyDispatcher) PurgeCircuitStreams(pID peer.ID) int {
 	return purged
 }
 
+// PurgeDeadConnStreams drops the peer's data streams pinned to the transport
+// that just closed, so the next Tx re-opens over a surviving path instead of
+// stalling until the write deadline expires on a dead conn. DisconnectedF calls
+// it when a direct link goes away while a circuit relay survives. Streams are
+// deregistered but not closed, matching PurgeCircuitStreams: an in-flight write
+// owns the stream and completes normally.
+func (sd *StrategyDispatcher) PurgeDeadConnStreams(pID peer.ID, deadConn network.Conn) int {
+	if deadConn == nil {
+		return 0
+	}
+	sd.peersMu.RLock()
+	ps := sd.peerMap[pID]
+	sd.peersMu.RUnlock()
+	if ps == nil {
+		return 0
+	}
+	purged := 0
+	ps.mu.Lock()
+	for name, s := range ps.streams {
+		if c := s.Conn(); c != nil && c.RemotePeer() == pID &&
+			c.RemoteMultiaddr().String() == deadConn.RemoteMultiaddr().String() {
+			delete(ps.streams, name)
+			purged++
+		}
+	}
+	if purged > 0 {
+		ps.rebuildLocked()
+	}
+	ps.mu.Unlock()
+	if purged > 0 {
+		log.Info("Dropped %d data stream(s) for peer %s pinned to the dead transport; next Tx re-opens over the surviving relay",
+			purged, pID.ShortString())
+	}
+	return purged
+}
+
 // hasDirectStream reports whether the peer currently has an active direct
 // (non-relay) stream in the peer map. Relay-only peers do not, and must be
 // reached via SendToPeer (which dials through the relay).

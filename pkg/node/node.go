@@ -2496,6 +2496,18 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 					if !node.isBootstrapPeer(pID) {
 						node.markRelayOnlyPeer(pID)
 					}
+					// The mirror of the direct-connect branch in ConnectedF. That one
+					// drops circuit streams so a new direct link wins immediately; this
+					// one drops the streams pinned to the direct link that just closed,
+					// so the next Tx re-opens over the surviving relay instead of
+					// stalling until the 2.5s write deadline fires on a dead conn.
+					// The persistent control streams need the same refresh: WithStream
+					// only heals them when a send fails, so a quiet control plane would
+					// keep them pinned to the dead transport indefinitely.
+					node.Dispatcher.PurgeDeadConnStreams(pID, conn)
+					node.lsaPool.Invalidate(pID)
+					node.metaPool.Invalidate(pID)
+					node.echoPool.Invalidate(pID)
 					log.Info("Direct transport unavailable for %s; downgraded to circuit relay (%d remaining)", pID.String(), remaining)
 				}
 				return
