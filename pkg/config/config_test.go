@@ -30,6 +30,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.RelayUpgradeMaxBackoff != 30*time.Minute {
 		t.Errorf("Expected default RelayUpgradeMaxBackoff 30m, got %v", cfg.RelayUpgradeMaxBackoff)
 	}
+	if cfg.RelayUpgradeFlapWindow != 5*time.Minute {
+		t.Errorf("Expected default RelayUpgradeFlapWindow 5m, got %v", cfg.RelayUpgradeFlapWindow)
+	}
 }
 
 // Validate must repair a missing cap so a config.json that predates the field
@@ -43,6 +46,21 @@ func TestConfigValidationRepairsMissingRelayUpgradeMaxBackoff(t *testing.T) {
 		}
 		if cfg.RelayUpgradeMaxBackoff != 30*time.Minute {
 			t.Errorf("input %v: expected 30m after Validate, got %v", v, cfg.RelayUpgradeMaxBackoff)
+		}
+	}
+}
+
+// Same for the flap window: a config.json predating the field must not be read
+// as "no flap window at all".
+func TestConfigValidationRepairsMissingRelayUpgradeFlapWindow(t *testing.T) {
+	for _, v := range []time.Duration{0, -time.Minute} {
+		cfg := DefaultConfig()
+		cfg.RelayUpgradeFlapWindow = v
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() on %v failed: %v", v, err)
+		}
+		if cfg.RelayUpgradeFlapWindow != 5*time.Minute {
+			t.Errorf("input %v: expected 5m after Validate, got %v", v, cfg.RelayUpgradeFlapWindow)
 		}
 	}
 }

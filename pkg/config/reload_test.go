@@ -90,6 +90,17 @@ func TestRestartRequiredFieldsRelayUpgradeMaxBackoffIsHot(t *testing.T) {
 	assertHasField(t, RestartRequiredFields(base, &newCfg), "relay_upgrade_interval")
 }
 
+// The flap window is read on every tick, so it hot-reloads like the backoff
+// cap. It is the third of the three relay-upgrade knobs, and only
+// relay_upgrade_interval needs a restart.
+func TestRestartRequiredFieldsRelayUpgradeFlapWindowIsHot(t *testing.T) {
+	base := DefaultConfig()
+
+	newCfg := *base
+	newCfg.RelayUpgradeFlapWindow = time.Minute
+	assertNoField(t, RestartRequiredFields(base, &newCfg), "relay_upgrade_flap_window")
+}
+
 // TestRestartRequiredFieldsTransports is the regression net for the Android
 // build: eight transport-derived fields were classified hot-reloadable there,
 // though every one is consumed once at libp2p host construction. The web-side

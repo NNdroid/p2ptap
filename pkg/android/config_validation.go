@@ -152,6 +152,9 @@ func mergeHotReload(dst *config.Config, src *config.Config, sent map[string]bool
 	if !sent["relay_upgrade_max_backoff"] || dst.RelayUpgradeMaxBackoff == 0 {
 		dst.RelayUpgradeMaxBackoff = src.RelayUpgradeMaxBackoff
 	}
+	if !sent["relay_upgrade_flap_window"] || dst.RelayUpgradeFlapWindow == 0 {
+		dst.RelayUpgradeFlapWindow = src.RelayUpgradeFlapWindow
+	}
 	if !sent["transport_strategy"] || dst.TransportStrategy == "" {
 		dst.TransportStrategy = src.TransportStrategy
 	}

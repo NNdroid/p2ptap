@@ -1402,6 +1402,9 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			if !sent("relay_upgrade_max_backoff") {
 				incoming.RelayUpgradeMaxBackoff = c.RelayUpgradeMaxBackoff
 			}
+			if !sent("relay_upgrade_flap_window") {
+				incoming.RelayUpgradeFlapWindow = c.RelayUpgradeFlapWindow
+			}
 			if !sent("log_level") {
 				incoming.LogLevel = c.LogLevel
 			}

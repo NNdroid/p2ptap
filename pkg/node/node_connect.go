@@ -161,6 +161,12 @@ const (
 	// peer's circuit streams. The window bounds that churn; the peer keeps
 	// sending data over the surviving circuit relay meanwhile.
 	relayUpgradeFlapWindow = 5 * time.Minute
+	// Bound the configured window to a meaningful range. Below this it is
+	// shorter than the smallest tick interval, so it could never suppress an
+	// attempt; past an hour a peer that genuinely regained a direct path would
+	// wait that long to be upgraded again.
+	relayUpgradeFlapWindowMin = 30 * time.Second
+	relayUpgradeFlapWindowMax = time.Hour
 )
 
 // resolveRelayUpgradeMaxBackoff turns the configured cap into one the backoff
@@ -168,6 +174,15 @@ const (
 func resolveRelayUpgradeMaxBackoff(v time.Duration) time.Duration {
 	if v < relayUpgradeMaxBackoffMin || v > relayUpgradeMaxBackoffMax {
 		return relayUpgradeMaxBackoff
+	}
+	return v
+}
+
+// resolveRelayUpgradeFlapWindow turns the configured flap window into one the
+// upgrade loop can honour.
+func resolveRelayUpgradeFlapWindow(v time.Duration) time.Duration {
+	if v < relayUpgradeFlapWindowMin || v > relayUpgradeFlapWindowMax {
+		return relayUpgradeFlapWindow
 	}
 	return v
 }
@@ -191,13 +206,14 @@ func directCandidates(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 // clearRelayOnlyPeer and the Router link flips from LinkCircuit to LinkDirect.
 // The retry interval is Config.RelayUpgradeInterval (default 30s), the failure
 // backoff is capped by Config.RelayUpgradeMaxBackoff (default 30m), and a peer
-// that just upgraded is held back relayUpgradeFlapWindow after it falls back to
-// relay-only, so a marginal path does not churn the loop every tick.
+// that just upgraded is held back Config.RelayUpgradeFlapWindow (default 5m)
+// after it falls back to relay-only, so a marginal path does not churn the loop
+// every tick.
 func (n *Node) relayOnlyDirectUpgradeLoop() {
 	defer n.wg.Done()
 	// The ticker cadence is frozen at loop start: time.NewTicker cannot be
-	// resized, so relay_upgrade_interval needs a restart. The backoff cap is read
-	// per tick below and is live-reloadable instead.
+	// resized, so relay_upgrade_interval needs a restart. The backoff cap and
+	// the flap window are read per tick below and are live-reloadable instead.
 	interval := n.config().RelayUpgradeInterval
 	if interval < 5*time.Second || interval > 120*time.Second {
 		interval = 30 * time.Second
@@ -210,8 +226,10 @@ func (n *Node) relayOnlyDirectUpgradeLoop() {
 		case <-n.ctx.Done():
 			return
 		case <-ticker.C:
-			maxBackoff := n.config().RelayUpgradeMaxBackoff
-			relayOnly := n.relayUpgradeCandidates(time.Now())
+			cfg := n.config()
+			maxBackoff := cfg.RelayUpgradeMaxBackoff
+			flapWindow := resolveRelayUpgradeFlapWindow(cfg.RelayUpgradeFlapWindow)
+			relayOnly := n.relayUpgradeCandidates(time.Now(), flapWindow)
 
 			// Parallel upgrades with a bounded semaphore: each attemptDirectUpgrade
 			// can take ~23s (8s DHT + 15s dial), so a serial loop of N peers can

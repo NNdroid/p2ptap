@@ -155,10 +155,11 @@ func (n *Node) isRelayOnlyPeer(pID peer.ID) bool {
 }
 
 // relayUpgradeCandidates returns the relay-only peers that should be tried for a
-// direct upgrade now, skipping peers still inside their exponential backoff.
-// Without this gate a peer that can never be reached directly is dialed on every
-// tick — one 15s dial plus an 8s DHT lookup each time, forever.
-func (n *Node) relayUpgradeCandidates(now time.Time) []peer.ID {
+// direct upgrade now, skipping peers still inside their exponential backoff or
+// their post-upgrade flap window. Without these gates a peer that can never be
+// reached directly is dialed on every tick — one 15s dial plus an 8s DHT lookup
+// each time, forever.
+func (n *Node) relayUpgradeCandidates(now time.Time, flapWindow time.Duration) []peer.ID {
 	n.relayOnlyMu.RLock()
 	defer n.relayOnlyMu.RUnlock()
 	if len(n.relayOnlyPeers) == 0 {
@@ -175,7 +176,7 @@ func (n *Node) relayUpgradeCandidates(now time.Time) []peer.ID {
 		// streams forever on a path that is only sometimes reachable. Hold such a
 		// peer back for a window after it last held direct, letting it ride the
 		// circuit relay in the meantime.
-		if last, ok := n.relayUpgradeLastDirect[pid]; ok && now.Sub(last) < relayUpgradeFlapWindow {
+		if last, ok := n.relayUpgradeLastDirect[pid]; ok && now.Sub(last) < flapWindow {
 			continue
 		}
 		out = append(out, pid)

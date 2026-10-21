@@ -303,6 +303,13 @@ type Config struct {
 	// relay-only peer regains a direct path, raise it to reduce background dial
 	// activity against peers that are permanently relay-bound.
 	RelayUpgradeMaxBackoff time.Duration `json:"relay_upgrade_max_backoff"`
+	// RelayUpgradeFlapWindow holds a peer that just upgraded back from another
+	// direct-upgrade attempt after it falls back to relay-only. Default: 5m. A
+	// success resets the failure backoff, so a marginal path would otherwise be
+	// redialled on every tick, each success tearing down the working circuit
+	// streams; lower it to pick up a restored direct path sooner, raise it to
+	// prefer the relay for a path that keeps flapping.
+	RelayUpgradeFlapWindow time.Duration `json:"relay_upgrade_flap_window"`
 }
 
 // DefaultConfig returns a sane default configuration
@@ -425,6 +432,7 @@ func DefaultConfig() *Config {
 		TurnServers:            []string{},
 		RelayUpgradeInterval:   30 * time.Second,
 		RelayUpgradeMaxBackoff: 30 * time.Minute,
+		RelayUpgradeFlapWindow: 5 * time.Minute,
 		Obfuscation: ObfuscationConfig{
 			Enable:               true,
 			Mode:                 "random",
@@ -816,6 +824,9 @@ func (c *Config) Validate() error {
 	}
 	if c.RelayUpgradeMaxBackoff <= 0 {
 		c.RelayUpgradeMaxBackoff = 30 * time.Minute
+	}
+	if c.RelayUpgradeFlapWindow <= 0 {
+		c.RelayUpgradeFlapWindow = 5 * time.Minute
 	}
 
 	// --- STUN servers ---

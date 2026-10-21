@@ -194,15 +194,15 @@ func TestRelayUpgradeCandidatesHonourBackoff(t *testing.T) {
 	n.markRelayOnlyPeer(free)
 
 	now := time.Now()
-	assertCandidates(t, n, now, []peer.ID{throttled, free}, "with no failures recorded")
+	assertCandidates(t, n, relayUpgradeFlapWindow, now, []peer.ID{throttled, free}, "with no failures recorded")
 
 	n.noteRelayUpgradeResult(throttled, false, relayUpgradeMaxBackoff) // fails=1: still eligible
-	assertCandidates(t, n, now, []peer.ID{throttled, free}, "after one failure (no backoff yet)")
+	assertCandidates(t, n, relayUpgradeFlapWindow, now, []peer.ID{throttled, free}, "after one failure (no backoff yet)")
 
 	n.noteRelayUpgradeResult(throttled, false, relayUpgradeMaxBackoff) // fails=2: 1m backoff starts
-	assertCandidates(t, n, now, []peer.ID{free}, "inside the backoff window")
+	assertCandidates(t, n, relayUpgradeFlapWindow, now, []peer.ID{free}, "inside the backoff window")
 
-	assertCandidates(t, n, now.Add(relayUpgradeBaseBackoff+time.Minute),
+	assertCandidates(t, n, relayUpgradeFlapWindow, now.Add(relayUpgradeBaseBackoff+time.Minute),
 		[]peer.ID{throttled, free}, "after the backoff window elapsed")
 }
 
@@ -225,33 +225,94 @@ func TestRelayUpgradeFlapWindow(t *testing.T) {
 
 	// A peer never upgraded through this loop is not suppressed: the first
 	// attempt of a genuine relay-only peer must not be delayed.
-	assertCandidates(t, n, now, []peer.ID{flapping, stable}, "with no direct epoch recorded")
+	assertCandidates(t, n, relayUpgradeFlapWindow, now, []peer.ID{flapping, stable}, "with no direct epoch recorded")
 
 	// A successful upgrade clears the relay-only mark, so the peer stops being a
 	// candidate at all until it drops back to relay. The direct epoch survives
 	// the clear — that is what starts the window later.
 	n.noteRelayUpgradeResult(flapping, true, relayUpgradeMaxBackoff)
 	n.clearRelayOnlyPeer(flapping)
-	assertCandidates(t, n, time.Now(), []peer.ID{stable}, "while directly connected")
+	assertCandidates(t, n, relayUpgradeFlapWindow, time.Now(), []peer.ID{stable}, "while directly connected")
 
 	// Observed back on the relay: the flap window starts, and the peer rides the
 	// circuit relay for its length.
 	n.markRelayOnlyPeer(flapping)
-	assertCandidates(t, n, time.Now(), []peer.ID{stable}, "inside the flap window")
-	assertCandidates(t, n, now.Add(relayUpgradeFlapWindow-time.Second), []peer.ID{stable}, "just before it expires")
-	assertCandidates(t, n, now.Add(relayUpgradeFlapWindow+time.Second), []peer.ID{flapping, stable}, "after it expired")
+	assertCandidates(t, n, relayUpgradeFlapWindow, time.Now(), []peer.ID{stable}, "inside the flap window")
+	assertCandidates(t, n, relayUpgradeFlapWindow, now.Add(relayUpgradeFlapWindow-time.Second), []peer.ID{stable}, "just before it expires")
+	assertCandidates(t, n, relayUpgradeFlapWindow, now.Add(relayUpgradeFlapWindow+time.Second), []peer.ID{flapping, stable}, "after it expired")
 
 	// A second flap starts a fresh window, so a marginal path cannot churn every
 	// tick.
 	n.noteRelayUpgradeResult(flapping, true, relayUpgradeMaxBackoff)
 	n.clearRelayOnlyPeer(flapping)
 	n.markRelayOnlyPeer(flapping)
-	assertCandidates(t, n, time.Now(), []peer.ID{stable}, "inside a second flap window")
+	assertCandidates(t, n, relayUpgradeFlapWindow, time.Now(), []peer.ID{stable}, "inside a second flap window")
 }
 
-func assertCandidates(t *testing.T, n *Node, now time.Time, want []peer.ID, ctx string) {
+// The flap window is a live config value, so it must be honoured for a
+// configured value too: each peer is held back by its own window, measured
+// from when it held direct, not by the compile-time default. Epochs are
+// stamped directly so no assertion depends on wall-clock timing.
+func TestRelayUpgradeFlapWindowHonoursConfiguredWindow(t *testing.T) {
+	n := &Node{}
+	// Held back until now+30s with a 1m window.
+	recent := peer.ID("12D3KooWRelayOnlyPeerRecent001")
+	// Held back until now+10s with a 1m window.
+	older := peer.ID("12D3KooWRelayOnlyPeerOlder00001")
+	now := time.Now()
+
+	n.relayOnlyMu.Lock()
+	if n.relayOnlyPeers == nil {
+		n.relayOnlyPeers = make(map[peer.ID]bool)
+	}
+	n.relayOnlyPeers[recent] = true
+	n.relayOnlyPeers[older] = true
+	if n.relayUpgradeLastDirect == nil {
+		n.relayUpgradeLastDirect = make(map[peer.ID]time.Time)
+	}
+	n.relayUpgradeLastDirect[recent] = now.Add(-30 * time.Second)
+	n.relayUpgradeLastDirect[older] = now.Add(-50 * time.Second)
+	n.relayOnlyMu.Unlock()
+
+	assertCandidates(t, n, time.Minute, now, []peer.ID{}, "both inside their own windows")
+	assertCandidates(t, n, time.Minute, now.Add(11*time.Second), []peer.ID{older}, "one window elapsed, the other not")
+	assertCandidates(t, n, time.Minute, now.Add(31*time.Second), []peer.ID{recent, older}, "both windows elapsed")
+	assertCandidates(t, n, 2*time.Minute, now.Add(11*time.Second), []peer.ID{}, "a longer window holds both back")
+	assertCandidates(t, n, 2*time.Minute, now.Add(121*time.Second), []peer.ID{recent, older}, "the longer window expired too")
+}
+
+// resolveRelayUpgradeFlapWindow keeps a configured window inside the range the
+// upgrade loop can honour: below the smallest tick interval a window could
+// never suppress an attempt, so it would silently disable the throttle, and
+// past an hour a peer that regained a direct path would wait that long.
+func TestResolveRelayUpgradeFlapWindowClamps(t *testing.T) {
+	for _, v := range []time.Duration{
+		0,
+		-time.Minute,
+		time.Second,
+		relayUpgradeFlapWindowMin - 1,
+		relayUpgradeFlapWindowMax + 1,
+		24 * time.Hour,
+	} {
+		if got := resolveRelayUpgradeFlapWindow(v); got != relayUpgradeFlapWindow {
+			t.Fatalf("clamp(%v) = %v, want the %v default", v, got, relayUpgradeFlapWindow)
+		}
+	}
+	for _, v := range []time.Duration{
+		relayUpgradeFlapWindowMin,
+		5 * time.Minute,
+		relayUpgradeFlapWindow,
+		relayUpgradeFlapWindowMax,
+	} {
+		if got := resolveRelayUpgradeFlapWindow(v); got != v {
+			t.Fatalf("clamp(%v) = %v, want unchanged", v, got)
+		}
+	}
+}
+
+func assertCandidates(t *testing.T, n *Node, flapWindow time.Duration, now time.Time, want []peer.ID, ctx string) {
 	t.Helper()
-	out := n.relayUpgradeCandidates(now)
+	out := n.relayUpgradeCandidates(now, flapWindow)
 	if len(out) != len(want) {
 		t.Fatalf("%s: got %d candidate(s), want %d: %v", ctx, len(out), len(want), out)
 	}
