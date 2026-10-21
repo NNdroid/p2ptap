@@ -153,6 +153,14 @@ const (
 	// mapping is rediscovered in 10 minutes instead of being re-dialled for an
 	// hour.
 	relayRediscoveryAddrTTL = 10 * time.Minute
+	// relayUpgradeFlapWindow is how long a peer that just upgraded to direct is
+	// held back from another upgrade attempt once it falls back to relay-only.
+	// A success resets the failure backoff to zero, so a marginal path — one that
+	// only sometimes survives a hole punch — would otherwise be redialled every
+	// tick for its whole life, each success tearing down and rebuilding the
+	// peer's circuit streams. The window bounds that churn; the peer keeps
+	// sending data over the surviving circuit relay meanwhile.
+	relayUpgradeFlapWindow = 5 * time.Minute
 )
 
 // resolveRelayUpgradeMaxBackoff turns the configured cap into one the backoff
@@ -181,8 +189,10 @@ func directCandidates(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 // to a direct connection. It is the recovery path for the "pinned to relay"
 // state: once a direct connection succeeds, the ConnectedF handler calls
 // clearRelayOnlyPeer and the Router link flips from LinkCircuit to LinkDirect.
-// The retry interval is Config.RelayUpgradeInterval (default 30s) and the
-// failure backoff is capped by Config.RelayUpgradeMaxBackoff (default 30m).
+// The retry interval is Config.RelayUpgradeInterval (default 30s), the failure
+// backoff is capped by Config.RelayUpgradeMaxBackoff (default 30m), and a peer
+// that just upgraded is held back relayUpgradeFlapWindow after it falls back to
+// relay-only, so a marginal path does not churn the loop every tick.
 func (n *Node) relayOnlyDirectUpgradeLoop() {
 	defer n.wg.Done()
 	// The ticker cadence is frozen at loop start: time.NewTicker cannot be

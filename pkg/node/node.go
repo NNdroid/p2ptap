@@ -168,6 +168,10 @@ type Node struct {
 	// on every tick forever.
 	relayUpgradeFails map[peer.ID]int
 	relayUpgradeNext  map[peer.ID]time.Time
+	// relayUpgradeLastDirect records when a peer last held a direct connection.
+	// The upgrade loop uses it to tell a genuinely new candidate apart from one
+	// whose direct path keeps falling back to relay. Guarded by relayOnlyMu.
+	relayUpgradeLastDirect map[peer.ID]time.Time
 	// relayCtrlSyncAt records the last time the relay-control reconciler kicked
 	// a control-plane sync (SeqSync + Meta) for a relay-only peer, so it can
 	// apply a per-peer cooldown instead of re-triggering every tick.

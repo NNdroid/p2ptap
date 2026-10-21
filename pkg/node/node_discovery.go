@@ -169,6 +169,15 @@ func (n *Node) relayUpgradeCandidates(now time.Time) []peer.ID {
 		if next, ok := n.relayUpgradeNext[pid]; ok && now.Before(next) {
 			continue
 		}
+		// A success clears the failure backoff, so a peer whose direct path
+		// flaps would otherwise be redialled on every tick: each success runs
+		// PurgeCircuitStreams plus three pool invalidations, so the loop churns
+		// streams forever on a path that is only sometimes reachable. Hold such a
+		// peer back for a window after it last held direct, letting it ride the
+		// circuit relay in the meantime.
+		if last, ok := n.relayUpgradeLastDirect[pid]; ok && now.Sub(last) < relayUpgradeFlapWindow {
+			continue
+		}
 		out = append(out, pid)
 	}
 	return out
@@ -184,10 +193,19 @@ func (n *Node) noteRelayUpgradeResult(pid peer.ID, upgraded bool, maxBackoff tim
 	if upgraded {
 		delete(n.relayUpgradeFails, pid)
 		delete(n.relayUpgradeNext, pid)
+		// Record the direct epoch instead: relayUpgradeCandidates holds the peer
+		// back relayUpgradeFlapWindow after it drops, so a path that keeps falling
+		// back is not redialled every tick. Only peers that went through this loop
+		// get an entry, which bounds the map and keeps clearRelayOnlyPeer
+		// allocation-free.
+		if n.relayUpgradeLastDirect == nil {
+			n.relayUpgradeLastDirect = make(map[peer.ID]time.Time)
+		}
+		n.relayUpgradeLastDirect[pid] = time.Now()
 		return
 	}
-	// Neither map is allocated by NewNode (tests build bare &Node{}), so the
-	// first failed upgrade would write into a nil map and panic the engine.
+	// Neither backoff map is allocated by NewNode (tests build bare &Node{}), so
+	// the first failed upgrade would write into a nil map and panic the engine.
 	if n.relayUpgradeFails == nil {
 		n.relayUpgradeFails = make(map[peer.ID]int)
 	}

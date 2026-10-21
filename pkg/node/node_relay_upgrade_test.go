@@ -138,17 +138,26 @@ func TestRelayUpgradeBackoffHonoursConfiguredCap(t *testing.T) {
 	}
 }
 
-// A success on a peer that was never recorded must not allocate either map: the
-// clear path is a no-op on nil maps (delete is safe), which keeps the common
-// case from churning allocations.
-func TestNoteRelayUpgradeSuccessDoesNotAllocate(t *testing.T) {
+// A success must not allocate the backoff maps: they exist to throttle
+// failures, and a peer that upgraded needs no throttle until it fails again.
+// It does record the direct epoch it just entered, so the loop can tell a flap
+// apart from a genuinely new candidate.
+func TestNoteRelayUpgradeSuccessOnlyRecordsTheDirectEpoch(t *testing.T) {
 	n := &Node{}
 	pid := peer.ID("12D3KooWRelayOnlyPeerSuccess0001")
 
+	before := time.Now()
 	n.noteRelayUpgradeResult(pid, true, relayUpgradeMaxBackoff)
 
 	if n.relayUpgradeFails != nil || n.relayUpgradeNext != nil {
 		t.Fatal("successful upgrade on an unrecorded peer must not allocate the backoff maps")
+	}
+	last, ok := n.relayUpgradeLastDirect[pid]
+	if !ok {
+		t.Fatal("successful upgrade did not record the direct epoch")
+	}
+	if last.Before(before) || last.After(time.Now()) {
+		t.Fatalf("direct epoch %v is outside the call window starting %v", last, before)
 	}
 }
 
@@ -195,6 +204,49 @@ func TestRelayUpgradeCandidatesHonourBackoff(t *testing.T) {
 
 	assertCandidates(t, n, now.Add(relayUpgradeBaseBackoff+time.Minute),
 		[]peer.ID{throttled, free}, "after the backoff window elapsed")
+}
+
+// Regression test: a success cleared the backoff outright, so a peer whose
+// direct path only sometimes survives a hole punch was redialled on every tick
+// for the node's whole life. Each of those successes runs PurgeCircuitStreams
+// plus three pool invalidations, so the upgrade loop churned the peer's streams
+// forever instead of converging. The flap window holds such a peer back until
+// it elapses, and it does expire, so a genuinely restored direct path is still
+// picked up.
+func TestRelayUpgradeFlapWindow(t *testing.T) {
+	n := &Node{}
+	flapping := peer.ID("12D3KooWRelayOnlyPeerFlap001")
+	stable := peer.ID("12D3KooWRelayOnlyPeerStable01")
+
+	n.markRelayOnlyPeer(flapping)
+	n.markRelayOnlyPeer(stable)
+
+	now := time.Now()
+
+	// A peer never upgraded through this loop is not suppressed: the first
+	// attempt of a genuine relay-only peer must not be delayed.
+	assertCandidates(t, n, now, []peer.ID{flapping, stable}, "with no direct epoch recorded")
+
+	// A successful upgrade clears the relay-only mark, so the peer stops being a
+	// candidate at all until it drops back to relay. The direct epoch survives
+	// the clear — that is what starts the window later.
+	n.noteRelayUpgradeResult(flapping, true, relayUpgradeMaxBackoff)
+	n.clearRelayOnlyPeer(flapping)
+	assertCandidates(t, n, time.Now(), []peer.ID{stable}, "while directly connected")
+
+	// Observed back on the relay: the flap window starts, and the peer rides the
+	// circuit relay for its length.
+	n.markRelayOnlyPeer(flapping)
+	assertCandidates(t, n, time.Now(), []peer.ID{stable}, "inside the flap window")
+	assertCandidates(t, n, now.Add(relayUpgradeFlapWindow-time.Second), []peer.ID{stable}, "just before it expires")
+	assertCandidates(t, n, now.Add(relayUpgradeFlapWindow+time.Second), []peer.ID{flapping, stable}, "after it expired")
+
+	// A second flap starts a fresh window, so a marginal path cannot churn every
+	// tick.
+	n.noteRelayUpgradeResult(flapping, true, relayUpgradeMaxBackoff)
+	n.clearRelayOnlyPeer(flapping)
+	n.markRelayOnlyPeer(flapping)
+	assertCandidates(t, n, time.Now(), []peer.ID{stable}, "inside a second flap window")
 }
 
 func assertCandidates(t *testing.T, n *Node, now time.Time, want []peer.ID, ctx string) {
