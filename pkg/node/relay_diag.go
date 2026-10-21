@@ -25,6 +25,9 @@ import (
 //   - PoolFull / UplinkGone climb → the forward path itself is congested/dead,
 //     not a crypto problem
 //   - LoopGuardDrop climbs       → routing table disagrees with reality (LSA skew)
+//   - EgressGate climbs          → THIS node is dropping its own TAP frames:
+//     no route, or no live uplink to the first hop. UplinkGone stays at zero
+//     here because the frame never reached the boot relay.
 type RelayDiag struct {
 	// inbound hop envelope (handleRelayStream, first peel)
 	HopGarbage atomic.Uint64 // hop-cipher AEAD open failed → dropped
@@ -33,6 +36,8 @@ type RelayDiag struct {
 	OriginPskDrop    atomic.Uint64 // PSK net: origin without a negotiated cipher
 	FinalDecryptFail atomic.Uint64 // end-to-end inner AEAD open failed
 	FinalUnpackFail  atomic.Uint64 // end-to-end inner unpack failed
+	// local egress decision (before any frame is put on the wire)
+	EgressGate atomic.Uint64 // TAP forward refused: no route or no live hop uplink
 	// transit forwarding decisions
 	LoopGuardDrop atomic.Uint64 // nextHop == carrier; would form a cycle
 	TtlExpired    atomic.Uint64 // ttl<=1 with destination not us
@@ -52,6 +57,7 @@ type RelayDiagSnapshot struct {
 	OriginPskDrop    uint64 `json:"origin_psk_drops"`
 	FinalDecryptFail uint64 `json:"final_decrypt_fail_drops"`
 	FinalUnpackFail  uint64 `json:"final_unpack_fail_drops"`
+	EgressGate       uint64 `json:"egress_gate_drops"`
 	LoopGuardDrop    uint64 `json:"loop_guard_drops"`
 	TtlExpired       uint64 `json:"ttl_expired_drops"`
 	SealFail         uint64 `json:"hop_seal_fail_drops"`
@@ -86,6 +92,11 @@ func (d *RelayDiag) finalDecFail() {
 func (d *RelayDiag) finalUnpack() {
 	if d != nil {
 		d.FinalUnpackFail.Add(1)
+	}
+}
+func (d *RelayDiag) egressGate() {
+	if d != nil {
+		d.EgressGate.Add(1)
 	}
 }
 func (d *RelayDiag) loopGuard() {
@@ -134,6 +145,7 @@ func (d *RelayDiag) snapshot() RelayDiagSnapshot {
 		OriginPskDrop:    d.OriginPskDrop.Load(),
 		FinalDecryptFail: d.FinalDecryptFail.Load(),
 		FinalUnpackFail:  d.FinalUnpackFail.Load(),
+		EgressGate:       d.EgressGate.Load(),
 		LoopGuardDrop:    d.LoopGuardDrop.Load(),
 		TtlExpired:       d.TtlExpired.Load(),
 		SealFail:         d.SealFail.Load(),
@@ -162,6 +174,7 @@ func (d *RelayDiag) summary() string {
 	add("originPSK", s.OriginPskDrop)
 	add("finalDecFail", s.FinalDecryptFail)
 	add("finalUnpackFail", s.FinalUnpackFail)
+	add("egressGate", s.EgressGate)
 	add("loopGuard", s.LoopGuardDrop)
 	add("ttlExpired", s.TtlExpired)
 	add("sealFail", s.SealFail)

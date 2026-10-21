@@ -1,7 +1,6 @@
 package node
 
 import (
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -18,7 +17,7 @@ func transportLabelForConn(c network.Conn) string {
 	if c == nil {
 		return ""
 	}
-	if strings.Contains(c.RemoteMultiaddr().String(), "/p2p-circuit") {
+	if IsCircuitRelay(c.RemoteMultiaddr()) {
 		return "circuit-relay"
 	}
 	return "direct"

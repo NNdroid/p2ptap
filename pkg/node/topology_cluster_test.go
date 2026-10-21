@@ -67,6 +67,10 @@ func TestGetTopologyAnnotatesClustersAndRoles(t *testing.T) {
 
 	// Federation: bootA's hub rebroadcasts bootB (1 backbone hop) and a client
 	// of bootB (2 hops), exactly as the boot mesh uplink does.
+	// The backfilled edge is only installed while we can actually forward for
+	// the announced peer, so bootA needs a live boot-relay uplink first — a
+	// dead boot announcing a peer must not pin a permanent route through it.
+	n.bootRelayRegister(bootA, &bootRelayConn{boot: bootA})
 	n.ingestPeekMapNodeInfo(PeekMapNodeInfo{
 		PeerID:      bootB.String(),
 		NodeName:    "boot-b",

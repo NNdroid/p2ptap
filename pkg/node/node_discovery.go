@@ -284,6 +284,14 @@ func (n *Node) realPeerLatencyMs(pID peer.ID) int64 {
 // RTT (unknown RTT sorted last) so callers that try addrs in order prefer the
 // fastest bridge.
 func (n *Node) SynthesizeRelayCircuitAddrs(targetPeer peer.ID) []multiaddr.Multiaddr {
+	// Circuit relay client is not registered in this build/run, so no circuit
+	// addr could ever be dialled. Returning nil here is the single guard that
+	// keeps every consumer honest: ProbePeerConnectivity stops spending 3s per
+	// addr on connections that can only fail, dialInParallel's relay leg has
+	// nothing to try, and the 1h-TTL peerstore pollution from dead addrs stops.
+	if !n.Config.Transports.CircuitRelayEnabled() {
+		return nil
+	}
 	type relayEntry struct {
 		addr    multiaddr.Multiaddr
 		latency time.Duration // 0 means unknown

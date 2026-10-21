@@ -1623,9 +1623,10 @@ func (n *Node) ProbePeerEcho(targetStr string) *observer.PeerEchoResultDTO {
 	start := time.Now()
 
 	if s.Conn() != nil {
-		remoteAddr := s.Conn().RemoteMultiaddr().String()
-		res.TransportAddr = remoteAddr
-		res.IsRelayed = strings.Contains(remoteAddr, "/p2p-circuit")
+		if ma := s.Conn().RemoteMultiaddr(); ma != nil {
+			res.TransportAddr = ma.String()
+			res.IsRelayed = IsCircuitRelay(ma)
+		}
 	}
 
 	_ = s.SetDeadline(time.Now().Add(4 * time.Second))
@@ -1960,8 +1961,7 @@ func (n *Node) ProbePeerSpeedTest(targetStr string) *observer.SpeedTestResultDTO
 	defer s.Close()
 
 	if s.Conn() != nil {
-		remoteAddr := s.Conn().RemoteMultiaddr().String()
-		res.IsRelayed = strings.Contains(remoteAddr, "/p2p-circuit")
+		res.IsRelayed = IsCircuitRelay(s.Conn().RemoteMultiaddr())
 	}
 
 	_ = s.SetDeadline(time.Now().Add(8 * time.Second))

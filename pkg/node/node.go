@@ -1371,7 +1371,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// hole-punching to confirm connections came from punches). p2ptap's own
 	// overlay relay (OverlayRelayProtocolID) is never gated here.
 	if off := cfg.Transports.DisabledRelayFeatures(); len(off) > 0 {
-		log.Warn("Relay features OFF: %s. Peers behind symmetric NAT may become unreachable.",
+		log.Warn("Relay features OFF: %s. That only disables libp2p circuit relay — p2ptap's own overlay relay and boot relay stay active, so a peer reachable through either is unaffected; only a peer reachable exclusively via a static relay is lost.",
 			strings.Join(off, " and "))
 	}
 	if cfg.Transports.CircuitRelayEnabled() {
@@ -2346,16 +2346,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				node.directConnectedMu.Unlock()
 				if !hadDirect {
 					node.Router.UpdateDirectLink(pID, rttMs, routing.LinkCircuit)
-				}
-				if node.isBootstrapPeer(pID) {
-					node.recordRelayLatency(pID, time.Duration(rttMs)*time.Millisecond)
-				}
-				// A non-bootstrap peer reached only via circuit relay is relay-only.
-				if !node.isBootstrapPeer(pID) {
-					node.directConnectedMu.Lock()
-					hadDirect2 := node.directConnected[pID]
-					node.directConnectedMu.Unlock()
-					if !hadDirect2 {
+					// A new circuit conn supersedes the streams pinned to another
+					// relay's conn: autorelay rotates the peer's reservation, so
+					// the old relay's conn stays alive until it closes and the
+					// lazy stream lifecycle would keep Tx on the outgoing path
+					// for the whole overlap.
+					node.Dispatcher.PurgeCircuitStreamsExcept(pID, conn)
+					if !node.isBootstrapPeer(pID) {
 						node.markRelayOnlyPeer(pID)
 					}
 				}
@@ -2367,6 +2364,19 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				node.clearRelayOnlyPeer(pID)
 				rttMs := node.routingPeerLatencyMs(pID)
 				node.Router.UpdateDirectLink(pID, rttMs, routing.LinkDirect)
+
+				if node.isBootstrapPeer(pID) {
+					// relayLatency is keyed by the hop ID that
+					// SynthesizeRelayCircuitAddrs looks up under, and only a
+					// DIRECT conn to that hop carries the hop's own RTT. The
+					// circuit branch of this handler used to feed it, but pID
+					// there is the circuit's ENDPOINT, so the value was
+					// end-to-end through the hop and the map was keyed on the
+					// wrong peer — for the ordinary case the lookup was
+					// never satisfied and the "prefer the fastest bridge"
+					// ordering in SynthesizeRelayCircuitAddrs stayed dead.
+					node.recordRelayLatency(pID, time.Duration(rttMs)*time.Millisecond)
+				}
 
 				// Direct link came up: drop any circuit-routed data streams so
 				// traffic upgrades to direct IMMEDIATELY. Without this the lazy
@@ -2473,12 +2483,15 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				// after the direct leg disappeared while a circuit fallback survived.
 				hasDirect, hasCircuit := false, false
 				for _, remainingConn := range netw.ConnsToPeer(pID) {
-					if strings.Contains(remainingConn.RemoteMultiaddr().String(), "/p2p-circuit") {
+					if IsCircuitRelay(remainingConn.RemoteMultiaddr()) {
 						hasCircuit = true
 					} else {
 						hasDirect = true
 					}
 				}
+				// Which leg closed decides the message below: a circuit conn closing
+				// while another survives is not a direct→relay downgrade.
+				deadIsCircuit := IsCircuitRelay(conn.RemoteMultiaddr())
 				rttMs := node.routingPeerLatencyMs(pID)
 				node.directConnectedMu.Lock()
 				if hasDirect {
@@ -2490,7 +2503,16 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				if hasDirect {
 					node.clearRelayOnlyPeer(pID)
 					node.Router.UpdateDirectLink(pID, rttMs, routing.LinkDirect)
-					log.Debug("Transport dropped for %s; a direct connection remains (%d total)", pID.String(), remaining)
+					// Mirror of the downgrade branch below: the conn that closed may
+					// have carried streams of its own. Without this a stream pinned
+					// to a dead relay hop is retired only on the next failed write.
+					node.Dispatcher.PurgeDeadConnStreams(pID, conn)
+					node.dropPooledConnStreams(pID, conn)
+					if deadIsCircuit {
+						log.Info("Relay hop dropped for %s; a direct connection remains (%d total)", pID.String(), remaining)
+					} else {
+						log.Debug("Transport dropped for %s; a direct connection remains (%d total)", pID.String(), remaining)
+					}
 				} else if hasCircuit {
 					node.Router.UpdateDirectLink(pID, rttMs, routing.LinkCircuit)
 					if !node.isBootstrapPeer(pID) {
@@ -2498,17 +2520,19 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 					}
 					// The mirror of the direct-connect branch in ConnectedF. That one
 					// drops circuit streams so a new direct link wins immediately; this
-					// one drops the streams pinned to the direct link that just closed,
-					// so the next Tx re-opens over the surviving relay instead of
+					// one drops the streams pinned to the transport that just closed,
+					// so the next Tx re-opens over a surviving path instead of
 					// stalling until the 2.5s write deadline fires on a dead conn.
 					// The persistent control streams need the same refresh: WithStream
 					// only heals them when a send fails, so a quiet control plane would
 					// keep them pinned to the dead transport indefinitely.
 					node.Dispatcher.PurgeDeadConnStreams(pID, conn)
-					node.lsaPool.Invalidate(pID)
-					node.metaPool.Invalidate(pID)
-					node.echoPool.Invalidate(pID)
-					log.Info("Direct transport unavailable for %s; downgraded to circuit relay (%d remaining)", pID.String(), remaining)
+					node.dropPooledConnStreams(pID, conn)
+					if deadIsCircuit {
+						log.Info("Relay hop dropped for %s; another circuit path remains (%d total)", pID.String(), remaining)
+					} else {
+						log.Info("Direct transport unavailable for %s; downgraded to circuit relay (%d remaining)", pID.String(), remaining)
+					}
 				}
 				return
 			}
@@ -2620,6 +2644,30 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	}
 
 	return node, nil
+}
+
+// dropPooledConnStreams drops the cached control streams for pID that are
+// pinned to the transport that just closed. DisconnectedF calls it on both
+// halves of the remaining>0 split: the pools key their streams by peer, not by
+// conn, and a pooled stream only heals when a send fails, so a quiet control
+// plane would otherwise keep a stream on a dead transport indefinitely.
+// Conn-precise on purpose — Invalidate would also force-close streams still
+// riding a surviving connection.
+func (node *Node) dropPooledConnStreams(pID peer.ID, deadConn network.Conn) {
+	dropped := 0
+	if node.lsaPool.DropConnStreams(pID, deadConn) {
+		dropped++
+	}
+	if node.metaPool.DropConnStreams(pID, deadConn) {
+		dropped++
+	}
+	if node.echoPool.DropConnStreams(pID, deadConn) {
+		dropped++
+	}
+	if dropped > 0 {
+		log.Debug("Dropped %d cached control stream(s) for %s pinned to the transport that just closed",
+			dropped, pID.String())
+	}
 }
 
 // verifyTAPMAC aligns cfg.TapMAC with a verified kernel value when the TAP
@@ -2948,7 +2996,7 @@ func (n *Node) isPeerReady(p peer.ID) bool {
 // unstable (frequent connection resets) and need faster re-key convergence.
 func (n *Node) peerHasCircuitRelayConn(p peer.ID) bool {
 	for _, conn := range n.Host.Network().ConnsToPeer(p) {
-		if strings.Contains(conn.RemoteMultiaddr().String(), "/p2p-circuit") {
+		if IsCircuitRelay(conn.RemoteMultiaddr()) {
 			return true
 		}
 	}

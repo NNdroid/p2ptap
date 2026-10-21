@@ -1129,12 +1129,14 @@ func (n *Node) negotiateObfWithPeer(p peer.ID, peerPub []byte, peerAlgos []byte,
 func connPathLabel(s network.Stream) string {
 	c := s.Conn()
 	ma := ""
+	isCircuit := false
 	if c != nil {
 		if rma := c.RemoteMultiaddr(); rma != nil {
 			ma = rma.String()
+			isCircuit = IsCircuitRelay(rma)
 		}
 	}
-	if c != nil && strings.Contains(ma, "/p2p-circuit") {
+	if isCircuit {
 		return "CIRCUIT-RELAY " + ma
 	}
 	return "DIRECT " + ma

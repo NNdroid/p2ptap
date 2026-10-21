@@ -838,6 +838,11 @@ func (n *Node) processTapFrame(payload []byte) bool {
 		// multi-hop / overlay-relay traffic (e.g. A -> relay -> C could never
 		// deliver).
 		if !n.canEgressWithRoute(targetPeer, route, hasRoute) {
+			// Count it: without this, a dead boot or a stale route table made this
+			// node drop its own TAP traffic with every RelayDiag counter flat,
+			// because UplinkGone only fires downstream at the boot relay, which a
+			// frame refused here never reaches.
+			n.relayDiag.egressGate()
 			hop := n.relayHopForTarget(targetPeer)
 			bootUplink := hop != "" && n.isBootstrapPeer(hop) && n.hasBootRelayUplink(hop)
 			if log.IsDebug() {

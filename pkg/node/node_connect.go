@@ -193,7 +193,7 @@ func resolveRelayUpgradeFlapWindow(v time.Duration) time.Duration {
 func directCandidates(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 	out := make([]multiaddr.Multiaddr, 0, len(addrs))
 	for _, a := range addrs {
-		if !strings.Contains(a.String(), "/p2p-circuit") {
+		if !IsCircuitRelay(a) {
 			out = append(out, a)
 		}
 	}

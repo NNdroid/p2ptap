@@ -1703,7 +1703,7 @@ func (n *Node) TestMultiaddrLatency(targetStr string) []observer.MultiaddrTestRe
 			// at the same value). Surface it as an *estimate* (note) only and keep
 			// rttMs at the -1 "inconclusive" sentinel so the UI stops claiming each
 			// relay row was independently timed.
-			if strings.Contains(addrStr, "/p2p-circuit") {
+			if IsCircuitRelay(addr) {
 				var note string
 				if ewma := n.Host.Peerstore().LatencyEWMA(pID); ewma > 0 {
 					note = fmt.Sprintf("relay EWMA ≈%d ms (estimated, not per-path probed)", ewma.Milliseconds())

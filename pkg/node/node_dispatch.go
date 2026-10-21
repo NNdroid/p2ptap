@@ -12,7 +12,6 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"strings"
 
 	"p2ptap/pkg/routing"
 )
@@ -636,7 +635,7 @@ func (n *Node) isDirectlyConnected(targetPeer peer.ID) bool {
 	}
 	// Fallback check on live conns if not yet recorded in directConnected map
 	for _, conn := range n.Host.Network().ConnsToPeer(targetPeer) {
-		if !strings.Contains(conn.RemoteMultiaddr().String(), "/p2p-circuit") {
+		if !IsCircuitRelay(conn.RemoteMultiaddr()) {
 			return true
 		}
 	}

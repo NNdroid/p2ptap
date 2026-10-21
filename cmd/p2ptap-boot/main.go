@@ -2447,7 +2447,7 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 	// is not a usable identity key and is dropped from the ban lookup; the
 	// per-peer-ID half still applies and a relay cannot forge peer IDs.
 	phyIP := ""
-	if ma := s.Conn().RemoteMultiaddr(); ma != nil && !strings.Contains(ma.String(), "/p2p-circuit/") {
+	if ma := s.Conn().RemoteMultiaddr(); ma != nil && !node.IsCircuitRelay(ma) {
 		if ip := node.ExtractIP(ma); ip != nil {
 			phyIP = ip.String()
 		}

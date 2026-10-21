@@ -216,6 +216,37 @@ func (p *lsaStreamPool) Invalidate(target peer.ID) {
 	p.closeLocked(target)
 }
 
+// DropConnStreams drops the peer's cached control stream only if it is pinned to
+// the transport that just closed, and reports whether anything was dropped.
+// DisconnectedF uses it instead of Invalidate: Invalidate would force-close a
+// control stream that is still riding a surviving connection, and the pooled
+// streams self-heal only when a send fails, so a quiet control plane would
+// otherwise keep a stream on a dead transport indefinitely. The peer-mutex
+// timeout path mirrors Invalidate.
+func (p *lsaStreamPool) DropConnStreams(target peer.ID, deadConn network.Conn) bool {
+	if p == nil || deadConn == nil {
+		return false
+	}
+	p.mu.Lock()
+	m, ok := p.writeMu[target]
+	s := p.streams[target]
+	p.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	if sc := s.Conn(); sc == nil || sc.RemotePeer() != target ||
+		sc.RemoteMultiaddr().String() != deadConn.RemoteMultiaddr().String() {
+		return false
+	}
+	if !ok || !tryLockTimeout(m, peerInvalidateWaitTimeout) {
+		p.closeLocked(target)
+		return true
+	}
+	defer m.Unlock()
+	p.closeLocked(target)
+	return true
+}
+
 const (
 	// peerInvalidateWaitTimeout bounds how long Invalidate waits for a busy
 	// peer mutex before force-closing the stream underneath its owner. It

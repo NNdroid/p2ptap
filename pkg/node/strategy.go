@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -143,8 +142,7 @@ func scoreStreamTransport(s network.Stream) int {
 	if rMA == nil {
 		return 999
 	}
-	rStr := rMA.String()
-	if strings.Contains(rStr, "/p2p-circuit") {
+	if IsCircuitRelay(rMA) {
 		return 100 // Relay stream: lowest priority
 	}
 	if manet.IsIPLoopback(rMA) {
@@ -1298,7 +1296,7 @@ func (sd *StrategyDispatcher) PurgeCircuitStreams(pID peer.ID) int {
 	purged := 0
 	ps.mu.Lock()
 	for name, s := range ps.streams {
-		if s != nil && s.Conn() != nil && strings.Contains(s.Conn().RemoteMultiaddr().String(), "/p2p-circuit") {
+		if s != nil && s.Conn() != nil && IsCircuitRelay(s.Conn().RemoteMultiaddr()) {
 			delete(ps.streams, name)
 			purged++
 		}
@@ -1309,6 +1307,48 @@ func (sd *StrategyDispatcher) PurgeCircuitStreams(pID peer.ID) int {
 	ps.mu.Unlock()
 	if purged > 0 {
 		log.Info("Purged %d circuit-routed stream(s) for peer %s after direct connect; next Tx re-opens over direct",
+			purged, pID.ShortString())
+	}
+	return purged
+}
+
+// PurgeCircuitStreamsExcept drops the peer's circuit-routed data streams that
+// are not pinned to keepConn. ConnectedF calls it when a NEW circuit connection
+// comes up: autorelay rotates a peer's reservation, so the old relay's conn
+// stays alive while the new one is established, and the lazy stream lifecycle
+// would otherwise keep Tx riding the outgoing relay until that conn dies. The
+// new conn's own streams are untouched, and the persistent control streams are
+// left alone — the superseded relay's conn is still alive, so those writes
+// still succeed, and DisconnectedF retires them precisely when it closes.
+// Streams are deregistered but not closed, matching PurgeCircuitStreams.
+func (sd *StrategyDispatcher) PurgeCircuitStreamsExcept(pID peer.ID, keepConn network.Conn) int {
+	if keepConn == nil {
+		return 0
+	}
+	keepMA := keepConn.RemoteMultiaddr().String()
+	sd.peersMu.RLock()
+	ps := sd.peerMap[pID]
+	sd.peersMu.RUnlock()
+	if ps == nil {
+		return 0
+	}
+	purged := 0
+	ps.mu.Lock()
+	for name, s := range ps.streams {
+		if c := s.Conn(); c != nil {
+			ma := c.RemoteMultiaddr()
+			if IsCircuitRelay(ma) && ma.String() != keepMA {
+				delete(ps.streams, name)
+				purged++
+			}
+		}
+	}
+	if purged > 0 {
+		ps.rebuildLocked()
+	}
+	ps.mu.Unlock()
+	if purged > 0 {
+		log.Info("Purged %d circuit stream(s) for peer %s pinned to a superseded relay; next Tx re-opens over the new relay",
 			purged, pID.ShortString())
 	}
 	return purged

@@ -874,8 +874,23 @@ func (n *Node) ingestPeekMapNodeInfo(info PeekMapNodeInfo, viaPeer peer.ID) {
 	// The peek-map learns this peer indirectly, through the relay/boot node
 	// (viaPeer). Mark the backfilled edge as circuit class so the cost model
 	// penalises it and prefers any real direct/overlay path when one exists.
-	n.Router.SetEdge(viaPeer, pID, estimatedRTT, routing.LinkCircuit)
-	log.Debug("Peek-map recorded indirect edge %s<->%s (hop=%d, est_rtt=%dms)", viaPeer.ShortString(), pID.ShortString(), hop, estimatedRTT)
+	//
+	// The backfilled edge is only worth installing while this node can actually
+	// forward for the peer. routeHopUsable gates a boot hop on uplink liveness
+	// rather than on whether that boot still holds the target, and peekMapOrigin
+	// carries no expiry, so an announcement kept alive after the boot lost the
+	// peer would pin a permanent route to a hop that drops the frames with no
+	// error and no log line.
+	edgeUsable := true
+	if n.isBootstrapPeer(viaPeer) {
+		edgeUsable = n.hasBootRelayUplink(viaPeer) && !n.isBootRelayBlacklisted(viaPeer)
+	}
+	if edgeUsable {
+		n.Router.SetEdge(viaPeer, pID, estimatedRTT, routing.LinkCircuit)
+		log.Debug("Peek-map recorded indirect edge %s<->%s (hop=%d, est_rtt=%dms)", viaPeer.ShortString(), pID.ShortString(), hop, estimatedRTT)
+	} else {
+		log.Debug("Peek-map edge %s<->%s not installed: no usable uplink to the announcing boot", pID.ShortString(), viaPeer.ShortString())
+	}
 
 	// Remember WHICH boot carried this announcement and how many boot-to-boot
 	// backbone hops it crossed. The link-state graph can only express "there is
