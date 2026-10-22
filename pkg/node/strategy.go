@@ -14,6 +14,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	manet "github.com/multiformats/go-multiaddr/net"
 
+	"p2ptap/pkg/maddrutil"
 	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/routing"
 )
@@ -142,7 +143,7 @@ func scoreStreamTransport(s network.Stream) int {
 	if rMA == nil {
 		return 999
 	}
-	if IsCircuitRelay(rMA) {
+	if maddrutil.IsCircuitRelay(rMA) {
 		return 100 // Relay stream: lowest priority
 	}
 	if manet.IsIPLoopback(rMA) {
@@ -1296,7 +1297,7 @@ func (sd *StrategyDispatcher) PurgeCircuitStreams(pID peer.ID) int {
 	purged := 0
 	ps.mu.Lock()
 	for name, s := range ps.streams {
-		if s != nil && s.Conn() != nil && IsCircuitRelay(s.Conn().RemoteMultiaddr()) {
+		if s != nil && s.Conn() != nil && maddrutil.IsCircuitRelay(s.Conn().RemoteMultiaddr()) {
 			delete(ps.streams, name)
 			purged++
 		}
@@ -1337,7 +1338,7 @@ func (sd *StrategyDispatcher) PurgeCircuitStreamsExcept(pID peer.ID, keepConn ne
 	for name, s := range ps.streams {
 		if c := s.Conn(); c != nil {
 			ma := c.RemoteMultiaddr()
-			if IsCircuitRelay(ma) && ma.String() != keepMA {
+			if maddrutil.IsCircuitRelay(ma) && ma.String() != keepMA {
 				delete(ps.streams, name)
 				purged++
 			}

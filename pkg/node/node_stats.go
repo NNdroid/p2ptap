@@ -17,6 +17,7 @@ import (
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 
+	"p2ptap/pkg/maddrutil"
 	"p2ptap/pkg/meta"
 	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/observer"
@@ -364,7 +365,7 @@ func (n *Node) updateWebCollectorState() {
 			// A peer could have a direct TCP connection AND a relay fallback simultaneously.
 			for _, c := range n.Host.Network().ConnsToPeer(pID) {
 				ma := c.RemoteMultiaddr()
-				if IsCircuitRelay(ma) {
+				if maddrutil.IsCircuitRelay(ma) {
 					if addr == "unknown" {
 						addr = ma.String()
 					}
@@ -1247,7 +1248,7 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 			ma := conn.RemoteMultiaddr()
 			remoteAddr := ma.String()
 			transport := "P2P"
-			if IsCircuitRelay(ma) {
+			if maddrutil.IsCircuitRelay(ma) {
 				transport = "Circuit Relay"
 			} else {
 				switch TransportOfConn(conn) {
@@ -1703,7 +1704,7 @@ func (n *Node) TestMultiaddrLatency(targetStr string) []observer.MultiaddrTestRe
 			// at the same value). Surface it as an *estimate* (note) only and keep
 			// rttMs at the -1 "inconclusive" sentinel so the UI stops claiming each
 			// relay row was independently timed.
-			if IsCircuitRelay(addr) {
+			if maddrutil.IsCircuitRelay(addr) {
 				var note string
 				if ewma := n.Host.Peerstore().LatencyEWMA(pID); ewma > 0 {
 					note = fmt.Sprintf("relay EWMA ≈%d ms (estimated, not per-path probed)", ewma.Milliseconds())

@@ -22,6 +22,7 @@ import (
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 
+	"p2ptap/pkg/maddrutil"
 	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/observer"
 	"p2ptap/pkg/packet"
@@ -1625,7 +1626,7 @@ func (n *Node) ProbePeerEcho(targetStr string) *observer.PeerEchoResultDTO {
 	if s.Conn() != nil {
 		if ma := s.Conn().RemoteMultiaddr(); ma != nil {
 			res.TransportAddr = ma.String()
-			res.IsRelayed = IsCircuitRelay(ma)
+			res.IsRelayed = maddrutil.IsCircuitRelay(ma)
 		}
 	}
 
@@ -1961,7 +1962,7 @@ func (n *Node) ProbePeerSpeedTest(targetStr string) *observer.SpeedTestResultDTO
 	defer s.Close()
 
 	if s.Conn() != nil {
-		res.IsRelayed = IsCircuitRelay(s.Conn().RemoteMultiaddr())
+		res.IsRelayed = maddrutil.IsCircuitRelay(s.Conn().RemoteMultiaddr())
 	}
 
 	_ = s.SetDeadline(time.Now().Add(8 * time.Second))

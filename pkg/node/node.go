@@ -44,6 +44,7 @@ import (
 
 	"p2ptap/pkg/config"
 	"p2ptap/pkg/logger"
+	"p2ptap/pkg/maddrutil"
 	"p2ptap/pkg/meta"
 	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/observer"
@@ -333,7 +334,12 @@ type Node struct {
 	bootRelayConns map[peer.ID]*bootRelayConn
 	// bootRelayStarted records boots for which the uplink goroutine has been
 	// spawned, so reconnects do not spawn duplicates (the uplink self-heals).
-	bootRelayStarted map[peer.ID]struct{}
+	// The value is the owning loop's generation taken from bootRelayUplinkGen:
+	// the loop retires its own slot after a sustained absence, and the
+	// generation stops a stale loop from deleting the entry a fresh loop just
+	// wrote when a boot reconnects in between.
+	bootRelayStarted   map[peer.ID]uint64
+	bootRelayUplinkGen atomic.Uint64
 	// bootRelayBlacklist marks boots whose relay-over-backbone uplink could NOT
 	// be established after repeated attempts — almost always because the "boot"
 	// is actually a plain node (no /p2ptap/boot-relay/1.0.0 handler) mistakenly
@@ -1872,7 +1878,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// from the configured PSK so cross-boot envelopes carry the right isolation
 	// tag; in open mode (no PSK) it is empty and the boot accepts all.
 	node.bootRelayConns = make(map[peer.ID]*bootRelayConn)
-	node.bootRelayStarted = make(map[peer.ID]struct{})
+	node.bootRelayStarted = make(map[peer.ID]uint64)
 	node.bootRelayBlacklist = make(map[peer.ID]time.Time)
 	node.overlayRelayBlacklist = make(map[peer.ID]time.Time)
 	// peerLastRx is an atomic.Pointer (copy-on-write) and needs no
@@ -2314,7 +2320,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		ConnectedF: func(netw network.Network, conn network.Conn) {
 			pID := conn.RemotePeer()
 			addrStr := conn.RemoteMultiaddr().String()
-			isCircuitRelay := IsCircuitRelay(conn.RemoteMultiaddr())
+			isCircuitRelay := maddrutil.IsCircuitRelay(conn.RemoteMultiaddr())
 
 			// Stamp a new monotonically increasing connection generation so any
 			// in-flight DisconnectedF debounce goroutine will not purge this peer.
@@ -2332,7 +2338,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			}
 
 			if isCircuitRelay {
-				relayIDs := RelayPeerIDs(conn.RemoteMultiaddr())
+				relayIDs := maddrutil.RelayPeerIDs(conn.RemoteMultiaddr())
 				if len(relayIDs) > 1 {
 					log.Info("Peer connected via CIRCUIT RELAY: %s via relay %s (ma=%s)", pID.String(), relayIDs[0].String(), addrStr)
 				} else {
@@ -2433,14 +2439,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 					node.ensurePeekMapListener(pID)
 
 					// Establish the boot-relay (relay-over-backbone) uplink.
-					node.bootRelayMu.Lock()
-					if _, ok := node.bootRelayStarted[pID]; !ok {
-						node.bootRelayStarted[pID] = struct{}{}
-						node.bootRelayMu.Unlock()
-						go node.openBootRelayUplink(pID)
-					} else {
-						node.bootRelayMu.Unlock()
-					}
+					node.maybeSpawnBootRelayUplink(pID)
 				}()
 				return
 			}
@@ -2483,7 +2482,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				// after the direct leg disappeared while a circuit fallback survived.
 				hasDirect, hasCircuit := false, false
 				for _, remainingConn := range netw.ConnsToPeer(pID) {
-					if IsCircuitRelay(remainingConn.RemoteMultiaddr()) {
+					if maddrutil.IsCircuitRelay(remainingConn.RemoteMultiaddr()) {
 						hasCircuit = true
 					} else {
 						hasDirect = true
@@ -2491,7 +2490,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				}
 				// Which leg closed decides the message below: a circuit conn closing
 				// while another survives is not a direct→relay downgrade.
-				deadIsCircuit := IsCircuitRelay(conn.RemoteMultiaddr())
+				deadIsCircuit := maddrutil.IsCircuitRelay(conn.RemoteMultiaddr())
 				rttMs := node.routingPeerLatencyMs(pID)
 				node.directConnectedMu.Lock()
 				if hasDirect {
@@ -2996,7 +2995,7 @@ func (n *Node) isPeerReady(p peer.ID) bool {
 // unstable (frequent connection resets) and need faster re-key convergence.
 func (n *Node) peerHasCircuitRelayConn(p peer.ID) bool {
 	for _, conn := range n.Host.Network().ConnsToPeer(p) {
-		if IsCircuitRelay(conn.RemoteMultiaddr()) {
+		if maddrutil.IsCircuitRelay(conn.RemoteMultiaddr()) {
 			return true
 		}
 	}

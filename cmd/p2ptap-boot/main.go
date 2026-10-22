@@ -23,6 +23,7 @@ import (
 
 	"p2ptap/pkg/bootweb"
 	"p2ptap/pkg/logger"
+	"p2ptap/pkg/maddrutil"
 	"p2ptap/pkg/meta"
 	"p2ptap/pkg/node"
 	"p2ptap/pkg/routing"
@@ -2447,7 +2448,7 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 	// is not a usable identity key and is dropped from the ban lookup; the
 	// per-peer-ID half still applies and a relay cannot forge peer IDs.
 	phyIP := ""
-	if ma := s.Conn().RemoteMultiaddr(); ma != nil && !node.IsCircuitRelay(ma) {
+	if ma := s.Conn().RemoteMultiaddr(); ma != nil && !maddrutil.IsCircuitRelay(ma) {
 		if ip := node.ExtractIP(ma); ip != nil {
 			phyIP = ip.String()
 		}

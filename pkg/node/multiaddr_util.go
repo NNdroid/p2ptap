@@ -6,7 +6,11 @@
 // misclassifying WebTransport addresses (/udp/N/quic-v1/webtransport)
 // as QUIC. This file replaces that with a single canonical function that
 // inspects protocol codes instead of strings, and with helpers for the
-// other two recurring patterns: /p2p/ stripping and relay-hop extraction.
+// other two recurring patterns: /p2p/ stripping and peer-ID extraction.
+//
+// Circuit-relay detection and /p2p/ peer-ID extraction live in
+// pkg/maddrutil instead: pkg/web needs them too, and pkg/web must not
+// import pkg/node, so they live in the shared leaf package.
 
 package node
 
@@ -19,6 +23,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
+
+	"p2ptap/pkg/maddrutil"
 )
 
 // TransportOf returns the canonical transport name for a multiaddr:
@@ -59,7 +65,7 @@ func TransportOf(ma multiaddr.Multiaddr) string {
 // stats collectors had drifted apart over this: collectProtocolChannelsAndStreams
 // had no "webtransport" arm at all and labelled every WebTransport link "P2P".
 func TransportOfConn(c network.Conn) string {
-	if ma := c.RemoteMultiaddr(); ma != nil && IsCircuitRelay(ma) {
+	if ma := c.RemoteMultiaddr(); ma != nil && maddrutil.IsCircuitRelay(ma) {
 		return "circuit"
 	}
 	switch c.ConnState().Transport {
@@ -78,17 +84,6 @@ func TransportOfConn(c network.Conn) string {
 	return ""
 }
 
-// IsCircuitRelay reports whether ma contains a /p2p-circuit/ component.
-// Replaces scattered strings.Contains(s, "/p2p-circuit") calls.
-func IsCircuitRelay(ma multiaddr.Multiaddr) bool {
-	for _, c := range ma {
-		if c.Protocol().Code == multiaddr.P_CIRCUIT {
-			return true
-		}
-	}
-	return false
-}
-
 // StripP2P removes the trailing /p2p/<peerID> component (if present).
 // Iterates backwards so multi-hop circuit paths keep their intermediate hops.
 func StripP2P(ma multiaddr.Multiaddr) multiaddr.Multiaddr {
@@ -100,21 +95,6 @@ func StripP2P(ma multiaddr.Multiaddr) multiaddr.Multiaddr {
 		return ma[:len(ma)-1]
 	}
 	return ma
-}
-
-// RelayPeerIDs extracts all /p2p/<id> peer IDs from a multiaddr.
-// For a circuit path /p2p/A/p2p-circuit/p2p/B, returns [A, B].
-func RelayPeerIDs(ma multiaddr.Multiaddr) []peer.ID {
-	var ids []peer.ID
-	for _, c := range ma {
-		if c.Protocol().Code == multiaddr.P_P2P {
-			pid, err := peer.Decode(c.Value())
-			if err == nil {
-				ids = append(ids, pid)
-			}
-		}
-	}
-	return ids
 }
 
 // TargetPeerID returns the final /p2p/<id> peer ID (the last one in a

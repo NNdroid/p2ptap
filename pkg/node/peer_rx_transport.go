@@ -6,6 +6,8 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+
+	"p2ptap/pkg/maddrutil"
 )
 
 // transportLabelForConn classifies one live connection the way deriveConnSignals
@@ -17,7 +19,7 @@ func transportLabelForConn(c network.Conn) string {
 	if c == nil {
 		return ""
 	}
-	if IsCircuitRelay(c.RemoteMultiaddr()) {
+	if maddrutil.IsCircuitRelay(c.RemoteMultiaddr()) {
 		return "circuit-relay"
 	}
 	return "direct"

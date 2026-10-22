@@ -23,6 +23,7 @@ import (
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 
+	"p2ptap/pkg/maddrutil"
 	"p2ptap/pkg/routing"
 	"p2ptap/pkg/version"
 )
@@ -193,7 +194,7 @@ func resolveRelayUpgradeFlapWindow(v time.Duration) time.Duration {
 func directCandidates(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 	out := make([]multiaddr.Multiaddr, 0, len(addrs))
 	for _, a := range addrs {
-		if !IsCircuitRelay(a) {
+		if !maddrutil.IsCircuitRelay(a) {
 			out = append(out, a)
 		}
 	}
@@ -1494,18 +1495,12 @@ func (n *Node) ensureRelayAuth(pi peer.AddrInfo) {
 
 	// Establish the boot-relay (relay-over-backbone) uplink. The uplink is
 	// SELF-HEALING: its own loop reopens the stream whenever the boot link
-	// drops, so we spawn it EXACTLY ONCE per boot (guarded here) and must NOT
-	// re-spawn it on every reconnect, or we would leak orphaned reader goroutines
-	// and clobber the live uplink entry. This is what lets us reach peers
-	// attached to THIS boot OR a different boot in the same PSK network when no
-	// direct / overlay-relay path exists. In open mode (no PSK) auth succeeds
-	// trivially and the uplink is still opened so cross-boot bridging works.
-	n.bootRelayMu.Lock()
-	if _, ok := n.bootRelayStarted[pi.ID]; !ok {
-		n.bootRelayStarted[pi.ID] = struct{}{}
-		n.bootRelayMu.Unlock()
-		go n.openBootRelayUplink(pi.ID)
-	} else {
-		n.bootRelayMu.Unlock()
-	}
+	// drops, so we spawn it EXACTLY ONCE per boot (guarded in
+	// maybeSpawnBootRelayUplink) and must NOT re-spawn it on every reconnect,
+	// or we would leak orphaned reader goroutines and clobber the live uplink
+	// entry. This is what lets us reach peers attached to THIS boot OR a
+	// different boot in the same PSK network when no direct / overlay-relay path
+	// exists. In open mode (no PSK) auth succeeds trivially and the uplink is
+	// still opened so cross-boot bridging works.
+	n.maybeSpawnBootRelayUplink(pi.ID)
 }

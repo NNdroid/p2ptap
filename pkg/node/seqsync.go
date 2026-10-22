@@ -17,6 +17,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 
+	"p2ptap/pkg/maddrutil"
 	"p2ptap/pkg/obfuscate"
 )
 
@@ -1133,7 +1134,7 @@ func connPathLabel(s network.Stream) string {
 	if c != nil {
 		if rma := c.RemoteMultiaddr(); rma != nil {
 			ma = rma.String()
-			isCircuit = IsCircuitRelay(rma)
+			isCircuit = maddrutil.IsCircuitRelay(rma)
 		}
 	}
 	if isCircuit {

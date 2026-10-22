@@ -10,6 +10,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/net/swarm"
 	"github.com/multiformats/go-multiaddr"
+
+	"p2ptap/pkg/maddrutil"
 )
 
 // roamDebounce collapses bursts of OS link/address events (a Wi-Fi
@@ -111,7 +113,7 @@ func reconcileRoam(ls listenerStore, base []multiaddr.Multiaddr) bool {
 func diffListeners(desired, current []multiaddr.Multiaddr) (toAdd, toRemove []multiaddr.Multiaddr) {
 	curByKey := make(map[string]multiaddr.Multiaddr, len(current))
 	for _, c := range current {
-		if IsCircuitRelay(c) {
+		if maddrutil.IsCircuitRelay(c) {
 			continue
 		}
 		curByKey[ListenAddrKey(c)] = c

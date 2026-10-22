@@ -52,11 +52,21 @@ type bootRelayConn struct {
 	writeCh chan bootRelayJob
 }
 
+// bootRelayUplinkAbortAfter is how long a boot may be unreachable before the
+// uplink loop gives up and retires its bootRelayStarted slot. Transient drops
+// run for seconds; a boot that has been gone this long has left the mesh, and
+// leaving the loop running means the slot is never reclaimed, so a later
+// reconnect would find a stale entry and never restart the uplink. ConnectedF
+// starts a fresh loop as soon as the boot comes back.
+const bootRelayUplinkAbortAfter = 15 * time.Minute
+
 // openBootRelayUplink establishes and maintains a persistent /p2ptap/boot-relay/
 // 1.0.0 stream to boot. It is spawned once per connected boot right after the
 // node authenticates with it (ensureRelayAuth). The loop reopens the stream on
-// any disconnect, so transient boot link drops self-heal.
-func (n *Node) openBootRelayUplink(boot peer.ID) {
+// any disconnect, so transient boot link drops self-heal; after a sustained
+// absence it exits instead of polling forever, handing the slot back so a
+// future connection can reopen the uplink.
+func (n *Node) openBootRelayUplink(boot peer.ID, gen uint64) {
 	backoff := 2 * time.Second
 	const maxBackoff = 30 * time.Second
 	// readerBackoff spaces out reconnects AFTER a stream was established and then
@@ -65,10 +75,35 @@ func (n *Node) openBootRelayUplink(boot peer.ID) {
 	readerBackoff := time.Second
 	const maxReaderBackoff = 15 * time.Second
 	failCount := 0
+	// goneSince marks the first poll that found the boot unreachable. Any
+	// reconnection resets it, so a boot that flaps but keeps coming back never
+	// triggers the abort.
+	var goneSince time.Time
 	for {
 		if n.ctx.Err() != nil {
 			return
 		}
+		if n.Host.Network().Connectedness(boot) != network.Connected {
+			// Connectivity is checked BEFORE the blacklist throttle: a
+			// blacklisted boot that is also offline would otherwise spend its
+			// 30s blacklist sleep first and keep resetting goneSince, so the
+			// loop could never reach the abort condition at all.
+			if goneSince.IsZero() {
+				goneSince = time.Now()
+			} else if time.Since(goneSince) >= bootRelayUplinkAbortAfter {
+				log.Info("[boot-relay] boot %s unreachable for %v; giving up on its uplink and releasing the slot for a fresh start when it returns",
+					boot.ShortString(), time.Since(goneSince).Round(time.Second))
+				n.forgetBootRelayStarted(boot, gen)
+				return
+			}
+			select {
+			case <-n.ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
+			continue
+		}
+		goneSince = time.Time{}
 		// If this boot is blacklisted (its uplink repeatedly failed to
 		// establish — it is likely not a real boot-relay server), throttle
 		// reconnect attempts to one per TTL instead of hammering NewStream every
@@ -78,14 +113,6 @@ func (n *Node) openBootRelayUplink(boot peer.ID) {
 			case <-n.ctx.Done():
 				return
 			case <-time.After(bootRelayBlacklistTTL):
-			}
-			continue
-		}
-		if n.Host.Network().Connectedness(boot) != network.Connected {
-			select {
-			case <-n.ctx.Done():
-				return
-			case <-time.After(2 * time.Second):
 			}
 			continue
 		}
@@ -157,6 +184,35 @@ func (n *Node) bootRelayUnregister(boot peer.ID, rc *bootRelayConn) {
 	n.bootRelayMu.Lock()
 	if n.bootRelayConns[boot] == rc {
 		delete(n.bootRelayConns, boot)
+	}
+	n.bootRelayMu.Unlock()
+}
+
+// maybeSpawnBootRelayUplink starts the boot-relay uplink loop for boot when no
+// one is running already, and reports whether it started one. Both
+// authentication paths call it (ConnectedF and ensureRelayAuth), which is why
+// the once-only guard lives here instead of being duplicated at each call site.
+func (n *Node) maybeSpawnBootRelayUplink(boot peer.ID) bool {
+	n.bootRelayMu.Lock()
+	if _, ok := n.bootRelayStarted[boot]; ok {
+		n.bootRelayMu.Unlock()
+		return false
+	}
+	gen := n.bootRelayUplinkGen.Add(1)
+	n.bootRelayStarted[boot] = gen
+	n.bootRelayMu.Unlock()
+	go n.openBootRelayUplink(boot, gen)
+	return true
+}
+
+// forgetBootRelayStarted retires boot's uplink slot only if this loop still
+// owns it. A boot that comes back before a stale loop has noticed its absence
+// gets a fresh entry and a fresh loop, and the stale loop must not delete the
+// newcomer's entry and leave it orphaned.
+func (n *Node) forgetBootRelayStarted(boot peer.ID, gen uint64) {
+	n.bootRelayMu.Lock()
+	if cur, ok := n.bootRelayStarted[boot]; ok && cur == gen {
+		delete(n.bootRelayStarted, boot)
 	}
 	n.bootRelayMu.Unlock()
 }

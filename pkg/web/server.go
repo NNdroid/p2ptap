@@ -27,8 +27,10 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	ping "github.com/libp2p/go-libp2p/p2p/protocol/ping"
+	"github.com/multiformats/go-multiaddr"
 	"p2ptap/pkg/config"
 	"p2ptap/pkg/logger"
+	"p2ptap/pkg/maddrutil"
 	"p2ptap/pkg/observer"
 	"p2ptap/pkg/routing"
 )
@@ -1998,25 +2000,25 @@ func shortPeerID(s string) string {
 	return s
 }
 
-// relayPeerIDsFromMaddr extracts the relay peer IDs embedded in a circuit-relay
-// connection multiaddr, e.g. "/ip4/x/tcp/y/p2p/R1/p2p-circuit/p2p/R2/p2p-circuit/p2p/DST"
-// yields [R1, R2] (the destination is excluded).
-func relayPeerIDsFromMaddr(maStr string) []string {
-	segs := strings.Split(maStr, "/p2p-circuit")
+// relayPeerIDsOf extracts the relay peer IDs embedded in a circuit-relay
+// connection multiaddr, e.g. /ip4/x/tcp/y/p2p/R1/p2p-circuit/p2p/R2/p2p-circuit/p2p/DST
+// yields [R1, R2] (the destination is excluded). The circuit hop is detected by
+// protocol code, not by string-matching the rendered address.
+func relayPeerIDsOf(ma multiaddr.Multiaddr) []string {
+	ids := maddrutil.RelayPeerIDs(ma)
+	if len(ids) == 0 {
+		return nil
+	}
+	// maddrutil.RelayPeerIDs includes the final /p2p/<id>, which is the
+	// destination rather than a hop; everything before it is a relay.
+	ids = ids[:len(ids)-1]
+	out := make([]string, 0, len(ids))
 	seen := map[string]bool{}
-	out := []string{}
-	for _, seg := range segs[:len(segs)-1] { // each segment but the last precedes a relay hop
-		idx := strings.LastIndex(seg, "/p2p/")
-		if idx < 0 {
-			continue
-		}
-		rest := seg[idx+len("/p2p/"):]
-		if end := strings.Index(rest, "/"); end >= 0 {
-			rest = rest[:end]
-		}
-		if rest != "" && !seen[rest] {
-			seen[rest] = true
-			out = append(out, rest)
+	for _, id := range ids {
+		s := id.String()
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
 		}
 	}
 	return out
@@ -2026,25 +2028,27 @@ func inspectPeerTransport(h host.Host, pid peer.ID) (path, addr string, relays [
 	if h == nil {
 		return "unknown", "", nil
 	}
-	addrs := make([]string, 0, len(h.Network().ConnsToPeer(pid)))
+	addrs := make([]multiaddr.Multiaddr, 0, len(h.Network().ConnsToPeer(pid)))
 	for _, c := range h.Network().ConnsToPeer(pid) {
-		addrs = append(addrs, c.RemoteMultiaddr().String())
+		if ma := c.RemoteMultiaddr(); ma != nil {
+			addrs = append(addrs, ma)
+		}
 	}
 	return classifyTransportAddrs(addrs)
 }
 
-func classifyTransportAddrs(addrs []string) (path, addr string, relays []string) {
-	var relayAddr string
-	for _, maStr := range addrs {
-		if !strings.Contains(maStr, "/p2p-circuit") {
-			return "direct", maStr, nil
+func classifyTransportAddrs(addrs []multiaddr.Multiaddr) (path, addr string, relays []string) {
+	var relayAddr multiaddr.Multiaddr
+	for _, ma := range addrs {
+		if !maddrutil.IsCircuitRelay(ma) {
+			return "direct", ma.String(), nil
 		}
-		if relayAddr == "" {
-			relayAddr = maStr
+		if relayAddr == nil {
+			relayAddr = ma
 		}
 	}
-	if relayAddr != "" {
-		return "circuit-relay", relayAddr, relayPeerIDsFromMaddr(relayAddr)
+	if relayAddr != nil {
+		return "circuit-relay", relayAddr.String(), relayPeerIDsOf(relayAddr)
 	}
 	return "unknown", "", nil
 }

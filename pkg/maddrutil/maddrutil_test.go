@@ -1,6 +1,27 @@
-package node
+package maddrutil
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/multiformats/go-multiaddr"
+)
+
+func mustMaddr(t *testing.T, s string) multiaddr.Multiaddr {
+	t.Helper()
+	ma, err := multiaddr.NewMultiaddr(s)
+	if err != nil {
+		t.Fatalf("NewMultiaddr(%q): %v", s, err)
+	}
+	return ma
+}
+
+func mustMA(s string) multiaddr.Multiaddr {
+	ma, err := multiaddr.NewMultiaddr(s)
+	if err != nil {
+		panic(err)
+	}
+	return ma
+}
 
 // TestRelayPeerIDs pins the circuit-relay peer-ID extraction contract used
 // by the transport-path diagnostics. A relayed connection's remote multiaddr
