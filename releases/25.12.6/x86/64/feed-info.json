@@ -3,7 +3,7 @@
   "openwrt_version": "25.12.6",
   "target": "x86",
   "subtarget": "64",
-  "source_commit": "ac5d6e3e37d8709ab392284293c11d21dc8af05c",
-  "source_version": "v1.0.20261021.174-ac5d6e3",
+  "source_commit": "8655d0becb9dc95d3b302fede23daa3735070d40",
+  "source_version": "v1.0.20261022.179-8655d0b",
   "package_count": 5
 }
