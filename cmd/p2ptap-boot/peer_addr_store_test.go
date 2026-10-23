@@ -729,3 +729,41 @@ func TestNotifyBundleRecordsOnConnect(t *testing.T) {
 			"guard above may no longer describe reality")
 	}
 }
+
+// TestLastSeenPeerNameFallbackIsDisplayable pins the unnamed-peer fallback in
+// GetLastSeenPeers. An empty node name is common for a peer whose info frame
+// only arrived after it disconnected, so a fallback is unavoidable — but it must
+// read as a name. peer.ID.ShortString renders as "<peer.ID 12*kSnUg6>", which
+// ships to the browser looking like an unwrapped type diagnostic.
+func TestLastSeenPeerNameFallbackIsDisplayable(t *testing.T) {
+	s, err := LoadStore(storePath(t), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	pID := test.RandPeerIDFatal(t)
+	s.RecordPeerAddrs(pID,
+		[]string{"/ip4/203.0.113.5/tcp/4001/p2p/" + pID.String()},
+		[]string{"tcp"}, "", "")
+
+	// No host: every peer in the store is therefore "last seen, not connected".
+	provider := &bootDataProviderImpl{peerAddrs: s}
+	got := provider.GetLastSeenPeers(10)
+	if len(got) != 1 {
+		t.Fatalf("GetLastSeenPeers returned %d entries, want 1", len(got))
+	}
+	if got[0].NodeName == "" {
+		t.Fatal("NodeName is empty; the fallback was not applied")
+	}
+	if strings.ContainsAny(got[0].NodeName, "<>") {
+		t.Fatalf("NodeName %q looks like a peer.ID.ShortString diagnostic", got[0].NodeName)
+	}
+	want := formatShortPeerID(pID)
+	if got[0].NodeName != want {
+		t.Fatalf("NodeName = %q, want %q", got[0].NodeName, want)
+	}
+	if got[0].NodeName != got[0].ShortID {
+		t.Fatalf("NodeName %q disagrees with ShortID %q", got[0].NodeName, got[0].ShortID)
+	}
+}

@@ -2422,9 +2422,11 @@ func (p *bootDataProviderImpl) GetLastSeenPeers(limit int) []bootweb.LastSeenPee
 		}
 		// An empty node name is usually a peer whose info frame we saw only
 		// after it had already disconnected; the short ID is still useful.
+		// Not pid.ShortString(): that renders as "<peer.ID 12*kSnUg6>", which
+		// reads as an unwrapped type diagnostic rather than a display name.
 		name := e.NodeName
 		if name == "" {
-			name = pid.ShortString()
+			name = formatShortPeerID(pid)
 		}
 		out = append(out, bootweb.LastSeenPeerDTO{
 			PeerID:      e.PeerID,
