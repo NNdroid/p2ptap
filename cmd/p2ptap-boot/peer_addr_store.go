@@ -39,6 +39,12 @@ const peerAddrFileVersion = 1
 // file once per connection event.
 const peerAddrFlushDelay = 5 * time.Second
 
+// peerAddrFlushMinInterval is the fallback write cadence for when peer churn
+// never leaves a full debounce window quiet. The cost is one extra rewrite per
+// interval during heavy traffic; the thing being insured against is losing the
+// records a restart would have flushed.
+const peerAddrFlushMinInterval = 30 * time.Second
+
 // peerAddrDefaultMaxPeers caps the in-memory (and on-disk) entry count. It is
 // a growth guard, not a policy: real deployments are orders of magnitude
 // below it.
@@ -85,8 +91,17 @@ type peerAddrStore struct {
 	maxPeers int
 	entries  map[peer.ID]*peerAddrEntry
 	dirty    bool
-	timer    *time.Timer
-	closed   bool
+	// flushReq is the single record-of-activity signal, owned by flushLoop.
+	// Buffered by one so a record that lands while the loop is mid-write is
+	// not lost. All timer bookkeeping lives in flushLoop, never here: a
+	// per-record time.Timer that is Stop()ed to reschedule cannot be waited
+	// on, and a `select` with a `default` arm against a timer channel is a
+	// NON-BLOCKING poll, not a wait — both earlier shapes meant the debounce
+	// signal was never delivered and only the 30s fallback ticker ever wrote.
+	flushReq chan struct{}
+	// doneCh stops flushLoop.
+	doneCh chan struct{}
+	closed bool
 }
 
 // LoadStore opens path (or creates it empty), then returns a store that
@@ -103,7 +118,10 @@ func LoadStore(path string, maxPeers int) (*peerAddrStore, error) {
 		path:     path,
 		maxPeers: maxPeers,
 		entries:  make(map[peer.ID]*peerAddrEntry),
+		flushReq: make(chan struct{}, 1),
+		doneCh:   make(chan struct{}),
 	}
+	s.flushLoop()
 	if path == "" {
 		return s, nil
 	}
@@ -336,19 +354,59 @@ func (s *peerAddrStore) PruneOver(max int) int {
 	return removed
 }
 
-// markDirtyLocked schedules a debounced write. Caller holds s.mu.
+// markDirtyLocked signals flushLoop, which owns the debounce timer. Caller
+// holds s.mu; the send is deliberately non-blocking so the loop can never be
+// held up here while flushLoop wants s.mu back inside Flush.
 func (s *peerAddrStore) markDirtyLocked() {
 	if s.path == "" {
 		return
 	}
 	s.dirty = true
-	if s.timer != nil {
-		s.timer.Stop()
+	select {
+	case s.flushReq <- struct{}{}:
+	default:
 	}
-	s.timer = time.NewTimer(peerAddrFlushDelay)
+}
+
+// flushLoop is the single writer, and it owns the debounce timer. Keeping the
+// timer here — instead of resetting one per record — is what makes the
+// debounce reachable at all: Stop is how a debounce is rescheduled, so a waiter
+// parked on the timer it was just stopped for never wakes, and a `select` with
+// a `default` arm against a timer channel is a non-blocking poll, not a wait.
+// The one-goroutine shape needs neither, and cannot leak a waiter per record.
+//
+// The ticker is what makes this survive continuous churn: a boot that never
+// leaves the debounce window quiet would otherwise coalesce forever and hold
+// every record in memory until a restart.
+func (s *peerAddrStore) flushLoop() {
+	if s.path == "" {
+		return
+	}
 	go func() {
-		<-s.timer.C
-		s.Flush()
+		ticker := time.NewTicker(peerAddrFlushMinInterval)
+		defer ticker.Stop()
+		var debounce *time.Timer
+		var debounceCh <-chan time.Time
+		for {
+			select {
+			case <-s.doneCh:
+				return
+			case <-s.flushReq:
+				// A record landed: (re)start the coalescing window. A nil
+				// debounceCh blocks forever, which is exactly the "no
+				// activity yet" state, so the timer is only ever armed after
+				// the first record.
+				if debounce != nil {
+					debounce.Stop()
+				}
+				debounce = time.NewTimer(peerAddrFlushDelay)
+				debounceCh = debounce.C
+			case <-debounceCh:
+				_ = s.Flush()
+			case <-ticker.C:
+				_ = s.Flush()
+			}
+		}
 	}()
 }
 
@@ -414,6 +472,9 @@ func (s *peerAddrStore) Close() {
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
+	// Stop the writer before the final write so it cannot race a record that
+	// was marked dirty in the same instant.
+	close(s.doneCh)
 	// allowClosed is the only way this final write can happen: Flush bails on
 	// the closed flag, so a plain Flush here would silently drop everything
 	// recorded since the last debounced write.

@@ -1,15 +1,19 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/test"
 	"github.com/multiformats/go-multiaddr"
 )
@@ -576,6 +580,99 @@ func TestReseedPeerAddrs(t *testing.T) {
 	}
 }
 
+// waitForStoreFile blocks until the writer produces the file, or the deadline
+// expires. Every deadline below is deliberately looser than the interval being
+// tested, so a broken writer fails loudly instead of passing on an empty file.
+func waitForStoreFile(t *testing.T, path string, limit time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(limit)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("store writer never reached %s within %s", path, limit)
+}
+
+// TestDebouncedWriteFiresUnderSilence drives the coalesced-write path. Every
+// other test calls Flush by hand, which bypasses the goroutine that is the
+// whole reason the debounce exists.
+func TestDebouncedWriteFiresUnderSilence(t *testing.T) {
+	path := storePath(t)
+	s, err := LoadStore(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pID := test.RandPeerIDFatal(t)
+	s.RecordPeerAddrs(pID, []string{"/ip4/203.0.113.5/tcp/4001/p2p/" + pID.String()},
+		[]string{"tcp"}, "netA", "node-1")
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("store file exists before the debounce fires: %v", err)
+	}
+	waitForStoreFile(t, path, 20*time.Second)
+}
+
+// TestWriterPersistsUnderContinuousChurn is the regression for the real
+// production failure: a boot whose peer traffic never left a full debounce
+// window quiet held every record in memory until a restart. Records are added
+// every 1s here, so the debounce keeps getting rescheduled and only the
+// bounded fallback write can land the file.
+func TestWriterPersistsUnderContinuousChurn(t *testing.T) {
+	path := storePath(t)
+	s, err := LoadStore(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Peer IDs are generated here rather than in the worker: calling a
+	// testing.T-bound helper from another goroutine is undefined behaviour.
+	ids := make([]peer.ID, 64)
+	for i := range ids {
+		ids[i] = test.RandPeerIDFatal(t)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			pID := ids[i%len(ids)]
+			s.RecordPeerAddrs(pID,
+				[]string{fmt.Sprintf("/ip4/203.0.113.%d/tcp/4001/p2p/%s", i%250+1, pID.String())},
+				[]string{"tcp"}, "", "")
+			time.Sleep(1000 * time.Millisecond)
+		}
+	}()
+	// Deferred after wg.Wait so close runs first: the churn must outlast the
+	// whole observation window, or the debounce wins instead of the fallback.
+	defer wg.Wait()
+	defer close(stop)
+
+	// The debounce never wins here, so this must exceed the fallback interval
+	// or the test cannot pass by construction.
+	waitForStoreFile(t, path, peerAddrFlushMinInterval+10*time.Second)
+
+	// The writer must have landed at least the first record.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("cannot read the flushed store: %v", err)
+	}
+	var f peerAddrFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatalf("flushed store is not decodable: %v", err)
+	}
+	if len(f.Peers) == 0 {
+		t.Fatalf("flushed store has no peer records")
+	}
+}
+
 // TestNotifyBundleRecordsOnConnect is a wiring check rather than a unit test:
 // the notify callbacks in main() cannot be exercised without standing up a full
 // boot, and the whole feature is silent about being unwired.
@@ -586,12 +683,20 @@ func TestReseedPeerAddrs(t *testing.T) {
 // connections all day, never fill the store, never write boot.addrs.json, and
 // never emit an error. The regression was real — it shipped once.
 func TestNotifyBundleRecordsOnConnect(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Skipf("cannot read main.go: %v", err)
+	// Source assertions are read through here so they normalize CRLF to LF.
+	// The GitHub Actions windows-latest runner checks out with autocrlf=true
+	// while ubuntu and macos stay LF, so a multi-line Contains check written
+	// with "\n" passes on Linux and fails in CI unless the input is folded.
+	readSource := func(name string) string {
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Skipf("cannot read %s: %v", name, err)
+		}
+		return strings.ReplaceAll(string(b), "\r\n", "\n")
 	}
 
-	body := strings.Split(string(src), "ConnectedF: func")
+	src := readSource("main.go")
+	body := strings.Split(src, "ConnectedF: func")
 	if len(body) < 2 {
 		t.Fatal("ConnectedF callback not found")
 	}
@@ -606,12 +711,20 @@ func TestNotifyBundleRecordsOnConnect(t *testing.T) {
 	}
 
 	// MarkGone's early return is what makes the above fatal rather than slow.
-	// Keep the assertion explicit so someone reading the failure understands why.
-	storeSrc, err := os.ReadFile("peer_addr_store.go")
-	if err != nil {
-		t.Skipf("cannot read peer_addr_store.go: %v", err)
+	// Assert against the function's own body rather than the whole file, so the
+	// check cannot be satisfied by an unrelated early return elsewhere.
+	storeSrc := readSource("peer_addr_store.go")
+	start := strings.Index(storeSrc, "func (s *peerAddrStore) MarkGone(")
+	if start < 0 {
+		t.Fatal("MarkGone not found in peer_addr_store.go")
 	}
-	if !strings.Contains(string(storeSrc), "e, ok := s.entries[pID]\n\tif !ok {\n\t\treturn nil\n\t}") {
+	rel := strings.Index(storeSrc[start:], "\nfunc ")
+	if rel < 0 {
+		t.Fatal("end of MarkGone not found in peer_addr_store.go")
+	}
+	markGoneBody := storeSrc[start : start+rel]
+	if !strings.Contains(markGoneBody, "e, ok := s.entries[pID]") ||
+		!strings.Contains(markGoneBody, "if !ok {\n\t\treturn nil\n\t}") {
 		t.Fatal("MarkGone no-longer returns early for an unknown peer; the wiring " +
 			"guard above may no longer describe reality")
 	}
