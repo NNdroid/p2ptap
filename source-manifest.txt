@@ -1,3 +1,3 @@
-source_commit=8655d0becb9dc95d3b302fede23daa3735070d40
-package_version=v1.0.20261022.179-8655d0b
-package_release=179
+source_commit=910c0fc3d6699753d8ed45b06a9c85dd37839371
+package_version=v1.0.20261023.180-910c0fc
+package_release=180
