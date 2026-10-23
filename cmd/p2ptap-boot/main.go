@@ -471,6 +471,229 @@ func (h *peekMapHub) publishBootInfo(self host.Host, nodeName, version string) {
 	log.Debug("[peek-map] published boot node info (name=%q, id=%s)", nodeName, self.ID().String())
 }
 
+// broadcastPeerAddrFrame tells every other local client what this boot just
+// observed about pID's direct reachability: addrs are the endpoints that
+// should now be dialed, removed are the stale ones that must be dropped
+// immediately instead of waiting out the 1h peerstore TTL.
+//
+// It reuses the peek-map channel rather than adding a protocol. A frame about
+// peer X that this boot originates is safe for a receiver to apply: both
+// registerPeekMapAddrs and removePeekMapAddrs only accept addresses whose
+// /p2p/<id> suffix names the peer being described, and the frame arrives on an
+// already-PSK-authenticated stream from the boot, so the trust gate in
+// ingestPeekMapNodeInfo passes on the viaPeer basis alone.
+func (h *peekMapHub) broadcastPeerAddrFrame(from, pID peer.ID, addrs, removed []string, netID, nodeName string) {
+	if len(addrs) == 0 && len(removed) == 0 {
+		return
+	}
+	info := node.PeekMapNodeInfo{
+		PeerID:      pID.String(),
+		NodeName:    nodeName,
+		Addrs:       addrs,
+		AddrsRemove: removed,
+		// IsBoot stays false: the described peer is a mesh member.
+		// HopDistance 0 means "directly attached to the boot that announced
+		// me", which is true here; the receiver clamps it to 1 for edge
+		// weighting anyway. 0 also keeps the peer nested under the right boot
+		// in recordPeekMapOrigin, where a fabricated 1 would look like a
+		// backbone hop.
+		HopDistance: 0,
+	}
+	payload, err := json.Marshal(info)
+	if err != nil {
+		log.Warn("[peek-map] marshal peer addr frame failed: %v", err)
+		return
+	}
+	msg := PeekMapMessage{
+		Type:    PeekMapUpdate,
+		From:    from.String(),
+		Payload: payload,
+	}
+	frame, err := json.Marshal(msg)
+	if err != nil {
+		log.Warn("[peek-map] marshal peer addr frame failed: %v", err)
+		return
+	}
+	// skipMesh=true: a NAT mapping is only meaningful to peers attached to
+	// THIS boot. Relaying it across the backbone would push one cluster's
+	// mappings into another's.
+	// netID scopes delivery to the described peer's own PSK network. This is
+	// deliberately NOT "" like publishBootInfo uses: the boot's own identity is
+	// meant to be visible to every network, but a peer's address is not.
+	h.fanout(frame, pID, true, netID)
+	log.Debug("[peek-map] announced peer %s addrs=%d removed=%d net=%q", pID.ShortString(), len(addrs), len(removed), netID)
+}
+
+// directPhysicalIP returns the peer's real public IP as observed on a direct
+// connection, or "" when the peer only has circuit-relayed connections.
+//
+// This distinction matters: on a circuit-relay inbound connection the visible
+// source IP is THIS boot's own relay IP, not the peer's. Reporting that as the
+// peer's address puts the boot's geo-location on every peer attached through
+// it, which is how the world map and the physical_ip column used to be
+// polluted. "" is the honest answer — the peer's public address is unknown to
+// us.
+func directPhysicalIP(conns []network.Conn, skip network.Conn) string {
+	for _, c := range conns {
+		if skip != nil && sameConn(c, skip) {
+			continue
+		}
+		ma := c.RemoteMultiaddr()
+		if ma == nil || maddrutil.IsCircuitRelay(ma) {
+			continue
+		}
+		if ip := node.ExtractIP(ma); ip != nil {
+			return ip.String()
+		}
+	}
+	return ""
+}
+
+// observedPeerAddrs renders every DIRECT source address a peer currently has a
+// connection on in the dialable /p2p/<id>-suffixed form, plus the distinct
+// transport labels those connections use.
+//
+// Circuit-relay connections are excluded for the same reason as
+// directPhysicalIP. skip is the connection a DisconnectedF callback is firing
+// for, which libp2p may still list in ConnsToPeer at the moment the callback
+// runs.
+func observedPeerAddrs(conns []network.Conn, pID peer.ID, skip network.Conn) (addrs, transports []string) {
+	var direct []multiaddr.Multiaddr
+	for _, c := range conns {
+		if skip != nil && sameConn(c, skip) {
+			continue
+		}
+		ma := c.RemoteMultiaddr()
+		if ma == nil || maddrutil.IsCircuitRelay(ma) {
+			continue
+		}
+		direct = append(direct, ma)
+		if t := node.TransportOfConn(c); t != "" {
+			transports = appendUniqueString(transports, t)
+		}
+	}
+	if len(direct) == 0 {
+		return nil, nil
+	}
+	return dedupStrings(node.AddrsWithPeerID(direct, pID)), transports
+}
+
+// sameConn reports whether a and b are the same connection, without ever
+// comparing the two interface values directly. `c == skip` panics when the
+// dynamic type is uncomparable, and network.Conn is a plain interface — the
+// comparison is only safe today because every real libp2p conn is a pointer.
+// Conn.ID is unique per host per run, so it is the correct identity here.
+func sameConn(a, b network.Conn) bool {
+	if a == nil {
+		return b == nil
+	}
+	if b == nil {
+		return false
+	}
+	return a.ID() == b.ID()
+}
+
+// appendUniqueString appends v to out unless it is already present or empty.
+// An empty entry would be a signalling failure (a broken transport detector),
+// so it is dropped rather than propagated into every snapshot.
+func appendUniqueString(out []string, v string) []string {
+	if v == "" {
+		return out
+	}
+	for _, x := range out {
+		if x == v {
+			return out
+		}
+	}
+	return append(out, v)
+}
+
+// dedupStrings drops duplicates from a whole slice, keeping first-seen order.
+// A peer can hold two connections to the same address; recording it twice would
+// rebroadcast the same endpoint twice and pad every WebUI row.
+func dedupStrings(in []string) []string {
+	if len(in) < 2 {
+		return in
+	}
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
+// peerAddrReplayTTL is how long a replayed address is trusted in this boot's
+// own peerstore. It is a bridge, not a record: the goal is to let a pending
+// circuit CONNECT be answered before the peer reconnects and re-announces.
+// Deliberately not PermanentAddrTTL — a NAT mapping that survived a restart is
+// usually already dead, and pinning it would hide the peer's real address for
+// as long as it stays offline.
+const peerAddrReplayTTL = 10 * time.Minute
+
+// peerAddrReplayBudget caps the wall-clock length of a whole replay so a large
+// cache cannot hold up startup for minutes.
+const peerAddrReplayBudget = 2 * time.Minute
+
+// replayPeerAddrs re-broadcasts cached peer endpoints after a restart and
+// re-seeds this boot's own peerstore.
+//
+// The broadcast is for the other clients: a peer whose STUN is fully blocked
+// can never advertise its own public address, so without replay it stays stuck
+// on the relay until the mesh happens to relearn it by accident.
+//
+// The peerstore re-seed is for this boot itself: circuit Relay v2 refuses to
+// dial a destination it holds no address for, and after a restart the peerstore
+// is empty until the peer reconnects.
+func replayPeerAddrs(ctx context.Context, h host.Host, hub *peekMapHub, entries []*peerAddrEntry) (broadcast, reseeded int) {
+	if h == nil || hub == nil || len(entries) == 0 {
+		return 0, 0
+	}
+	// Fanout writes inline with a 10s deadline per listener and a stream is not
+	// safe for concurrent writes, so the loop is deliberately sequential and the
+	// stagger is what spreads the load instead of goroutines.
+	stagger := peerAddrReplayBudget / time.Duration(len(entries))
+	for _, e := range entries {
+		select {
+		case <-ctx.Done():
+			return broadcast, reseeded
+		case <-time.After(time.Duration(mathrand.Int64N(int64(stagger) + 1))):
+		}
+		pID, err := peer.Decode(e.PeerID)
+		if err != nil || pID == "" {
+			continue
+		}
+		if len(e.Addrs) > 0 {
+			reseeded += reseedPeerAddrs(h, pID, e.Addrs)
+		}
+		hub.broadcastPeerAddrFrame(h.ID(), pID, e.Addrs, nil, e.NetworkID, e.NodeName)
+		broadcast++
+	}
+	return broadcast, reseeded
+}
+
+// reseedPeerAddrs loads addrs into this boot's own peerstore under
+// peerAddrReplayTTL and returns how many were accepted.
+func reseedPeerAddrs(h host.Host, pID peer.ID, addrs []string) int {
+	var mas []multiaddr.Multiaddr
+	for _, s := range addrs {
+		ma, err := multiaddr.NewMultiaddr(s)
+		if err != nil {
+			continue
+		}
+		mas = append(mas, ma)
+	}
+	if len(mas) == 0 {
+		return 0
+	}
+	h.Peerstore().AddAddrs(pID, mas, peerAddrReplayTTL)
+	return len(mas)
+}
+
 // incrementPeekMapHop adds 1 to the payload's "hop_distance" field so that
 // cascaded boot nodes accumulate the number of boot relays between the
 // publisher and each downstream receiver. Every other payload field is
@@ -1389,6 +1612,23 @@ func main() {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Load the peer address store before anything can observe a connection, so
+	// the first peer that connects is recorded. A read failure is not fatal:
+	// the store holds derived, rebuildable state, and the flush will report the
+	// write-side failure repeatedly if the path is genuinely unusable.
+	var peerAddrs *peerAddrStore
+	if cfg.EnablePeerAddrCache {
+		var serr error
+		peerAddrs, serr = LoadStore(cfg.PeerAddrFile, 0)
+		if serr != nil {
+			fmt.Printf("Warning: could not load peer address store %s: %v (starting with an empty store)\n", cfg.PeerAddrFile, serr)
+		} else {
+			fmt.Printf("[+] Peer address cache: %s\n", cfg.PeerAddrFile)
+		}
+	} else {
+		fmt.Println("[!] Peer address cache disabled (enable_peer_addr_cache=false)")
+	}
 	defer cancel()
 
 	// Initialize hub BEFORE any stream handler is registered. The PSK auth
@@ -1780,6 +2020,42 @@ func main() {
 	fmt.Printf("[+] Boot-relay & relay-control handlers registered (protocols: %s, %s, %s)\n",
 		BootRelayProtocolID, BootRelayBackboneProtocolID, RelayCtrlProtocolID)
 
+	// Remember what this boot observes about a peer's direct endpoints and tell
+	// the other local clients about the change. conns is the peer's current
+	// connection set; skip is the link being dropped (may still be listed);
+	// gone means the peer has no links left at all.
+	//
+	// Always dispatched to its own goroutine: broadcastPeerAddrFrame calls
+	// fanout, which writes inline with a 10s deadline per listener. Running that
+	// inside libp2p's notify callback would stall the notify thread behind one
+	// unresponsive peer and block every other connection notification.
+	onPeerAddrChange := func(pID peer.ID, conns []network.Conn, skip network.Conn, gone bool) {
+		if peerAddrs == nil {
+			return
+		}
+		// Both values must be read while the peer is still registered: the
+		// cleanup below RemoveAuthenticated's and un-caches it, after which both
+		// would read empty.
+		netID := aclFilter.NetworkOf(pID)
+		nodeName := ""
+		if v, ok := peerInfoCache.Load(pID); ok {
+			if ci, ok := v.(clientNodeInfo); ok {
+				nodeName = ci.NodeName
+			}
+		}
+		go func() {
+			var addrs, removed []string
+			if gone {
+				removed = peerAddrs.MarkGone(pID)
+			} else {
+				var transports []string
+				addrs, transports = observedPeerAddrs(conns, pID, skip)
+				removed = peerAddrs.RecordPeerAddrs(pID, addrs, transports, netID, nodeName)
+			}
+			hub.broadcastPeerAddrFrame(h.ID(), pID, addrs, removed, netID, nodeName)
+		}()
+	}
+
 	// 8. Log peer connection/disconnection events.
 	// Protect() every connected peer from the ConnManager so relay links are
 	// never silently trimmed (a trimmed link is the root cause of circuitv2
@@ -1805,10 +2081,7 @@ func main() {
 			case "webtransport":
 				transportName = "WebTransport"
 			}
-			phyIP := ""
-			if ip := node.ExtractIP(conn.RemoteMultiaddr()); ip != nil {
-				phyIP = ip.String()
-			}
+			phyIP := directPhysicalIP(h.Network().ConnsToPeer(pID), nil)
 			bootAlerts.Add("info", "peer_connect", pID.ShortString(),
 				fmt.Sprintf("Peer connected: %s via %s (%s)", pID.ShortString(), transportName, phyIP))
 			// Trigger initial ping probe to immediately measure RTT.
@@ -1842,6 +2115,10 @@ func main() {
 			// every NEW circuit CONNECT is denied (auth removed) and it silently
 			// stops receiving peer-discovery broadcasts.
 			if h.Network().Connectedness(peerID) != network.Connected {
+				// The peer is gone for good: mark its cached endpoints as
+				// retracted and tell the mesh to drop them now rather than
+				// waiting out the 1h peerstore TTL.
+				onPeerAddrChange(peerID, h.Network().ConnsToPeer(peerID), conn, true)
 				h.ConnManager().Unprotect(peerID, "relay-peer")
 				aclFilter.RemoveAuthenticated(peerID)
 				hub.unregister(peerID)
@@ -1860,6 +2137,12 @@ func main() {
 				}
 				bootAlerts.Add("info", "peer_disconnect", peerID.ShortString(),
 					fmt.Sprintf("Peer disconnected: %s (online %s)", peerID.ShortString(), duration))
+			} else {
+				// A link dropped but the peer is still attached on another one.
+				// Re-record the surviving set so the dropped link's address is
+				// retracted here too — otherwise it stays in the mesh until the
+				// 1h peerstore TTL expires.
+				onPeerAddrChange(peerID, h.Network().ConnsToPeer(peerID), conn, false)
 			}
 		},
 	})
@@ -1913,6 +2196,7 @@ func main() {
 			geoIPPath:   geoDBPath,
 			sessions:    gSessions,
 			traffic:     gTraffic,
+			peerAddrs:   peerAddrs,
 			listenAddrs: listenAddrs,
 		}
 
@@ -1949,12 +2233,24 @@ func main() {
 
 	printBootstrapBanner(h, nodeNameVal, pskEnabled, webServer)
 
+	// Replay cached peer addresses now that the hub is live, so a restart does
+	// not leave the mesh without the endpoints it had before. Window-filtered,
+	// because NAT mappings rarely survive a day.
+	if peerAddrs != nil {
+		if n, m := replayPeerAddrs(ctx, h, hub, peerAddrs.SnapshotWithin(cfg.PeerAddrRebroadcastWindow)); n > 0 {
+			fmt.Printf("[+] Replayed %d cached peer address record(s) covering %d address(es)\n", n, m)
+		}
+	}
+
 	// Wait for OS shutdown signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
 	fmt.Println("\nShutting down bootstrap server...")
+	if peerAddrs != nil {
+		peerAddrs.Close()
+	}
 	if webServer != nil {
 		_ = webServer.Stop(context.Background())
 	}
@@ -1977,6 +2273,7 @@ type bootDataProviderImpl struct {
 	geoIPPath   string
 	sessions    *sessionTracker
 	traffic     *trafficHistory
+	peerAddrs   *peerAddrStore
 	listenAddrs []string
 }
 
@@ -2073,6 +2370,112 @@ func (p *bootDataProviderImpl) GetPeerNodeInfo(id peer.ID) (string, string, stri
 	return "", "", "", "", "", "", "", nil, false, "", ""
 }
 
+func (p *bootDataProviderImpl) GetPeerObservedAddrs(id peer.ID) *bootweb.ObservedAddrsDTO {
+	e := p.peerAddrs.Entry(id)
+	if e == nil {
+		return nil
+	}
+	return &bootweb.ObservedAddrsDTO{
+		Addrs:       e.Addrs,
+		Transports:  e.Transports,
+		NetworkID:   e.NetworkID,
+		FirstSeenAt: formatPeerAddrTime(e.FirstSeen),
+		LastSeenAt:  formatPeerAddrTime(e.LastSeen),
+		SeenCount:   e.SeenCount,
+	}
+}
+
+func (p *bootDataProviderImpl) GetPeerConnectedSince(id peer.ID) (time.Time, bool) {
+	if v, ok := gPeerConnectTimes.Load(id); ok {
+		if t, ok := v.(time.Time); ok {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func (p *bootDataProviderImpl) GetLastSeenPeers(limit int) []bootweb.LastSeenPeerDTO {
+	if limit <= 0 {
+		limit = 200
+	}
+	h := p.GetHost()
+	connected := make(map[peer.ID]bool)
+	if h != nil {
+		for _, pid := range h.Network().Peers() {
+			if h.Network().Connectedness(pid) == network.Connected {
+				connected[pid] = true
+			}
+		}
+	}
+	now := time.Now()
+	var out []bootweb.LastSeenPeerDTO
+	for _, e := range p.peerAddrs.Snapshot() {
+		pid, err := peer.Decode(e.PeerID)
+		if err != nil || connected[pid] {
+			continue
+		}
+		// An empty node name is usually a peer whose info frame we saw only
+		// after it had already disconnected; the short ID is still useful.
+		name := e.NodeName
+		if name == "" {
+			name = pid.ShortString()
+		}
+		out = append(out, bootweb.LastSeenPeerDTO{
+			PeerID:      e.PeerID,
+			ShortID:     formatShortPeerID(pid),
+			NodeName:    name,
+			Addrs:       e.Addrs,
+			Transports:  e.Transports,
+			NetworkID:   e.NetworkID,
+			FirstSeenAt: formatPeerAddrTime(e.FirstSeen),
+			LastSeenAt:  formatPeerAddrTime(e.LastSeen),
+			LastSeenAgo: humanDuration(now.Sub(e.LastSeen)),
+			SeenCount:   e.SeenCount,
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// formatPeerAddrTime renders a store timestamp for the WebUI. Zero times render
+// as "" rather than "0001-01-01", which would read as a bug.
+func formatPeerAddrTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format("2006-01-02 15:04:05")
+}
+
+// formatShortPeerID duplicates the WebUI's short-ID convention so the boot's
+// own provider output matches the dashboard's peer rows.
+func formatShortPeerID(pid peer.ID) string {
+	s := pid.String()
+	if len(s) <= 16 {
+		return s
+	}
+	return s[:7] + "..." + s[len(s)-6:]
+}
+
+// humanDuration renders a duration the way an operator expects to read it in
+// a "last seen" column.
+func humanDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
 func (p *bootDataProviderImpl) GetMeshPeers() []bootweb.MeshPeerInfo {
 	out := make([]bootweb.MeshPeerInfo, 0, len(p.meshInfos))
 	for _, mi := range p.meshInfos {
@@ -2123,10 +2526,7 @@ func (p *bootDataProviderImpl) GetGeoNodes() []bootweb.GeoNodeDTO {
 		if len(conns) == 0 {
 			continue
 		}
-		phyIP := ""
-		if ip := node.ExtractIP(conns[0].RemoteMultiaddr()); ip != nil {
-			phyIP = ip.String()
-		}
+		phyIP := directPhysicalIP(conns, nil)
 		lat, lon, country, city := p.geoIP.Lookup(phyIP)
 		if lat == 0 && lon == 0 {
 			continue
@@ -2169,14 +2569,8 @@ func (p *bootDataProviderImpl) GetGeoArcs() []bootweb.GeoArcDTO {
 		if len(srcConns) == 0 || len(dstConns) == 0 {
 			continue
 		}
-		srcIP := ""
-		if ip := node.ExtractIP(srcConns[0].RemoteMultiaddr()); ip != nil {
-			srcIP = ip.String()
-		}
-		dstIP := ""
-		if ip := node.ExtractIP(dstConns[0].RemoteMultiaddr()); ip != nil {
-			dstIP = ip.String()
-		}
+		srcIP := directPhysicalIP(srcConns, nil)
+		dstIP := directPhysicalIP(dstConns, nil)
 		srcLat, srcLon, _, _ := p.geoIP.Lookup(srcIP)
 		dstLat, dstLon, _, _ := p.geoIP.Lookup(dstIP)
 		if (srcLat == 0 && srcLon == 0) || (dstLat == 0 && dstLon == 0) {

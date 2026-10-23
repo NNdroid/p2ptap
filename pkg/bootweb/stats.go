@@ -10,6 +10,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
+	"p2ptap/pkg/maddrutil"
 	"p2ptap/pkg/node"
 	"p2ptap/pkg/version"
 )
@@ -61,6 +62,44 @@ type PeerItemDTO struct {
 	AllMultiaddrs     []string `json:"all_multiaddrs"`
 	ObfsAlgo          string   `json:"obfs_algo"`
 	ObfsMode          string   `json:"obfs_mode"`
+
+	// LastSeenPublicAddrs is this boot's PERSISTENT record of the peer's direct
+	// endpoints, from the peer address store. It survives a disconnect and a
+	// restart, unlike RemoteMultiaddr / AllMultiaddrs which describe only live
+	// connections and the live peerstore.
+	LastSeenPublicAddrs []string `json:"last_seen_public_addrs"`
+	FirstSeenAt         string   `json:"first_seen_at"`
+	LastSeenAt          string   `json:"last_seen_at"`
+	DirectSeenCount     int      `json:"direct_seen_count"`
+}
+
+// ObservedAddrsDTO is the boot's persistent record of the public source
+// addresses it has seen a peer connect from. It is the display form of the
+// peer address store entry.
+type ObservedAddrsDTO struct {
+	Addrs       []string `json:"addrs"`
+	Transports  []string `json:"transports"`
+	NetworkID   string   `json:"network_id"`
+	FirstSeenAt string   `json:"first_seen_at"`
+	LastSeenAt  string   `json:"last_seen_at"`
+	SeenCount   int      `json:"seen_count"`
+}
+
+// LastSeenPeerDTO describes a peer the boot has observed a direct connection
+// from but which is not currently connected. It is how the operator still sees
+// history after a restart, and it is the only place a peer whose STUN is fully
+// blocked shows up at all.
+type LastSeenPeerDTO struct {
+	PeerID      string   `json:"peer_id"`
+	ShortID     string   `json:"short_id"`
+	NodeName    string   `json:"node_name"`
+	Addrs       []string `json:"addrs"`
+	Transports  []string `json:"transports"`
+	NetworkID   string   `json:"network_id"`
+	FirstSeenAt string   `json:"first_seen_at"`
+	LastSeenAt  string   `json:"last_seen_at"`
+	LastSeenAgo string   `json:"last_seen_ago"`
+	SeenCount   int      `json:"seen_count"`
 }
 
 // SubnetRouteDTO represents an advertised subnet route learned from a client node.
@@ -211,6 +250,7 @@ type BootDashboardDTO struct {
 	TrafficHistory []TrafficPoint    `json:"traffic_history"`
 	Health         HealthCheckDTO    `json:"health"`
 	Config         ConfigSummaryDTO  `json:"config"`
+	LastSeenPeers  []LastSeenPeerDTO `json:"last_seen_peers"`
 }
 
 // BootDataProvider provides an interface for extracting live data from the boot server.
@@ -236,6 +276,16 @@ type BootDataProvider interface {
 	GetTrafficHistory() []TrafficPoint
 	GetHealth(peers []PeerItemDTO) HealthCheckDTO
 	GetConfigSummary() ConfigSummaryDTO
+	// GetPeerObservedAddrs returns the boot's persistent record of the public
+	// addresses observed for p, or nil if the peer has never been seen directly.
+	// Nil-safe: implementations may return nil when the cache is disabled.
+	GetPeerObservedAddrs(p peer.ID) *ObservedAddrsDTO
+	// GetPeerConnectedSince returns when p first connected in this process, for
+	// the duration column. false means "no such record", which renders as "".
+	GetPeerConnectedSince(p peer.ID) (time.Time, bool)
+	// GetLastSeenPeers returns peers that have a cached address record but are
+	// not currently connected, most recently seen first, capped at limit.
+	GetLastSeenPeers(limit int) []LastSeenPeerDTO
 }
 
 // MeshPeerInfo holds static info about a configured mesh boot.
@@ -385,8 +435,19 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 				c := conns[0]
 				ma := c.RemoteMultiaddr()
 				remoteAddrStr = ma.String()
-				if ip := node.ExtractIP(ma); ip != nil {
-					physicalIP = ip.String()
+				// Only a DIRECT connection reveals the peer's real public IP. On
+				// a circuit-relayed link the source IP is the boot's own relay
+				// IP, so attributing it to the peer puts the boot's location on
+				// every peer routed through it. "" is the honest answer.
+				for _, cc := range conns {
+					cma := cc.RemoteMultiaddr()
+					if cma == nil || maddrutil.IsCircuitRelay(cma) {
+						continue
+					}
+					if ip := node.ExtractIP(cma); ip != nil {
+						physicalIP = ip.String()
+						break
+					}
 				}
 
 				switch node.TransportOfConn(c) {
@@ -398,6 +459,8 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 					transport = "WebTransport"
 				case "tcp":
 					transport = "TCP"
+				case "circuit":
+					transport = "Circuit Relay"
 				}
 
 				if c.Stat().Direction == network.DirOutbound {
@@ -424,32 +487,53 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 				rttMs = latency.Milliseconds()
 			}
 
+			// Connection duration. These two columns used to be hard-coded "" —
+			// the boot records the connect time in gPeerConnectTimes but nothing
+			// ever read it for the dashboard.
+			connectedTime, connectedDuration := "", ""
+			if since, ok := p.GetPeerConnectedSince(pid); ok {
+				connectedTime = since.Format("2006-01-02 15:04:05")
+				connectedDuration = now.Sub(since).Round(time.Second).String()
+			}
+
+			// The persistent, restart-surviving record of this peer's public
+			// addresses. nil-safe: an empty ObservedAddrsDTO renders all-empty,
+			// which is the right answer for a peer only ever seen over the relay.
+			lastSeenAddrs := ObservedAddrsDTO{}
+			if o := p.GetPeerObservedAddrs(pid); o != nil {
+				lastSeenAddrs = *o
+			}
+
 			item := PeerItemDTO{
-				PeerID:            pid.String(),
-				ShortID:           formatShortPeerID(pid),
-				NodeName:          nodeName,
-				RemoteMultiaddr:   remoteAddrStr,
-				PhysicalIP:        physicalIP,
-				Transport:         transport,
-				Direction:         direction,
-				ConnectedTime:     "",
-				ConnectedDuration: "",
-				IsAuthenticated:   isAuthed,
-				NetworkID:         netID,
-				HasPeekMapStream:  hasPeekMap,
-				HasBootRelay:      hasBootRelay,
-				LatencyMs:         rttMs,
-				TapIP:             tapIP,
-				TapIPv6:           tapIPv6,
-				TapMAC:            tapMAC,
-				OS:                osStr,
-				Arch:              archStr,
-				Version:           verStr,
-				AdvertisedSubnets: subnets,
-				IsExitNode:        isExit,
-				AllMultiaddrs:     allMultiaddrs,
-				ObfsAlgo:          obfsAlgo,
-				ObfsMode:          obfsMode,
+				PeerID:              pid.String(),
+				ShortID:             formatShortPeerID(pid),
+				NodeName:            nodeName,
+				RemoteMultiaddr:     remoteAddrStr,
+				PhysicalIP:          physicalIP,
+				Transport:           transport,
+				Direction:           direction,
+				ConnectedTime:       connectedTime,
+				ConnectedDuration:   connectedDuration,
+				IsAuthenticated:     isAuthed,
+				NetworkID:           netID,
+				HasPeekMapStream:    hasPeekMap,
+				HasBootRelay:        hasBootRelay,
+				LatencyMs:           rttMs,
+				TapIP:               tapIP,
+				TapIPv6:             tapIPv6,
+				TapMAC:              tapMAC,
+				OS:                  osStr,
+				Arch:                archStr,
+				Version:             verStr,
+				AdvertisedSubnets:   subnets,
+				IsExitNode:          isExit,
+				AllMultiaddrs:       allMultiaddrs,
+				ObfsAlgo:            obfsAlgo,
+				ObfsMode:            obfsMode,
+				LastSeenPublicAddrs: lastSeenAddrs.Addrs,
+				FirstSeenAt:         lastSeenAddrs.FirstSeenAt,
+				LastSeenAt:          lastSeenAddrs.LastSeenAt,
+				DirectSeenCount:     lastSeenAddrs.SeenCount,
 			}
 			peersList = append(peersList, item)
 
@@ -553,8 +637,14 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 		TrafficHistory: trafficHistory,
 		Health:         health,
 		Config:         config,
+		LastSeenPeers:  p.GetLastSeenPeers(lastSeenPeersLimit),
 	}
 }
+
+// lastSeenPeersLimit caps the "previously seen" list. It is a display cap, not
+// a data cap — the store keeps everything, so a larger cache still works and
+// the operator just sees the most recent portion.
+const lastSeenPeersLimit = 200
 
 func formatShortPeerID(pid peer.ID) string {
 	s := pid.String()

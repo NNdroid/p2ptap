@@ -2,12 +2,14 @@ package bootweb
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -16,9 +18,24 @@ type mockBootDataProvider struct {
 	nodeName   string
 	pskEnabled bool
 	alerts     *AlertBuffer
+
+	// host, when non-nil, makes CollectDashboard walk its live peer list.
+	host host.Host
+	// connectedSince / hasSince feed the connection-duration column.
+	connectedSince time.Time
+	hasSince       bool
+	// observed is what the persistent address cache says about a peer.
+	observed *ObservedAddrsDTO
+	// lastSeen is the "seen before, not connected now" list.
+	lastSeen []LastSeenPeerDTO
 }
 
-func (m *mockBootDataProvider) GetHost() host.Host                 { return nil }
+func (m *mockBootDataProvider) GetHost() host.Host {
+	if m.host != nil {
+		return m.host
+	}
+	return nil
+}
 func (m *mockBootDataProvider) GetNodeName() string                { return m.nodeName }
 func (m *mockBootDataProvider) GetStartTime() time.Time            { return time.Now().Add(-10 * time.Minute) }
 func (m *mockBootDataProvider) IsPSKEnabled() bool                 { return m.pskEnabled }
@@ -50,6 +67,18 @@ func (m *mockBootDataProvider) GetHealth(peers []PeerItemDTO) HealthCheckDTO {
 }
 func (m *mockBootDataProvider) GetConfigSummary() ConfigSummaryDTO {
 	return ConfigSummaryDTO{NodeName: m.nodeName, PSKCount: 2}
+}
+func (m *mockBootDataProvider) GetPeerObservedAddrs(p peer.ID) *ObservedAddrsDTO {
+	return m.observed
+}
+func (m *mockBootDataProvider) GetPeerConnectedSince(p peer.ID) (time.Time, bool) {
+	return m.connectedSince, m.hasSince
+}
+func (m *mockBootDataProvider) GetLastSeenPeers(limit int) []LastSeenPeerDTO {
+	if limit > 0 && len(m.lastSeen) > limit {
+		return m.lastSeen[:limit]
+	}
+	return m.lastSeen
 }
 
 func TestBootWebAuthAndStats(t *testing.T) {
@@ -187,5 +216,84 @@ func TestBootWebAuthAndStats(t *testing.T) {
 	}
 	if len(dash.Alerts) != 1 {
 		t.Errorf("expected 1 alert, got %d", len(dash.Alerts))
+	}
+}
+
+// TestCollectDashboardPeerAddressFields pins the two pieces of the dashboard
+// that came from the boot's persistent address cache: the per-peer fields
+// (last-seen public addrs, connect duration, direct-connection count) and the
+// disconnected-but-seen-before list. Both need a real host, because the peer
+// list comes from Network().Peers().
+func TestCollectDashboardPeerAddressFields(t *testing.T) {
+	boot, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"))
+	if err != nil {
+		t.Skipf("cannot create a localhost host: %v", err)
+	}
+	defer boot.Close()
+	client, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"))
+	if err != nil {
+		t.Skipf("cannot create a localhost host: %v", err)
+	}
+	defer client.Close()
+
+	// A live connection is what puts the peer in Network().Peers(); it is held
+	// for the whole test rather than closed and hoped to linger in the registry.
+	if err := boot.Connect(context.Background(), peer.AddrInfo{ID: client.ID(), Addrs: client.Addrs()}); err != nil {
+		t.Skipf("cannot connect localhost hosts: %v", err)
+	}
+
+	since := time.Now().Add(-9 * time.Minute)
+	mockProvider := &mockBootDataProvider{
+		nodeName:       "MockBoot",
+		pskEnabled:     true,
+		host:           boot,
+		connectedSince: since,
+		hasSince:       true,
+		observed: &ObservedAddrsDTO{
+			Addrs:       []string{"/ip4/203.0.113.5/udp/443/quic-v1/p2p/" + client.ID().String()},
+			Transports:  []string{"quic"},
+			NetworkID:   "6b87ce74b335cc1a",
+			FirstSeenAt: since.Add(-24 * time.Hour).Format(time.RFC3339),
+			LastSeenAt:  since.Format(time.RFC3339),
+			SeenCount:   7,
+		},
+		lastSeen: []LastSeenPeerDTO{
+			{PeerID: "12D3KooWSeenBefore", ShortID: "12D3KooWSe", NodeName: "old-node",
+				Addrs:      []string{"/ip4/198.51.100.9/tcp/4001/p2p/12D3KooWSeenBefore"},
+				Transports: []string{"tcp"}, NetworkID: "6b87ce74b335cc1a",
+				FirstSeenAt: since.Add(-48 * time.Hour).Format(time.RFC3339),
+				LastSeenAt:  since.Add(-2 * time.Hour).Format(time.RFC3339),
+				LastSeenAgo: "2h ago", SeenCount: 3},
+		},
+	}
+
+	dash := CollectDashboard(mockProvider)
+
+	if len(dash.Peers) != 1 {
+		t.Fatalf("expected exactly 1 connected peer, got %d", len(dash.Peers))
+	}
+	got := dash.Peers[0]
+	if got.PeerID != client.ID().String() {
+		t.Fatalf("peer ID = %s, want %s", got.PeerID, client.ID())
+	}
+	if len(got.LastSeenPublicAddrs) != 1 || got.LastSeenPublicAddrs[0] != "/ip4/203.0.113.5/udp/443/quic-v1/p2p/"+client.ID().String() {
+		t.Errorf("LastSeenPublicAddrs = %v", got.LastSeenPublicAddrs)
+	}
+	if got.DirectSeenCount != 7 {
+		t.Errorf("DirectSeenCount = %d, want 7", got.DirectSeenCount)
+	}
+	if got.ConnectedTime == "" {
+		t.Errorf("ConnectedTime is empty; the duration column must be filled")
+	}
+	if got.ConnectedDuration == "" {
+		t.Errorf("ConnectedDuration is empty; the duration column must be filled")
+	}
+	if got.Transport == "unknown" {
+		t.Errorf("Transport = %q, want the resolved transport", got.Transport)
+	}
+
+	// The previously-seen list is served by the provider, capped by the caller.
+	if len(dash.LastSeenPeers) != 1 || dash.LastSeenPeers[0].PeerID != "12D3KooWSeenBefore" {
+		t.Fatalf("LastSeenPeers = %+v", dash.LastSeenPeers)
 	}
 }

@@ -228,6 +228,36 @@
             <div id="subnetPagination"></div>
         </div>
 
+        <!-- Persistent Public Addresses of Previously-Direct Peers -->
+        <div class="card" id="lastSeenCard" style="display: none;">
+            <div class="section-header">
+                <div class="section-title">
+                    <span style="color: #38bdf8;">📡</span>
+                    <span data-i18n="last_seen_sec">已断开但曾直连的节点</span>
+                </div>
+                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                    <input type="text" id="lastSeenSearchInput" class="search-input" data-i18n-ph="alert_search_ph" placeholder="🔍 搜索节点/地址..." oninput="onLastSeenSearch()" />
+                    <span class="badge badge-outline" id="lastSeenCountBadge">0</span>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th data-i18n="th_peer_id">Peer ID</th>
+                            <th data-i18n="last_seen_lbl_addrs">公网地址</th>
+                            <th data-i18n="th_psk_net">所属 PSK 网络</th>
+                            <th data-i18n="last_seen_lbl_ago">距今</th>
+                        </tr>
+                    </thead>
+                    <tbody id="lastSeenTableBody">
+                        <!-- Injected via JS -->
+                    </tbody>
+                </table>
+            </div>
+            <div id="lastSeenPagination"></div>
+        </div>
+
         <!-- Module H: Network Health Check -->
         <div class="card" id="healthCard" style="display: none;">
             <div class="section-header">

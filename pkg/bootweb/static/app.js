@@ -216,6 +216,7 @@
             renderNetworkGroups();
             renderConfig();
             renderResourceMonitor();
+            renderLastSeenPeers();
 
             renderPeersTable();
             drawTopology();
@@ -227,14 +228,16 @@
             alerts: '',
             peers: '',
             sessions: '',
-            subnets: ''
+            subnets: '',
+            lastSeen: ''
         };
         const pageState = {
             timeline: 1,
             alerts: 1,
             peers: 1,
             sessions: 1,
-            subnets: 1
+            subnets: 1,
+            lastSeen: 1
         };
         const PAGE_SIZE = 10;
 
@@ -322,6 +325,60 @@
         function setSubnetPage(p) {
             pageState.subnets = p;
             renderSubnets();
+        }
+
+        /* ── Persistent Public Addresses of Previously-Direct Peers ────────
+           These entries come from the boot's on-disk peer address store, so they
+           outlive a disconnect and a boot restart. The card stays hidden when the
+           store is empty (nothing ever went direct, or the cache is disabled). */
+        function onLastSeenSearch() {
+            const input = document.getElementById('lastSeenSearchInput');
+            searchState.lastSeen = input ? input.value : '';
+            pageState.lastSeen = 1;
+            renderLastSeenPeers();
+        }
+        function setLastSeenPage(p) {
+            pageState.lastSeen = p;
+            renderLastSeenPeers();
+        }
+        function renderLastSeenPeers() {
+            const peers = state.last_seen_peers || [];
+            const card = document.getElementById('lastSeenCard');
+            const q = (searchState.lastSeen || '').toLowerCase();
+            let filtered = peers;
+            if (q) {
+                filtered = peers.filter(p => (p.node_name && p.node_name.toLowerCase().includes(q)) ||
+                                              (p.peer_id && p.peer_id.toLowerCase().includes(q)) ||
+                                              (p.short_id && p.short_id.toLowerCase().includes(q)) ||
+                                              (p.network_id && p.network_id.toLowerCase().includes(q)) ||
+                                              (p.addrs && p.addrs.join(' ').toLowerCase().includes(q)));
+            }
+            if (peers.length === 0 && !q) { card.style.display = 'none'; return; }
+            card.style.display = 'block';
+            document.getElementById('lastSeenCountBadge').textContent = filtered.length;
+
+            const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+            if (pageState.lastSeen > totalPages) pageState.lastSeen = totalPages;
+            const start = (pageState.lastSeen - 1) * PAGE_SIZE;
+            const pageItems = filtered.slice(start, start + PAGE_SIZE);
+
+            const body = document.getElementById('lastSeenTableBody');
+            if (pageItems.length === 0) {
+                body.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 24px;">${t('no_matching_last_seen')}</td></tr>`;
+            } else {
+                body.innerHTML = pageItems.map(p => `
+                    <tr>
+                        <td>
+                            <div style="font-weight: 600; color: var(--text-primary);">${escapeHtml(p.node_name || '--')}</div>
+                            <div class="peer-id-cell" onclick="copyText('${p.peer_id}')">${highlightMatch(p.short_id, q)}</div>
+                        </td>
+                        <td style="font-size: 11px; color: var(--text-secondary); font-family: monospace;">${(p.addrs || []).map(a => highlightMatch(a, q)).join('<br>')}</td>
+                        <td>${p.network_id ? `<span class="badge badge-purple" style="font-size: 10px;">net=${highlightMatch(p.network_id.substring(0, 8), q)}</span>` : '<span class="badge badge-info">default</span>'}</td>
+                        <td style="white-space: nowrap; font-size: 11px; color: var(--text-muted);">${escapeHtml(p.last_seen_ago || '--')}</td>
+                    </tr>
+                `).join('');
+            }
+            renderPagination('lastSeenPagination', pageState.lastSeen, filtered.length, PAGE_SIZE, 'setLastSeenPage');
         }
 
         function renderSubnets() {
@@ -1471,6 +1528,16 @@
                     <div class="drawer-section-label">${t('drawer_sec_multiaddrs')} (${peer.all_multiaddrs.length})</div>
                     <div class="drawer-multiaddrs-box">
                         ${peer.all_multiaddrs.map(a => `<div class="drawer-multiaddr-item">${escapeHtml(a)}</div>`).join('')}
+                    </div>
+                </div>` : ''}
+                ${peer.first_seen_at || peer.last_seen_at ? `
+                <div class="drawer-section">
+                    <div class="drawer-section-label">${t('drawer_sec_observed_addrs')}${(peer.last_seen_public_addrs || []).length ? ` (${peer.last_seen_public_addrs.length})` : ''}</div>
+                    ${peer.last_seen_public_addrs && peer.last_seen_public_addrs.length ? `<div class="drawer-multiaddrs-box">${peer.last_seen_public_addrs.map(a => `<div class="drawer-multiaddr-item">${escapeHtml(a)}</div>`).join('')}</div>` : ''}
+                    <div class="config-grid" style="margin-top: 6px;">
+                        <span class="config-key">${t('drawer_lbl_first_seen')}</span><span class="config-val" style="font-family: monospace; font-size: 11px;">${escapeHtml(peer.first_seen_at || '--')}</span>
+                        <span class="config-key">${t('drawer_lbl_last_seen')}</span><span class="config-val" style="font-family: monospace; font-size: 11px;">${escapeHtml(peer.last_seen_at || '--')}</span>
+                        <span class="config-key">${t('drawer_lbl_seen_count')}</span><span class="config-val">${peer.direct_seen_count || 0}</span>
                     </div>
                 </div>` : ''}
                 ${alerts.length > 0 ? `

@@ -726,6 +726,15 @@ type PeekMapNodeInfo struct {
 	// carrying endpoints here, a peer in cluster B can dial a peer in cluster A
 	// directly (or hole-punch to it) instead of being permanently unreachable.
 	Addrs []string `json:"addrs,omitempty"`
+	// AddrsRemove is the retraction half of Addrs: endpoints the publisher says
+	// are no longer reachable. Without it a moved/stale address stays in every
+	// peer's peerstore until the 1h AddressTTL expires, which is what makes
+	// "the peer changed its public IP" take an hour to propagate. A bootstrap
+	// emits this when a peer disconnects or drops a transport, since it is the
+	// one place in the mesh that can see the peer's real source address go away.
+	// Older nodes ignore the unknown field and lose only the immediacy, never
+	// correctness.
+	AddrsRemove []string `json:"addrs_remove,omitempty"`
 	// IsBoot marks the publisher as a bootstrap/relay node rather than a mesh
 	// member. Receivers use it to optionally attach to boots they discovered
 	// through the backbone, which merges the two clusters into one
@@ -906,6 +915,13 @@ func (n *Node) ingestPeekMapNodeInfo(info PeekMapNodeInfo, viaPeer peer.ID) {
 	// boot), so it would show up in the UI and stay permanently unreachable.
 	n.registerPeekMapAddrs(pID, info.Addrs)
 
+	// And drop the ones the publisher says are dead. Kept immediately below the
+	// add path on purpose: add and remove must be symmetric. Gating remove but
+	// not add behind the trust check above would make the attack surface one-way
+	// — anyone could poison the mesh with addresses, but only a trusted relay
+	// could clean them up.
+	n.removePeekMapAddrs(pID, info.AddrsRemove)
+
 	// A boot learned through the backbone can be attached to, which merges the
 	// two clusters into a single circuit-relay domain.
 	if info.IsBoot {
@@ -979,10 +995,10 @@ func (n *Node) lookupPeekMapOrigin(pID peer.ID) (peekMapOrigin, bool) {
 
 // registerPeekMapAddrs stores endpoints advertised over the peek-map channel.
 //
-	// AddressTTL (not PermanentAddrTTL) is deliberate: these are third-party claims
-	// relayed through a boot, so they must expire if the peer stops republishing.
-	// The peek-map republishes on every change and on every new peer, which keeps
-	// live entries fresh.
+// AddressTTL (not PermanentAddrTTL) is deliberate: these are third-party claims
+// relayed through a boot, so they must expire if the peer stops republishing.
+// The peek-map republishes on every change and on every new peer, which keeps
+// live entries fresh.
 func (n *Node) registerPeekMapAddrs(pID peer.ID, addrs []string) {
 	if len(addrs) == 0 {
 		return
@@ -1016,6 +1032,48 @@ func (n *Node) registerPeekMapAddrs(pID peer.ID, addrs []string) {
 	}
 	n.Host.Peerstore().AddAddrs(pID, parsed, peerstore.AddressTTL)
 	log.Debug("Peek-map registered %d dialable addr(s) for %s", len(parsed), pID.ShortString())
+}
+
+// removePeekMapAddrs drops endpoints a publisher says are no longer reachable,
+// applying the same /p2p/<id> suffix validation as registerPeekMapAddrs. A
+// publisher may only retract addresses that name the peer being described, so a
+// frame cannot make the mesh stop dialing an address for a peer it does not
+// control.
+//
+// SetAddrs with a zero TTL is the only delete primitive this fork exposes: the
+// AddrBook interface has no RemoveAddr, and pstoremem resolves ttl<=0 to a
+// targeted delete of exactly the named addresses. ClearAddrs is not an
+// option — it would also wipe the peer's circuit address and anything learned
+// from the DHT. Because Addrs() filters by expiry, the removal takes effect on
+// the very next dial rather than after the TTL.
+func (n *Node) removePeekMapAddrs(pID peer.ID, addrs []string) {
+	if len(addrs) == 0 {
+		return
+	}
+	parsed := make([]multiaddr.Multiaddr, 0, len(addrs))
+	for _, s := range addrs {
+		ma, err := multiaddr.NewMultiaddr(s)
+		if err != nil {
+			log.Debug("Peek-map removal of addr %q for %s is invalid, skipped: %v", s, pID.ShortString(), err)
+			continue
+		}
+		info, err := peer.AddrInfoFromP2pAddr(ma)
+		if err != nil {
+			log.Debug("Peek-map removal of addr %q for %s has no /p2p/ suffix, skipped", s, pID.ShortString())
+			continue
+		}
+		if info.ID != pID {
+			log.Debug("Peek-map removal of addr %q names peer %s but was published for %s, skipped",
+				s, info.ID.ShortString(), pID.ShortString())
+			continue
+		}
+		parsed = append(parsed, info.Addrs...)
+	}
+	if len(parsed) == 0 {
+		return
+	}
+	n.Host.Peerstore().SetAddrs(pID, parsed, 0)
+	log.Debug("Peek-map removed %d stale addr(s) for %s", len(parsed), pID.ShortString())
 }
 
 // maxDiscoveredBoots caps how many boots we will attach to beyond the ones in

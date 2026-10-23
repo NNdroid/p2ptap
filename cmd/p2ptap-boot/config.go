@@ -18,6 +18,14 @@ import (
 // Each distinct PSK defines a network; peers authenticated under one PSK can
 // only relay to and discover peers under the SAME PSK.
 // WebUIConfig controls the embedded WebUI monitoring dashboard.
+const (
+	// DefaultPeerAddrFile is the peer-address cache sidecar written next to
+	// boot.json.
+	DefaultPeerAddrFile = "boot.addrs.json"
+	// DefaultPeerAddrRebroadcastWindow bounds startup replay of cached records.
+	DefaultPeerAddrRebroadcastWindow = 7 * 24 * time.Hour
+)
+
 type WebUIConfig struct {
 	Enable    bool   `json:"enable"`     // enable web dashboard
 	Listen    string `json:"listen"`     // e.g. "0.0.0.0:8080"
@@ -47,6 +55,22 @@ type BootConfig struct {
 	// dials with a shorter timeout gives up before the peer behind symmetric NAT
 	// finishes bringing its socket up. JSON serializes it as nanoseconds.
 	HolePunchTimeout time.Duration `json:"hole_punch_timeout"`
+
+	// PeerAddrFile is the sidecar JSON file holding the public source addresses
+	// this boot observed from directly-connected peers, with the times they
+	// were seen. It is deliberately separate from boot.json: it grows with the
+	// peer population and is rewritten on every save, which would churn a file
+	// the operator edits by hand.
+	PeerAddrFile string `json:"peer_addr_file"`
+	// EnablePeerAddrCache turns address observation on. When false the boot
+	// behaves exactly as before — it just stops remembering peer addresses
+	// across a disconnect or a restart.
+	EnablePeerAddrCache bool `json:"enable_peer_addr_cache"`
+	// PeerAddrRebroadcastWindow bounds how old a record may be when the boot
+	// replays it after a restart. NAT mappings rarely survive a day, so replaying
+	// everything would flood the mesh with unreachable endpoints; the on-disk
+	// copy is still retained forever for operators.
+	PeerAddrRebroadcastWindow time.Duration `json:"peer_addr_rebroadcast_window"`
 }
 
 // DefaultBootConfig returns the configuration used on first run / when fields
@@ -95,6 +119,10 @@ func DefaultBootConfig() *BootConfig {
 		// Fill this in with a real URL carrying ?username=...&credential=....
 		TurnServers:      []string{},
 		HolePunchTimeout: 15 * time.Second,
+
+		PeerAddrFile:              DefaultPeerAddrFile,
+		EnablePeerAddrCache:       true,
+		PeerAddrRebroadcastWindow: DefaultPeerAddrRebroadcastWindow,
 	}
 }
 
@@ -132,6 +160,17 @@ func LoadBootConfig(path string) (*BootConfig, error) {
 	// nanoseconds — a punch that gives up before the socket is even open.
 	if cfg.HolePunchTimeout < 100*time.Millisecond || cfg.HolePunchTimeout > 120*time.Second {
 		cfg.HolePunchTimeout = 15 * time.Second
+	}
+	// The rebroadcast window must stay in the same ballpark. Too small and a
+	// restart loses records that were recorded minutes ago; too large and a
+	// restart replays mappings that have been dead for months.
+	if cfg.PeerAddrRebroadcastWindow < 1*time.Hour || cfg.PeerAddrRebroadcastWindow > 365*24*time.Hour {
+		cfg.PeerAddrRebroadcastWindow = DefaultPeerAddrRebroadcastWindow
+	}
+	// An empty name would silently fall back to "." and write the store next to
+	// whatever the current directory happened to be.
+	if cfg.PeerAddrFile == "" {
+		cfg.PeerAddrFile = DefaultPeerAddrFile
 	}
 	return cfg, nil
 }
