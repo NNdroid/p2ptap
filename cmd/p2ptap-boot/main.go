@@ -2071,6 +2071,12 @@ func main() {
 			fmt.Printf("[Peer] Connected: %s via %s\n", pID.String(), maStr)
 			// Record connect time for duration tracking on disconnect.
 			gPeerConnectTimes.Store(pID, time.Now())
+			// Record the endpoints this link reveals. This is the only place
+			// RecordPeerAddrs is reached: the disconnect path only ever retracts,
+			// and MarkGone is a no-op for a peer that was never recorded, so a
+			// boot with this call missing never wrote its address cache at all.
+			// No skip conn — a fresh connect is always an observed address.
+			onPeerAddrChange(pID, h.Network().ConnsToPeer(pID), nil, false)
 			// Determine transport name for the alert message.
 			transportName := "TCP"
 			switch node.TransportOfConn(conn) {

@@ -575,3 +575,44 @@ func TestReseedPeerAddrs(t *testing.T) {
 		t.Fatalf("peerstore holds %d addrs for the peer: %v", len(got), got)
 	}
 }
+
+// TestNotifyBundleRecordsOnConnect is a wiring check rather than a unit test:
+// the notify callbacks in main() cannot be exercised without standing up a full
+// boot, and the whole feature is silent about being unwired.
+//
+// RecordPeerAddrs is only reachable from ConnectedF. The two DisconnectedF
+// paths are retraction-only, and MarkGone returns early for a peer that was
+// never recorded, so a boot whose ConnectedF lost this call would accept
+// connections all day, never fill the store, never write boot.addrs.json, and
+// never emit an error. The regression was real — it shipped once.
+func TestNotifyBundleRecordsOnConnect(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Skipf("cannot read main.go: %v", err)
+	}
+
+	body := strings.Split(string(src), "ConnectedF: func")
+	if len(body) < 2 {
+		t.Fatal("ConnectedF callback not found")
+	}
+	connectBody := strings.SplitN(body[1], "DisconnectedF: func", 2)
+	if len(connectBody) < 2 {
+		t.Fatal("DisconnectedF callback not found after ConnectedF")
+	}
+	if !strings.Contains(connectBody[0], "onPeerAddrChange(") {
+		t.Fatal("ConnectedF does not call onPeerAddrChange: the address store is " +
+			"never written, because DisconnectedF only retracts and MarkGone is a " +
+			"no-op for a peer that was never recorded")
+	}
+
+	// MarkGone's early return is what makes the above fatal rather than slow.
+	// Keep the assertion explicit so someone reading the failure understands why.
+	storeSrc, err := os.ReadFile("peer_addr_store.go")
+	if err != nil {
+		t.Skipf("cannot read peer_addr_store.go: %v", err)
+	}
+	if !strings.Contains(string(storeSrc), "e, ok := s.entries[pID]\n\tif !ok {\n\t\treturn nil\n\t}") {
+		t.Fatal("MarkGone no-longer returns early for an unknown peer; the wiring " +
+			"guard above may no longer describe reality")
+	}
+}
