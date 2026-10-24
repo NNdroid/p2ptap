@@ -832,21 +832,40 @@ func (n *Node) handleLSAStream(s network.Stream) {
 				}
 				entry.firstSeen = time.Now()
 				n.seenOrigins.Store(lsa.Origin, entry)
-			} else if lsa.Snapshot {
+			} else if lsa.Snapshot && lsa.TTL == routing.DefaultLSATTL {
 				// First sighting via a cached snapshot. The receiver is usually
 				// NOT directly connected to the origin, so the direct+full-TTL
 				// rule below cannot apply, and this trust is unavoidable: LSAs
 				// carry no PSK-keyed stamp the way the relay-ctrl tunnel does
-				// (relay_ctrl_attest.go). It is bounded, though — this branch only
-				// fires on the FIRST sighting, so a snapshot can never re-pin an
-				// origin someone else already introduced, and the entry ages out
-				// with the seenOrigins reaper.
+				// (relay_ctrl_attest.go). Two things bound the trust:
+				//   (1) pushLSASnapshotToPeer sets replay.TTL = DefaultLSATTL on
+				//       every frame it replays, so a real snapshot always arrives
+				//       at full TTL. Forwards that decrement TTL through an
+				//       intermediate hop no longer carry the Snapshot flag (only
+				//       the sender's own cache replay does), so this TTL check
+				//       only admits the intended first-hop snapshot path — a peer
+				//       that mints Snapshot=true on a re-forwarded frame still
+				//       sets TTL itself, but a peer that merely forwards a real
+				//       snapshot after decrementing it is rejected here and falls
+				//       through to the strict rule below.
+				//   (2) A snapshot can only pin a first-sighting; it can never
+				//       re-pin an origin someone else already introduced (that
+				//       is the KNOWN-origin branch above, which takes the same
+				//       origin/source check).
+				// The identity side effects of applyPeerMetaFromLSA —
+				// learnMACFromMeta, RegisterIPMAC, processSubnetRoutes and the
+				// GARP/NA writes into the local TAP — are gated further down on
+				// n.hasPeerConnection(origin), so even a snapshot-minted forged
+				// origin never installs MAC/IP state or writes L2 frames under
+				// that identity. This branch only lets the routing graph learn
+				// the edge, which is the minimal information a late-joining peer
+				// needs to bootstrap the full mesh through a single StaticPeer.
 				n.seenOrigins.Store(lsa.Origin, seenOriginEntry{firstSeen: time.Now(), source: remoteStr})
 			} else {
 				// First time seeing this origin: must come directly with full TTL.
 				if lsa.Origin != remoteStr || lsa.TTL != routing.DefaultLSATTL {
-					log.Debug("LSA from %s claims unseen origin %s with ttl=%d; dropping",
-						remotePeer.ShortString(), lsa.Origin, lsa.TTL)
+					log.Debug("LSA from %s claims unseen origin %s with ttl=%d (snapshot=%v); dropping",
+						remotePeer.ShortString(), lsa.Origin, lsa.TTL, lsa.Snapshot)
 					continue
 				}
 				n.seenOrigins.Store(lsa.Origin, seenOriginEntry{firstSeen: time.Now(), source: remoteStr})
@@ -861,7 +880,20 @@ func (n *Node) handleLSAStream(s network.Stream) {
 		accepted := n.Router.ProcessLSA(&lsa)
 		if accepted && lsa.Origin != "" {
 			if origin, err := peer.Decode(lsa.Origin); err == nil {
-				n.applyPeerMetaFromLSA(origin, lsa)
+				// applyPeerMetaFromLSA runs with the CLAIMED origin identity —
+				// learnMACFromMeta, RegisterIPMAC and processSubnetRoutes all
+				// install state keyed by lsa.Origin, and GARP/NA writes go into
+				// the local TAP from that identity. A carrier that is not
+				// directly connected to the origin is only relaying a JSON
+				// blob; nothing in the LSA header (including lsa.Snapshot)
+				// authenticates that blob to the claimed origin. So the identity
+				// channel must be direct-only: the origin's own max-TTL LSA, or
+				// one from a peer this node is actively connected to. The ROUTING
+				// graph still accepts forwarded LSAs through ProcessLSA above;
+				// only the identity side effects are gated.
+				if n.hasPeerConnection(origin) {
+					n.applyPeerMetaFromLSA(origin, lsa)
+				}
 			}
 		}
 		if accepted {

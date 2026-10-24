@@ -131,16 +131,19 @@ func (n *Node) obfCipherForPeer(p peer.ID) obfuscate.ObfCipher {
 	//     a whole is quiet (e.g. one busy peer among many idle ones). It counts
 	//     only frames actually sealed to this peer (framesSinceRekey), which is
 	//     a strictly tighter signal than the global delta for that case.
+	var nonceBudgetDelta uint64
 	if n.Packer != nil {
 		if delta := n.Packer.CurrentCounter() - po.negotiatedAtSeq; delta > obfRekeyFrameThreshold {
 			log.Debug("Tx: proactive re-key (global counter) triggered for %s (counter delta=%d > threshold=%d); re-handshaking in background",
 				p.String(), delta, obfRekeyFrameThreshold)
+			nonceBudgetDelta = delta
 			n.triggerPeerRekey(p)
 		}
 	}
-	if po.framesSinceRekey.Load() > obfRekeyFrameThreshold {
+	perPeerBudget := po.framesSinceRekey.Load()
+	if perPeerBudget > obfRekeyFrameThreshold {
 		log.Debug("Tx: proactive re-key (per-peer frame count) triggered for %s (framesSinceRekey=%d > threshold=%d); re-handshaking in background",
-			p.String(), po.framesSinceRekey.Load(), obfRekeyFrameThreshold)
+			p.String(), perPeerBudget, obfRekeyFrameThreshold)
 		n.triggerPeerRekey(p)
 	}
 	// R10: Hard stop when the nonce budget is exhausted and a re-key is
@@ -148,7 +151,14 @@ func (n *Node) obfCipherForPeer(p peer.ID) obfuscate.ObfCipher {
 	// plaintext rather than reusing a (key, nonce) pair under the
 	// current key. The re-key completes asynchronously and the next
 	// frame will be encrypted with a fresh key/nonce.
-	if po.framesSinceRekey.Load() > obfRekeyFrameThreshold {
+	//
+	// The gate must mirror BOTH triggers above. The nonce counter's low 32
+	// bits are shared node-wide (only the 12-bit per-peer epoch differs), so
+	// a quiet peer whose own framesSinceRekey stays low still wraps once the
+	// GLOBAL counter recycles past its negotiatedAtSeq anchor — a per-peer-only
+	// check here would let such a peer keep sealing under an exhausted budget
+	// for as long as its own traffic stayed idle.
+	if nonceBudgetDelta > obfRekeyFrameThreshold || perPeerBudget > obfRekeyFrameThreshold {
 		if _, rekeying := n.rekeyPeers.Load(p); rekeying {
 			log.Debug("Tx: nonce budget exhausted for %s; re-key in flight — dropping encryption for this frame", p.String())
 			return nil
