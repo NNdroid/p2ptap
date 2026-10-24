@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -172,7 +174,96 @@ func LoadBootConfig(path string) (*BootConfig, error) {
 	if cfg.PeerAddrFile == "" {
 		cfg.PeerAddrFile = DefaultPeerAddrFile
 	}
+	// Trim and drop empty / whitespace-only PSK entries. Without this an
+	// operator who writes `"psks": [""]` or leaves a trailing comma is not
+	// asked for a PSK and does not realise the boot is running open relay
+	// mode with zero networks configured. The empty-string case is worse
+	// than "no PSKs at all": relayRes.pskEnabled flips to true, ACL
+	// enforcement engages, and every subsequent PSK auth silently fails
+	// against the zero-byte network key — the boot refuses every client
+	// with no signal in the config that anything is misconfigured.
+	if len(cfg.PSKs) > 0 {
+		kept := cfg.PSKs[:0]
+		for i, raw := range cfg.PSKs {
+			trimmed := strings.TrimSpace(raw)
+			if trimmed == raw {
+				kept = append(kept, raw)
+				continue
+			}
+			if trimmed == "" {
+				fmt.Printf("Warning: dropping empty psks[%d] from %s\n", i, path)
+				continue
+			}
+			fmt.Printf("Warning: trimming whitespace from psks[%d] in %s\n", i, path)
+			kept = append(kept, trimmed)
+		}
+		cfg.PSKs = kept
+	}
+	// Require each retained PSK to have real entropy, matching the mesh node's
+	// validatePSK policy. Anything below 8 bytes (16 hex chars) is guessable
+	// with a single laptop; anything above 64 bytes is almost certainly a
+	// key file pasted into the wrong field, and the PSK is fed to every
+	// per-peer key derivation on connect, so a huge value is a self-inflicted
+	// performance trap rather than extra security.
+	for i, psk := range cfg.PSKs {
+		if err := validateBootSecret("psks["+strconv.Itoa(i)+"]", psk, 16, 128); err != nil {
+			return nil, err
+		}
+	}
+	// web_ui.auth_token has the same trust model as a PSK on this machine:
+	// anyone who knows the token can read every peer's identity, name, TAP IP,
+	// geo location and version from /api/stats and /api/logs. An empty string
+	// is fine (the boot generates a random one at startup), but a non-empty
+	// token must have real entropy — "changeme" or a hardcoded short string
+	// defeats the whole point of putting an auth token on a public listener.
+	if tok := strings.TrimSpace(cfg.WebUI.AuthToken); tok != "" {
+		if err := validateBootSecret("web_ui.auth_token", tok, 16, 256); err != nil {
+			return nil, err
+		}
+		if tok != cfg.WebUI.AuthToken {
+			cfg.WebUI.AuthToken = tok
+		}
+	}
 	return cfg, nil
+}
+
+// validateBootSecret enforces a length window and a two-character-class
+// requirement on a secret read from boot.json. It mirrors the semantics of
+// validateSecretEntropy in pkg/config but lives here because the mesh-node
+// version is unexported and the boot binary is a separate deployment artifact
+// that must stay self-contained.
+//
+// The character-class check is what stops "changeme" and "abcdefgh12345678"
+// from passing — a single-class secret of the right length is still trivially
+// guessable.
+func validateBootSecret(field, secret string, minLen, maxLen int) error {
+	if len(secret) < minLen {
+		return fmt.Errorf("invalid config: %s: %d characters is below the %d-character minimum for adequate entropy", field, len(secret), minLen)
+	}
+	if len(secret) > maxLen {
+		return fmt.Errorf("invalid config: %s: %d characters exceeds the %d-character maximum", field, len(secret), maxLen)
+	}
+	classes := 0
+	for _, ch := range secret {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			classes |= 0x1
+		case ch >= 'A' && ch <= 'Z':
+			classes |= 0x2
+		case ch >= '0' && ch <= '9':
+			classes |= 0x4
+		default:
+			classes |= 0x8
+		}
+	}
+	n := 0
+	for x := classes; x > 0; x &= x - 1 {
+		n++
+	}
+	if n < 2 {
+		return fmt.Errorf("invalid config: %s: secret uses only one character class (lowercase/uppercase/digit/symbol); include at least two for adequate entropy", field)
+	}
+	return nil
 }
 
 // SaveBootConfig writes the config as pretty-printed JSON (0600).
