@@ -6,10 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -389,27 +392,86 @@ func ipv6Str(b [16]byte) string {
 }
 
 func loadOrGenerateNodeKey(keyPath string) (crypto.PrivKey, error) {
-	// Resolve the real path and reject symlinks — a symlink planted by any
-	// local process redirects the key read (TOCTOU between Stat and ReadFile),
-	// so a world-readable decoy leaks the node's private identity key.
-	realPath, err := filepath.EvalSymlinks(keyPath)
-	if err == nil && realPath != keyPath {
-		return nil, fmt.Errorf("node key path %s is a symlink — refusing to load key from a symlink target", keyPath)
+	if priv, err := tryLoadNodeKey(keyPath); err != nil || priv != nil {
+		return priv, err
 	}
+	return generateNodeKeyFile(keyPath)
+}
 
-	if info, err := os.Stat(keyPath); err == nil {
-		// Reject world-readable keys — a leaked identity key compromises mesh
-		// identity and every PSK/KEM derived from it.
-		if info.Mode().Perm()&0077 != 0 {
-			return nil, fmt.Errorf("node key file %s has insecure permissions %o (must be 0600 or stricter)", keyPath, info.Mode().Perm())
+// tryLoadNodeKey reads the identity key at keyPath. It opens the path and then
+// stats and reads the opened fd rather than the path, which is what makes this
+// safe against a symlink that has been swapped in to point at a different file:
+// the inode stat'ed here is the inode that is read, so the permission test
+// below applies to the bytes actually loaded. The old code did EvalSymlinks,
+// compared the resolved string to the requested one, and refused on any
+// difference — which broke Android, whose app data directory is reached through
+// the system symlink /data/user/0/<pkg> -> /data/data/<pkg>. The key read
+// refused and the node minted a fresh ephemeral identity on every start, so a
+// device reported a different Peer ID each time it connected and every address
+// its mesh peers had saved for it went dead.
+//
+// nil, nil is the "no file yet, generate one" answer; it is distinct from
+// an error, so a key file that exists but cannot be read is never papered
+// over with a new identity.
+func tryLoadNodeKey(keyPath string) (crypto.PrivKey, error) {
+	f, err := os.Open(keyPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
 		}
-		keyBytes, err := os.ReadFile(keyPath)
-		if err != nil {
-			return nil, err
-		}
-		return crypto.UnmarshalPrivateKey(keyBytes)
+		return nil, err
 	}
+	defer f.Close()
 
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	mode := info.Mode().Perm()
+	if !nodeKeyModeAccepted(runtime.GOOS, mode) {
+		// A symlink that resolves to a world-readable decoy shows up here as
+		// mode 0644 and is refused, which is the attack this check exists for.
+		return nil, fmt.Errorf("node key file %s has insecure permissions %o (must be 0600 or stricter)", keyPath, mode)
+	}
+	if warnKeyMode(runtime.GOOS, mode) {
+		log.Warn("node key file %s reports permissions %o; mode bits are not enforced on this platform, so the key is used as-is", keyPath, mode)
+	}
+	keyBytes, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	return crypto.UnmarshalPrivateKey(keyBytes)
+}
+
+// nodeKeyModeAccepted reports whether a key file carrying the given permission
+// bits may be loaded on the given OS. Unix tracks permissions in the inode, so
+// there a world-readable key is refused outright. Windows stores access control
+// in ACLs and os.Stat reports 0666 for every regular file, so refusing there
+// would discard a perfectly good key on every start — the Peer ID changing
+// under the user on each connection, with the addresses other peers had saved
+// for this node all pointing at a dead identity. Android is the same story from
+// the other direction: the key sits in the app's private internal storage, which
+// no other uid can read whatever the mode bits say, so refusing would burn a
+// mesh membership over a bit pattern.
+func nodeKeyModeAccepted(osName string, mode os.FileMode) bool {
+	switch osName {
+	case "windows", "android":
+		return true
+	}
+	return mode&0077 == 0
+}
+
+// warnKeyMode reports whether a permissive mode is worth logging on the given
+// OS. Android is the only platform where the bits are meaningful enough to note
+// but not trustworthy enough to refuse, and the usual cause of a deviation is a
+// key pushed from a desktop over adb with that machine's umask applied. On
+// Windows every regular file reports 0666, so logging it would fire on every
+// start for no information.
+func warnKeyMode(osName string, mode os.FileMode) bool {
+	return osName == "android" && mode&0077 != 0
+}
+
+func generateNodeKeyFile(keyPath string) (crypto.PrivKey, error) {
 	// Generate new Ed25519 keypair
 	priv, _, err := crypto.GenerateEd25519Key(rand.Reader)
 	if err != nil {

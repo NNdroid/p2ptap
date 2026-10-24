@@ -883,17 +883,22 @@ func GetPeerIDFromKey(keyPath string) string {
 	if keyPath == "" {
 		return ""
 	}
-	if _, err := os.Stat(keyPath); err == nil {
-		data, err := os.ReadFile(keyPath)
-		if err == nil && len(data) > 0 {
-			priv, err := crypto.UnmarshalPrivateKey(data)
-			if err == nil {
-				pid, err := peer.IDFromPrivateKey(priv)
-				if err == nil {
-					return pid.String()
-				}
+	_, statErr := os.Stat(keyPath)
+	existed := statErr == nil
+	if data, err := os.ReadFile(keyPath); err == nil && len(data) > 0 {
+		if priv, err := crypto.UnmarshalPrivateKey(data); err == nil {
+			if pid, err := peer.IDFromPrivateKey(priv); err == nil {
+				return pid.String()
 			}
 		}
+	}
+	if existed {
+		// The file is there but unreadable or corrupt. Writing a fresh key over
+		// it would hand the node a brand new Peer ID — and this is called from
+		// the UI on every refresh, so a single truncated write would have been
+		// turned into a permanent identity change. Report nothing and let the
+		// caller fall back to whatever it already has.
+		return ""
 	}
 	// Key does not exist yet: generate a new persistent Ed25519 identity key
 	priv, _, err := crypto.GenerateKeyPair(crypto.Ed25519, -1)
@@ -905,7 +910,7 @@ func GetPeerIDFromKey(keyPath string) string {
 		return ""
 	}
 	_ = os.MkdirAll(filepath.Dir(keyPath), 0700)
-	if err := os.WriteFile(keyPath, data, 0600); err != nil {
+	if err := atomicWriteFile(keyPath, data, 0600); err != nil {
 		return ""
 	}
 	pid, err := peer.IDFromPrivateKey(priv)
@@ -913,6 +918,45 @@ func GetPeerIDFromKey(keyPath string) string {
 		return ""
 	}
 	return pid.String()
+}
+
+// atomicWriteFile writes data to path atomically: temp file in the same
+// directory, fsync, chmod, then rename over the target. WriteFile truncates the
+// destination first, so a crash or a full disk mid-write leaves a truncated key
+// — and the only thing that reads this file next is GetPeerIDFromKey, which
+// would have replaced it with a new identity. The temp file is removed on any
+// failure and the target is left untouched.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName) // no-op after a successful rename
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	tmpName = "" // rename succeeded — don't remove the temp path (it no longer exists)
+	return nil
 }
 
 // Version returns the build version string (injected at build time).
@@ -987,7 +1031,7 @@ func ImportIdentityKeyBase64(keyPath string, b64Key string) (string, error) {
 	}
 
 	_ = os.MkdirAll(filepath.Dir(keyPath), 0755)
-	if err := os.WriteFile(keyPath, data, 0600); err != nil {
+	if err := atomicWriteFile(keyPath, data, 0600); err != nil {
 		return "", fmt.Errorf("write key file: %w", err)
 	}
 	return pid.String(), nil
@@ -1012,7 +1056,7 @@ func GenerateNewIdentityKey(keyPath string) (string, error) {
 		return "", fmt.Errorf("derive peer id: %w", err)
 	}
 	_ = os.MkdirAll(filepath.Dir(keyPath), 0755)
-	if err := os.WriteFile(keyPath, data, 0600); err != nil {
+	if err := atomicWriteFile(keyPath, data, 0600); err != nil {
 		return "", fmt.Errorf("write key file: %w", err)
 	}
 	return pid.String(), nil
