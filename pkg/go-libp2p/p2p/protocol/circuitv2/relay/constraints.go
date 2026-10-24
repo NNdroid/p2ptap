@@ -47,15 +47,28 @@ func newConstraints(rc *Resources) *constraints {
 
 // Reserve adds a reservation for a given peer with a given multiaddr.
 // If adding this reservation violates IP, ASN, or total reservation constraints, an error is returned.
+//
+// Validation order matters: cleanupPeer (which drops the peer's previous
+// reservation from total/ips/asns) MUST run only after every cap check has
+// passed. Removing it before the checks means a refresh that violates a cap
+// (peer's IP/ASN/total reservation is over quota) desyncs the peer's
+// reservation state — the peer loses its existing constraint footprint while
+// r.rsvp still considers it eligible to CONNECT, so the peer becomes
+// reservation-eligible without a constraints entry. Reorder the cleanupPeer
+// call to AFTER the caps pass and the desync cannot happen: a rejected
+// refresh leaves the peer's previous reservation intact.
 func (c *constraints) Reserve(p peer.ID, a ma.Multiaddr, expiry time.Time) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
 	now := time.Now()
 	c.cleanup(now)
-	// To handle refreshes correctly, remove the existing reservation for the peer.
-	c.cleanupPeer(p)
 
+	// Check caps WITHOUT dropping the peer's existing reservation yet. This
+	// means a refresh that would go over quota sees the pre-refresh total,
+	// which is the intended semantics (the caller is only allowed to add one
+	// fresh reservation at a time; the previous one is replaced at the end of
+	// this function, not dropped mid-way).
 	if len(c.total) >= c.rc.MaxReservations {
 		return errTooManyReservations
 	}
@@ -65,8 +78,11 @@ func (c *constraints) Reserve(p peer.ID, a ma.Multiaddr, expiry time.Time) error
 		return errors.New("no IP address associated with peer")
 	}
 
+	// Subtract the peer's existing reservation from the effective count for
+	// this IP/ASN before comparing: a refresh must not be denied just because
+	// the peer already holds one slot against the same cap.
 	ipReservations := c.ips[ip.String()]
-	if len(ipReservations) >= c.rc.MaxReservationsPerIP {
+	if c.countExcluding(ipReservations, p) >= c.rc.MaxReservationsPerIP {
 		return errTooManyReservationsForIP
 	}
 
@@ -76,22 +92,41 @@ func (c *constraints) Reserve(p peer.ID, a ma.Multiaddr, expiry time.Time) error
 		asn = asnutil.AsnForIPv6(ip)
 		if asn != 0 {
 			asnReservations = c.asns[asn]
-			if len(asnReservations) >= c.rc.MaxReservationsPerASN {
+			if c.countExcluding(asnReservations, p) >= c.rc.MaxReservationsPerASN {
 				return errTooManyReservationsForASN
 			}
 		}
 	}
 
-	c.total = append(c.total, peerWithExpiry{Expiry: expiry, Peer: p})
+	// All caps passed. Now swap in the refreshed reservation: drop the
+	// peer's previous entry (if any) and commit the new one.
+	c.cleanupPeer(p)
+	ipReservations = c.ips[ip.String()]
 
+	c.total = append(c.total, peerWithExpiry{Expiry: expiry, Peer: p})
 	ipReservations = append(ipReservations, peerWithExpiry{Expiry: expiry, Peer: p})
 	c.ips[ip.String()] = ipReservations
 
 	if asn != 0 {
+		asnReservations = c.asns[asn]
 		asnReservations = append(asnReservations, peerWithExpiry{Expiry: expiry, Peer: p})
 		c.asns[asn] = asnReservations
 	}
 	return nil
+}
+
+// countExcluding counts entries in list whose Peer is not p. Used to decide
+// whether a peer refreshing an existing reservation is still within the
+// per-IP / per-ASN cap, without double-counting the slot it is about to
+// replace.
+func (c *constraints) countExcluding(list []peerWithExpiry, p peer.ID) int {
+	n := 0
+	for _, pe := range list {
+		if pe.Peer != p {
+			n++
+		}
+	}
+	return n
 }
 
 func (c *constraints) cleanup(now time.Time) {

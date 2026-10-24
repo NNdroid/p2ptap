@@ -65,7 +65,9 @@ func (n *Node) handleMetaStream(s network.Stream) {
 		data := buf[:rn]
 
 		var payload meta.NodeMetaPayload
-		if err := json.Unmarshal(data, &payload); err == nil {
+		if err := json.Unmarshal(data, &payload); err != nil {
+			log.Debug("Meta stream from %s: dropping %d-byte malformed frame: %v", remotePeer.ShortString(), rn, err)
+		} else {
 			n.storePeerMeta(remotePeer, PeerMeta{
 				NodeName:          payload.NodeName,
 				TapIP:             payload.TapIP,
