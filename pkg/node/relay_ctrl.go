@@ -22,6 +22,21 @@ import (
 // against a routing loop wedging a handshake stream open forever.
 const relayCtrlMaxHops = 8
 
+// relayCtrlHeaderReadDeadline bounds the time we wait for a peer's relay-ctrl
+// header. A peer that opens a stream and never writes the header would otherwise
+// pin a handler goroutine and a stack frame of ~4 KiB forever. 30s is long
+// enough to absorb a slow handshake over a bad NAT path and short enough that
+// the failure is visible in an operator session.
+const relayCtrlHeaderReadDeadline = 30 * time.Second
+
+// relayCtrlInflightMax caps the number of concurrently-handled relay-ctrl
+// streams. Each handler holds a goroutine plus a 4 KiB header buffer, and each
+// transit tunnel spawns two extra goroutines for proxyStreams. Without a cap a
+// peer could open hundreds of streams to force unbounded goroutine growth; the
+// cap is a resource-discipline measure, not an authentication control (the
+// anti-spoof gate below the header read still applies to every admitted stream).
+const relayCtrlInflightMax = 64
+
 // RelayCtrlHeader is the self-delimiting (length-prefixed) header carried on
 // every RelayCtrlProtocolID stream. The initiator writes it once; each transit
 // hop re-writes it (bumping Hops) before proxying the inner control bytes.
@@ -151,7 +166,23 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 	defer s.Close()
 	remotePeer := s.Conn().RemotePeer()
 
+	// Cap concurrent handlers: a peer that never writes the header would
+	// otherwise pin one goroutine per stream indefinitely, and every transit
+	// tunnel spawns two more proxyStreams goroutines. The anti-spoof gate
+	// below still applies to every admitted stream — this cap is not a
+	// substitute for it, just a resource-discipline measure.
+	if n.relayCtrlInflight.Add(1) > relayCtrlInflightMax {
+		n.relayCtrlInflight.Add(-1)
+		log.Debug("RelayCtrl: inflight cap (%d) reached; refusing new tunnel from %s", relayCtrlInflightMax, remotePeer)
+		return
+	}
+	defer n.relayCtrlInflight.Add(-1)
+
 	hdrBuf := make([]byte, 4096)
+	if err := s.SetReadDeadline(time.Now().Add(relayCtrlHeaderReadDeadline)); err != nil {
+		log.Debug("RelayCtrl: SetReadDeadline failed from %s: %v", remotePeer, err)
+		return
+	}
 	n0, err := ReadFrame(s, hdrBuf)
 	if err != nil || n0 == 0 {
 		log.Debug("RelayCtrl: header read error from %s: %v", remotePeer, err)

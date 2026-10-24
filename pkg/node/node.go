@@ -668,6 +668,19 @@ type Node struct {
 	// telemetry for every protocol channel (Data, SeqSync, LSA, PeekMap, etc.).
 	protoTracker *ProtocolTrafficTracker
 
+	// relayCtrlInflight counts currently-handling RelayCtrlProtocolID streams.
+	// It is a resource-discipline guard, not an auth check: handleRelayCtrl runs
+	// the anti-spoof gate after the header read, but a peer that opens hundreds
+	// of streams and never writes the header would still pin one goroutine (and
+	// one 4 KiB header buffer) per stream forever. relayCtrlInflightMax is the
+	// ceiling; see handleRelayCtrl in relay_ctrl.go.
+	relayCtrlInflight atomic.Int64
+
+	// peekMapInflight counts currently-handling PeekMapProtocolID streams. Same
+	// resource-discipline pattern as relayCtrlInflight; see peekMapInflightMax
+	// and the comment on PeekMapMsgMaxBytes in meta.go.
+	peekMapInflight atomic.Int64
+
 	// manuallyAuthSubnets tracks subnets dynamically authorized via the WebUI
 	// so users can enable routing to an advertised subnet without editing config.json.
 	manuallyAuthSubnetsMu sync.RWMutex

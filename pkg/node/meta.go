@@ -688,6 +688,29 @@ func (n *Node) broadcastMetadata() {
 
 const PeekMapProtocolID = "/p2ptap/peek-map/1.0.0"
 
+// peekMapMsgMaxBytes caps a single PeekMapMessage value read from a stream.
+// A message is a small JSON envelope ({type, from, payload, net_id}) with a
+// nested NodeInfo payload; several kilobytes is plenty, and anything larger
+// is either a hostile peer or a corrupted stream. Without the cap the
+// streaming decoder grows its buffer to whatever the sender writes, and a
+// peer pushing a multi-GB "message" would balloon memory before we ever
+// got to a size check.
+const peekMapMsgMaxBytes = 1 << 20
+
+// peekMapReadDeadline bounds the time we wait between peek-map messages. A
+// peer that opens the stream and then goes idle would otherwise pin one
+// goroutine and the stream's transport credits for the entire lifetime of
+// the connection. 60s is comfortably longer than the fastest periodic
+// broadcast interval but short enough that a dead sender's resources are
+// reclaimed within a single observation cycle.
+const peekMapReadDeadline = 60 * time.Second
+
+// peekMapInflightMax caps the number of concurrently-handled peek-map
+// streams across the node. Each handler holds a goroutine plus a decoder
+// buffer; the cap is a resource-discipline measure, not an auth control
+// (the trust gate further down in ingestPeekMapNodeInfo still applies).
+const peekMapInflightMax = 32
+
 // PeekMap message types exchanged over the bootstrap pub/sub channel.
 const PeekMapUpdate = "update" // a node's identity/subnets; hub rebroadcasts to all others
 
@@ -763,6 +786,15 @@ func (n *Node) registerPeekMapHandler() {
 	n.Host.SetStreamHandler(PeekMapProtocolID, func(s network.Stream) {
 		defer s.Close()
 		remotePeer := s.Conn().RemotePeer()
+
+		// Cap concurrent handlers (see the comment on peekMapInflightMax).
+		if n.peekMapInflight.Add(1) > peekMapInflightMax {
+			n.peekMapInflight.Add(-1)
+			log.Debug("Peek-map: inflight cap (%d) reached; refusing new listener from %s", peekMapInflightMax, remotePeer.ShortString())
+			return
+		}
+		defer n.peekMapInflight.Add(-1)
+
 		// Streaming JSON decoder. The sender (boot hub or peer) emits
 		// newline-delimited PeekMapMessage values via json.NewEncoder(s).Encode.
 		// A bare s.Read + json.Unmarshal would only parse the first value in a
@@ -772,12 +804,26 @@ func (n *Node) registerPeekMapHandler() {
 		cr := &countingReader{r: s}
 		dec := json.NewDecoder(cr)
 		for {
+			// Refresh the read deadline on every iteration: the streaming
+			// decoder reads across read boundaries, so a single deadline set
+			// before the loop would only cover the first value. Reset it to
+			// zero first so a slow but legitimate broadcast isn't cut off by a
+			// stale absolute deadline left over from the previous value.
+			if err := s.SetReadDeadline(time.Now().Add(peekMapReadDeadline)); err != nil {
+				log.Debug("Peek-map: SetReadDeadline failed from %s: %v", remotePeer.ShortString(), err)
+				return
+			}
 			before := cr.n
 			var msg PeekMapMessage
 			if err := dec.Decode(&msg); err != nil {
 				if err != io.EOF {
 					log.Debug("Peek-map listener from %s closed: %v", remotePeer.ShortString(), err)
 				}
+				return
+			}
+			if n := cr.n - before; n > peekMapMsgMaxBytes {
+				log.Warn("Peek-map: message from %s is %d bytes, over the %d-byte cap; closing listener",
+					remotePeer.ShortString(), n, peekMapMsgMaxBytes)
 				return
 			}
 			// Attribute the bytes this Decode consumed to the peek-map channel so

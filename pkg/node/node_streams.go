@@ -1044,6 +1044,25 @@ func (n *Node) handleRelayStream(s network.Stream) {
 	defer s.Close()
 	remotePeer := s.Conn().RemotePeer()
 
+	// Reset the stream on node shutdown, matching handleStream. Without this
+	// an idle relay stream (peer connected but not sending any frames) pins
+	// the handler goroutine and its 65 KiB receive buffer for the entire
+	// lifetime of the node. A read deadline is deliberately NOT set here —
+	// the same reason handleStream clears the inherited one: ReadFrame has no
+	// rewind, so a deadline firing mid-frame would leave the stream out of
+	// sync with any further bytes the peer sends.
+	if n.ctx != nil {
+		streamDone := make(chan struct{})
+		defer close(streamDone)
+		go func() {
+			select {
+			case <-n.ctx.Done():
+				_ = s.Reset()
+			case <-streamDone:
+			}
+		}()
+	}
+
 	// Loop read: handle multiple relay frames on the same stream (consistent with handleStream)
 	buf := make([]byte, obfuscate.MaxSealedFrameSize)
 	// Per-stream decrypt scratch (same zero-alloc pattern as handleStream):
