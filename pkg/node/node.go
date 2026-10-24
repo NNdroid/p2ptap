@@ -2573,6 +2573,29 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				node.MACTable.CleanPeer(debounceID)
 				node.Dispatcher.RemovePeer(debounceID)
 				node.removePeerObf(debounceID)
+				// Drop the peer's self-reported metadata (NodeName, TapIP, TapMAC,
+				// AdvertisedSubnets) so a departed peer cannot keep its IP/MAC/subnet
+				// reservations alive in the ARP index and the WebUI. The router
+				// already handles subnet routing via LSA (RemoveDirectLink above),
+				// and the ARP index is rebuilt by deletePeerMeta so the peer's
+				// claimed IPs and MACs stop resolving to it. Previously deletePeerMeta
+				// was defined but never called, so metadata survived forever: a
+				// churn loop of peers each claimed the same subnet CIDR, and the
+				// WebUI showed IPs/MACs of peers that had left the mesh for hours.
+				node.deletePeerMeta(debounceID)
+				// Tear down the Exit Node if the departed peer was the active
+				// gateway. Without this the host's default route keeps pointing
+				// at a disconnected peer, black-holing all egress until the
+				// operator manually clears it. ClearExitNode restores the
+				// physical default route so the host is not left without
+				// connectivity. The reconciler (OnExitNodeChanged) will re-set
+				// the exit node if a different eligible peer becomes available.
+				if node.isExitNodeActive() {
+					if exitPID := node.Gateway.ActiveExitPeerPID(); exitPID != "" && exitPID == debounceID {
+						log.Info("Exit node peer %s disconnected; tearing down default route", debounceID.String())
+						_ = node.Gateway.ClearExitNode()
+					}
+				}
 				// A departed peer has no working path, so it no longer qualifies as
 				// "relay-only". Without this the entry survives forever: the upgrade
 				// loop keeps dialing it and the ping-pong probe keeps re-establishing
