@@ -318,8 +318,8 @@ func TestBootBackboneFederatesDiscoveryAcrossClusters(t *testing.T) {
 	// Each boot knows the other is backbone BEFORE any stream arrives.
 	hubA.markMesh(bootB.ID())
 	hubB.markMesh(bootA.ID())
-	bootA.SetStreamHandler(PeekMapProtocolID, makePeekMapHandler(bootA, hubA, "bootA"))
-	bootB.SetStreamHandler(PeekMapProtocolID, makePeekMapHandler(bootB, hubB, "bootB"))
+	bootA.SetStreamHandler(PeekMapProtocolID, makePeekMapHandler(bootA, hubA, "bootA", nil))
+	bootB.SetStreamHandler(PeekMapProtocolID, makePeekMapHandler(bootB, hubB, "bootB", nil))
 
 	// Clients subscribe to their own boot, exactly like ensurePeekMapListener.
 	subscribe := func(c host.Host, b host.Host) network.Stream {

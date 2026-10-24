@@ -124,7 +124,7 @@ func generateConfigFile(outPath string) {
 		os.Exit(1)
 	}
 
-	if err := os.WriteFile(absOutPath, data, 0644); err != nil {
+	if err := os.WriteFile(absOutPath, data, 0600); err != nil {
 		fmt.Printf("Error writing config file %s: %v\n", absOutPath, err)
 		os.Exit(1)
 	}
@@ -134,6 +134,7 @@ func generateConfigFile(outPath string) {
 	fmt.Printf("    - Random MAC : %s\n", randomMAC)
 	fmt.Printf("    - Random PSK : %s\n", randomPSK)
 	fmt.Printf("    - Node Key   : %s\n", keyFilePath)
+	fmt.Printf("    - Permissions: 0600 (contains PSK; readable only by owner)\n")
 }
 
 func runDefaultNode(configPath string) {

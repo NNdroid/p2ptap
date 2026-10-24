@@ -307,18 +307,24 @@ func (n *Node) attemptDirectUpgrade(pid peer.ID) bool {
 // isRefresh=true marks a periodic keep-alive refresh (logs at DEBUG); the initial
 // handshake on (re)connect logs at INFO.
 func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
-	// Probe the relay auth stream
+	// Probe the relay auth stream. Only "protocol not supported" means the
+	// boot is in open mode (PSK disabled). Any other error — peer not
+	// connected, transient transport failure, context deadline — must NOT be
+	// treated as auth success, or a non-member peer gets relay access.
 	s, err := n.Host.NewStream(n.ctx, peerID, relayAuthProtocol)
 	if err != nil {
-		// Bootstrap server does NOT have PSK enabled (open mode)
-		log.Debug("Relay peer %s does not require PSK auth (open relay)", peerID.ShortString())
-		return true
+		if isProtocolNotSupported(err) {
+			log.Debug("Relay peer %s does not require PSK auth (open relay)", peerID.ShortString())
+			return true
+		}
+		log.Debug("Relay peer %s auth stream open failed: %v", peerID.ShortString(), err)
+		return false
 	}
 	defer s.Close()
 
 	// If the auth stream opened successfully, the bootstrap server REQUIRES PSK authentication!
 	if n.Config.PSK == "" {
-		log.Warn("Bootstrap peer %s requires PSK authentication, but no PSK is configured on this node! Relay access and discovery denied.", peerID.ShortString())
+		log.Warn("Bootstrap peer %s requires PSK authentication, but no PSK is configured on this node! Relay access and discovery denied.", peerID.String())
 		return false
 	}
 
@@ -361,11 +367,12 @@ func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 	// Read 1-byte response
 	var resp [1]byte
 	if _, err := io.ReadFull(s, resp[:]); err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			log.Debug("Relay peer %s closed auth stream (relay does not require PSK auth)", peerID.String())
-			return true
-		}
-		log.Debug("Relay auth response read info for peer %s: %v", peerID.String(), err)
+		// The auth stream was opened, so the boot REQUIRES PSK auth. An EOF
+		// (boot closed without sending 0x01) means auth FAILED — treating it
+		// as success would grant relay access to a non-member. Return false
+		// so the caller does not open a boot-relay uplink to an unauthenticated
+		// peer.
+		log.Debug("Relay auth response read failed for peer %s: %v", peerID.String(), err)
 		return false
 	}
 	if n.protoTracker != nil {
@@ -422,6 +429,16 @@ func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 		n.protoTracker.Auth.RecordSyncEvent()
 	}
 	return true
+}
+
+// isProtocolNotSupported checks whether err means the peer rejected our
+// protocol because it does not advertise it. The go-multistream muxer
+// returns ErrNotSupported (whose string is "protocols not supported: …"),
+// and BasicHost.NewStream wraps it as "failed to negotiate protocol: …".
+// This is the ONLY error that means "open mode / PSK disabled" — every
+// other error (no conn, timeout, reset) must NOT be treated as success.
+func isProtocolNotSupported(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "protocols not supported")
 }
 
 // bootstrapKeepAliveLoop periodically reconnects to bootstrap/static peers that have disconnected

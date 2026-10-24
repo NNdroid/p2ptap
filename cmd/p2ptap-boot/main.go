@@ -809,6 +809,25 @@ func (f *pskACLFilter) waitForAuth(p peer.ID, timeout time.Duration) {
 	}
 }
 
+// RequireAuth reports whether p is allowed to use a non-relay stream protocol
+// (peek-map, meta, echo, seqsync). In open mode every peer is allowed. In PSK
+// mode the peer must have completed PSK authentication; because the auth stream
+// and these streams are opened concurrently, a brief wait absorbs the race.
+// Without this gate an unauthenticated peer that advertises the protocol gets
+// full access to topology broadcasts, the boot's metadata, echo ping-pong, and
+// the SeqSync handshake — all of which are control-plane primitives that should
+// be restricted to known members.
+func (f *pskACLFilter) RequireAuth(p peer.ID) bool {
+	if !f.pskEnabled {
+		return true
+	}
+	if f.IsAuthenticated(p) {
+		return true
+	}
+	f.waitForAuth(p, 3*time.Second)
+	return f.IsAuthenticated(p)
+}
+
 // NetworkOf returns the network ID p authenticated under, or "" if not
 // authenticated. It is wired into peekMapHub.netResolver so discovery routing
 // can enforce the same isolation as relay access.
@@ -1915,6 +1934,10 @@ func main() {
 
 	h.SetStreamHandler(meta.MetaProtocolID, func(s network.Stream) {
 		defer s.Close()
+		if !aclFilter.RequireAuth(s.Conn().RemotePeer()) {
+			log.Warn("[meta] refusing unauthenticated peer %s", s.Conn().RemotePeer().ShortString())
+			return
+		}
 		// The p2ptap client speaks a LENGTH-FRAMED meta protocol (see
 		// pkg/node/meta.go: WriteFrame/ReadFrame = 4-byte big-endian length
 		// prefix + payload). A bare JSON write here would be mis-read by the
@@ -1945,6 +1968,10 @@ func main() {
 	// 6. Register Echo stream handler for liveness ping-pong probes
 	h.SetStreamHandler(echoProtocolID, func(s network.Stream) {
 		defer s.Close()
+		if !aclFilter.RequireAuth(s.Conn().RemotePeer()) {
+			log.Warn("[echo] refusing unauthenticated peer %s", s.Conn().RemotePeer().ShortString())
+			return
+		}
 		// Backstop: a legitimate echo (used by relayKeepaliveLoop) finishes in
 		// milliseconds, but an abusive peer could hold the stream open and pump
 		// arbitrary bytes. Cap the lifetime and the total reflected bytes so a
@@ -1960,6 +1987,11 @@ func main() {
 	// it advertises ObfEnabled=false and a fixed MySeq=0; the client's local
 	// anchorDedupForPeer/negotiateObfWithPeer simply mark the boot peer usable.
 	h.SetStreamHandler(SeqSyncProtocolID, func(s network.Stream) {
+		if !aclFilter.RequireAuth(s.Conn().RemotePeer()) {
+			log.Warn("[seqsync] refusing unauthenticated peer %s", s.Conn().RemotePeer().ShortString())
+			_ = s.Close()
+			return
+		}
 		handleSeqSyncStream(s)
 	})
 	fmt.Printf("[+] SeqSync responder registered (protocol: %s)\n", SeqSyncProtocolID)
@@ -1974,7 +2006,7 @@ func main() {
 	if pskEnabled {
 		hub.netResolver = aclFilter.NetworkOf
 	}
-	h.SetStreamHandler(PeekMapProtocolID, makePeekMapHandler(h, hub, nodeNameVal))
+	h.SetStreamHandler(PeekMapProtocolID, makePeekMapHandler(h, hub, nodeNameVal, aclFilter))
 	fmt.Printf("[+] Peek-map pub/sub broadcast hub registered (protocol: %s)\n", PeekMapProtocolID)
 	// Announce this boot node immediately so peers already connected (before the
 	// first new peek-map client triggers a re-broadcast) learn its identity.
@@ -3236,9 +3268,23 @@ func readFrame(r io.Reader, buf []byte) (int, error) {
 //
 // Extracted from main so the boot-backbone behaviour can be exercised in tests
 // with real hosts.
-func makePeekMapHandler(h host.Host, hub *peekMapHub, nodeName string) func(network.Stream) {
+func makePeekMapHandler(h host.Host, hub *peekMapHub, nodeName string, acl *pskACLFilter) func(network.Stream) {
 	return func(s network.Stream) {
 		remotePeer := s.Conn().RemotePeer()
+
+		// PSK auth gate: refuse to register an unauthenticated peer as a
+		// listener. Without this, any peer that advertises the peek-map
+		// protocol can receive topology broadcasts from ALL other clients
+		// (including cross-network peers when the resolver is nil), leaking
+		// the entire mesh topology to a non-member.
+		if acl != nil && !acl.RequireAuth(remotePeer) {
+			log.Warn("[peek-map] refusing unauthenticated peer %s", remotePeer.ShortString())
+			bootAlerts.Add("warn", "unauth_peek_map", remotePeer.ShortString(),
+				fmt.Sprintf("Peer %s opened peek-map without PSK auth; connection refused", remotePeer.ShortString()))
+			_ = s.Close()
+			return
+		}
+
 		hub.register(remotePeer, s)
 		// Announce this boot node to the freshly connected client (and, since
 		// broadcast fans out to all clients, to everyone else too) so the boot

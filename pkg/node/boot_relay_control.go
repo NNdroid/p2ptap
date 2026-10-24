@@ -476,9 +476,15 @@ func (n *Node) deliverBootRelayControl(finalDst, srcPeer peer.ID, proto protocol
 			return
 		}
 	} else {
-		// Legacy unsigned frame: accept for interop with older builds, but log
-		// so the operator knows they have unauthenticated peers on the backbone.
-		log.Debug("[boot-relay] control frame from %s is unsigned (legacy build)", srcPeer.ShortString())
+		// Unsigned frame: an older build that has not yet been upgraded to sign
+		// control frames. Dropping is strictly safer than accepting — an
+		// unsigned frame is fully forgeable on the backbone, and the protocol
+		// is self-healing (the sender re-sends on timeout). This closes the
+		// window where an unauthenticated backbone peer could inject a forged
+		// control frame (e.g. a Meta reply or a relay-ctrl tunnel) into the
+		// victim's control stream under a spoofed srcPeer.
+		log.Warn("[boot-relay] DROPPED unsigned control frame from %s (requires upgrade)", srcPeer.ShortString())
+		return
 	}
 	// Copy BOTH fields out of the downlink's REUSED read buffer. The downlink
 	// loop calls ReadFrame(s, buf) on the very next iteration, which overwrites

@@ -892,7 +892,12 @@ func validatePSK(psk string) error {
 		// A hex key uses a fixed alphabet, so it spans the whole character space
 		// by construction and the plaintext diversity check would be meaningless
 		// — it would spuriously reject a random key that happens to contain only
-		// digits.
+		// digits. BUT a hex key that repeats a single character (e.g. "0000...0"
+		// or "ffffff...f") is trivially brute-forceable — the entire key space is
+		// 16 possible values. Reject any hex key where every digit is identical.
+		if isAllSameChar(psk) {
+			return fmt.Errorf("invalid config: psk: hex key uses only one repeated character; generate a random key instead")
+		}
 		return nil
 	}
 	if isHexString(psk) && len(psk)%2 == 1 {
@@ -908,6 +913,22 @@ func isHexString(s string) bool {
 	}
 	for i := 0; i < len(s); i++ {
 		if !((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f') || (s[i] >= 'A' && s[i] <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// isAllSameChar reports whether s is non-empty and every character is identical.
+// A PSK like "0000...0" or "ffffff...f" has only 16 possible values and is
+// trivially brute-forceable.
+func isAllSameChar(s string) bool {
+	if s == "" {
+		return false
+	}
+	c := s[0]
+	for i := 1; i < len(s); i++ {
+		if s[i] != c {
 			return false
 		}
 	}

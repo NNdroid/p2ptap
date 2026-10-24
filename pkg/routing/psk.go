@@ -6,12 +6,13 @@ import (
 	"strings"
 )
 
-// Domain separators for the two PSK derivatives. Keeping them named makes the
-// two hashes unmistakably distinct and prevents one call site from silently
+// Domain separators for the three PSK derivatives. Keeping them named makes
+// the hashes unmistakably distinct and prevents one call site from silently
 // adopting the other's separator.
 const (
 	pskDomainRelayAuth = "p2ptap-relay-auth:"
 	pskDomainNetworkID = "p2ptap-net:"
+	pskDomainDiscovery = "p2ptap-disco:"
 )
 
 // PSKKeyBytes returns the canonical byte form of a configured PSK: the bytes
@@ -75,6 +76,19 @@ func RelayAuthToken(psk string) [32]byte {
 func NetworkIDFromPSK(psk string) string {
 	sum := pskHash(pskDomainNetworkID, psk)
 	return hex.EncodeToString(sum[:8])
+}
+
+// DiscoRendezvousKey derives the DHT discovery rendezvous key for a PSK: the
+// full 32-byte SHA-256(pskDomainDiscovery + canonical key bytes), hex-encoded.
+//
+// The discovery layer must use a domain-separated, PSKKeyBytes-normalised hash
+// — NOT raw sha256(PSK). Without this, a hex PSK "ABCD" would produce a
+// different rendezvous key than "abcd" (the two halves of a mixed-case network
+// would never find each other in the DHT), and the hash could collide with
+// another protocol's raw-PSK hash.
+func DiscoRendezvousKey(psk string) string {
+	sum := pskHash(pskDomainDiscovery, psk)
+	return hex.EncodeToString(sum[:])
 }
 
 // pskHash hashes a domain separator over the canonical PSK key bytes.

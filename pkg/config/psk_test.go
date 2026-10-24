@@ -37,7 +37,13 @@ func TestValidatePSKHexNotSubjectToCharacterClassRule(t *testing.T) {
 }
 
 func TestValidatePSKHexLengthBoundaries(t *testing.T) {
-	repeat := func(hexChars int) string { return strings.Repeat("0", hexChars) }
+	// Use a varying pattern (not a single repeated character) so the length
+	// test does not trip the isAllSameChar entropy guard — a key of all "0"s
+	// is trivially brute-forceable and must be rejected.
+	repeat := func(hexChars int) string {
+		pattern := "0123456789abcdef"
+		return strings.Repeat(pattern, hexChars/len(pattern)+1)[:hexChars]
+	}
 
 	cases := []struct {
 		name    string

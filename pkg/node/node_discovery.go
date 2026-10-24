@@ -1,8 +1,6 @@
 package node
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"net"
 	"sort"
@@ -13,14 +11,19 @@ import (
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/libp2p/go-libp2p/p2p/discovery/util"
 	"github.com/multiformats/go-multiaddr"
+
+	"p2ptap/pkg/routing"
 )
 
 func (n *Node) discoveryLoop() {
 	defer n.wg.Done()
 
-	// Hash the PSK using SHA256 to generate a secure rendezvous string
-	hash := sha256.Sum256([]byte(n.Config.PSK))
-	rendezvousString := "p2ptap-" + hex.EncodeToString(hash[:])
+	// Domain-separated PSK derivation for the DHT rendezvous key. Using the
+	// routing package's canonical PSKKeyBytes (hex-lowercased) + domain
+	// separator ensures a mixed-case hex PSK resolves to the same rendezvous
+	// key on both sides, and the hash cannot collide with another protocol's
+	// raw-PSK hash.
+	rendezvousString := "p2ptap-" + routing.DiscoRendezvousKey(n.Config.PSK)
 	log.Debug("Generated secure rendezvous string for DHT discovery")
 
 	// Initialize routing discovery
