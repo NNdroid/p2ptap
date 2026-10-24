@@ -210,18 +210,11 @@ o.datatype = "range(256, 9000)"
 o.default = "1500"
 o.description = translate("dynamic 模式下的最大帧尺寸。")
 o:depends("obfuscation_mode", "dynamic")
-o:depends("obfuscation_mode", "auto")
 
 o = s:taboption("obfs", Value, "auto_detect_interval", translate("自动检测间隔 (Auto Detect Interval, 秒)"))
 o.datatype = "range(5, 600)"
 o.default = "30"
 o.description = translate("Auto 模式下重新评估混淆策略的间隔秒数。")
-o:depends("obfuscation_mode", "auto")
-
-o = s:taboption("obfs", Value, "auto_threshold_bytes", translate("自动切换阈值 (Auto Threshold Bytes)"))
-o.datatype = "range(1024, 1073741824)"
-o.default = "1048576"
-o.description = translate("Auto 模式下累计传输超过此字节数后触发重评估。默认 1MB。")
 o:depends("obfuscation_mode", "auto")
 
 o = s:taboption("obfs", Flag, "allow_mode_switch", translate("允许自动切换模式 (Allow Mode Switch)"))

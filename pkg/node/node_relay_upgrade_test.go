@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+
+	"p2ptap/pkg/config"
 )
 
 // Regression test for a shipped crash: "panic: assignment to entry in nil map"
@@ -95,8 +97,8 @@ func TestResolveRelayUpgradeMaxBackoffClamps(t *testing.T) {
 		0,
 		-time.Minute,
 		time.Second,
-		relayUpgradeMaxBackoffMin - 1,
-		relayUpgradeMaxBackoffMax + 1,
+		config.RelayUpgradeMaxBackoffMin - 1,
+		config.RelayUpgradeMaxBackoffMax + 1,
 		24 * time.Hour,
 	} {
 		if got := resolveRelayUpgradeMaxBackoff(v); got != relayUpgradeMaxBackoff {
@@ -104,10 +106,10 @@ func TestResolveRelayUpgradeMaxBackoffClamps(t *testing.T) {
 		}
 	}
 	for _, v := range []time.Duration{
-		relayUpgradeMaxBackoffMin,
+		config.RelayUpgradeMaxBackoffMin,
 		5 * time.Minute,
 		relayUpgradeMaxBackoff,
-		relayUpgradeMaxBackoffMax,
+		config.RelayUpgradeMaxBackoffMax,
 	} {
 		if got := resolveRelayUpgradeMaxBackoff(v); got != v {
 			t.Fatalf("clamp(%v) = %v, want unchanged", v, got)
@@ -290,8 +292,8 @@ func TestResolveRelayUpgradeFlapWindowClamps(t *testing.T) {
 		0,
 		-time.Minute,
 		time.Second,
-		relayUpgradeFlapWindowMin - 1,
-		relayUpgradeFlapWindowMax + 1,
+		config.RelayUpgradeFlapWindowMin - 1,
+		config.RelayUpgradeFlapWindowMax + 1,
 		24 * time.Hour,
 	} {
 		if got := resolveRelayUpgradeFlapWindow(v); got != relayUpgradeFlapWindow {
@@ -299,10 +301,10 @@ func TestResolveRelayUpgradeFlapWindowClamps(t *testing.T) {
 		}
 	}
 	for _, v := range []time.Duration{
-		relayUpgradeFlapWindowMin,
+		config.RelayUpgradeFlapWindowMin,
 		5 * time.Minute,
 		relayUpgradeFlapWindow,
-		relayUpgradeFlapWindowMax,
+		config.RelayUpgradeFlapWindowMax,
 	} {
 		if got := resolveRelayUpgradeFlapWindow(v); got != v {
 			t.Fatalf("clamp(%v) = %v, want unchanged", v, got)

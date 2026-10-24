@@ -301,7 +301,6 @@ type FramePacker struct {
 
 	// Auto-detection
 	AutoDetectInterval int  `json:"auto_detect_interval"`
-	AutoThresholdBytes int  `json:"auto_threshold_bytes"`
 	AllowModeSwitch    bool `json:"allow_mode_switch"`
 
 	seqCounter uint64 // per-source monotonic counter (low 32 bits of structured SeqID); accessed atomically
@@ -354,7 +353,6 @@ func NewFramePackerFull(cfg *config.ObfuscationConfig) *FramePacker {
 	fp.MinSize = cfg.MinSize
 	fp.MaxSize = cfg.MaxSize
 	fp.AutoDetectInterval = cfg.AutoDetectInterval
-	fp.AutoThresholdBytes = cfg.AutoThresholdBytes
 	fp.AllowModeSwitch = cfg.AllowModeSwitch
 	fp.sizeConfigured = cfg.FixedSize > 0 || cfg.MaxSize > 0
 	fp.applyDefaults()
@@ -1062,7 +1060,6 @@ func (fp *FramePacker) UpdateConfig(cfg *config.ObfuscationConfig) {
 	fp.MinSize = cfg.MinSize
 	fp.MaxSize = cfg.MaxSize
 	fp.AutoDetectInterval = cfg.AutoDetectInterval
-	fp.AutoThresholdBytes = cfg.AutoThresholdBytes
 	fp.AllowModeSwitch = cfg.AllowModeSwitch
 	fp.sizeConfigured = cfg.FixedSize > 0 || cfg.MaxSize > 0
 	fp.applyDefaults()

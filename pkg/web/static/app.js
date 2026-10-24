@@ -600,7 +600,6 @@
                 obfs_max_safe_desc: "PMTU safety threshold for obfuscated frames (bytes)",
                 obfs_auto_title: "🤖 Auto-Detect Settings",
                 obfs_eval_interval_lbl: "Eval Interval",
-                obfs_threshold_lbl: "Threshold",
                 obfs_allow_switch_lbl: "Allow Automatic Mode Switching",
                 obfs_strict_key_lbl: "Strict Key Negotiation (PFS)",
                 obfs_strict_key_desc: "Forbid falling back to the long-lived node key. Each peer pair must derive its own cipher from a one-shot ECDH ephemeral key; otherwise that peer stays plaintext. Hardens per-pair key isolation.",
@@ -1451,7 +1450,6 @@
                 obfs_max_safe_desc: "混淆分片的物理防分片丢包 PMTU 阈值 (字节)",
                 obfs_auto_title: "🤖 动态自适应评估设置",
                 obfs_eval_interval_lbl: "评估时间间隔",
-                obfs_threshold_lbl: "触发评估流量阈值",
                 obfs_allow_switch_lbl: "允许根据流量指纹自动切换模式",
                 obfs_strict_key_lbl: "严格密钥协商 (PFS)",
                 obfs_strict_key_desc: "禁止回退到长期节点密钥。每对 peer 必须用一次性 ECDH 临时密钥各自派生独立的加密套件，否则该 peer 保持明文。强化每对密钥隔离。",
@@ -2389,7 +2387,6 @@
                 obfs_jitter_lbl: "抖動範圍（±位元組）",
                 obfs_max_safe_desc: "PMTU safety threshold for obfuscated frames (bytes)",
                 obfs_max_safe_lbl: "Max Safe Frame Size",
-                obfs_threshold_lbl: "閾值",
                 packet_rate_title: "📊 封包速率分佈（傳送 / 接收）",
                 pcap_layer_frame: "幀",
                 pcap_layer_tree: "協定解析",
@@ -3136,7 +3133,6 @@
                 obfs_jitter_lbl: "ジッタ範囲（±バイト）",
                 obfs_max_safe_desc: "PMTU safety threshold for obfuscated frames (bytes)",
                 obfs_max_safe_lbl: "Max Safe Frame Size",
-                obfs_threshold_lbl: "閾値",
                 packet_rate_title: "📊 パケットレート分布（送信 / 受信）",
                 pcap_layer_frame: "フレーム",
                 pcap_layer_tree: "プロトコル解析",
@@ -3949,7 +3945,6 @@
                 obfs_jitter_lbl: "Jitter-Bereich (±Bytes)",
                 obfs_max_safe_desc: "PMTU safety threshold for obfuscated frames (bytes)",
                 obfs_max_safe_lbl: "Max Safe Frame Size",
-                obfs_threshold_lbl: "Schwellenwert",
                 packet_rate_title: "📊 Paketraten-Verteilung (Tx / Rx)",
                 pcap_layer_frame: "Frame",
                 pcap_layer_tree: "Protokoll-Analyse",
@@ -4762,7 +4757,6 @@
                 obfs_jitter_lbl: "Rango de jitter (±bytes)",
                 obfs_max_safe_desc: "PMTU safety threshold for obfuscated frames (bytes)",
                 obfs_max_safe_lbl: "Max Safe Frame Size",
-                obfs_threshold_lbl: "Umbral",
                 packet_rate_title: "📊 Distribución de tasa de paquetes (Tx / Rx)",
                 pcap_layer_frame: "Trama",
                 pcap_layer_tree: "Análisis de protocolo",
@@ -5640,7 +5634,6 @@
                 obfs_jitter_lbl: "Plage de gigue (±octets)",
                 obfs_max_safe_desc: "PMTU safety threshold for obfuscated frames (bytes)",
                 obfs_max_safe_lbl: "Max Safe Frame Size",
-                obfs_threshold_lbl: "Seuil",
                 packet_rate_title: "📊 Distribution du taux de paquets (Tx / Rx)",
                 pcap_layer_frame: "Trame",
                 pcap_layer_tree: "Analyse de protocole",
@@ -6117,7 +6110,6 @@
                 document.getElementById('cfgMaxSize').value = obfs.max_size || 1500;
                 document.getElementById('cfgBlockSize').value = obfs.block_size || 256;
                 document.getElementById('cfgAutoDetectInterval').value = obfs.auto_detect_interval || 30;
-                document.getElementById('cfgAutoThresholdBytes').value = obfs.auto_threshold_bytes || 65536;
                 document.getElementById('cfgAllowModeSwitch').checked = !!obfs.allow_mode_switch;
                 document.getElementById('cfgStrictKeyNegotiation').checked = !!obfs.strict_key_negotiation;
                 document.getElementById('cfgRequireAuthKeyExchange').checked = !!obfs.require_auth_key_exchange;
@@ -6704,7 +6696,6 @@
                 ob.min_size = parseInt(document.getElementById('cfgMinSize').value, 10) || 512;
                 ob.max_size = parseInt(document.getElementById('cfgMaxSize').value, 10) || 1500;
                 ob.auto_detect_interval = parseInt(document.getElementById('cfgAutoDetectInterval').value, 10) || 30;
-                ob.auto_threshold_bytes = parseInt(document.getElementById('cfgAutoThresholdBytes').value, 10) || 65536;
                 ob.allow_mode_switch = document.getElementById('cfgAllowModeSwitch').checked;
                 ob.strict_key_negotiation = document.getElementById('cfgStrictKeyNegotiation').checked;
                 ob.require_auth_key_exchange = document.getElementById('cfgRequireAuthKeyExchange').checked;

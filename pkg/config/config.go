@@ -160,7 +160,6 @@ type ObfuscationConfig struct {
 
 	// Auto-detection
 	AutoDetectInterval int  `json:"auto_detect_interval"` // seconds between re-evaluations (default 30)
-	AutoThresholdBytes int  `json:"auto_threshold_bytes"` // bytes before evaluating switch
 	AllowModeSwitch    bool `json:"allow_mode_switch"`    // allow engine to auto-switch mode
 
 	// MaxFragSize caps the per-fragment inner size (bytes) used by the tunnel's
@@ -312,6 +311,19 @@ type Config struct {
 	RelayUpgradeFlapWindow time.Duration `json:"relay_upgrade_flap_window"`
 }
 
+// Accepted ranges for the relay-upgrade durations. Validate() rejects values
+// outside these bounds instead of rewriting them, and pkg/node resolves its
+// clamps against the same constants, so a value an operator types is the value
+// the upgrade loop honours.
+const (
+	RelayUpgradeIntervalMin   = 5 * time.Second
+	RelayUpgradeIntervalMax   = 120 * time.Second
+	RelayUpgradeMaxBackoffMin = 10 * time.Second
+	RelayUpgradeMaxBackoffMax = 6 * time.Hour
+	RelayUpgradeFlapWindowMin = 30 * time.Second
+	RelayUpgradeFlapWindowMax = time.Hour
+)
+
 // DefaultConfig returns a sane default configuration
 func DefaultConfig() *Config {
 	hostName, err := os.Hostname()
@@ -442,7 +454,6 @@ func DefaultConfig() *Config {
 			MinSize:              512,
 			MaxSize:              1500,
 			AutoDetectInterval:   30,
-			AutoThresholdBytes:   65536,
 			AllowModeSwitch:      false,
 			MaxFragSize:          0,
 			Algorithm:            "auto",
@@ -768,16 +779,9 @@ func (c *Config) Validate() error {
 	if c.Obfuscation.AutoDetectInterval <= 0 {
 		c.Obfuscation.AutoDetectInterval = 30
 	}
-	if c.Obfuscation.AutoThresholdBytes <= 0 {
-		c.Obfuscation.AutoThresholdBytes = 65536
-	}
 	if c.Obfuscation.AutoDetectInterval > 3600 {
 		return fmt.Errorf("invalid config: obfuscation.auto_detect_interval: %d must be 1-3600 (seconds)", c.Obfuscation.AutoDetectInterval)
 	}
-	if c.Obfuscation.AutoThresholdBytes > 1048576 {
-		return fmt.Errorf("invalid config: obfuscation.auto_threshold_bytes: %d must be 1-1048576 (bytes)", c.Obfuscation.AutoThresholdBytes)
-	}
-
 	// --- ACL ---
 	if c.ACL.Enable {
 		if c.ACL.DefaultAction != "accept" && c.ACL.DefaultAction != "allow" && c.ACL.DefaultAction != "drop" && c.ACL.DefaultAction != "deny" {
@@ -822,11 +826,20 @@ func (c *Config) Validate() error {
 	if c.RelayUpgradeInterval <= 0 {
 		c.RelayUpgradeInterval = 30 * time.Second
 	}
+	if c.RelayUpgradeInterval < RelayUpgradeIntervalMin || c.RelayUpgradeInterval > RelayUpgradeIntervalMax {
+		return fmt.Errorf("invalid config: relay_upgrade_interval: %s must be %s-%s", c.RelayUpgradeInterval, RelayUpgradeIntervalMin, RelayUpgradeIntervalMax)
+	}
 	if c.RelayUpgradeMaxBackoff <= 0 {
 		c.RelayUpgradeMaxBackoff = 30 * time.Minute
 	}
+	if c.RelayUpgradeMaxBackoff < RelayUpgradeMaxBackoffMin || c.RelayUpgradeMaxBackoff > RelayUpgradeMaxBackoffMax {
+		return fmt.Errorf("invalid config: relay_upgrade_max_backoff: %s must be %s-%s", c.RelayUpgradeMaxBackoff, RelayUpgradeMaxBackoffMin, RelayUpgradeMaxBackoffMax)
+	}
 	if c.RelayUpgradeFlapWindow <= 0 {
 		c.RelayUpgradeFlapWindow = 5 * time.Minute
+	}
+	if c.RelayUpgradeFlapWindow < RelayUpgradeFlapWindowMin || c.RelayUpgradeFlapWindow > RelayUpgradeFlapWindowMax {
+		return fmt.Errorf("invalid config: relay_upgrade_flap_window: %s must be %s-%s", c.RelayUpgradeFlapWindow, RelayUpgradeFlapWindowMin, RelayUpgradeFlapWindowMax)
 	}
 
 	// --- STUN servers ---
@@ -1256,7 +1269,6 @@ func UpdateConfigFileDelta(configPath string, incoming *Config) error {
 	obfsMap["min_size"] = incoming.Obfuscation.MinSize
 	obfsMap["max_size"] = incoming.Obfuscation.MaxSize
 	obfsMap["auto_detect_interval"] = incoming.Obfuscation.AutoDetectInterval
-	obfsMap["auto_threshold_bytes"] = incoming.Obfuscation.AutoThresholdBytes
 	obfsMap["allow_mode_switch"] = incoming.Obfuscation.AllowModeSwitch
 	obfsMap["max_frag_size"] = incoming.Obfuscation.MaxFragSize
 	obfsMap["algorithm"] = incoming.Obfuscation.Algorithm

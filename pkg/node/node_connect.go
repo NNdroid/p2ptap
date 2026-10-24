@@ -23,6 +23,7 @@ import (
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 
+	"p2ptap/pkg/config"
 	"p2ptap/pkg/maddrutil"
 	"p2ptap/pkg/routing"
 	"p2ptap/pkg/version"
@@ -143,11 +144,6 @@ const (
 	// never be reached directly is retried roughly once per half hour instead
 	// of once per tick.
 	relayUpgradeMaxBackoff = 30 * time.Minute
-	// Bound the configured cap to a meaningful range. Below the base step a cap
-	// cannot be reached, so it silently disables the throttle; beyond a few hours
-	// a peer that regained a direct path would wait that long to be upgraded.
-	relayUpgradeMaxBackoffMin = 10 * time.Second
-	relayUpgradeMaxBackoffMax = 6 * time.Hour
 	// relayRediscoveryAddrTTL is how long addresses learned from a DHT
 	// rediscovery stay cached. Shorter than peerstore.AddressTTL (1h): a DHT
 	// record is a point-in-time view of what the peer advertised, so a stale
@@ -162,27 +158,22 @@ const (
 	// peer's circuit streams. The window bounds that churn; the peer keeps
 	// sending data over the surviving circuit relay meanwhile.
 	relayUpgradeFlapWindow = 5 * time.Minute
-	// Bound the configured window to a meaningful range. Below this it is
-	// shorter than the smallest tick interval, so it could never suppress an
-	// attempt; past an hour a peer that genuinely regained a direct path would
-	// wait that long to be upgraded again.
-	relayUpgradeFlapWindowMin = 30 * time.Second
-	relayUpgradeFlapWindowMax = time.Hour
 )
 
-// resolveRelayUpgradeMaxBackoff turns the configured cap into one the backoff
-// actually honours.
+// resolveRelayUpgradeMaxBackoff refuses a cap outside config's accepted range.
+// Validate() already rejects such a config, so this only guards a caller that
+// bypasses validation.
 func resolveRelayUpgradeMaxBackoff(v time.Duration) time.Duration {
-	if v < relayUpgradeMaxBackoffMin || v > relayUpgradeMaxBackoffMax {
+	if v < config.RelayUpgradeMaxBackoffMin || v > config.RelayUpgradeMaxBackoffMax {
 		return relayUpgradeMaxBackoff
 	}
 	return v
 }
 
-// resolveRelayUpgradeFlapWindow turns the configured flap window into one the
-// upgrade loop can honour.
+// resolveRelayUpgradeFlapWindow refuses a window outside config's accepted range.
+// See resolveRelayUpgradeMaxBackoff for why this is belt-and-braces.
 func resolveRelayUpgradeFlapWindow(v time.Duration) time.Duration {
-	if v < relayUpgradeFlapWindowMin || v > relayUpgradeFlapWindowMax {
+	if v < config.RelayUpgradeFlapWindowMin || v > config.RelayUpgradeFlapWindowMax {
 		return relayUpgradeFlapWindow
 	}
 	return v
@@ -216,7 +207,7 @@ func (n *Node) relayOnlyDirectUpgradeLoop() {
 	// resized, so relay_upgrade_interval needs a restart. The backoff cap and
 	// the flap window are read per tick below and are live-reloadable instead.
 	interval := n.config().RelayUpgradeInterval
-	if interval < 5*time.Second || interval > 120*time.Second {
+	if interval < config.RelayUpgradeIntervalMin || interval > config.RelayUpgradeIntervalMax {
 		interval = 30 * time.Second
 	}
 	ticker := time.NewTicker(interval)

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,6 +62,56 @@ func TestConfigValidationRepairsMissingRelayUpgradeFlapWindow(t *testing.T) {
 		}
 		if cfg.RelayUpgradeFlapWindow != 5*time.Minute {
 			t.Errorf("input %v: expected 5m after Validate, got %v", v, cfg.RelayUpgradeFlapWindow)
+		}
+	}
+}
+
+// Before these checks existed, an out-of-range value passed Validate() and the
+// upgrade loop quietly replaced it: "relay_upgrade_interval: 5m" silently
+// became 30s, so the operator saw a saved setting that never took effect.
+func TestConfigValidationRejectsRelayUpgradeOutOfRange(t *testing.T) {
+	cases := []struct {
+		name   string
+		apply  func(*Config)
+		expect string
+	}{
+		{"interval below min", func(c *Config) { c.RelayUpgradeInterval = RelayUpgradeIntervalMin - time.Second }, "relay_upgrade_interval"},
+		{"interval above max", func(c *Config) { c.RelayUpgradeInterval = RelayUpgradeIntervalMax + time.Second }, "relay_upgrade_interval"},
+		{"backoff below min", func(c *Config) { c.RelayUpgradeMaxBackoff = RelayUpgradeMaxBackoffMin - time.Second }, "relay_upgrade_max_backoff"},
+		{"backoff above max", func(c *Config) { c.RelayUpgradeMaxBackoff = RelayUpgradeMaxBackoffMax + time.Minute }, "relay_upgrade_max_backoff"},
+		{"flap window below min", func(c *Config) { c.RelayUpgradeFlapWindow = RelayUpgradeFlapWindowMin - time.Second }, "relay_upgrade_flap_window"},
+		{"flap window above max", func(c *Config) { c.RelayUpgradeFlapWindow = RelayUpgradeFlapWindowMax + time.Minute }, "relay_upgrade_flap_window"},
+	}
+	for _, tc := range cases {
+		cfg := DefaultConfig()
+		tc.apply(cfg)
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatalf("%s: Validate() accepted a value outside the accepted range", tc.name)
+		}
+		if !strings.Contains(err.Error(), tc.expect) {
+			t.Errorf("%s: error %q does not name %s", tc.name, err, tc.expect)
+		}
+	}
+}
+
+// The bounds are inclusive: the endpoints themselves must be accepted.
+func TestConfigValidationAcceptsRelayUpgradeBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*Config)
+	}{
+		{"interval min", func(c *Config) { c.RelayUpgradeInterval = RelayUpgradeIntervalMin }},
+		{"interval max", func(c *Config) { c.RelayUpgradeInterval = RelayUpgradeIntervalMax }},
+		{"backoff min", func(c *Config) { c.RelayUpgradeMaxBackoff = RelayUpgradeMaxBackoffMin }},
+		{"backoff max", func(c *Config) { c.RelayUpgradeMaxBackoff = RelayUpgradeMaxBackoffMax }},
+		{"flap window min", func(c *Config) { c.RelayUpgradeFlapWindow = RelayUpgradeFlapWindowMin }},
+		{"flap window max", func(c *Config) { c.RelayUpgradeFlapWindow = RelayUpgradeFlapWindowMax }},
+	} {
+		cfg := DefaultConfig()
+		tc.apply(cfg)
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("%s: %v", tc.name, err)
 		}
 	}
 }
@@ -145,6 +196,25 @@ func TestConfigValidationErrors(t *testing.T) {
 		t.Error("Expected error for invalid TapMAC, got nil")
 	} else {
 		t.Logf("[config] ✓ invalid TapMAC rejected: %v", err)
+	}
+}
+
+// Dropping the field must not break a config.json that still carries it.
+// encoding/json ignores unknown keys, so a config written before
+// auto_threshold_bytes was removed keeps loading unchanged.
+func TestLoadConfigIgnoresRemovedAutoThresholdBytes(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "old_config.json")
+	content := `{"tap_ip": "10.0.0.1/24", "obfuscation": {"auto_threshold_bytes": 1048576, "auto_detect_interval": 60}}`
+	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfigFromFile(configFile)
+	if err != nil {
+		t.Fatalf("a pre-removal config.json must still load: %v", err)
+	}
+	if cfg.Obfuscation.AutoDetectInterval != 60 {
+		t.Errorf("an unrelated obfuscation field was disturbed: %+v", cfg.Obfuscation)
 	}
 }
 

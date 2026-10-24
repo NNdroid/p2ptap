@@ -61,14 +61,19 @@ func RestartRequiredFields(old, new *Config) []string {
 	add("psk", old.PSK != new.PSK)
 	add("transport_strategy", old.TransportStrategy != new.TransportStrategy)
 
-	// Only the WebUI bind/port/enable/token need a restart: the running Server
-	// resolves its bearer token once at startup; pcap_sample_every is read
-	// live and stays excluded.
+	// Every WebUI knob is read once, when the Server is constructed: the
+	// bearer token and the packet-capture sampling are both applied in
+	// StartWebServer, so nothing in the running process observes a change. The
+	// capture rate can still be tuned live, but only through the pcap HTTP
+	// endpoint, which does not write the config file — so a change made here
+	// must be announced as needing a restart, not waved through as applied.
 	add("web_ui", old.WebUI.Enable != new.WebUI.Enable ||
 		old.WebUI.ListenIP != new.WebUI.ListenIP ||
 		old.WebUI.ListenIPv6 != new.WebUI.ListenIPv6 ||
 		old.WebUI.Port != new.WebUI.Port ||
-		old.WebUI.AuthToken != new.WebUI.AuthToken)
+		old.WebUI.AuthToken != new.WebUI.AuthToken ||
+		old.WebUI.PcapSampleEvery != new.WebUI.PcapSampleEvery ||
+		old.WebUI.PcapMaxRatePerSec != new.WebUI.PcapMaxRatePerSec)
 
 	// Node name still updates the local display live via the collector, but
 	// peer-anchored identity — meta/peek-map/LSA — keeps the boot value.
