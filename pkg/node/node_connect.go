@@ -380,9 +380,17 @@ func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 	// Auth succeeded: best-effort read the boot's version record. An OLD boot
 	// closed the stream after the 1-byte response, so a short read means
 	// "unknown version" — warn and proceed rather than fail the whole link.
+	// A corrupted record (non-EOF error) means the peer sent a malformed or
+	// truncated JSON — log loudly so an envelope-corruption attack is visible,
+	// but still proceed (the auth already succeeded, and the compatibility
+	// check below will flag any envelope mismatch).
 	var peerRec version.Record
 	if err := peerRec.ReadRecord(s); err != nil {
-		log.Warn("Relay peer %s did not report a version record (old build?) — cannot verify envelope compatibility", peerID.String())
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			log.Warn("Relay peer %s did not report a version record (old build?) — cannot verify envelope compatibility", peerID.String())
+		} else {
+			log.Warn("Relay peer %s sent a corrupted version record — cannot verify envelope compatibility: %v", peerID.String(), err)
+		}
 	} else {
 		// Compatibility is a tri-state: OK (safe), Warn (differs but safe to
 		// connect), Danger (incompatible envelope — corruption risk). We NEVER
