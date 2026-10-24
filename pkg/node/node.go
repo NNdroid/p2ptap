@@ -2006,7 +2006,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		SetMACLookup(func(net.IP) net.HardwareAddr)
 	}); ok {
 		macSetter.SetMACLookup(func(ip net.IP) net.HardwareAddr {
-			_, mac := node.resolvePeerIDByIP(ip)
+			_, mac := node.ResolvePeerIDByIP(ip)
 			return mac
 		})
 	}

@@ -152,7 +152,7 @@ func TestRebuildARPIndexDuplicateIPv4Arbitration(t *testing.T) {
 		},
 	)
 
-	gotPID, gotMAC := n.resolvePeerIDByIP(net.ParseIP("10.0.0.5"))
+	gotPID, gotMAC := n.ResolvePeerIDByIP(net.ParseIP("10.0.0.5"))
 	if gotPID != pid("peer-A") {
 		t.Fatalf("resolvePeerIDByIP(10.0.0.5) = %s, want peer-A (earlier in allow list)", gotPID)
 	}
@@ -195,7 +195,7 @@ func TestRebuildARPIndexDuplicateIPv6Arbitration(t *testing.T) {
 		},
 	)
 
-	gotPID, _ := n.resolvePeerIDByIP(net.ParseIP("fd00::5"))
+	gotPID, _ := n.ResolvePeerIDByIP(net.ParseIP("fd00::5"))
 	if gotPID != pid("peer-B") {
 		t.Fatalf("resolvePeerIDByIP(fd00::5) = %s, want peer-B (earlier in allow list)", gotPID)
 	}
@@ -248,7 +248,7 @@ func TestRebuildARPIndexNoConflictWhenUnique(t *testing.T) {
 		t.Fatalf("conflicts = %+v, want none for unique IPs", got)
 	}
 	// Unique lookups must still resolve correctly.
-	if gotPID, _ := n.resolvePeerIDByIP(net.ParseIP("10.0.0.3")); gotPID != pid("peer-B") {
+	if gotPID, _ := n.ResolvePeerIDByIP(net.ParseIP("10.0.0.3")); gotPID != pid("peer-B") {
 		t.Errorf("resolve(10.0.0.3) = %s, want peer-B", gotPID)
 	}
 }
@@ -292,7 +292,7 @@ func TestRebuildARPIndexOverlappingSubnetArbitration(t *testing.T) {
 	}
 
 	// The more specific prefix owns the contained range.
-	gotPID, gotMAC := n.resolvePeerIDByIP(net.ParseIP("10.1.5.9"))
+	gotPID, gotMAC := n.ResolvePeerIDByIP(net.ParseIP("10.1.5.9"))
 	if gotPID != pid("peer-B") {
 		t.Errorf("resolve(10.1.5.9) = %s, want peer-B (the /16 is the longest match)", gotPID)
 	}
@@ -300,7 +300,7 @@ func TestRebuildARPIndexOverlappingSubnetArbitration(t *testing.T) {
 		t.Errorf("resolved MAC = %v, want peer-B's MAC %v", gotMAC, macB)
 	}
 	// Outside the /16 the broader prefix still applies.
-	if gotPID, _ := n.resolvePeerIDByIP(net.ParseIP("10.2.5.9")); gotPID != pid("peer-A") {
+	if gotPID, _ := n.ResolvePeerIDByIP(net.ParseIP("10.2.5.9")); gotPID != pid("peer-A") {
 		t.Errorf("resolve(10.2.5.9) = %s, want peer-A (outside the contained /16)", gotPID)
 	}
 

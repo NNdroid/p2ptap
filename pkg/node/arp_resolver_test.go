@@ -65,7 +65,7 @@ func TestResolvePeerIDByIndex(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotPID, gotMAC := n.resolvePeerIDByIP(tt.ip)
+			gotPID, gotMAC := n.ResolvePeerIDByIP(tt.ip)
 			if gotPID != tt.wantPID {
 				t.Errorf("resolvePeerIDByIP(%v).pid = %q, want %q", tt.ip, gotPID, tt.wantPID)
 			}
@@ -124,7 +124,7 @@ func TestARPLookupsUseIndex(t *testing.T) {
 // first peerMeta write (e.g. during early startup).
 func TestARPResolverNilIndexSafe(t *testing.T) {
 	n := &Node{} // arpIndex left nil
-	if pid, mac := n.resolvePeerIDByIP(net.ParseIP("10.0.0.2")); pid != "" || mac != nil {
+	if pid, mac := n.ResolvePeerIDByIP(net.ParseIP("10.0.0.2")); pid != "" || mac != nil {
 		t.Errorf("resolvePeerIDByIP on nil index = (%v,%v), want (nil,'')", mac, pid)
 	}
 }
@@ -158,19 +158,19 @@ func BenchmarkResolvePeerIDByIP(b *testing.B) {
 		b.Run("direct/sz="+strconv.Itoa(sz), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				_, _ = n.resolvePeerIDByIP(direct)
+				_, _ = n.ResolvePeerIDByIP(direct)
 			}
 		})
 		b.Run("subnet/sz="+strconv.Itoa(sz), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				_, _ = n.resolvePeerIDByIP(subnet)
+				_, _ = n.ResolvePeerIDByIP(subnet)
 			}
 		})
 		b.Run("miss/sz="+strconv.Itoa(sz), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				_, _ = n.resolvePeerIDByIP(unknown)
+				_, _ = n.ResolvePeerIDByIP(unknown)
 			}
 		})
 	}

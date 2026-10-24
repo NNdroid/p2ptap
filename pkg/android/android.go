@@ -1215,10 +1215,30 @@ func setExitNodeLocked(n *node.Node, peerID, tapIPv4, tapIPv6 string) error {
 			return n.Gateway.ClearExitNode()
 		}
 		if ip := net.ParseIP(target); ip != nil {
-			if ip.To4() != nil {
-				return n.Gateway.SetExitNode("", target, "", nil)
+			// A bare IP (not a peer ID) — the user typed the peer's TAP IP
+			// instead of its libp2p peer ID. Resolve the peer ID from the ARP
+			// index so the exit node has a real peer behind the default route.
+			// Without this the default route points to a TAP IP with no peer,
+			// and ClearExitNode will never fire when that peer disconnects
+			// (ActiveExitPeerPID returns ""), black-holing all egress.
+			if pid, _ := n.ResolvePeerIDByIP(ip); pid != "" {
+				log.Info("Exit node: resolved bare IP %s to peer %s", target, pid.String())
+				if tapIPv4 == "" && tapIPv6 == "" {
+					if meta, ok := n.GetPeerMeta(pid); ok {
+						if meta.TapIP != "" {
+							tapIPv4 = strings.Split(meta.TapIP, "/")[0]
+						}
+						if meta.TapIPv6 != "" {
+							tapIPv6 = strings.Split(meta.TapIPv6, "/")[0]
+						}
+					}
+				}
+				return n.Gateway.SetExitNode(pid.String(), tapIPv4, tapIPv6, nil)
 			}
-			return n.Gateway.SetExitNode("", "", target, nil)
+			// No peer owns this TAP IP yet — return an error rather than
+			// silently setting up a peerless exit node that cannot be
+			// cleaned up when the peer disconnects.
+			return fmt.Errorf("cannot activate exit node: TAP IP %s is not claimed by any connected peer", target)
 		}
 		// If peerID is given and bare IPs are empty, automatically resolve from peer metadata
 		if tapIPv4 == "" && tapIPv6 == "" {

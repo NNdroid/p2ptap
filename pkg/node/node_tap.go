@@ -792,7 +792,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 		// destination IP directly from the frame (direct TAP IP, advertised LAN subnet,
 		// or runtime IPTracker) and look up the owning mesh peer.
 		if dstIP := extractFrameDstIP(payload); dstIP != nil {
-			pid, mac := n.resolvePeerIDByIP(dstIP)
+			pid, mac := n.ResolvePeerIDByIP(dstIP)
 			if len(mac) == 0 {
 				if log.IsDebug() {
 					log.Debug("TAPFWD resolve: dstIP=%s resolvePeerIDByIP => pid=(empty) mac=(none) [NOT found]", dstIP.String())

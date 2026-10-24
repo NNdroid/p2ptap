@@ -948,7 +948,7 @@ func (n *Node) lookupPeerMACByIPv4(ip net.IP) (net.HardwareAddr, peer.ID) {
 // resolvePeerIDByIP is the unified multi-stage fallback resolver for an IP:
 // direct TAP IPv4/IPv6, then advertised LAN subnet. O(1) + O(subnets) over the
 // read-optimized index, with no per-call CIDR/MAC parsing.
-func (n *Node) resolvePeerIDByIP(ip net.IP) (peer.ID, net.HardwareAddr) {
+func (n *Node) ResolvePeerIDByIP(ip net.IP) (peer.ID, net.HardwareAddr) {
 	if ip == nil {
 		return "", nil
 	}
