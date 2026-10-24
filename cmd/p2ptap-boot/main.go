@@ -1857,35 +1857,7 @@ func main() {
 	aclFilter.SetHost(h)
 
 	// 3. Enable Circuit Relay v2 with ACL and resource limits.
-	// Limits are sized generously for a dedicated relay server: a relay that runs
-	// out of circuits/reservations silently drops legitimate peers (another
-	// flavour of "relay can't connect"), so we give it ample headroom. Per-circuit
-	// Duration/Data still bound abusive single streams.
-	relayRes := relay.DefaultResources()
-	relayRes.ReservationTTL = 1 * time.Hour
-	relayRes.MaxReservations = relayMaxReservations
-	relayRes.MaxCircuits = relayMaxCircuits
-	// Note: relay.Resources.MaxReservationsPerPeer is deliberately NOT set. It is
-	// marked Deprecated in libp2p ("We only need 1 reservation per peer") and the
-	// field is never read by any limiter — constraints.Reserve removes the peer's
-	// existing reservation before appending the new one, so the enforced per-peer
-	// cap is 1 regardless of this value. Setting it to 16 here made the WebUI
-	// advertise 16 reservations per peer that the relay could never grant.
-	relayRes.MaxReservationsPerIP = 64
-	// MaxReservationsPerASN is silently left at libp2p's default of 32, which
-	// means all peers behind a single ISP ASN (office networks, CGNAT, mobile
-	// carriers) share a 32-slot pool. A boot serving many peers on one ISP
-	// exhausts this and denies reservations silently — the denial comes from
-	// libp2p's resource limiter, not pskACLFilter, so it doesn't appear in the
-	// WebUI alerts. Override with a generous value.
-	relayRes.MaxReservationsPerASN = 256
-	// BufferSize defaults to 2048 bytes per relayed connection, which throttles
-	// throughput on high-bandwidth links. Raise it for a dedicated relay.
-	relayRes.BufferSize = relayBufferSize
-	relayRes.Limit = &relay.RelayLimit{
-		Duration: 5 * time.Minute,
-		Data:     1 << 29, // 512 MiB per relay connection (↑ from 128MiB for better throughput)
-	}
+	relayRes := relayResources()
 
 	_, err = relay.New(h,
 		relay.WithACL(aclFilter),
@@ -2306,6 +2278,10 @@ func (p *bootDataProviderImpl) GetRelayLimits() bootweb.RelayStatsDTO {
 		d.DurationLimitSec = int(p.relayRes.Limit.Duration.Seconds())
 		d.DataLimitMB = int(p.relayRes.Limit.Data / (1 << 20))
 	}
+	// A nil Limit leaves both fields at 0, which is the "no circuit lifetime or
+	// data quota" encoding rather than a missing value — libp2p's own reservation
+	// limit says "If 0, there is no limit". relayResources sets Limit to nil on
+	// purpose, so 0/0 is the honest report.
 	return d
 }
 
@@ -3016,11 +2992,12 @@ func printBootstrapBanner(h host.Host, name string, pskEnabled bool, webServer *
 	// Mirror the WebUI dashboard: MaxPerPeer is 1 because libp2p's
 	// MaxReservationsPerPeer field is deprecated and never enforced — the limiter
 	// removes a peer's old reservation before granting a new one, so 16 was a
-	// number we never granted.
+	// number we never granted. "none" for the circuit lifetime and data quota:
+	// see relayResources for why the boot must not cap either.
 	relayLimits := []string{
 		"MaxReservations=1024", "MaxCircuits=1024",
 		"MaxPerPeer=1", "MaxPerIP=64", "MaxPerASN=256",
-		"ReservationTTL=1h", "ConnDuration=5m", "ConnData=512MiB",
+		"ReservationTTL=1h", "ConnDuration=none", "ConnData=none",
 	}
 	fmt.Printf(" Relay Limits      : %s\n", strings.Join(relayLimits, ", "))
 	fmt.Println(" Copy-paste any of the following Multiaddrs into your")
@@ -3030,6 +3007,55 @@ func printBootstrapBanner(h host.Host, name string, pskEnabled bool, webServer *
 		fmt.Printf("   \"%s/p2p/%s\",\n", a.String(), h.ID())
 	}
 	fmt.Println("=========================================================")
+}
+
+// relayResources builds the circuit relay's resource envelope. It is extracted
+// from main() so the envelope can be asserted in tests: the one value that must
+// not change is Limit, and a regression there was invisible from the relay's
+// advertised capacity.
+func relayResources() relay.Resources {
+	relayRes := relay.DefaultResources()
+	relayRes.ReservationTTL = 1 * time.Hour
+	relayRes.MaxReservations = relayMaxReservations
+	relayRes.MaxCircuits = relayMaxCircuits
+	// Note: relay.Resources.MaxReservationsPerPeer is deliberately NOT set. It is
+	// marked Deprecated in libp2p ("We only need 1 reservation per peer") and the
+	// field is never read by any limiter — constraints.Reserve removes the peer's
+	// existing reservation before appending the new one, so the enforced per-peer
+	// cap is 1 regardless of this value. Setting it to 16 here made the WebUI
+	// advertise 16 reservations per peer that the relay could never grant.
+	relayRes.MaxReservationsPerIP = 64
+	// MaxReservationsPerASN is left at libp2p's default of 32, which means all
+	// peers behind a single ISP ASN (office networks, CGNAT, mobile carriers)
+	// share a 32-slot pool. A boot serving many peers on one ISP exhausts this
+	// and denies reservations silently — the denial comes from libp2p's resource
+	// limiter, not pskACLFilter, so it doesn't appear in the WebUI alerts.
+	// Override with a generous value. Note constraints.Reserve applies the ASN
+	// cap to IPv6 reservations only (it gates on ip.To4() == nil), so IPv4
+	// clients are bounded by MaxReservationsPerIP instead.
+	relayRes.MaxReservationsPerASN = 256
+	// BufferSize defaults to 2048 bytes per relayed connection, which throttles
+	// throughput on high-bandwidth links. Raise it for a dedicated relay.
+	relayRes.BufferSize = relayBufferSize
+	// No per-circuit Duration or Data limit. A non-nil Limit makes the relay do
+	// s.SetDeadline(now+Duration) and bs.SetDeadline(now+Duration) on both
+	// directions of every relayed connection and wrap each direction in
+	// io.LimitReader(..., Data); there is no circuit-renewal message in relay v2,
+	// so a circuit simply dies. 5 minutes capped every p2ptap peer-to-peer
+	// session riding on a circuit, and 512 MiB filled in seconds on a gigabit
+	// link. The reservation TTL above is unrelated: it bounds how long a
+	// reservation is offered, not how long a circuit may live.
+	//
+	// Nil is the correct answer for a dedicated PSK relay — the resource the
+	// limit was throttling is exactly the resource the relay exists to serve,
+	// and abuse is already bounded at reservation time (the PSK ACL, the
+	// MaxReservations / PerIP / PerASN pools) and by the resource manager's
+	// memory, fd and stream ceilings. Acceptable cost: a hostile peer can now
+	// hold its reservations and circuits open indefinitely, so it can occupy up
+	// to MaxReservationsPerIP slots forever instead of losing them after 5
+	// minutes. That is the right trade for this service.
+	relayRes.Limit = nil
+	return relayRes
 }
 
 // relayResourceManager builds the resource manager for this relay.
