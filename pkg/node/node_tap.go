@@ -338,9 +338,18 @@ func (n *Node) tapWriteLoop() {
 	// R10: recover from panics in the TAP write path. A panic in
 	// tapWrite (e.g. from a corrupted frame buffer) would kill this
 	// goroutine and stop all TAP writes, black-holing the entire mesh.
+	// Mirror tapReadLoop: restart the loop if the context is still live.
+	// Without this, one poisoned frame buffer permanently disables TAP
+	// injection for the process lifetime — the loop returns, the drain
+	// never resumes, and every enqueueTapWrite falls through to the
+	// synchronous tapWrite fallback, which would panic the same way.
 	defer func() {
 		if r := recover(); r != nil {
-			log.Error("tapWriteLoop: panic recovered: %v", r)
+			log.Error("tapWriteLoop: panic recovered: %v\n%s", r, debug.Stack())
+			if n.ctx.Err() == nil {
+				n.wg.Add(1)
+				go n.tapWriteLoop()
+			}
 		}
 	}()
 	// Reuse a worker-local batch slot to avoid per-batch allocation.
@@ -416,10 +425,18 @@ func (n *Node) tapWriteUrgent(payload []byte) {
 // forwarding path cannot starve diagnostic probe replies.
 func (n *Node) tapWriteUrgentLoop() {
 	defer n.wg.Done()
-	// R10: recover from panics in the urgent TAP write path.
+	// R10: recover from panics in the urgent TAP write path. Restart the
+	// loop on panic (see tapWriteLoop for the full reasoning): without
+	// this, a single poisoned probe reply permanently disables the
+	// urgent path and every future probe falls through to the synchronous
+	// tapWrite fallback, which would panic on the same input.
 	defer func() {
 		if r := recover(); r != nil {
-			log.Error("tapWriteUrgentLoop: panic recovered: %v", r)
+			log.Error("tapWriteUrgentLoop: panic recovered: %v\n%s", r, debug.Stack())
+			if n.ctx.Err() == nil {
+				n.wg.Add(1)
+				go n.tapWriteUrgentLoop()
+			}
 		}
 	}()
 	for {
