@@ -168,9 +168,18 @@ type SeqSyncMsg struct {
 	// fix signs ObfPub with the sender's libp2p identity key, which a hop
 	// cannot forge. All three are additive: an older peer ignores them and the
 	// exchange degrades to the (previously-default) unauthenticated ECDH.
-	HandshakeVer    uint32 `json:"hv"`        // >= 1 ⇒ this sender signs ObfPub; 0 ⇒ legacy/unsigned
+	HandshakeVer    uint32 `json:"hv"`        // >= 1 ⇒ this sender signs ObfPub; >= 2 ⇒ also signs the message
 	ObfPubSig       []byte `json:"opksig"`    // identity-key signature over ObfPub
 	ObfPubSignerPub []byte `json:"opksigner"` // the identity public key the signature is over
+
+	// MsgSig is an identity-key signature over the ENTIRE SeqSyncMsg (all fields
+	// except MsgSig itself), bound to the sender's identity. It closes the ack
+	// forgery/replay window: an attacker who captures a valid ack (with a valid
+	// ObfPubSig) can modify MySeq/ConnEpoch/Timestamp to manipulate the
+	// receiver's dedup window, because ObfPubSig only covers ObfPub. MsgSig
+	// covers everything, so any tampering is detected. Present when
+	// HandshakeVer >= 2.
+	MsgSig []byte `json:"msig,omitempty"`
 }
 
 // generateConnEpoch returns a fresh random 12-bit epoch for this node instance.
@@ -276,9 +285,21 @@ func (n *Node) buildSeqSyncMsg(msgType string, p peer.ID, myPub []byte) SeqSyncM
 		} else {
 			m.ObfPub = myPub
 			m.ObfAlgos = n.mySupportedAlgos()
-			m.HandshakeVer = seqSyncAuthVersion
+			m.HandshakeVer = seqSyncAuthVersion2
 			m.ObfPubSig = sig
 			m.ObfPubSignerPub = signerPub
+		}
+	}
+	// Sign the entire message (not just ObfPub) so that MySeq, ConnEpoch,
+	// Timestamp, and all Obf* fields are bound to the sender's identity. This
+	// closes the ack forgery/replay window: an attacker who captures a valid
+	// ack (with a valid ObfPubSig) can no longer modify MySeq/ConnEpoch to
+	// manipulate the receiver's dedup window, because MsgSig covers everything.
+	if m.HandshakeVer >= seqSyncAuthVersion2 {
+		if err := n.signSeqSyncMsg(&m); err != nil {
+			log.Warn("SeqSync: cannot sign message for %s: %v", p.String(), err)
+			m.MsgSig = nil
+			m.HandshakeVer = seqSyncAuthVersion
 		}
 	}
 	return m
@@ -336,6 +357,16 @@ func (n *Node) handleSeqSync(s network.Stream) {
 			// instead of serving MITM'd ciphertext.
 			log.Warn("SeqSync: refusing key exchange from %s — unauthenticated: %v", remotePeer, err)
 			return
+		}
+		// Verify the message-level signature (HandshakeVer >= 2). This binds
+		// MySeq, ConnEpoch, Timestamp, and all Obf* fields to the sender's
+		// identity, closing the ack forgery/replay window. A legacy peer (no
+		// MsgSig, HandshakeVer < 2) is accepted for interop.
+		if n.requireSeqSyncMsgAuth(remotePeer, msg) {
+			if err := n.verifySeqSyncMsg(remotePeer, msg); err != nil {
+				log.Warn("SeqSync: refusing message from %s — unauthenticated: %v", remotePeer, err)
+				return
+			}
 		}
 		// Ensure we ourselves have a (per-peer) epoch before replying.
 		n.ensureLocalEpoch(remotePeer)
@@ -663,6 +694,16 @@ func (n *Node) syncSeqToPeerAttempt(p peer.ID) error {
 	if err := n.checkObfPubAuth(p, reply); err != nil {
 		log.Warn("SeqSync: refusing key exchange from %s — unauthenticated: %v", p.String(), err)
 		return fmt.Errorf("SeqSync: unauthenticated key exchange with %s: %w", p.String(), err)
+	}
+	// Verify the message-level signature (HandshakeVer >= 2) on the ack. This
+	// binds MySeq, ConnEpoch, Timestamp, and all Obf* fields to the responder's
+	// identity, closing the ack forgery/replay window. A legacy responder (no
+	// MsgSig, HandshakeVer < 2) is accepted for interop.
+	if n.requireSeqSyncMsgAuth(p, reply) {
+		if err := n.verifySeqSyncMsg(p, reply); err != nil {
+			log.Warn("SeqSync: refusing ack from %s — unauthenticated: %v", p.String(), err)
+			return fmt.Errorf("SeqSync: unauthenticated ack from %s: %w", p.String(), err)
+		}
 	}
 	n.anchorDedupForPeer(p, reply.MySeq, reply.ConnEpoch)
 	// Negotiate per-peer encryption from the peer's ECDH public key, using our

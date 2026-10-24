@@ -56,28 +56,69 @@ var errBootRelayCtrlDeadline = errors.New("boot-relay control stream deadline ex
 // interleave.
 const bootRelayCtrlConvIDLen = 8
 
-// encodeBootRelayCtrlFrame prepends a self-delimiting convID to the inner
-// control-protocol payload. The boot carries the result as an opaque payload, so
-// the convID survives the bridge untouched.
-func encodeBootRelayCtrlFrame(convID, inner []byte) []byte {
-	out := make([]byte, 2+len(convID)+len(inner))
-	binary.BigEndian.PutUint16(out[:2], uint16(len(convID)))
-	copy(out[2:], convID)
-	copy(out[2+len(convID):], inner)
+// bootRelayCtrlSigDomain is prepended to the inner payload before signing,
+// domain-separating boot-relay control frame signatures from every other use
+// of the identity key (ObfPub signing, SeqSync message signing).
+var bootRelayCtrlSigDomain = []byte("p2ptap-bootrelay-ctrl-sig\x00")
+
+// encodeBootRelayCtrlFrame prepends a self-delimiting convID and an
+// optional signature to the inner control-protocol payload. The boot carries
+// the result as an opaque payload, so the convID and signature survive the
+// bridge untouched. The signature (if non-nil) is over
+// bootRelayCtrlSigDomain || inner, signed by the origin peer's identity key.
+func encodeBootRelayCtrlFrame(convID, inner, sig []byte) []byte {
+	sigLen := 2
+	if sig != nil {
+		sigLen += len(sig)
+	}
+	out := make([]byte, 2+len(convID)+sigLen+len(inner))
+	off := 0
+	binary.BigEndian.PutUint16(out[off:off+2], uint16(len(convID)))
+	off += 2
+	copy(out[off:off+len(convID)], convID)
+	off += len(convID)
+	if sig != nil {
+		binary.BigEndian.PutUint16(out[off:off+2], uint16(len(sig)))
+		off += 2
+		copy(out[off:off+len(sig)], sig)
+		off += len(sig)
+	} else {
+		binary.BigEndian.PutUint16(out[off:off+2], 0)
+		off += 2
+	}
+	copy(out[off:], inner)
 	return out
 }
 
-// decodeBootRelayCtrlFrame splits a control payload back into its convID and the
-// inner control-protocol bytes.
-func decodeBootRelayCtrlFrame(payload []byte) (convID, inner []byte, err error) {
+// decodeBootRelayCtrlFrame splits a control payload back into its convID,
+// optional signature, and the inner control-protocol bytes. A zero-length
+// signature is returned as nil (legacy unsigned frame).
+func decodeBootRelayCtrlFrame(payload []byte) (convID, sig, inner []byte, err error) {
 	if len(payload) < 2 {
-		return nil, nil, fmt.Errorf("boot-relay ctrl frame too short")
+		return nil, nil, nil, fmt.Errorf("boot-relay ctrl frame too short")
 	}
 	cl := int(binary.BigEndian.Uint16(payload[:2]))
-	if 2+cl > len(payload) {
-		return nil, nil, fmt.Errorf("boot-relay ctrl frame convID length overflow")
+	off := 2
+	if off+cl > len(payload) {
+		return nil, nil, nil, fmt.Errorf("boot-relay ctrl frame convID length overflow")
 	}
-	return payload[2 : 2+cl], payload[2+cl:], nil
+	convID = payload[off : off+cl]
+	off += cl
+	// Read signature length
+	if off+2 > len(payload) {
+		return nil, nil, nil, fmt.Errorf("boot-relay ctrl frame missing signature length")
+	}
+	sl := int(binary.BigEndian.Uint16(payload[off : off+2]))
+	off += 2
+	if sl > 0 {
+		if off+sl > len(payload) {
+			return nil, nil, nil, fmt.Errorf("boot-relay ctrl frame signature length overflow")
+		}
+		sig = payload[off : off+sl]
+		off += sl
+	}
+	inner = payload[off:]
+	return convID, sig, inner, nil
 }
 
 // newBootRelayCtrlConvID mints a fresh random conversation ID.
@@ -190,8 +231,12 @@ func (s *bootRelayCtrlStream) Write(p []byte) (int, error) {
 
 	// Stamp every frame with this conversation's unique ID so the peer can route
 	// its reply back to the exact stream that sent these bytes (libp2p tunnel
-	// semantics). The boot forwards the wrapped payload opaquely.
-	wrapped := encodeBootRelayCtrlFrame(s.convID, p)
+	// semantics). The boot forwards the wrapped payload opaquely. Sign the inner
+	// payload with this node's identity key so a compromised or curious boot
+	// cannot inject or modify control frames — the destination verifies the
+	// signature against the origin peer's identity before processing.
+	sig, _, _ := s.n.signBootRelayCtrlPayload(p)
+	wrapped := encodeBootRelayCtrlFrame(s.convID, p, sig)
 	env, err := routing.PackBootRelayFrame(s.n.bootRelayNetID, routing.BootRelayKindControl, s.proto, s.remote, s.n.Host.ID(), routing.MaxRelayTTL, wrapped)
 	if err != nil {
 		return 0, fmt.Errorf("boot-relay control pack: %w", err)
@@ -412,10 +457,28 @@ func (n *Node) deliverBootRelayControl(finalDst, srcPeer peer.ID, proto protocol
 	if viaBoot != "" && viaBoot != srcPeer {
 		n.recordPeekMapOrigin(srcPeer, viaBoot, 1, false)
 	}
-	convID, inner, err := decodeBootRelayCtrlFrame(payload)
+	convID, sig, inner, err := decodeBootRelayCtrlFrame(payload)
 	if err != nil {
 		log.Debug("[boot-relay] control frame decode error from %s: %v", srcPeer.ShortString(), err)
 		return
+	}
+	// Verify the origin peer's signature over the inner payload. A compromised
+	// or curious boot could inject or modify control frames; without this check
+	// a boot could forge a SeqSync ack to manipulate the dedup window or inject
+	// a Meta update to poison the link-state graph. The signature is bound to
+	// srcPeer's identity key, which the PSK auth already authenticated at the
+	// transport layer. A missing or invalid signature is dropped — the frame
+	// is self-healing (the protocol re-sends on timeout), so a lost frame is
+	// not catastrophic.
+	if sig != nil {
+		if err := n.verifyBootRelayCtrlSignature(srcPeer, sig, inner); err != nil {
+			log.Warn("[boot-relay] control frame signature verification failed from %s: %v", srcPeer.ShortString(), err)
+			return
+		}
+	} else {
+		// Legacy unsigned frame: accept for interop with older builds, but log
+		// so the operator knows they have unauthenticated peers on the backbone.
+		log.Debug("[boot-relay] control frame from %s is unsigned (legacy build)", srcPeer.ShortString())
 	}
 	// Copy BOTH fields out of the downlink's REUSED read buffer. The downlink
 	// loop calls ReadFrame(s, buf) on the very next iteration, which overwrites
@@ -481,4 +544,54 @@ func (n *Node) dispatchBootRelayControlStream(st *bootRelayCtrlStream) {
 	default:
 		log.Warn("[boot-relay] no control handler for proto %s (origin %s); closing", st.proto, st.remote.ShortString())
 	}
+}
+
+// signBootRelayCtrlPayload signs the inner control-protocol payload with this
+// node's libp2p identity private key. The signature binds the control frame to
+// its origin, preventing a compromised or curious boot from injecting or
+// modifying frames. The signature is over
+// bootRelayCtrlSigDomain || inner, domain-separated from every other use of the
+// identity key. If the identity key is unavailable (should not happen in
+// practice), a nil signature is returned and the frame is sent unsigned — the
+// receiver logs a warning and accepts it for interop with older builds.
+func (n *Node) signBootRelayCtrlPayload(inner []byte) (sig []byte, signerPub []byte, err error) {
+	priv := n.identityPrivKey()
+	if priv == nil {
+		return nil, nil, fmt.Errorf("no identity key available to sign boot-relay control frame")
+	}
+	buf := make([]byte, 0, len(bootRelayCtrlSigDomain)+len(inner))
+	buf = append(buf, bootRelayCtrlSigDomain...)
+	buf = append(buf, inner...)
+	sig, err = priv.Sign(buf)
+	if err != nil {
+		return nil, nil, fmt.Errorf("signing boot-relay control payload: %w", err)
+	}
+	signerPub, err = ic.MarshalPublicKey(priv.GetPublic())
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshalling identity public key: %w", err)
+	}
+	return sig, signerPub, nil
+}
+
+// verifyBootRelayCtrlSignature verifies that sig is a valid identity-key
+// signature over inner by srcPeer. The peer's public key is looked up in the
+// peerstore (populated by the PSK-authenticated transport layer). If the peer
+// is not in the peerstore, the signature cannot be verified and an error is
+// returned — the frame is dropped and the protocol re-sends on timeout.
+func (n *Node) verifyBootRelayCtrlSignature(srcPeer peer.ID, sig, inner []byte) error {
+	pub := n.Host.Peerstore().PubKey(srcPeer)
+	if pub == nil {
+		return fmt.Errorf("no public key for peer %s in peerstore", srcPeer.ShortString())
+	}
+	buf := make([]byte, 0, len(bootRelayCtrlSigDomain)+len(inner))
+	buf = append(buf, bootRelayCtrlSigDomain...)
+	buf = append(buf, inner...)
+	ok, err := pub.Verify(buf, sig)
+	if err != nil {
+		return fmt.Errorf("verifying boot-relay control signature from %s: %w", srcPeer.ShortString(), err)
+	}
+	if !ok {
+		return fmt.Errorf("boot-relay control signature from %s does not verify", srcPeer.ShortString())
+	}
+	return nil
 }

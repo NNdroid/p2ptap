@@ -1,6 +1,7 @@
 package node
 
 import (
+	"encoding/binary"
 	"fmt"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
@@ -64,6 +65,13 @@ import (
 // later dropping the version; RequireAuthKeyExchange is the sole thing that closes
 // the window outright.
 const seqSyncAuthVersion = uint32(1)
+
+// seqSyncAuthVersion2 indicates that the sender signs the ENTIRE SeqSyncMsg
+// (not just ObfPub). An ack with HandshakeVer >= 2 carries a MsgSig that covers
+// all fields, closing the ack forgery/replay window where an attacker could
+// capture a valid ack (with a valid ObfPubSig) and modify MySeq/ConnEpoch to
+// manipulate the receiver's dedup window.
+const seqSyncAuthVersion2 = uint32(2)
 
 // obfPubSigDomain is prepended to the offered handshake public key before
 // signing, domain-separating these signatures from every other use of the
@@ -199,4 +207,119 @@ func (n *Node) checkObfPubAuth(remotePeer peer.ID, msg SeqSyncMsg) error {
 	n.markObfAuth(remotePeer)
 	log.Debug("SeqSync: %s key exchange authenticated (HandshakeVer=%d)", remotePeer, msg.HandshakeVer)
 	return nil
+}
+
+// seqSyncMsgSigDomain is prepended to the message bytes before signing,
+// domain-separating SeqSync message signatures from every other use of the
+// identity key (ObfPub signing, boot-relay control frame signing).
+var seqSyncMsgSigDomain = []byte("p2ptap-seqsync-msg-sig\x00")
+
+// seqSyncMsgSigInput builds the exact byte string signed and verified for a
+// SeqSyncMsg. It covers all fields except MsgSig itself, so any tampering with
+// NodeID, MySeq, ConnEpoch, Timestamp, or the Obf* fields is detected.
+func seqSyncMsgSigInput(m SeqSyncMsg) []byte {
+	buf := make([]byte, 0, 128+len(m.ObfPub)+len(m.ObfAlgos))
+	buf = append(buf, seqSyncMsgSigDomain...)
+	// Type
+	buf = append(buf, m.Type...)
+	// NodeID
+	buf = append(buf, m.NodeID...)
+	// MySeq (8 bytes big-endian)
+	buf = append(buf, encodeUint64BE(m.MySeq)...)
+	// ConnEpoch (8 bytes big-endian)
+	buf = append(buf, encodeUint64BE(m.ConnEpoch)...)
+	// Timestamp (8 bytes big-endian)
+	buf = append(buf, encodeUint64BE(uint64(m.Timestamp))...)
+	// ObfEnabled (1 byte)
+	buf = append(buf, boolByte(m.ObfEnabled))
+	// ObfAlgos
+	buf = append(buf, m.ObfAlgos...)
+	// ObfMode
+	buf = append(buf, m.ObfMode...)
+	// ObfPub
+	buf = append(buf, m.ObfPub...)
+	// HandshakeVer (4 bytes big-endian)
+	buf = append(buf, encodeUint32BE(m.HandshakeVer)...)
+	// ObfPubSig (length-prefixed)
+	buf = append(buf, encodeUint16BE(uint16(len(m.ObfPubSig)))...)
+	buf = append(buf, m.ObfPubSig...)
+	// ObfPubSignerPub (length-prefixed)
+	buf = append(buf, encodeUint16BE(uint16(len(m.ObfPubSignerPub)))...)
+	buf = append(buf, m.ObfPubSignerPub...)
+	return buf
+}
+
+func encodeUint64BE(v uint64) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, v)
+	return b
+}
+
+func encodeUint32BE(v uint32) []byte {
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, v)
+	return b
+}
+
+func encodeUint16BE(v uint16) []byte {
+	b := make([]byte, 2)
+	binary.BigEndian.PutUint16(b, v)
+	return b
+}
+
+func boolByte(b bool) byte {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// signSeqSyncMsg signs a SeqSyncMsg with this node's identity key and returns
+// the signature. The signature is over all fields except MsgSig itself. If the
+// identity key is unavailable, an error is returned.
+func (n *Node) signSeqSyncMsg(m *SeqSyncMsg) error {
+	priv := n.identityPrivKey()
+	if priv == nil {
+		return fmt.Errorf("no identity key available to sign SeqSync message")
+	}
+	sig, err := priv.Sign(seqSyncMsgSigInput(*m))
+	if err != nil {
+		return fmt.Errorf("signing SeqSync message: %w", err)
+	}
+	m.MsgSig = sig
+	m.HandshakeVer = seqSyncAuthVersion2
+	return nil
+}
+
+// verifySeqSyncMsg verifies that msg.MsgSig is a valid identity-key signature
+// over the message content by remotePeer. The peer's public key is looked up
+// in the peerstore. Returns nil on success.
+func (n *Node) verifySeqSyncMsg(remotePeer peer.ID, msg SeqSyncMsg) error {
+	if len(msg.MsgSig) == 0 {
+		return fmt.Errorf("SeqSync message has no signature")
+	}
+	pub := n.Host.Peerstore().PubKey(remotePeer)
+	if pub == nil {
+		return fmt.Errorf("no public key for peer %s in peerstore", remotePeer.ShortString())
+	}
+	ok, err := pub.Verify(seqSyncMsgSigInput(msg), msg.MsgSig)
+	if err != nil {
+		return fmt.Errorf("verifying SeqSync message signature from %s: %w", remotePeer.ShortString(), err)
+	}
+	if !ok {
+		return fmt.Errorf("SeqSync message signature from %s does not verify", remotePeer.ShortString())
+	}
+	return nil
+}
+
+// requireSeqSyncMsgAuth reports whether a message-level signature is MANDATORY
+// for a SeqSyncMsg from peer, given what the message has advertised. Message
+// signing is an ADDITIVE feature (version 2); a peer that hasn't upgraded
+// advertises version 1 and cannot sign messages, so requiring a message
+// signature from it would break interoperability. The signature is required
+// ONLY when the message itself advertises HandshakeVer >= 2, which is the
+// peer's explicit opt-in. The operator flag RequireAuthKeyExchange controls
+// ObfPub signing (version 1) only, not message signing.
+func (n *Node) requireSeqSyncMsgAuth(peer peer.ID, msg SeqSyncMsg) bool {
+	return msg.HandshakeVer >= seqSyncAuthVersion2
 }
