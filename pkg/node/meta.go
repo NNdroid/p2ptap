@@ -793,6 +793,29 @@ func (n *Node) registerPeekMapHandler() {
 				log.Debug("Peek-map listener could not parse payload from %s: %v", remotePeer.ShortString(), err)
 				continue
 			}
+			// The publisher identity is asserted by the transport (the libp2p
+			// connection's RemotePeer), not by info.PeerID — that field is a
+			// plain JSON string the sender chose to write. Two legitimate shapes:
+			//   (1) A direct announcement, where the sender is describing itself
+			//       and remotePeer == info.PeerID.
+			//   (2) A frame originated by OUR boot (publishBootInfo announces the
+			//       boot itself; broadcastPeerAddrFrame announces a client the
+			//       boot just observed). Only the boot we dial over the configured
+			//       uplink can originate these — hub.broadcastPeerAddrFrame is an
+			//       internal boot method that never crosses a mesh link, so the
+			//       remotePeer here is a bootstrap peer from our own config.
+			// Anything else is a peer claiming to describe a peer it is not the
+			// transport identity of. That is not identity spoofing in the classic
+			// sense — registerPeekMapAddrs enforces the /p2p/<id> suffix match on
+			// each address and the trust gate further below keys identity writes
+			// to n.peerKnownPeer(pID) — but it would still let any authenticated
+			// peer plant bogus entries in peekMapOrigin and drive
+			// considerDiscoveredPeer dial attempts against arbitrary peer IDs.
+			if peerID, err := peer.Decode(info.PeerID); err == nil && remotePeer != peerID && !n.isBootstrapPeer(remotePeer) {
+				log.Debug("Peek-map announcement from %s claims publisher %s (not the transport peer and not our boot); dropping",
+					remotePeer.ShortString(), info.PeerID)
+				continue
+			}
 			if n.protoTracker != nil {
 				n.protoTracker.PeekMap.RecordSyncEvent()
 			}
@@ -862,6 +885,14 @@ func (n *Node) ingestPeekMapNodeInfo(info PeekMapNodeInfo, viaPeer peer.ID) {
 			IsExitNode:        info.IsExitNode,
 			AdvertisedSubnets: info.AdvertisedSubnets,
 		})
+	} else {
+		// Previously this fell through silently. Without the log it was
+		// indistinguishable from "applyPeerMetaFromLSA ran and everything was
+		// already populated", so an operator chasing missing peer metadata had
+		// no signal that the trust gate was rejecting every announcement for
+		// this peer.
+		log.Debug("Peek-map metadata from %s about %s not applied: neither the carrier %s nor the described peer is known/configured",
+			viaPeer.ShortString(), pID.ShortString(), viaPeer.ShortString())
 	}
 	// Backfill the indirect link into the topology graph. The weight estimates
 	// the boot<->peer latency as a base relay cost scaled by the advertised hop
@@ -1200,7 +1231,6 @@ func (n *Node) localPeekMapNodeInfo() PeekMapNodeInfo {
 		ObfsMode: c.Obfuscation.Mode,
 	}
 }
-
 
 type peekMapStreamWrapper struct {
 	mu sync.Mutex
