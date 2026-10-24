@@ -42,6 +42,14 @@ func RestartRequiredFields(old, new *Config) []string {
 	add("driver_type", old.DriverType != new.DriverType)
 	add("listen_addrs", !sliceEqual(old.ListenAddrs, new.ListenAddrs))
 
+	// The identity key is read exactly once, at host construction, and a path
+	// that does not exist yet generates a brand new key there. LuCI and the
+	// WebUI both expose the field, so an edit that was saved but not restarted
+	// would announce "applied", and the next restart would silently come up
+	// under a different Peer ID — every address peers had saved for this node
+	// would be pointing at a dead identity.
+	add("node_key_file", old.NodeKeyFile != new.NodeKeyFile)
+
 	// Transports: EnableRelay / EnableHolePunching / EnableAutoRelayWithStaticRelays
 	// are libp2p options consumed by libp2p.New, and TLSServerName / TLSSNISuffix
 	// are written once through global setters before it. The whole block is bound

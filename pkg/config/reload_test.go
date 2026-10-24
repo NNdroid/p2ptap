@@ -54,6 +54,7 @@ func TestRestartRequiredFieldsConstructionTime(t *testing.T) {
 		"tap_mac":                    {func(c *Config) { c.TapMAC = "02:00:00:00:00:02" }, "tap_mac"},
 		"mtu":                        {func(c *Config) { c.MTU = 1280 }, "mtu"},
 		"driver_type":                {func(c *Config) { c.DriverType = "tap" }, "driver_type"},
+		"node_key_file":              {func(c *Config) { c.NodeKeyFile = "other.key" }, "node_key_file"},
 		"listen_addrs":               {func(c *Config) { c.ListenAddrs = append(c.ListenAddrs, "/ip4/0.0.0.0/udp/41149") }, "listen_addrs"},
 		"bootstrap_peers":            {func(c *Config) { c.BootstrapPeers = append(c.BootstrapPeers, "peer-a") }, "bootstrap_peers"},
 		"static_peers":               {func(c *Config) { c.StaticPeers = append(c.StaticPeers, "peer-b") }, "static_peers"},
