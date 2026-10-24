@@ -272,13 +272,13 @@ func (r *Relay) handleConnect(s network.Stream, msg *pbv2.HopMessage) pbv2.Statu
 		r.handleError(s, status)
 	}
 
-	// reserve buffers for the relay
-	if err := span.ReserveMemory(2*r.rc.BufferSize, network.ReservationPriorityHigh); err != nil {
-		log.Debug("error reserving memory for relay",
-			"error", err)
-		fail(pbv2.Status_RESOURCE_LIMIT_EXCEEDED)
-		return pbv2.Status_RESOURCE_LIMIT_EXCEEDED
-	}
+	// Validate the request BEFORE reserving relay buffers. The previous
+	// order reserved memory first (span.ReserveMemory), then ran the
+	// isRelayAddr, PeerToPeerInfoV2, and ACL checks. On rejection the
+	// fail() path released the reservation, but the reservation was made
+	// unnecessarily — a denial-of-service vector where a peer floods
+	// malformed or ACL-denied CONNECT requests to consume the relay's
+	// memory budget before the slow validation runs.
 
 	if isRelayAddr(a) {
 		log.Debug("refusing connection",
@@ -300,6 +300,14 @@ func (r *Relay) handleConnect(s network.Stream, msg *pbv2.HopMessage) pbv2.Statu
 			"reason", "permission denied")
 		fail(pbv2.Status_PERMISSION_DENIED)
 		return pbv2.Status_PERMISSION_DENIED
+	}
+
+	// All validation passed. Now reserve buffers for the relay.
+	if err := span.ReserveMemory(2*r.rc.BufferSize, network.ReservationPriorityHigh); err != nil {
+		log.Debug("error reserving memory for relay",
+			"error", err)
+		fail(pbv2.Status_RESOURCE_LIMIT_EXCEEDED)
+		return pbv2.Status_RESOURCE_LIMIT_EXCEEDED
 	}
 
 	r.mx.Lock()
