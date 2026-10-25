@@ -77,6 +77,13 @@ func (n *Node) openControlStream(ctx context.Context, target peer.ID, proto prot
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// Try unified mux channel first: multiplexes all control protocols onto
+	// one stream per peer. Falls back to per-protocol streams for legacy peers.
+	if n.muxEngine != nil {
+		if s, ok := n.tryOpenMuxStream(ctx, target, proto); ok {
+			return s, nil
+		}
+	}
 	if n.isDirectlyConnected(target) {
 		return n.Host.NewStream(ctx, target, proto)
 	}
@@ -110,6 +117,40 @@ func (n *Node) openControlStream(ctx context.Context, target peer.ID, proto prot
 	// Relay v2). This is the classic path for a peer reachable only through a
 	// bootstrap node that does not speak the application-level overlay relay.
 	return n.openStreamViaRelayContext(ctx, target, proto)
+}
+
+// tryOpenMuxStream tries to open a mux stream on the same transport paths as
+// openControlStream. If successful, wraps it in a muxInitStream for the given
+// protocol. Returns (nil, false) if the mux protocol is not supported.
+func (n *Node) tryOpenMuxStream(ctx context.Context, target peer.ID, proto protocol.ID) (network.Stream, bool) {
+	if n.muxEngine == nil {
+		return nil, false
+	}
+	if n.isDirectlyConnected(target) {
+		s, err := n.Host.NewStream(ctx, target, MuxControlProtocolID)
+		if err != nil {
+			return nil, false
+		}
+		wrapped, ok := n.muxEngine.WrapStream(s, proto)
+		if !ok {
+			s.Close()
+			return nil, false
+		}
+		return wrapped, true
+	}
+	if n.hasPeerConnection(target) {
+		s, err := n.openStreamViaRelayContext(ctx, target, MuxControlProtocolID)
+		if err != nil {
+			return nil, false
+		}
+		wrapped, ok := n.muxEngine.WrapStream(s, proto)
+		if !ok {
+			s.Close()
+			return nil, false
+		}
+		return wrapped, true
+	}
+	return nil, false
 }
 
 // openRelayCtrlStream opens a RelayCtrlProtocolID stream to hop and writes the

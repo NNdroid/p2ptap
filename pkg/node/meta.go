@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"p2ptap/pkg/meta"
+	"p2ptap/pkg/mux"
 	"p2ptap/pkg/observer"
 	"p2ptap/pkg/routing"
 	"p2ptap/pkg/tap"
@@ -236,9 +238,27 @@ func (n *Node) syncMetadataToPeer(targetPeer peer.ID) {
 	}
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		// Reuse a persistent per-peer meta stream (A) instead of opening a fresh
-		// NewStream on every 15s tick. WithStream runs write+read inside the
-		// peer's lock so no other goroutine can interleave on the same stream.
+		// Try the unified mux control channel first.
+		if n.muxEngine != nil {
+			payload := n.buildLocalMetaPayload()
+			data, err := json.Marshal(payload)
+			if err != nil {
+				goto fallback
+			}
+			frame := make([]byte, 4+len(data))
+			binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
+			copy(frame[4:], data)
+			resp, err := n.muxEngine.SendRecv(targetPeer, mux.TagMeta, frame, 5*time.Second)
+			if err == nil && len(resp) >= 4 {
+				rn := binary.BigEndian.Uint32(resp[:4])
+				if rn > 0 && rn < uint32(len(resp)) {
+					n.handleMetaResponse(targetPeer, resp[4:4+rn])
+				}
+				return
+			}
+		}
+	fallback:
+		// Legacy fallback: reuse a persistent per-peer meta stream.
 		ok := n.metaPool.WithStream(targetPeer, func(s network.Stream) error {
 			_ = s.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			payload := n.buildLocalMetaPayload()

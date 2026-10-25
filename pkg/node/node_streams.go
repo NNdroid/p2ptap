@@ -23,6 +23,7 @@ import (
 	manet "github.com/multiformats/go-multiaddr/net"
 
 	"p2ptap/pkg/maddrutil"
+	"p2ptap/pkg/mux"
 	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/observer"
 	"p2ptap/pkg/packet"
@@ -732,6 +733,14 @@ func (n *Node) broadcastLSA(seq uint64) {
 		if n.isBootstrapPeer(pID) {
 			continue
 		}
+		// Try the unified mux control channel first; fall back to the
+		// legacy per-protocol stream for peers that don't support mux.
+		if n.muxEngine != nil && n.muxEngine.Send(pID, mux.TagLSA, data) {
+			if n.protoTracker != nil {
+				n.protoTracker.LSA.RecordTx(1, uint64(len(data)))
+			}
+			continue
+		}
 		if n.lsaPool.Submit(pID, data) {
 			if n.protoTracker != nil {
 				n.protoTracker.LSA.RecordTx(1, uint64(len(data)))
@@ -920,6 +929,9 @@ func (n *Node) handleLSAStream(s network.Stream) {
 					}
 					fwd := pID
 					go func() {
+						if n.muxEngine != nil && n.muxEngine.Send(fwd, mux.TagLSA, forwardData) {
+							return
+						}
 						if !n.lsaPool.Submit(fwd, forwardData) {
 							log.Debug("LSA forward to %s failed (unreachable)", fwd.String())
 						}
@@ -1028,6 +1040,10 @@ func (n *Node) pushLSASnapshotToPeer(target peer.ID) {
 		replay.Snapshot = true
 		data, err := json.Marshal(&replay)
 		if err != nil {
+			continue
+		}
+		if n.muxEngine != nil && n.muxEngine.Send(target, mux.TagLSA, data) {
+			sent++
 			continue
 		}
 		if n.lsaPool.Submit(target, data) {

@@ -25,6 +25,7 @@ import (
 	"p2ptap/pkg/logger"
 	"p2ptap/pkg/maddrutil"
 	"p2ptap/pkg/meta"
+	"p2ptap/pkg/mux"
 	"p2ptap/pkg/node"
 	"p2ptap/pkg/routing"
 	"p2ptap/pkg/version"
@@ -2058,6 +2059,15 @@ func main() {
 	fmt.Printf("[+] Boot-relay & relay-control handlers registered (protocols: %s, %s, %s)\n",
 		BootRelayProtocolID, BootRelayBackboneProtocolID, RelayCtrlProtocolID)
 
+	// Register the unified mux control-channel handler. The mux protocol
+	// multiplexes SeqSync, Meta, Echo, and RelayCtrl onto one stream per
+	// peer. The boot node dispatches by tag byte to the same handlers
+	// registered above.
+	h.SetStreamHandler(mux.ControlProtocolID, func(s network.Stream) {
+		handleBootMuxControlStream(s, h, hub, aclFilter, pskEntries, nodeNameVal, startTime)
+	})
+	fmt.Printf("[+] Mux control-channel handler registered (protocol: %s)\n", mux.ControlProtocolID)
+
 	// Remember what this boot observes about a peer's direct endpoints and tell
 	// the other local clients about the change. conns is the peer's current
 	// connection set; skip is the link being dropped (may still be listed);
@@ -3319,6 +3329,137 @@ func transportAndPort(a multiaddr.Multiaddr) (family, port string) {
 // Only peers that are ALREADY connected are pinged (h.Network().Peers() returns
 // connected peers), so this never triggers an outbound dial to a NAT'd peer that
 // can't be reached — such a peer must reconnect from its own side.
+// bootMuxStream implements network.Stream on top of a single mux request.
+// Read() returns the request payload; Write() wraps data in a mux response
+// frame. This lets the boot's existing protocol handlers (which expect
+// network.Stream) work transparently over the mux control channel.
+type bootMuxStream struct {
+	stream  network.Stream
+	tag     uint8
+	reqID   uint32
+	request []byte
+	rpos    int
+	deadline time.Time
+}
+
+func (b *bootMuxStream) Read(p []byte) (int, error) {
+	if b.rpos < len(b.request) {
+		n := copy(p, b.request[b.rpos:])
+		b.rpos += n
+		return n, nil
+	}
+	return 0, io.EOF
+}
+
+func (b *bootMuxStream) Write(p []byte) (int, error) {
+	return mux.WriteFrame(b.stream, b.tag, mux.DirResponse, b.reqID, p)
+}
+
+func (b *bootMuxStream) Close() error           { return nil }
+func (b *bootMuxStream) CloseWrite() error      { return nil }
+func (b *bootMuxStream) CloseRead() error       { return nil }
+func (b *bootMuxStream) Reset() error           { return nil }
+func (b *bootMuxStream) SetDeadline(t time.Time) error {
+	b.deadline = t
+	return nil
+}
+func (b *bootMuxStream) SetReadDeadline(t time.Time) error {
+	b.deadline = t
+	return nil
+}
+func (b *bootMuxStream) SetWriteDeadline(t time.Time) error {
+	b.deadline = t
+	return nil
+}
+func (b *bootMuxStream) ID() string                       { return b.stream.ID() }
+func (b *bootMuxStream) Protocol() protocol.ID            { return b.stream.Protocol() }
+func (b *bootMuxStream) SetProtocol(id protocol.ID) error { return b.stream.SetProtocol(id) }
+func (b *bootMuxStream) Stat() network.Stats              { return b.stream.Stat() }
+func (b *bootMuxStream) Conn() network.Conn               { return b.stream.Conn() }
+func (b *bootMuxStream) Scope() network.StreamScope       { return &network.NullScope{} }
+func (b *bootMuxStream) ResetWithError(code network.StreamErrorCode) error {
+	return b.stream.ResetWithError(code)
+}
+
+// handleBootMuxControlStream reads mux frames from the control channel and
+// dispatches them to the boot's protocol handlers. The boot handles SeqSync,
+// Meta, Echo, and RelayCtrl; LSA and TapProbeAck are node-only and are dropped.
+func handleBootMuxControlStream(s network.Stream, h host.Host, hub *peekMapHub,
+	acl *pskACLFilter, entries []pskEntry, nodeNameVal string, startTime time.Time) {
+	defer s.Close()
+	from := s.Conn().RemotePeer()
+	buf := make([]byte, 64*1024+mux.HeaderLen)
+
+	for {
+		tag, dir, reqID, payload, err := mux.ReadFrame(s, buf)
+		if err != nil {
+			return
+		}
+		if dir != mux.DirRequest && dir != mux.DirBroadcast {
+			continue // skip responses to other peers' requests
+		}
+
+		ms := &bootMuxStream{
+			stream:  s,
+			tag:     tag,
+			reqID:   reqID,
+			request: append([]byte(nil), payload...),
+		}
+
+		switch tag {
+		case mux.TagSeqSync:
+			if !acl.RequireAuth(from) {
+				log.Warn("[mux:seqsync] refusing unauthenticated peer %s", from.ShortString())
+				continue
+			}
+			go handleSeqSyncStream(ms)
+
+		case mux.TagMeta:
+			if !acl.RequireAuth(from) {
+				log.Warn("[mux:meta] refusing unauthenticated peer %s", from.ShortString())
+				continue
+			}
+			go func() {
+				_ = ms.SetReadDeadline(time.Now().Add(10 * time.Second))
+				reqBuf := make([]byte, 64*1024)
+				_, _ = readFrame(ms, reqBuf)
+				data, _ := json.Marshal(meta.NodeMetaPayload{
+					NodeName:     nodeNameVal,
+					OS:           runtime.GOOS,
+					Arch:         runtime.GOARCH,
+					Version:      version.Version,
+					UptimeSec:    int64(time.Since(startTime).Seconds()),
+					Reachability: "Public Server",
+				})
+				_ = writeFrame(ms, data)
+			}()
+
+		case mux.TagEcho:
+			if !acl.RequireAuth(from) {
+				log.Warn("[mux:echo] refusing unauthenticated peer %s", from.ShortString())
+				continue
+			}
+			go func() {
+				_ = ms.SetDeadline(time.Now().Add(60 * time.Second))
+				_, _ = io.Copy(ms, io.LimitReader(ms, 64<<20))
+			}()
+
+		case mux.TagRelayCtrl:
+			go func() {
+				handler := makeRelayCtrlHandler(h, acl, hub, entries)
+				handler(ms)
+			}()
+
+		case mux.TagLSA, mux.TagTapProbeAck:
+			// Boot does not handle these; they are node-only protocols.
+			log.Debug("[mux] dropping node-only tag %d from %s", tag, from.ShortString())
+
+		default:
+			log.Warn("[mux] unknown tag %d from %s", tag, from.ShortString())
+		}
+	}
+}
+
 // writeFrame/readFrame mirror pkg/node/framing.go EXACTLY: a 4-byte big-endian
 // length prefix followed by the payload. The relay and the p2ptap client must
 // speak the identical /p2ptap/echo/1.0.0 framing, otherwise the client's

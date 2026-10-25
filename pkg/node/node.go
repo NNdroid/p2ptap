@@ -434,15 +434,15 @@ type Node struct {
 	bootRelayCtrlMu      sync.Mutex
 	bootRelayCtrlStreams map[string]*bootRelayCtrlStream
 
-	// lsaPool and metaPool reuse ONE long-lived stream per peer for the
-	// periodic control traffic (LSA topology broadcast + metadata handshake).
-	// This collapses the previous O(N) NewStream-per-15s-tick storm into
-	// steady-state zero new streams. See lsa_pool.go.
+	// muxEngine is the unified control-channel multiplexer. It replaces the
+	// three separate lsaStreamPool instances with a single engine that
+	// multiplexes all control protocols onto one stream per peer. The old
+	// lsaPool/metaPool/echoPool are kept as fallback for legacy peers that
+	// don't support the mux protocol.
+	muxEngine *muxEngine
+
 	lsaPool  *lsaStreamPool
 	metaPool *lsaStreamPool
-	// echoPool reuses ONE long-lived echo stream per peer for the unified
-	// liveness/health probe, replacing the old per-tick NewStream-per-peer echo
-	// storm.
 	echoPool *lsaStreamPool
 
 	// lastLSAJSON caches the JSON of the last broadcast LSA so we can skip
@@ -1905,6 +1905,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	node.lsaPool = newLSAStreamPool(node, LSAProtocolID)
 	node.metaPool = newLSAStreamPool(node, meta.MetaProtocolID)
 	node.echoPool = newLSAStreamPool(node, EchoProtocolID)
+	node.muxEngine = newMuxEngine(node)
 	dispatcher.SetNode(node)
 
 	// Ephemeral ECDH(P256) key pair for per-peer obfuscation key agreement.
@@ -2328,6 +2329,14 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	node.registerMetaStreamHandler()
 	node.registerPeekMapHandler()
 
+	// Unified mux channels: /p2ptap/ctrl/1.0.0 multiplexes all control
+	// protocols onto one stream per peer; /p2ptap/data/1.0.0 multiplexes
+	// VTP + relay data. The old per-protocol handlers above remain as
+	// fallback for legacy peers that don't support the mux.
+	h.SetStreamHandler(MuxControlProtocolID, node.muxEngine.handleControlStream)
+	h.SetStreamHandler(MuxDataProtocolID, node.muxEngine.handleDataStream)
+	log.Debug("Stream handlers registered for unified mux channels: %s, %s", MuxControlProtocolID, MuxDataProtocolID)
+
 	// Register network event notifier for connection/disconnection logging & state cleanup
 	h.Network().Notify(&network.NotifyBundle{
 		ConnectedF: func(netw network.Network, conn network.Conn) {
@@ -2406,6 +2415,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 					node.lsaPool.Invalidate(pID)
 					node.metaPool.Invalidate(pID)
 					node.echoPool.Invalidate(pID)
+					node.muxEngine.Invalidate(pID)
 				}
 
 				// Prime the application-level ProtocolID stream so the first
@@ -2610,6 +2620,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				node.lsaPool.Invalidate(debounceID)
 				node.metaPool.Invalidate(debounceID)
 				node.echoPool.Invalidate(debounceID)
+				node.muxEngine.Invalidate(debounceID)
 				// Re-flood LSA so peers drop the now-stale direct edge to this peer
 				// instead of holding a phantom link. Fresh seq + reset gossip
 				// throttle guarantees propagation even if our neighbour set is
@@ -2697,6 +2708,9 @@ func (node *Node) dropPooledConnStreams(pID peer.ID, deadConn network.Conn) {
 		dropped++
 	}
 	if node.echoPool.DropConnStreams(pID, deadConn) {
+		dropped++
+	}
+	if node.muxEngine.DropConnStreams(pID, deadConn) {
 		dropped++
 	}
 	if dropped > 0 {
@@ -4237,6 +4251,7 @@ func (n *Node) Close() error {
 			func() error { n.lsaPool.InvalidateAll(); return nil },
 			func() error { n.metaPool.InvalidateAll(); return nil },
 			func() error { n.echoPool.InvalidateAll(); return nil },
+			func() error { n.muxEngine.InvalidateAll(); return nil },
 		}
 		var poolWG sync.WaitGroup
 		poolWG.Add(len(steps))

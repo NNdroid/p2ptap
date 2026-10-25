@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"p2ptap/pkg/mux"
 
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -977,9 +980,29 @@ func (n *Node) pingPongProbePeer(pid peer.ID) {
 	replyBuf := make([]byte, 16)
 	var measuredRTT time.Duration
 
-	// Reuse the persistent echo stream (WithStream runs write+read inside the
-	// peer's lock so a concurrent manual WebUI probe can't interleave on it).
-	ok := n.echoPool.WithStream(pid, func(s network.Stream) error {
+	// Try the unified mux control channel first.
+	muxSucceeded := false
+	if n.muxEngine != nil {
+		frame := make([]byte, 4+len(pingPayload))
+		binary.BigEndian.PutUint32(frame[:4], uint32(len(pingPayload)))
+		copy(frame[4:], pingPayload)
+		start := time.Now()
+		resp, err := n.muxEngine.SendRecv(pid, mux.TagEcho, frame, pingPongReadTimeout)
+		rtt := time.Since(start)
+		if err == nil && len(resp) >= 8 {
+			rn := binary.BigEndian.Uint32(resp[:4])
+			if rn >= 4 && bytes.Equal(resp[4:4+min(4, rn)], pingPayload) {
+				measuredRTT = rtt
+				muxSucceeded = true
+				log.Debug("Ping-pong OK (mux) for %s RTT=%dms", pid.String(), rtt.Milliseconds())
+			}
+		}
+	}
+
+	var ok bool
+	if !muxSucceeded {
+		// Legacy fallback: reuse the persistent echo stream.
+		ok = n.echoPool.WithStream(pid, func(s network.Stream) error {
 		// Exclude stream lookup/opening from the wire RTT. Cold connection setup
 		// is a separate availability metric, not round-trip latency.
 		start := time.Now()
@@ -999,9 +1022,10 @@ func (n *Node) pingPongProbePeer(pid peer.ID) {
 		measuredRTT = rtt
 		log.Debug("Ping-pong OK for %s RTT=%dms", pid.String(), rtt.Milliseconds())
 		return nil
-	})
+		})
+	}
 
-	if ok {
+	if ok || measuredRTT > 0 {
 		// Feed the real completed echo round trip into both libp2p's EWMA and
 		// the source-labelled rolling WebUI window. Previously the RTT was only
 		// printed at DEBUG and discarded.
