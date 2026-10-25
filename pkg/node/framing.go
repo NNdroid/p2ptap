@@ -101,6 +101,11 @@ func writeAll(w io.Writer, data []byte) error {
 		if n <= 0 {
 			return io.ErrShortWrite
 		}
+		if n > len(data) {
+			// Defend against writers that return more than len(data);
+			// a panic here was the root cause of Android crashes.
+			n = len(data)
+		}
 		data = data[n:]
 	}
 	return nil
