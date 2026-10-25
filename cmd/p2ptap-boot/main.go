@@ -446,7 +446,7 @@ func (h *peekMapHub) publishBootInfo(self host.Host, nodeName, version string) {
 		Arch:        runtime.GOARCH,
 		Version:     version,
 		HopDistance: 0,
-		Addrs:       node.MultiaddrsToStrings(self.Addrs()),
+		Addrs:       node.AddrsWithPeerID(self.Addrs(), self.ID()),
 		IsBoot:      true,
 	}
 	payload, err := json.Marshal(info)
@@ -3621,7 +3621,7 @@ func runMeshUplink(ctx context.Context, h host.Host, hub *peekMapHub, info peer.
 		HopDistance: 0,
 		// Endpoints + the boot marker are what let the REMOTE cluster's clients
 		// attach to us, giving both clusters a shared relay anchor.
-		Addrs:  node.MultiaddrsToStrings(h.Addrs()),
+		Addrs:  node.AddrsWithPeerID(h.Addrs(), h.ID()),
 		IsBoot: true,
 	}
 	if payload, merr := json.Marshal(selfInfo); merr == nil {
