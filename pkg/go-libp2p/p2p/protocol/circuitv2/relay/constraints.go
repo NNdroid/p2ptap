@@ -69,7 +69,11 @@ func (c *constraints) Reserve(p peer.ID, a ma.Multiaddr, expiry time.Time) error
 	// which is the intended semantics (the caller is only allowed to add one
 	// fresh reservation at a time; the previous one is replaced at the end of
 	// this function, not dropped mid-way).
-	if len(c.total) >= c.rc.MaxReservations {
+	//
+	// Use countExcluding for the total cap too — a peer refreshing an existing
+	// reservation must not be denied just because the pool is at capacity,
+	// since the refresh replaces the old entry and adds no net new slot.
+	if c.countExcluding(c.total, p) >= c.rc.MaxReservations {
 		return errTooManyReservations
 	}
 

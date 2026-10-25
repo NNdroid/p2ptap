@@ -293,6 +293,17 @@ func (r *Relay) handleConnect(s network.Stream, msg *pbv2.HopMessage) pbv2.Statu
 		return pbv2.Status_MALFORMED_MESSAGE
 	}
 
+	// Reject circuits to self: addConn(src) + addConn(dest.ID) would count 2
+	// against the same peer's MaxCircuits, halving its budget. The NewStream
+	// to self would also burn a relay stream against the stop handler.
+	if src == dest.ID {
+		log.Debug("refusing connection",
+			"source_peer", src,
+			"reason", "source == destination")
+		fail(pbv2.Status_PERMISSION_DENIED)
+		return pbv2.Status_PERMISSION_DENIED
+	}
+
 	if r.acl != nil && !r.acl.AllowConnect(src, s.Conn().RemoteMultiaddr(), dest.ID) {
 		log.Debug("refusing connection",
 			"source_peer", src,

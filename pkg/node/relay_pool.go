@@ -319,6 +319,12 @@ func (p *relayStreamPool) Submit(hop peer.ID, data []byte, onSent, onFail func()
 	select {
 	case rc.writeCh <- job:
 		return true
+	case <-rc.ctx.Done():
+		// The conn is being torn down (reaper or shutdown). The write goroutine
+		// has already exited or is about to, so nothing will drain this job.
+		// Fail fast so the caller falls back to another path.
+		onFail()
+		return false
 	default:
 		// Queue full: drop the frame (onFail already called) but throttle the
 		// WARN — a stalled hop otherwise floods hundreds of identical lines per

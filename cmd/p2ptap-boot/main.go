@@ -1172,8 +1172,15 @@ func makeBootRelayHandler(rr *relayRouter) func(network.Stream) {
 		for {
 			_ = s.SetReadDeadline(time.Now().Add(5 * time.Minute))
 			n, err := readFrame(s, buf)
-			if err != nil || n == 0 {
+			if err != nil {
 				return
+			}
+			if n == 0 {
+				// Zero-length frame: a keepalive or empty message. Not an
+				// error — just skip and keep reading. Treating it as
+				// connection death destroys long-lived uplinks on a single
+				// [00 00 00 00] byte sequence.
+				continue
 			}
 			// Frame rate limit: waiting applies back-pressure rather than
 			// silently dropping packets an L2 tunnel cannot recover.
@@ -1216,8 +1223,15 @@ func makeBootRelayBackboneHandler(rr *relayRouter, hub *peekMapHub) func(network
 		for {
 			_ = s.SetReadDeadline(time.Now().Add(5 * time.Minute))
 			n, err := readFrame(s, buf)
-			if err != nil || n == 0 {
+			if err != nil {
 				return
+			}
+			if n == 0 {
+				// Zero-length frame: a keepalive or empty message. Not an
+				// error — just skip and keep reading. Treating it as
+				// connection death destroys long-lived uplinks on a single
+				// [00 00 00 00] byte sequence.
+				continue
 			}
 			// Frames arriving over the backbone are local-delivery-only, so a
 			// misbehaving mesh boot can flood only us — but it is still CPU and
@@ -1330,7 +1344,7 @@ func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter, hub *peekMapHub, entri
 			// an unknown network) mints "" — correct, because in a PSK-less mesh
 			// stamps are neither minted nor required.
 			hdr.Stamp = node.StampRelayCtrlOrigin(psk, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto))
-		case node.VerifyRelayCtrlStamp(psk, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), hdr.Stamp):
+		case psk != nil && node.VerifyRelayCtrlStamp(psk, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), hdr.Stamp):
 			// Already endorsed by an upstream first relay: carry the stamp through.
 			log.Debug("[relay-ctrl] endorsed tunnel %s -> %s relayed via %s (hops=%d)",
 				hdr.Origin.ShortString(), hdr.Target.ShortString(), remotePeer.ShortString(), hdr.Hops)
@@ -2157,6 +2171,12 @@ func main() {
 				if gSecurity != nil {
 					gSecurity.PeekMap.Remove(peerID)
 				}
+				// Evict the relay router's per-peer rate-limit bucket so a
+				// peer that disconnects does not leave a permanent tokenBucket
+				// in the map (unbounded growth on a 24/7 relay).
+				if relayRouter != nil {
+					relayRouter.frameLimiter.Remove(peerID)
+				}
 				// Clean up relay sessions and compute online duration.
 				if gSessions != nil {
 					gSessions.RemoveForPeer(peerID)
@@ -2187,7 +2207,7 @@ func main() {
 
 	// 9b. Background maintenance sweeper: periodically prunes expired relay sessions,
 	// deduplication caches, and stale peer metadata for 24/7/365 long-term reliability.
-	go runMaintenanceSweeper(ctx, h, aclFilter, hub, gSessions)
+	go runMaintenanceSweeper(ctx, h, aclFilter, hub, gSessions, relayRouter)
 	fmt.Printf("[+] Background maintenance sweeper started (prunes expired relay sessions, dedup caches and stale states every 1m)\n")
 
 	// 10. Boot backbone: interconnect with peer boots so clients attached to
@@ -3712,7 +3732,7 @@ func relayKeepaliveLoop(ctx context.Context, h host.Host, interval time.Duration
 
 // runMaintenanceSweeper runs periodic garbage collection and stale-state pruning
 // to guarantee bounded memory usage and prevent resource leaks during long-term (24/7/365) running.
-func runMaintenanceSweeper(ctx context.Context, h host.Host, acl *pskACLFilter, hub *peekMapHub, sessions *sessionTracker) {
+func runMaintenanceSweeper(ctx context.Context, h host.Host, acl *pskACLFilter, hub *peekMapHub, sessions *sessionTracker, rr *relayRouter) {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
@@ -3800,6 +3820,11 @@ func runMaintenanceSweeper(ctx context.Context, h host.Host, acl *pskACLFilter, 
 			// 8. Sweep security rate limiters and expired bans
 			if gSecurity != nil {
 				gSecurity.Cleanup()
+			}
+
+			// 9. Evict idle relay router rate-limit buckets (15 min idle)
+			if rr != nil {
+				rr.frameLimiter.Cleanup()
 			}
 		}
 	}

@@ -323,6 +323,13 @@ func (n *Node) bootRelaySubmit(boot peer.ID, env []byte, onSent, onFail func()) 
 func (n *Node) bootRelayWriteLoop(rc *bootRelayConn) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
+	// Close the stream on exit so the downlink reader wakes immediately
+	// instead of parking until its 60 s read deadline. Without this,
+	// bootRelayConns[boot] still points at a dead rc for up to 60 s after
+	// the writer dies, and every bootRelaySubmit in that window enqueues
+	// into an undrained channel and returns success — the frame is silently
+	// lost with no onFail.
+	defer rc.stream.Close()
 
 	for {
 		select {

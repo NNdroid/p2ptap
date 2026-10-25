@@ -197,6 +197,18 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 		log.Warn("RelayCtrl: header missing origin/target from %s", remotePeer)
 		return
 	}
+
+	// Clear the header read deadline. libp2p deadlines are absolute and
+	// nothing downstream re-arms them. Without this, every multi-hop
+	// relay-ctrl tunnel is force-torn ~30s after the header is read:
+	// proxyStreams' io.Copy on the inbound side hits the deadline and
+	// closes the tunnel, and dispatchRelayCtrlInner caps any handler
+	// that doesn't set its own deadline.
+	if err := s.SetReadDeadline(time.Time{}); err != nil {
+		log.Debug("RelayCtrl: failed to clear read deadline: %v", err)
+		return
+	}
+
 	// The relay-ctrl tunnel is what the WebUI "DCUtR 自动打洞与中继" card counts
 	// (its stream total folds in RelayCtrlProtocolID). Record the header RX and a
 	// sync event per established tunnel so the card is not stuck at 0.
@@ -267,9 +279,10 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 
 	sub, ferr := n.openRelayCtrlNextHop(forward, remotePeer)
 	if ferr != nil || sub == nil {
-		if ferr != nil {
-			n.recordRelayControlFailure(hdr.Target, ferr)
-		}
+		// Do NOT record this against hdr.Target: openRelayCtrlNextHop can
+		// fail because the relay hop is unreachable (not the target).
+		// Recording it against the target poisons its circuit-breaker state
+		// and can cascade into auth refresh / rediscovery for a healthy peer.
 		log.Warn("RelayCtrl: cannot forward tunnel to %s (origin %s): %v",
 			hdr.Target, hdr.Origin, ferr)
 		return

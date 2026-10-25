@@ -201,7 +201,9 @@ func (s *bootRelayCtrlStream) Read(p []byte) (int, error) {
 				timer.Stop()
 			}
 			s.mu.Lock()
-			s.readBuf = frame
+			// Append (not overwrite) so bytes stashed in readBuf by enqueue
+			// (when readCh was full) are not silently lost.
+			s.readBuf = append(s.readBuf, frame...)
 			s.mu.Unlock()
 			// loop to hand bytes to the caller
 		case <-closeCh:
@@ -332,7 +334,7 @@ func (s *bootRelayCtrlStream) SetProtocol(p protocol.ID) error {
 
 func (s *bootRelayCtrlStream) Stat() network.Stats { return network.Stats{} }
 
-func (s *bootRelayCtrlStream) Scope() network.StreamScope { return nil }
+func (s *bootRelayCtrlStream) Scope() network.StreamScope { return &network.NullScope{} }
 
 func (s *bootRelayCtrlStream) Conn() network.Conn {
 	return &bootRelayCtrlConn{n: s.n, remote: s.remote}
@@ -388,7 +390,7 @@ func (c *bootRelayCtrlConn) ConnState() network.ConnectionState         { return
 func (c *bootRelayCtrlConn) LocalMultiaddr() ma.Multiaddr               { return nil }
 func (c *bootRelayCtrlConn) RemoteMultiaddr() ma.Multiaddr              { return nil }
 func (c *bootRelayCtrlConn) Stat() network.ConnStats                    { return network.ConnStats{} }
-func (c *bootRelayCtrlConn) Scope() network.ConnScope                   { return nil }
+func (c *bootRelayCtrlConn) Scope() network.ConnScope                   { return &network.NullScope{} }
 func (c *bootRelayCtrlConn) CloseWithError(network.ConnErrorCode) error { return nil }
 func (c *bootRelayCtrlConn) ID() string                                 { return "bootrelay-ctrl-conn-" + c.remote.String() }
 func (c *bootRelayCtrlConn) NewStream(context.Context) (network.Stream, error) {
@@ -452,12 +454,6 @@ func (n *Node) deliverBootRelayControl(finalDst, srcPeer peer.ID, proto protocol
 	if proto == "" {
 		return
 	}
-	// Boot-relay control plane: viaBoot is the carrier, i.e. the hop this peer's
-	// return side actually used.
-	n.notePeerRxTransport(srcPeer, "overlay-relay", viaBoot)
-	if viaBoot != "" && viaBoot != srcPeer {
-		n.recordPeekMapOrigin(srcPeer, viaBoot, 1, false)
-	}
 	convID, sig, inner, err := decodeBootRelayCtrlFrame(payload)
 	if err != nil {
 		log.Debug("[boot-relay] control frame decode error from %s: %v", srcPeer.ShortString(), err)
@@ -486,6 +482,15 @@ func (n *Node) deliverBootRelayControl(finalDst, srcPeer peer.ID, proto protocol
 		// victim's control stream under a spoofed srcPeer.
 		log.Warn("[boot-relay] DROPPED unsigned control frame from %s (requires upgrade)", srcPeer.ShortString())
 		return
+	}
+
+	// Signature verified — now safe to record provenance. Recording before
+	// verification let an unauthenticated frame plant reachability and routing
+	// provenance for an arbitrary peer, polluting the return-path view and
+	// steering return frames to an attacker-influenced hop.
+	n.notePeerRxTransport(srcPeer, "overlay-relay", viaBoot)
+	if viaBoot != "" && viaBoot != srcPeer {
+		n.recordPeekMapOrigin(srcPeer, viaBoot, 1, false)
 	}
 	// Copy BOTH fields out of the downlink's REUSED read buffer. The downlink
 	// loop calls ReadFrame(s, buf) on the very next iteration, which overwrites

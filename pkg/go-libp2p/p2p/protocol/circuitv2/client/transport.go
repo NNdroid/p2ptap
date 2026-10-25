@@ -85,6 +85,12 @@ func (c *Client) dialAndUpgrade(ctx context.Context, a ma.Multiaddr, p peer.ID, 
 	conn.tagHop()
 	cc, err := c.upgrader.Upgrade(ctx, c, conn, network.DirOutbound, p, connScope)
 	if err != nil {
+		// On upgrade failure the hop stream and its tag would leak: the conn
+		// stays tagged "relay-hop-stream" at weight 5, shielding it from
+		// ConnManager pruning, and hopCount grows without bound. Close the
+		// conn and drop the tag.
+		conn.untagHop()
+		conn.Close()
 		return nil, err
 	}
 	return capableConn{cc.(capableConnWithStat)}, nil
