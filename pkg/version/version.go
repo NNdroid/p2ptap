@@ -165,7 +165,7 @@ func (r Record) CompatibleWith(peer Record) (CompatLevel, string) {
 	if !r.known() || !peer.known() {
 		return CompatOK, "peer version unknown (old build) — cannot verify envelope compatibility"
 	}
-	if r.Commit == peer.Commit {
+	if short(r.Commit, 10) == short(peer.Commit, 10) {
 		return CompatOK, ""
 	}
 	// Same envelope wire version: the build differs but the relay framing is

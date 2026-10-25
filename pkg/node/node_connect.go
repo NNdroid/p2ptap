@@ -844,8 +844,11 @@ func (n *Node) assertBootRelayUplinkHealth() {
 	}
 }
 
-// peerPingPongLoop sends echo-based keepalive pings to all connected non-bootstrap
-// peers every PingPongKeepaliveInterval (10s, ±20% jitter). After
+// peerPingPongLoop sends echo-based keepalive pings to all connected peers
+// every PingPongKeepaliveInterval (10s, ±20% jitter). Bootstrap peers are
+// included because without application-level echo pings, a half-open transport
+// link to the boot could silently blackhole circuit-relay traffic for up to
+// 30s (the boot's own relayKeepaliveLoop period) before either side notices.
 // pingPongMaxFailures (2) consecutive timeouts the peer is reconnected — unless
 // it has sent us inbound data within pingPongReconnectQuietWindow, in which case
 // only the echo stream is refreshed. This provides fast dead-connection
@@ -959,7 +962,7 @@ func (n *Node) peerPingPongLoop() {
 // It reuses a persistent per-peer echo stream (echoPool) instead of opening a fresh
 // NewStream on every tick — the old per-tick NewStream-per-peer storm is gone.
 func (n *Node) pingPongProbePeer(pid peer.ID) {
-	if pid == "" || pid == n.Host.ID() || n.isBootstrapPeer(pid) {
+	if pid == "" || pid == n.Host.ID() {
 		return
 	}
 
