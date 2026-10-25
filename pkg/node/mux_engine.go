@@ -9,7 +9,6 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/core/protocol"
 
 	mux "p2ptap/pkg/mux"
 )
@@ -83,6 +82,16 @@ func (e *muxEngine) handleControlStream(s network.Stream) {
 // them to protocol handlers.
 func (e *muxEngine) handleStream(s network.Stream, from peer.ID) {
 	defer s.Close()
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("mux handleStream panic (from %s): %v", from.ShortString(), r)
+		}
+		e.mu.Lock()
+		if cur := e.streams[from]; cur == s {
+			delete(e.streams, from)
+		}
+		e.mu.Unlock()
+	}()
 	buf := make([]byte, maxFrameLen+mux.HeaderLen)
 
 	for {
@@ -114,7 +123,7 @@ func (e *muxEngine) handleStream(s network.Stream, from peer.ID) {
 			e.sessionsMu.Unlock()
 			if sess != nil {
 				select {
-				case sess.respCh <- payload:
+				case sess.respCh <- append([]byte(nil), payload...):
 				default:
 				}
 			}
@@ -122,24 +131,35 @@ func (e *muxEngine) handleStream(s network.Stream, from peer.ID) {
 	}
 }
 
-// dispatch calls the protocol handler for a mux tag.
+// dispatch calls the protocol handler for a mux tag. Each handler runs in
+// its own goroutine with a recover() guard so a panic in one handler does
+// not kill the process.
 func (e *muxEngine) dispatch(from peer.ID, tag uint8, sess *muxSession) {
 	ms := &muxStream{sess: sess}
 	wrapped := &logicalPeerStream{Stream: ms, logical: from}
 
+	dispatchHandler := func(h func(network.Stream)) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("mux dispatch panic (tag=%d, from=%s): %v", tag, from.ShortString(), r)
+			}
+		}()
+		h(wrapped)
+	}
+
 	switch tag {
 	case mux.TagSeqSync:
-		go e.node.handleSeqSync(wrapped)
+		go dispatchHandler(e.node.handleSeqSync)
 	case mux.TagLSA:
-		go e.node.handleLSAStream(wrapped)
+		go dispatchHandler(e.node.handleLSAStream)
 	case mux.TagMeta:
-		go e.node.handleMetaStream(wrapped)
+		go dispatchHandler(e.node.handleMetaStream)
 	case mux.TagEcho:
-		go e.node.handleEcho(wrapped)
+		go dispatchHandler(e.node.handleEcho)
 	case mux.TagTapProbeAck:
-		go e.node.handleTapProbeAck(wrapped)
+		go dispatchHandler(e.node.handleTapProbeAck)
 	case mux.TagRelayCtrl:
-		go e.node.handleRelayCtrl(wrapped)
+		go dispatchHandler(e.node.handleRelayCtrl)
 	default:
 		log.Warn("mux: no handler for tag %d (from %s)", tag, from.ShortString())
 	}
@@ -157,7 +177,9 @@ func (e *muxEngine) Send(target peer.ID, tag uint8, payload []byte) bool {
 	m.Lock()
 	defer m.Unlock()
 
-	s := e.getOrOpenLocked(e.node.ctx, target)
+	ctx, cancel := context.WithTimeout(e.node.ctx, 15*time.Second)
+	defer cancel()
+	s := e.getOrOpenLocked(ctx, target)
 	if s == nil {
 		return false
 	}
@@ -297,8 +319,13 @@ func (e *muxEngine) DropConnStreams(target peer.ID, deadConn network.Conn) bool 
 // It reads data mux frames and dispatches them by kind.
 func (e *muxEngine) handleDataStream(s network.Stream) {
 	defer s.Close()
-	buf := make([]byte, maxFrameLen+mux.DataHeaderLen)
 	from := s.Conn().RemotePeer()
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("mux handleDataStream panic (from %s): %v", from.ShortString(), r)
+		}
+	}()
+	buf := make([]byte, maxFrameLen+mux.DataHeaderLen)
 
 	for {
 		kind, payload, err := mux.ReadDataFrame(s, buf)
@@ -308,9 +335,11 @@ func (e *muxEngine) handleDataStream(s network.Stream) {
 
 		switch kind {
 		case mux.KindVTP:
-			go e.node.handleDataMuxVTP(s, from, payload)
+			p := append([]byte(nil), payload...)
+			go e.node.handleDataMuxVTP(s, from, p)
 		case mux.KindRelay:
-			go e.node.handleDataMuxRelay(s, from, payload)
+			p := append([]byte(nil), payload...)
+			go e.node.handleDataMuxRelay(s, from, p)
 		default:
 			log.Warn("mux data: unknown kind %d from %s", kind, from.ShortString())
 		}
@@ -330,26 +359,4 @@ func (e *muxEngine) InvalidateAll() {
 	for _, id := range targets {
 		e.Invalidate(id)
 	}
-}
-
-// WrapStream wraps a raw mux stream into a muxInitStream for a specific
-// protocol tag. The caller gets a network.Stream that transparently
-// multiplexes over the underlying mux stream. Used by openControlStream
-// when the mux protocol is available.
-func (e *muxEngine) WrapStream(s network.Stream, proto protocol.ID) (network.Stream, bool) {
-	tag, ok := muxTagForProto(proto)
-	if !ok {
-		return nil, false
-	}
-	reqID := e.nextReqID.Add(1)
-	sess := &muxSession{
-		tag:    tag,
-		reqID:  reqID,
-		stream: s,
-		respCh: make(chan []byte, 1),
-	}
-	e.sessionsMu.Lock()
-	e.sessions[reqID] = sess
-	e.sessionsMu.Unlock()
-	return &muxInitStream{stream: s, tag: tag, reqID: reqID, sess: sess, engine: e}, true
 }

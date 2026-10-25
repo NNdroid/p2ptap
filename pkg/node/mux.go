@@ -170,7 +170,7 @@ func (m *muxInitStream) Read(p []byte) (int, error) {
 	}
 }
 
-func (m *muxInitStream) Close() error       { return nil }
+func (m *muxInitStream) Close() error       { return m.stream.Close() }
 func (m *muxInitStream) CloseWrite() error   { return nil }
 func (m *muxInitStream) CloseRead() error    { return nil }
 func (m *muxInitStream) Reset() error        { return nil }
