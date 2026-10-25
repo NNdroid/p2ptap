@@ -470,7 +470,7 @@ func (n *Node) bootstrapKeepAliveLoop() {
 				if err != nil {
 					continue
 				}
-				if n.Host.Network().Connectedness(info.ID) != network.Connected {
+				if n.Host.Network().Connectedness(info.ID) == network.NotConnected {
 					log.Debug("Bootstrap peer %s disconnected, reconnecting...", info.ID.String())
 					go n.connectWithRetry(*info, "bootstrap", 5*time.Second, 3)
 				}
@@ -489,7 +489,7 @@ func (n *Node) bootstrapKeepAliveLoop() {
 				// Inspired by official libp2p chat example: permanently register static peer addrs in Peerstore
 				n.Host.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
 
-				if n.Host.Network().Connectedness(info.ID) != network.Connected {
+				if n.Host.Network().Connectedness(info.ID) == network.NotConnected {
 					log.Debug("Static peer %s disconnected, reconnecting...", info.ID.String())
 					go n.connectWithRetry(*info, "static", 5*time.Second, 3)
 				}
@@ -833,7 +833,7 @@ func (n *Node) assertBootRelayUplinkHealth() {
 		if !n.isBootstrapPeer(pid) {
 			continue
 		}
-		if n.Host.Network().Connectedness(pid) != network.Connected {
+		if n.Host.Network().Connectedness(pid) == network.NotConnected {
 			continue
 		}
 		if n.isBootRelayBlacklisted(pid) || n.hasBootRelayUplink(pid) {
@@ -884,7 +884,7 @@ func (n *Node) peerPingPongLoop() {
 				// from the client side (only from the boot's 30s relayKeepaliveLoop),
 				// so a half-open transport link to the boot could silently blackhole
 				// circuit-relay traffic for up to 30s before the boot noticed.
-				if n.Host.Network().Connectedness(pid) != network.Connected {
+				if n.Host.Network().Connectedness(pid) == network.NotConnected {
 					n.deletePingPongFailCount(pid)
 					continue
 				}
@@ -1312,7 +1312,7 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 				if berr != nil {
 					continue
 				}
-				if n.Host.Network().Connectedness(bInfo.ID) != network.Connected {
+				if n.Host.Network().Connectedness(bInfo.ID) == network.NotConnected {
 					bootWg.Add(1)
 					go func(bi peer.AddrInfo) {
 						defer bootWg.Done()
