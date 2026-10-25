@@ -367,6 +367,10 @@ func (n *Node) handleSeqSync(s network.Stream) {
 				log.Warn("SeqSync: refusing message from %s — unauthenticated: %v", remotePeer, err)
 				return
 			}
+			if err := checkSeqSyncTimestamp(msg); err != nil {
+				log.Warn("SeqSync: rejecting stale message from %s: %v", remotePeer, err)
+				return
+			}
 		}
 		// Ensure we ourselves have a (per-peer) epoch before replying.
 		n.ensureLocalEpoch(remotePeer)
@@ -703,6 +707,10 @@ func (n *Node) syncSeqToPeerAttempt(p peer.ID) error {
 		if err := n.verifySeqSyncMsg(p, reply); err != nil {
 			log.Warn("SeqSync: refusing ack from %s — unauthenticated: %v", p.String(), err)
 			return fmt.Errorf("SeqSync: unauthenticated ack from %s: %w", p.String(), err)
+		}
+		if err := checkSeqSyncTimestamp(reply); err != nil {
+			log.Warn("SeqSync: rejecting stale ack from %s: %v", p.String(), err)
+			return fmt.Errorf("SeqSync: stale ack from %s: %w", p.String(), err)
 		}
 	}
 	n.anchorDedupForPeer(p, reply.MySeq, reply.ConnEpoch)

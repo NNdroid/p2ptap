@@ -76,6 +76,15 @@ BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 GIT_COMMIT="$( (git rev-parse HEAD 2>/dev/null || echo 'unknown') | head -1)"
 VER_FLAGS="-X p2ptap/pkg/version.Version=$VERSION -X p2ptap/pkg/version.BuildTime=$BUILD_TIME -X p2ptap/pkg/version.GitCommit=$GIT_COMMIT"
 
+# Garble obfuscator: if available, use `garble build -literals` for stronger
+# string encryption and name randomisation. Falls back to plain `go build`
+# when garble is not installed.
+if command -v garble >/dev/null 2>&1; then
+  BUILD_CMD="garble build -literals"
+else
+  BUILD_CMD="go build"
+fi
+
 OS_FILTER=""
 ARCH_FILTER=""
 TARGET="all"
@@ -226,13 +235,13 @@ for t in "${SELECTED_TARGETS[@]}"; do
     if [ "$os" = "windows" ] && [ "$arch" = "amd64" ]; then
       out_prefix="p2ptap"
     fi
-    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -ldflags="-s -w $VER_FLAGS" -o "$OUT_DIR/$out_prefix$ext" ./cmd/p2ptap
+    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" $BUILD_CMD -ldflags="-s -w $VER_FLAGS" -o "$OUT_DIR/$out_prefix$ext" ./cmd/p2ptap
     
     boot_prefix="p2ptap-boot-$os-$arch"
     if [ "$os" = "windows" ] && [ "$arch" = "amd64" ]; then
       boot_prefix="p2ptap-boot"
     fi
-    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -ldflags="-s -w $VER_FLAGS" -o "$OUT_DIR/$boot_prefix$ext" ./cmd/p2ptap-boot
+    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" $BUILD_CMD -ldflags="-s -w $VER_FLAGS" -o "$OUT_DIR/$boot_prefix$ext" ./cmd/p2ptap-boot
 
     if [ "$os" = "windows" ]; then
       printf '   %s🪟 编译 p2ptap-tray (GUI)%s\n' "$DIM" "$RESET"
@@ -240,7 +249,7 @@ for t in "${SELECTED_TARGETS[@]}"; do
       if [ "$arch" = "amd64" ]; then
         tray_prefix="p2ptap-tray.exe"
       fi
-      CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -ldflags="-s -w -H windowsgui $VER_FLAGS" -o "$OUT_DIR/$tray_prefix" ./cmd/p2ptap-tray
+      CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" $BUILD_CMD -ldflags="-s -w -H windowsgui $VER_FLAGS" -o "$OUT_DIR/$tray_prefix" ./cmd/p2ptap-tray
       [ -f "$SCRIPT_DIR/start.bat" ] && cp "$SCRIPT_DIR/start.bat" "$OUT_DIR/"
       [ -f "$SCRIPT_DIR/launcher.vbs" ] && cp "$SCRIPT_DIR/launcher.vbs" "$OUT_DIR/"
       ensure_wintun_dll "$arch"
@@ -260,12 +269,12 @@ for t in "${SELECTED_TARGETS[@]}"; do
   mkdir -p "$stage_dir"
 
   printf '   %s🔨 编译 p2ptap、p2ptap-boot%s\n' "$DIM" "$RESET"
-  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -ldflags="-s -w $VER_FLAGS" -o "$stage_dir/p2ptap$ext" ./cmd/p2ptap
-  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -ldflags="-s -w $VER_FLAGS" -o "$stage_dir/p2ptap-boot$ext" ./cmd/p2ptap-boot
+  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" $BUILD_CMD -ldflags="-s -w $VER_FLAGS" -o "$stage_dir/p2ptap$ext" ./cmd/p2ptap
+  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" $BUILD_CMD -ldflags="-s -w $VER_FLAGS" -o "$stage_dir/p2ptap-boot$ext" ./cmd/p2ptap-boot
 
   if [ "$os" = "windows" ]; then
     printf '   %s🪟 编译 p2ptap-tray (GUI) + 附带驱动文件%s\n' "$DIM" "$RESET"
-    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -ldflags="-s -w -H windowsgui $VER_FLAGS" -o "$stage_dir/p2ptap-tray.exe" ./cmd/p2ptap-tray
+    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" $BUILD_CMD -ldflags="-s -w -H windowsgui $VER_FLAGS" -o "$stage_dir/p2ptap-tray.exe" ./cmd/p2ptap-tray
     [ -f "$SCRIPT_DIR/start.bat" ] && cp "$SCRIPT_DIR/start.bat" "$stage_dir/"
     [ -f "$SCRIPT_DIR/launcher.vbs" ] && cp "$SCRIPT_DIR/launcher.vbs" "$stage_dir/"
     ensure_wintun_dll "$arch"

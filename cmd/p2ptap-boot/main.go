@@ -2742,6 +2742,20 @@ func handleSeqSyncStream(s network.Stream) {
 		return
 	}
 
+	// Reject stale messages (replay defense). Only enforced for HandshakeVer >= 2
+	// (the timestamp is covered by the message signature). Legacy peers and
+	// unsigned messages are accepted.
+	if req.Timestamp != 0 && req.HandshakeVer >= 2 {
+		age := time.Now().Unix() - req.Timestamp/1000
+		if age < 0 {
+			age = -age
+		}
+		if age > 300 { // 5 minutes
+			log.Debug("[seqsync] stale message from %s (age %ds)", remotePeer.String(), age)
+			return
+		}
+	}
+
 	// Reply with an ack carrying our identity. MySeq=0 and a fresh random
 	// ConnEpoch are sufficient: the boot node issues no TAP frames, so the
 	// client's anchorDedupForPeer just records these as the boot peer's window.
@@ -2764,6 +2778,17 @@ func handleSeqSyncStream(s network.Stream) {
 	// Same cap as above: the reciprocal "ready" must not be an unbounded
 	// JSON value either.
 	if err := json.NewDecoder(io.LimitReader(s, 4096)).Decode(&ready); err == nil && ready.Type == "ready" {
+		// Defense-in-depth: reject stale ready messages.
+		if ready.Timestamp != 0 && ready.HandshakeVer >= 2 {
+			age := time.Now().Unix() - ready.Timestamp/1000
+			if age < 0 {
+				age = -age
+			}
+			if age > 300 {
+				log.Debug("[seqsync] stale ready from %s (age %ds)", remotePeer.String(), age)
+				return
+			}
+		}
 		_ = json.NewEncoder(s).Encode(seqSyncMsg{
 			Type:       "ready",
 			NodeID:     s.Conn().LocalPeer().String(),

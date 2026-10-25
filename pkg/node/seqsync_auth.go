@@ -3,9 +3,12 @@ package node
 import (
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
+
+	"p2ptap/pkg/obfuscate"
 )
 
 // AUTHENTICATED KEY EXCHANGE for the SeqSync obfuscation handshake.
@@ -76,7 +79,7 @@ const seqSyncAuthVersion2 = uint32(2)
 // obfPubSigDomain is prepended to the offered handshake public key before
 // signing, domain-separating these signatures from every other use of the
 // identity key so a signature cannot be repurposed across message types.
-var obfPubSigDomain = []byte("p2ptap-obfpub-sig\x00")
+var obfPubSigDomain = obfuscate.D([]byte{0x38, 0x7a, 0x38, 0x3c, 0x29, 0x38, 0x65, 0x27, 0x2a, 0x2e, 0x38, 0x3d, 0x2a, 0x65, 0x3b, 0x21, 0x2f, 0x48})
 
 // obfPubSigInput is the exact byte string signed and verified for an offered
 // handshake public key.
@@ -212,7 +215,7 @@ func (n *Node) checkObfPubAuth(remotePeer peer.ID, msg SeqSyncMsg) error {
 // seqSyncMsgSigDomain is prepended to the message bytes before signing,
 // domain-separating SeqSync message signatures from every other use of the
 // identity key (ObfPub signing, boot-relay control frame signing).
-var seqSyncMsgSigDomain = []byte("p2ptap-seqsync-msg-sig\x00")
+var seqSyncMsgSigDomain = obfuscate.D([]byte{0x38, 0x7a, 0x38, 0x3c, 0x29, 0x38, 0x65, 0x3b, 0x2d, 0x39, 0x3b, 0x31, 0x26, 0x2b, 0x65, 0x25, 0x3b, 0x2f, 0x65, 0x3b, 0x21, 0x2f, 0x48})
 
 // seqSyncMsgSigInput builds the exact byte string signed and verified for a
 // SeqSyncMsg. It covers all fields except MsgSig itself, so any tampering with
@@ -322,4 +325,33 @@ func (n *Node) verifySeqSyncMsg(remotePeer peer.ID, msg SeqSyncMsg) error {
 // ObfPub signing (version 1) only, not message signing.
 func (n *Node) requireSeqSyncMsgAuth(peer peer.ID, msg SeqSyncMsg) bool {
 	return msg.HandshakeVer >= seqSyncAuthVersion2
+}
+
+// seqSyncTimestampWindow is the maximum allowed age for a signed SeqSyncMsg
+// (HandshakeVer >= 2). Messages older than this are rejected as replays.
+// 5 minutes is generous enough to tolerate clock skew across nodes but tight
+// enough to defeat a simple capture-and-replay within the same day.
+const seqSyncTimestampWindow = 300 // seconds
+
+// checkSeqSyncTimestamp validates that msg.Timestamp is within the allowed
+// freshness window. Only enforced when msg.HandshakeVer >= 2 (the message
+// signature covers the timestamp field, so a stale timestamp is detectable).
+// A zero timestamp is accepted for backward compatibility with versions that
+// predate the timestamp field.
+func checkSeqSyncTimestamp(msg SeqSyncMsg) error {
+	if msg.HandshakeVer < seqSyncAuthVersion2 {
+		return nil // legacy peer, timestamp not authenticated
+	}
+	if msg.Timestamp == 0 {
+		return nil // pre-timestamp version, accept for interop
+	}
+	now := time.Now().Unix()
+	age := now - msg.Timestamp/1000 // Timestamp is Unix ms
+	if age < 0 {
+		age = -age // tolerate small clock skew in either direction
+	}
+	if age > seqSyncTimestampWindow {
+		return fmt.Errorf("SeqSync message timestamp is %d seconds old (max %d)", age, seqSyncTimestampWindow)
+	}
+	return nil
 }

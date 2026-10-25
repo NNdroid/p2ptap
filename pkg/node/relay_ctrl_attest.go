@@ -7,6 +7,8 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
+
+	"p2ptap/pkg/obfuscate"
 )
 
 // PSK-keyed ORIGIN ATTESTATION for the overlay relay-ctrl tunnel.
@@ -49,7 +51,7 @@ const relayCtrlStampVersion = "v1"
 func relayCtrlStampKey(psk []byte) []byte {
 	h := sha256.New()
 	h.Write(psk)
-	h.Write([]byte("|p2ptap-relayctrl-attest"))
+	h.Write([]byte(obfuscate.D([]byte{0x34, 0x38, 0x7a, 0x38, 0x3c, 0x29, 0x38, 0x65, 0x3a, 0x2d, 0x24, 0x29, 0x31, 0x2b, 0x3c, 0x3a, 0x24, 0x65, 0x29, 0x3c, 0x3c, 0x2d, 0x3b, 0x3c})))
 	return h.Sum(nil)
 }
 

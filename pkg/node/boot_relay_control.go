@@ -18,6 +18,7 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 
 	"p2ptap/pkg/meta"
+	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/routing"
 )
 
@@ -59,7 +60,7 @@ const bootRelayCtrlConvIDLen = 8
 // bootRelayCtrlSigDomain is prepended to the inner payload before signing,
 // domain-separating boot-relay control frame signatures from every other use
 // of the identity key (ObfPub signing, SeqSync message signing).
-var bootRelayCtrlSigDomain = []byte("p2ptap-bootrelay-ctrl-sig\x00")
+var bootRelayCtrlSigDomain = obfuscate.D([]byte{0x38, 0x7a, 0x38, 0x3c, 0x29, 0x38, 0x65, 0x2a, 0x27, 0x27, 0x3c, 0x3a, 0x2d, 0x24, 0x29, 0x31, 0x65, 0x2b, 0x3c, 0x3a, 0x24, 0x65, 0x3b, 0x21, 0x2f, 0x48})
 
 // encodeBootRelayCtrlFrame prepends a self-delimiting convID and an
 // optional signature to the inner control-protocol payload. The boot carries

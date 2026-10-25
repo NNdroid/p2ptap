@@ -21,6 +21,13 @@ import (
 )
 
 func main() {
+	// Anti-debugging: detect and silently exit if a debugger is attached.
+	// Placed before checkAndRunService() to cover all execution modes
+	// (foreground, Windows service, genconf, version).
+	if checkDebugger() {
+		os.Exit(1)
+	}
+
 	if checkAndRunService() {
 		return
 	}

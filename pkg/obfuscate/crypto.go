@@ -211,17 +211,17 @@ func DeriveKeysPSK(priv *ecdh.PrivateKey, peerPub, psk []byte) (keyA, keyB []byt
 	// derivation is identical to DeriveKeys for PSK-less deployments.
 	var salt []byte
 	if len(psk) > 0 {
-		h := sha256.Sum256(append([]byte("p2ptap-obf-psk-salt\x00"), psk...))
+		h := sha256.Sum256(append([]byte(D([]byte{0x38, 0x7a, 0x38, 0x3c, 0x29, 0x38, 0x65, 0x27, 0x2a, 0x2e, 0x65, 0x38, 0x3b, 0x23, 0x65, 0x3b, 0x29, 0x24, 0x3c, 0x48})), psk...))
 		salt = h[:]
 	}
 
 	keyA = make([]byte, 32)
 	keyB = make([]byte, 32)
-	rA := hkdf.New(sha256.New, shared, salt, []byte("p2ptap-obf-key-a"))
+	rA := hkdf.New(sha256.New, shared, salt, []byte(D([]byte{0x38, 0x7a, 0x38, 0x3c, 0x29, 0x38, 0x65, 0x27, 0x2a, 0x2e, 0x65, 0x23, 0x2d, 0x31, 0x65, 0x29})))
 	if _, err = io.ReadFull(rA, keyA); err != nil {
 		return nil, nil, err
 	}
-	rB := hkdf.New(sha256.New, shared, salt, []byte("p2ptap-obf-key-b"))
+	rB := hkdf.New(sha256.New, shared, salt, []byte(D([]byte{0x38, 0x7a, 0x38, 0x3c, 0x29, 0x38, 0x65, 0x27, 0x2a, 0x2e, 0x65, 0x23, 0x2d, 0x31, 0x65, 0x2a})))
 	if _, err = io.ReadFull(rB, keyB); err != nil {
 		return nil, nil, err
 	}

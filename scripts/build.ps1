@@ -112,6 +112,13 @@ try {
         if ($LASTEXITCODE -ne 0) { $gitCommit = 'unknown' }
     } catch { $gitCommit = 'unknown' }
     $ldflags = "-s -w -X p2ptap/pkg/version.Version=$ver -X p2ptap/pkg/version.BuildTime=$buildTime -X p2ptap/pkg/version.GitCommit=$gitCommit"
+
+    # Garble obfuscator: if available, use `garble build -literals` for stronger
+    # string encryption and name randomisation. Falls back to plain `go build`.
+    $BuildCmd = "go build"
+    $garbleCheck = Get-Command garble -ErrorAction SilentlyContinue
+    if ($garbleCheck) { $BuildCmd = "garble build -literals" }
+
     foreach ($t in $SelectedTargets) {
         $os = $t.OS
         $arch = $t.Arch
@@ -130,13 +137,13 @@ try {
             $binName = if ($isNative) { "p2ptap$ext" } else { "p2ptap-$os-$arch$ext" }
             $bootName = if ($isNative) { "p2ptap-boot$ext" } else { "p2ptap-boot-$os-$arch$ext" }
 
-            go build -ldflags="$ldflags" -o (Join-Path $BinDir $binName) ./cmd/p2ptap
-            go build -ldflags="$ldflags" -o (Join-Path $BinDir $bootName) ./cmd/p2ptap-boot
+            $BuildCmd -ldflags="$ldflags" -o (Join-Path $BinDir $binName) ./cmd/p2ptap
+            $BuildCmd -ldflags="$ldflags" -o (Join-Path $BinDir $bootName) ./cmd/p2ptap-boot
 
             if ($os -eq "windows") {
                 $guiLdflags = "$ldflags -H windowsgui"
                 $trayName = if ($isNative) { "p2ptap-tray$ext" } else { "p2ptap-tray-$os-$arch$ext" }
-                go build -ldflags="$guiLdflags" -o (Join-Path $BinDir $trayName) ./cmd/p2ptap-tray
+                $BuildCmd -ldflags="$guiLdflags" -o (Join-Path $BinDir $trayName) ./cmd/p2ptap-tray
             }
         } else {
             # Bundled release mode
@@ -148,13 +155,13 @@ try {
             $bootOut = Join-Path $stageDir "p2ptap-boot$ext"
 
             Write-Host "[+] Compiling package for $os/$arch..." -ForegroundColor Green
-            go build -ldflags="$ldflags" -o $binOut ./cmd/p2ptap
-            go build -ldflags="$ldflags" -o $bootOut ./cmd/p2ptap-boot
+            $BuildCmd -ldflags="$ldflags" -o $binOut ./cmd/p2ptap
+            $BuildCmd -ldflags="$ldflags" -o $bootOut ./cmd/p2ptap-boot
 
             if ($os -eq "windows") {
                 $trayOut = Join-Path $stageDir "p2ptap-tray.exe"
                 $guiLdflags = "$ldflags -H windowsgui"
-                go build -ldflags="$guiLdflags" -o $trayOut ./cmd/p2ptap-tray
+                $BuildCmd -ldflags="$guiLdflags" -o $trayOut ./cmd/p2ptap-tray
                 if (Test-Path (Join-Path $ScriptDir "start.bat")) {
                     Copy-Item (Join-Path $ScriptDir "start.bat") $stageDir
                 }

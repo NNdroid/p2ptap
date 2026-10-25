@@ -4,15 +4,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
+
+	"p2ptap/pkg/obfuscate"
 )
 
 // Domain separators for the three PSK derivatives. Keeping them named makes
 // the hashes unmistakably distinct and prevents one call site from silently
-// adopting the other's separator.
-const (
-	pskDomainRelayAuth = "p2ptap-relay-auth:"
-	pskDomainNetworkID = "p2ptap-net:"
-	pskDomainDiscovery = "p2ptap-disco:"
+// adopting the other's separator. Encoded to avoid appearing in binary strings.
+var (
+	pskDomainRelayAuth = obfuscate.D([]byte{0x38, 0x7a, 0x38, 0x3c, 0x29, 0x38, 0x65, 0x3a, 0x2d, 0x24, 0x29, 0x31, 0x65, 0x29, 0x3d, 0x3c, 0x20, 0x72})
+	pskDomainNetworkID = obfuscate.D([]byte{0x38, 0x7a, 0x38, 0x3c, 0x29, 0x38, 0x65, 0x26, 0x2d, 0x3c, 0x72})
+	pskDomainDiscovery = obfuscate.D([]byte{0x38, 0x7a, 0x38, 0x3c, 0x29, 0x38, 0x65, 0x2c, 0x21, 0x3b, 0x2b, 0x27, 0x72})
 )
 
 // PSKKeyBytes returns the canonical byte form of a configured PSK: the bytes
