@@ -198,6 +198,33 @@
             <div id="alertPagination"></div>
         </div>
 
+        <!-- Unauthenticated Data Panel -->
+        <div class="card" id="unauthCard" style="display: none;">
+            <div class="section-header">
+                <div class="section-title">
+                    <span style="color: #ef4444;">🔒</span>
+                    <span data-i18n="unauth_title">未认证数据拦截 (Unauthenticated Data)</span>
+                </div>
+                <span class="badge badge-danger" id="unauthCountBadge">0</span>
+            </div>
+            <div style="display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px;" id="unauthCounters"></div>
+            <div class="table-responsive" style="max-height: 300px; overflow-y: auto;">
+                <table id="unauthTable">
+                    <thead>
+                        <tr>
+                            <th data-i18n="unauth_th_time">时间</th>
+                            <th data-i18n="unauth_th_type">类型</th>
+                            <th data-i18n="unauth_th_peer">Peer ID</th>
+                            <th data-i18n="unauth_th_detail">详情</th>
+                        </tr>
+                    </thead>
+                    <tbody id="unauthTableBody">
+                        <!-- Injected via JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- Subnet Routes Summary Card -->
         <div class="card" id="subnetCard" style="display: none;">
             <div class="section-header">

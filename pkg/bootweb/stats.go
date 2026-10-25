@@ -152,6 +152,21 @@ type AlertEventDTO struct {
 	Message   string `json:"message"`
 }
 
+// UnauthEventDTO represents a single rejected/dropped unauthenticated data event.
+type UnauthEventDTO struct {
+	Timestamp string `json:"timestamp"`
+	Type      string `json:"type"`
+	PeerID    string `json:"peer_id"`
+	Detail    string `json:"detail"`
+}
+
+// UnauthStatsDTO holds aggregate counters and recent events for unauthenticated data.
+type UnauthStatsDTO struct {
+	TotalDropped int64              `json:"total_dropped"`
+	ByType       map[string]int64   `json:"by_type"`
+	RecentEvents []UnauthEventDTO   `json:"recent_events"`
+}
+
 // NetworkGroup groups peers by their PSK Network ID.
 type NetworkGroup struct {
 	NetworkID string   `json:"network_id"`
@@ -251,6 +266,7 @@ type BootDashboardDTO struct {
 	Health         HealthCheckDTO    `json:"health"`
 	Config         ConfigSummaryDTO  `json:"config"`
 	LastSeenPeers  []LastSeenPeerDTO `json:"last_seen_peers"`
+	UnauthStats    UnauthStatsDTO    `json:"unauth_stats"`
 }
 
 // BootDataProvider provides an interface for extracting live data from the boot server.
@@ -268,6 +284,7 @@ type BootDataProvider interface {
 	GetPeerNodeInfo(p peer.ID) (nodeName, tapIP, tapIPv6, tapMAC, osStr, archStr, verStr string, subnets []string, isExit bool, obfsAlgo, obfsMode string)
 	GetMeshPeers() []MeshPeerInfo
 	GetRecentAlerts() []AlertEventDTO
+	GetUnauthStats() UnauthStatsDTO
 	// New methods for enhanced dashboard modules
 	GetRelaySessions() []RelaySessionDTO
 	GetRelayLimits() RelayStatsDTO
@@ -638,6 +655,7 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 		Health:         health,
 		Config:         config,
 		LastSeenPeers:  p.GetLastSeenPeers(lastSeenPeersLimit),
+		UnauthStats:    p.GetUnauthStats(),
 	}
 }
 

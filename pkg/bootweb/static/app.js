@@ -187,6 +187,9 @@
             // Alerts Panel with Type Filtering & Search
             renderAlertsPanel();
 
+            // Unauthenticated Data Panel
+            renderUnauthStats();
+
             // Mesh Backbone
             const mesh = state.mesh || [];
             const meshCard = document.getElementById('meshCard');
@@ -493,6 +496,65 @@
                 renderPagination('alertPagination', pageState.alerts, alerts.length, PAGE_SIZE, 'setAlertPage');
             } else {
                 alertsCard.style.display = 'none';
+            }
+        }
+
+        /* ── Module: Unauthenticated Data ──────────────────────────────── */
+        const unauthTypeLabels = {
+            'relay_frame': t => t('unauth_type_relay_frame'),
+            'relay_ctrl': t => t('unauth_type_relay_ctrl'),
+            'boot_relay': t => t('unauth_type_boot_relay'),
+            'meta': t => t('unauth_type_meta'),
+            'echo': t => t('unauth_type_echo'),
+            'seqsync': t => t('unauth_type_seqsync'),
+            'peek_map': t => t('unauth_type_peek_map'),
+            'auth_fail': t => t('unauth_type_auth_fail'),
+            'spoofed': t => t('unauth_type_spoofed')
+        };
+
+        function renderUnauthStats() {
+            const stats = state.unauth_stats || {};
+            const card = document.getElementById('unauthCard');
+            const total = stats.total_dropped || 0;
+            const events = stats.recent_events || [];
+            const byType = stats.by_type || {};
+
+            if (total > 0) {
+                card.style.display = 'block';
+                document.getElementById('unauthCountBadge').innerText = total + ' ' + t('unauth_badge_unit');
+
+                // Render type counters
+                const countersDiv = document.getElementById('unauthCounters');
+                let countersHtml = '';
+                for (const [type, count] of Object.entries(byType)) {
+                    if (count > 0) {
+                        const labelFn = unauthTypeLabels[type];
+                        const label = labelFn ? labelFn(t) : type;
+                        countersHtml += `
+                            <div style="background: var(--surface-hover); border-radius: 8px; padding: 8px 16px; min-width: 100px;">
+                                <div style="font-size: 11px; color: var(--text-muted);">${label}</div>
+                                <div style="font-size: 20px; font-weight: bold; color: var(--accent-danger);">${count}</div>
+                            </div>`;
+                    }
+                }
+                countersDiv.innerHTML = countersHtml;
+
+                // Render event table
+                const tbody = document.getElementById('unauthTableBody');
+                if (events.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 16px;">${t('unauth_no_events')}</td></tr>`;
+                } else {
+                    tbody.innerHTML = events.slice(0, 50).map(ev => `
+                        <tr>
+                            <td style="font-family: monospace; font-size: 12px; white-space: nowrap;">${ev.timestamp}</td>
+                            <td><span class="badge badge-${ev.type === 'auth_fail' ? 'danger' : 'warning'}" style="font-size: 10px;">${escapeHtml(ev.type)}</span></td>
+                            <td class="peer-id-cell" onclick="copyText('${ev.peer_id}')">${escapeHtml(ev.peer_id)}</td>
+                            <td style="font-size: 12px; color: var(--text-secondary);">${escapeHtml(ev.detail)}</td>
+                        </tr>
+                    `).join('');
+                }
+            } else {
+                card.style.display = 'none';
             }
         }
 

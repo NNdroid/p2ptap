@@ -55,6 +55,9 @@ func (m *mockBootDataProvider) GetRecentAlerts() []AlertEventDTO {
 	}
 	return nil
 }
+func (m *mockBootDataProvider) GetUnauthStats() UnauthStatsDTO {
+	return UnauthStatsDTO{TotalDropped: 0, ByType: map[string]int64{}}
+}
 func (m *mockBootDataProvider) GetRelaySessions() []RelaySessionDTO { return nil }
 func (m *mockBootDataProvider) GetRelayLimits() RelayStatsDTO {
 	return RelayStatsDTO{Enabled: true, MaxCircuits: 1024, MaxReservations: 1024, MaxPerPeer: 1, MaxPerIP: 64, MaxPerASN: 256, DurationLimitSec: 300, DataLimitMB: 512}
