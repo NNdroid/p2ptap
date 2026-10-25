@@ -48,7 +48,7 @@ func (n *Node) discoveryLoop() {
 			n.Host.Peerstore().AddAddrs(p.ID, p.Addrs, 10*time.Minute)
 
 			// Check if already connected; if not, initiate CONCURRENT connection with parallel race
-			if n.Host.Network().Connectedness(p.ID) != network.Connected {
+			if n.Host.Network().Connectedness(p.ID) == network.NotConnected {
 				log.Debug("DHT discovered new peer %s with addrs %v, connecting...", p.ID.String(), p.Addrs)
 				go func(pi peer.AddrInfo) {
 					if err := n.dialInParallel(n.ctx, pi, "discovered"); err != nil {
@@ -318,7 +318,7 @@ func (n *Node) SynthesizeRelayCircuitAddrs(targetPeer peer.ID) []multiaddr.Multi
 			continue
 		}
 		seenRelays[bInfo.ID] = true
-		if n.Host.Network().Connectedness(bInfo.ID) != network.Connected {
+		if n.Host.Network().Connectedness(bInfo.ID) == network.NotConnected {
 			continue
 		}
 		circuitMA, cerr := multiaddr.NewMultiaddr(
@@ -336,7 +336,7 @@ func (n *Node) SynthesizeRelayCircuitAddrs(targetPeer peer.ID) []multiaddr.Multi
 			return true
 		}
 		seenRelays[bootPID] = true
-		if n.Host.Network().Connectedness(bootPID) != network.Connected {
+		if n.Host.Network().Connectedness(bootPID) == network.NotConnected {
 			return true
 		}
 		circuitMA, cerr := multiaddr.NewMultiaddr(

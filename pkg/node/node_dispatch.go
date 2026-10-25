@@ -625,7 +625,7 @@ func (n *Node) isDirectlyConnected(targetPeer peer.ID) bool {
 	if n.Host == nil || targetPeer == n.Host.ID() {
 		return false
 	}
-	if n.Host.Network().Connectedness(targetPeer) != network.Connected {
+	if n.Host.Network().Connectedness(targetPeer) == network.NotConnected {
 		return false
 	}
 	n.directConnectedMu.Lock()
@@ -743,7 +743,7 @@ func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
 			if pID == targetPeer || (n.Host != nil && pID == n.Host.ID()) {
 				continue
 			}
-			if n.Host.Network().Connectedness(pID) != network.Connected {
+			if n.Host.Network().Connectedness(pID) == network.NotConnected {
 				continue
 			}
 			if n.isBootstrapPeer(pID) {

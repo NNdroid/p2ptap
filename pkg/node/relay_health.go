@@ -185,7 +185,7 @@ func (n *Node) refreshConnectedRelayAuthentication() {
 			return
 		}
 		seen[info.ID] = struct{}{}
-		if n.Host.Network().Connectedness(info.ID) == network.Connected {
+		if n.Host.Network().Connectedness(info.ID) != network.NotConnected {
 			n.ensureRelayAuth(info)
 		}
 	}

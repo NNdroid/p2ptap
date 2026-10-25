@@ -680,7 +680,7 @@ func (n *Node) triggerOnDemandConnect(pid peer.ID) {
 
 	go func() {
 		log.Debug("On-demand egress trigger for peer %s (connectedness=%v)", pid.ShortString(), n.Host.Network().Connectedness(pid))
-		if n.Host.Network().Connectedness(pid) == network.Connected {
+		if n.Host.Network().Connectedness(pid) != network.NotConnected {
 			// Already connected at transport layer, trigger rekey to unblock cipher / ready state
 			n.triggerPeerRekey(pid)
 		} else {
@@ -945,7 +945,7 @@ func (n *Node) peerPingPongLoop() {
 			// 3-strike count survives transient circuit drops).
 			if m := n.pingPongFailCount.Load(); m != nil {
 				for pid := range *m {
-					if n.Host.Network().Connectedness(pid) == network.Connected {
+					if n.Host.Network().Connectedness(pid) != network.NotConnected {
 						continue
 					}
 					if n.isRelayOnlyPeer(pid) {

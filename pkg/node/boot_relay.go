@@ -83,7 +83,7 @@ func (n *Node) openBootRelayUplink(boot peer.ID, gen uint64) {
 		if n.ctx.Err() != nil {
 			return
 		}
-		if n.Host.Network().Connectedness(boot) != network.Connected {
+		if n.Host.Network().Connectedness(boot) == network.NotConnected {
 			// Connectivity is checked BEFORE the blacklist throttle: a
 			// blacklisted boot that is also offline would otherwise spend its
 			// 30s blacklist sleep first and keep resetting goneSince, so the

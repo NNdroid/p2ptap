@@ -1043,7 +1043,7 @@ func (m *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	}
 	// mDNS fires repeatedly for peers already connected (and on every network
 	// change); skip redialing an established session to avoid connection churn.
-	if m.h.Network().Connectedness(pi.ID) == network.Connected {
+	if m.h.Network().Connectedness(pi.ID) != network.NotConnected {
 		return
 	}
 	log.Info("mDNS discovered local LAN peer %s, connecting...", pi.ID.String())
@@ -3642,7 +3642,7 @@ func (n *Node) GetTopology() TopologyResponse {
 			tn.Depth = int(dist[pid]) // depth proxy = cumulative RTT; replaced below
 		} else {
 			// Fallback parent when node is not yet connected in the LSA link-state graph
-			if graphAdjacent || n.Host.Network().Connectedness(pid) == network.Connected {
+			if graphAdjacent || n.Host.Network().Connectedness(pid) != network.NotConnected {
 				tn.Parent = self.String()
 				tn.Depth = 1
 			} else if hop := n.relayHopForTarget(pid); hop != "" {
@@ -3806,7 +3806,7 @@ func (n *Node) localBootCluster() string {
 		if firstConfigured == "" {
 			firstConfigured = info.ID
 		}
-		if n.Host.Network().Connectedness(info.ID) == network.Connected {
+		if n.Host.Network().Connectedness(info.ID) != network.NotConnected {
 			return info.ID.String()
 		}
 	}
@@ -3819,7 +3819,7 @@ func (n *Node) localBootCluster() string {
 	var discovered string
 	n.discoveredBoots.Range(func(k, _ any) bool {
 		pid := k.(peer.ID)
-		if n.Host.Network().Connectedness(pid) == network.Connected {
+		if n.Host.Network().Connectedness(pid) != network.NotConnected {
 			discovered = pid.String()
 			return false
 		}

@@ -216,7 +216,7 @@ func (n *Node) triggerPeerRekey(p peer.ID) {
 					}
 				}
 				pathState := "transport connection present"
-				if n.Host.Network().Connectedness(p) != network.Connected {
+				if n.Host.Network().Connectedness(p) == network.NotConnected {
 					pathState = "relay route known but not verified"
 				}
 				if cooldown := n.relayPermissionCooldownRemaining(p); cooldown > retryDelay {

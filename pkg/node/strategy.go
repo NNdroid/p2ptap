@@ -285,7 +285,7 @@ func (sd *StrategyDispatcher) openStream(parentCtx context.Context, targetPeer p
 	// If the peer is NOT connected, we need a full dial timeout (8s) for NAT
 	// traversal + relay setup.
 	streamTimeout := 3 * time.Second
-	if sd.node != nil && sd.node.Host.Network().Connectedness(targetPeer) == network.Connected {
+	if sd.node != nil && sd.node.Host.Network().Connectedness(targetPeer) != network.NotConnected {
 		streamTimeout = 1500 * time.Millisecond
 	}
 	ctx, cancel := context.WithTimeout(parentCtx, streamTimeout)
@@ -1217,7 +1217,7 @@ func collectBroadcastPeers(sd *StrategyDispatcher) map[peer.ID]bool {
 	sd.peersMu.Unlock()
 	var stalePeers []peer.ID
 	for _, pID := range mapCopy {
-		if sd.h.Network().Connectedness(pID) == network.Connected {
+		if sd.h.Network().Connectedness(pID) != network.NotConnected {
 			peerIDs[pID] = true
 		} else {
 			stalePeers = append(stalePeers, pID)
@@ -1240,7 +1240,7 @@ func collectBroadcastPeers(sd *StrategyDispatcher) map[peer.ID]bool {
 		if peerIDs[pID] {
 			continue
 		}
-		if sd.h.Network().Connectedness(pID) != network.Connected {
+		if sd.h.Network().Connectedness(pID) == network.NotConnected {
 			continue
 		}
 		protocols, err := sd.h.Peerstore().GetProtocols(pID)

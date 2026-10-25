@@ -264,7 +264,7 @@ func (p *relayStreamPool) relayHopConnected(hop peer.ID) bool {
 	if p.host == nil {
 		return false
 	}
-	return p.host.Network().Connectedness(hop) == network.Connected
+	return p.host.Network().Connectedness(hop) != network.NotConnected
 }
 
 // teardownConn stops a relayConn's background writeLoop and releases its

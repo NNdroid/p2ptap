@@ -1195,7 +1195,7 @@ func (n *Node) considerDiscoveredBoot(pID peer.ID) {
 		return
 	}
 
-	if n.Host.Network().Connectedness(pID) != network.Connected {
+	if n.Host.Network().Connectedness(pID) == network.NotConnected {
 		addrs := filterUndialableAddrs(n.Host.Peerstore().Addrs(pID))
 		if len(addrs) == 0 {
 			// No usable endpoint yet; drop the marker so a later announcement
@@ -1231,7 +1231,7 @@ func (n *Node) considerDiscoveredPeer(pID peer.ID) {
 	if pID == "" || pID == n.Host.ID() || n.isBootstrapPeer(pID) {
 		return
 	}
-	if n.Host.Network().Connectedness(pID) == network.Connected {
+	if n.Host.Network().Connectedness(pID) != network.NotConnected {
 		return
 	}
 	addrs := filterUndialableAddrs(n.Host.Peerstore().Addrs(pID))
@@ -1339,7 +1339,7 @@ func (n *Node) ensurePeekMapListener(bsPeer peer.ID) {
 					return
 				case <-time.After(2 * time.Second):
 				}
-				if n.Host.Network().Connectedness(bsPeer) == network.Connected {
+				if n.Host.Network().Connectedness(bsPeer) != network.NotConnected {
 					log.Debug("Peek-map listener to %s: auto-reconnecting stream", bsPeer.ShortString())
 					n.ensurePeekMapListener(bsPeer)
 				}
