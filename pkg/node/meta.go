@@ -1444,6 +1444,36 @@ func (n *Node) publishPeekMapSelf() {
 	})
 }
 
+// peekMapAnnounceLoop periodically re-broadcasts our own node info through all
+// open peek-map listeners. This ensures that peers which joined after we did
+// (and missed our startup announcement) or peers whose first broadcast was lost
+// to stream churn eventually learn our addresses — without waiting for the DHT
+// rendezvous loop (20s) or a third peer's re-announcement.
+func (n *Node) peekMapAnnounceLoop() {
+	defer n.wg.Done()
+	const period = 60 * time.Second
+	timer := newJitterTimer(period)
+	defer timer.Stop()
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-timer.C:
+			timer.Reset(jitterInterval(period))
+			// Only announce if we have at least one open listener; otherwise
+			// there is nothing to publish to and the call would be a no-op.
+			hasListener := false
+			peekMapListeners.Range(func(k, v interface{}) bool {
+				hasListener = true
+				return false
+			})
+			if hasListener {
+				n.publishPeekMapSelf()
+			}
+		}
+	}
+}
+
 func (n *Node) processSubnetRoutes(remotePeer peer.ID, tapIPv4, tapIPv6 string, subnets []string) {
 	if remotePeer == n.Host.ID() || len(subnets) == 0 || !n.config().AcceptAdvertisedSubnets {
 		return

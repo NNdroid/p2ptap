@@ -872,11 +872,15 @@ func (n *Node) peerPingPongLoop() {
 			connected := make(map[peer.ID]bool, len(peers))
 			var probePeers []peer.ID
 			for _, pid := range peers {
-				if pid == n.Host.ID() || n.isBootstrapPeer(pid) {
+				if pid == n.Host.ID() {
 					continue
 				}
 				connected[pid] = true
-				// Only probe non-bootstrap connected P2P mesh peers
+				// Probe all connected peers including bootstrap/relay peers.
+				// Without this the client's link to the boot was never echo-probed
+				// from the client side (only from the boot's 30s relayKeepaliveLoop),
+				// so a half-open transport link to the boot could silently blackhole
+				// circuit-relay traffic for up to 30s before the boot noticed.
 				if n.Host.Network().Connectedness(pid) != network.Connected {
 					n.deletePingPongFailCount(pid)
 					continue
@@ -890,7 +894,7 @@ func (n *Node) peerPingPongLoop() {
 			// (openStreamViaRelay), so their link is not silently cut.
 			n.relayOnlyMu.RLock()
 			for pid := range n.relayOnlyPeers {
-				if pid == n.Host.ID() || connected[pid] || n.isBootstrapPeer(pid) {
+				if pid == n.Host.ID() || connected[pid] {
 					continue
 				}
 				probePeers = append(probePeers, pid)

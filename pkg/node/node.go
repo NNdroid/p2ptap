@@ -2943,6 +2943,15 @@ func (n *Node) Start() {
 	n.wg.Add(1)
 	go n.metaSyncLoop()
 
+	// Periodically re-broadcast our own node info through peek-map so peers that
+	// missed the initial broadcast window (or joined after we did) still learn
+	// our addresses. Without this, a peer behind STUN-blocked NAT that connects
+	// 5s after us never hears our announcement and stays stuck on relay until the
+	// DHT loop (20s) or a third peer happens to re-announce. 60s is long enough
+	// to avoid spam but short enough to converge quickly.
+	n.wg.Add(1)
+	go n.peekMapAnnounceLoop()
+
 	// Start the relay-control reconciler: brings up the SeqSync cipher + Meta
 	// identity for peers reachable ONLY through a relay hop (e.g. A↔C via relay
 	// B) so the end-to-end control plane converges even when the two peers are
