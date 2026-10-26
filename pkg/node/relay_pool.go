@@ -271,8 +271,13 @@ func (p *relayStreamPool) relayHopConnected(hop peer.ID) bool {
 // resources. It is safe to call on a conn that is no longer in p.conns (the map
 // entry is removed by the caller first). Idempotent via the conn's cancel.
 func (p *relayStreamPool) teardownConn(rc *relayConn) {
-	rc.cancel()      // unblocks writeLoop (context-aware NewStream/wait paths)
-	rc.wg.Wait()     // wait for the goroutine to exit and drain/close
+	rc.cancel()  // unblocks writeLoop (context-aware NewStream/wait paths)
+	rc.wg.Wait() // wait for the goroutine to exit and drain/close
+	// drainAll() again: writeLoop drains once on exit, but writeCh is buffered
+	// and never closed, so a Submit that already held this rc can still enqueue
+	// after that drain and get a successful send with nobody left to consume it.
+	// drainAll is safe to race — each job is received exactly once.
+	rc.drainAll()
 	rc.closeStream() // best-effort final stream close (idempotent)
 }
 
@@ -318,6 +323,17 @@ func (p *relayStreamPool) Submit(hop peer.ID, data []byte, onSent, onFail func()
 
 	select {
 	case rc.writeCh <- job:
+		// writeCh is buffered and never closed, so a successful send is not
+		// proof that anyone will consume the job. A teardown racing us has
+		// already drained-and-exited by the time this send wins: rc.ctx is done
+		// but the write goroutine is gone, and the job would sit here forever
+		// with onFail never called and the caller believing it was delivered.
+		// Re-check, and if the conn is dead drain (failing everything still
+		// queued, including ours) and report failure so the caller falls back.
+		if rc.ctx.Err() != nil {
+			rc.drainAll()
+			return false
+		}
 		return true
 	case <-rc.ctx.Done():
 		// The conn is being torn down (reaper or shutdown). The write goroutine
@@ -407,12 +423,18 @@ func (p *relayStreamPool) shutdown() {
 	p.wg.Wait()
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	for hop, rc := range p.conns {
-		rc.cancel()
-		rc.wg.Wait()
-		rc.closeStream()
-		delete(p.conns, hop)
+	dead := make([]*relayConn, 0, len(p.conns))
+	for _, rc := range p.conns {
+		dead = append(dead, rc)
+	}
+	p.conns = make(map[peer.ID]*relayConn)
+	p.mu.Unlock()
+
+	// Teardown OUTSIDE the lock: teardownConn drains queued jobs, and their
+	// onFail callbacks may call back into Submit (getOrCreate takes p.mu), so
+	// draining under the lock would deadlock.
+	for _, rc := range dead {
+		p.teardownConn(rc)
 	}
 }
 

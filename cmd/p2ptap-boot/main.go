@@ -1020,9 +1020,22 @@ func (r *relayRouter) registerMesh(p peer.ID, s network.Stream) {
 	r.mu.Unlock()
 }
 
-func (r *relayRouter) unregisterMesh(p peer.ID) {
+// unregisterMesh removes the backbone stream for p ONLY if it is still the given
+// stream, exactly like unregisterClientStream. Both the dial side
+// (runBootRelayMeshUplink) and the server side (makeBootRelayBackboneHandler)
+// run in a reconnect loop, so a flapped backbone yields two concurrent handler
+// instances for the same boot: the newcomer registers second and overwrites the
+// entry, then the stale instance finally errors out of its read loop (which can
+// be up to a 10-minute read deadline away) and defers an unregister. Unguarded,
+// that defer deleted the LIVE registration, leaving r.meshStreams without an
+// entry for a boot we are actually connected to — route() then silently
+// `continue`s past it and every frame destined for its clients is dropped until
+// the stream times out and re-registers.
+func (r *relayRouter) unregisterMesh(p peer.ID, s network.Stream) {
 	r.mu.Lock()
-	delete(r.meshStreams, p)
+	if r.meshStreams[p] == s {
+		delete(r.meshStreams, p)
+	}
 	r.mu.Unlock()
 }
 
@@ -1092,6 +1105,13 @@ func (r *relayRouter) route(data []byte, fromMesh bool, fromPeer peer.ID) {
 		if werr := writeFrame(ls, data); werr != nil {
 			log.Debug("[boot-relay] write to local client %s failed: %v; dropping uplink", finalDst.ShortString(), werr)
 			r.unregisterClientStream(finalDst, ls)
+			// Close as well: unregistering alone leaves the client's downlink
+			// reader parked in ReadFrame until its own 60s deadline, so the node
+			// keeps believing the uplink is alive (hasBootRelayUplink reflects
+			// registration, not deliverability) and keeps enqueuing frames that
+			// return success while nothing is read. Closing makes the node's
+			// reader return immediately.
+			_ = ls.Close()
 		}
 		return
 	}
@@ -1112,16 +1132,19 @@ func (r *relayRouter) route(data []byte, fromMesh bool, fromPeer peer.ID) {
 	if finalDst == srcPeer {
 		return
 	}
-	// Flood to the backbone (single hop only).
-	if ttl <= 1 || len(r.meshStreams) == 0 {
-		return
-	}
+	// Flood to the backbone (single hop only). The len() read must be under the
+	// RLock — meshStreams is written by the register/unregister paths from other
+	// goroutines, and reading its length unlocked is a data race.
 	r.mu.RLock()
+	empty := len(r.meshStreams) == 0
 	peers := make([]peer.ID, 0, len(r.meshStreams))
 	for bp := range r.meshStreams {
 		peers = append(peers, bp)
 	}
 	r.mu.RUnlock()
+	if ttl <= 1 || empty {
+		return
+	}
 	for _, bp := range peers {
 		r.mu.RLock()
 		ms := r.meshStreams[bp]
@@ -1135,7 +1158,13 @@ func (r *relayRouter) route(data []byte, fromMesh bool, fromPeer peer.ID) {
 		_ = ms.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if werr := writeFrame(ms, data); werr != nil {
 			log.Debug("[boot-relay] write to backbone boot %s failed: %v; dropping uplink", bp.ShortString(), werr)
-			r.unregisterMesh(bp)
+			// Guarded, and close as well: our side of the link is gone, but the
+			// remote boot's handler for this same stream can still be parked in
+			// its read loop (10-minute deadline). unregisterMesh is a no-op if a
+			// newer stream already took the slot; closing is what makes the
+			// remote reader return instead of waiting out that deadline.
+			r.unregisterMesh(bp, ms)
+			_ = ms.Close()
 		}
 	}
 }
@@ -1216,7 +1245,7 @@ func makeBootRelayBackboneHandler(rr *relayRouter, hub *peekMapHub) func(network
 		}
 		rr.registerMesh(remotePeer, s)
 		defer func() {
-			rr.unregisterMesh(remotePeer)
+			rr.unregisterMesh(remotePeer, s)
 			_ = s.Close()
 		}()
 		buf := make([]byte, maxBootRelayEnvelope)
@@ -1590,7 +1619,10 @@ func runBootRelayMeshUplink(ctx context.Context, h host.Host, rr *relayRouter, i
 	}
 	defer s.Close()
 	rr.registerMesh(info.ID, s)
-	defer rr.unregisterMesh(info.ID)
+	// Guarded: this function runs in a reconnect loop, so a flapped backbone can
+	// have a newer instance of this stream already registered by the time a stale
+	// instance errors out. unregisterMesh deletes only if s still owns the slot.
+	defer rr.unregisterMesh(info.ID, s)
 	fmt.Printf("[boot-relay|mesh] Backbone uplink established to boot %s\n", info.ID.String())
 	bootAlerts.Add("info", "mesh_connected", info.ID.ShortString(),
 		fmt.Sprintf("Mesh backbone connected: boot %s", info.ID.ShortString()))

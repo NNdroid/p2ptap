@@ -164,10 +164,14 @@ func (n *Node) openBootRelayUplink(boot peer.ID, gen uint64) {
 			stream:  s,
 			writeCh: make(chan bootRelayJob, bootRelayMaxQueue),
 		}
+		// Start the writer BEFORE publishing rc. bootRelayRegister is what makes
+		// rc visible to bootRelaySubmit, and registering first left a window in
+		// which a submit could enqueue into a channel no writer had started yet.
+		// The writer itself does not read anything gated on registration.
+		go n.bootRelayWriteLoop(rc)
 		n.bootRelayRegister(boot, rc)
 
-		// Write loop (one goroutine) + downlink reader over the same stream.
-		go n.bootRelayWriteLoop(rc)
+		// Downlink reader over the same stream.
 		n.handleBootRelayDownlink(s, boot)
 
 		// Downlink reader returned (stream dead): tear down, cancel writeLoop, and
@@ -322,6 +326,21 @@ func (n *Node) bootRelaySubmit(boot peer.ID, env []byte, onSent, onFail func()) 
 	}
 	select {
 	case rc.writeCh <- bootRelayJob{data: env, onSent: onSent, onFail: onFail}:
+		// writeCh is buffered and never closed, so a successful send is not proof
+		// the job will be consumed. bootRelayWriteLoop drains once on
+		// rc.ctx.Done() and then exits, so a submit that races that exit enqueues
+		// into a channel nobody reads and returns success for a lost frame. Drain
+		// it — the channel hands each job out exactly once, so onFail fires at
+		// most once even if the writer is still draining — and report failure so
+		// the caller falls back.
+		//
+		// rc.ctx is compared to nil rather than read through a select case:
+		// a nil context interface panics on Done(), and unit tests register
+		// bare &bootRelayConn{boot: ...} stubs to exercise the dispatch paths.
+		if rc.ctx != nil && rc.ctx.Err() != nil {
+			n.bootRelayDrain(rc)
+			return false
+		}
 		return true
 	default:
 		if onFail != nil {
@@ -410,6 +429,19 @@ func (n *Node) bootRelayDrain(rc *bootRelayConn) {
 // boot itself never holds that key.
 func (n *Node) handleBootRelayDownlink(s network.Stream, boot peer.ID) {
 	defer s.Close()
+	// n.ctx is the node's shutdown context: without a reset hook this reader
+	// parks in ReadFrame until its 60s deadline, so shutdown can hang that long
+	// on each boot uplink. Reset on shutdown and let the guard goroutine exit
+	// with the reader (mirrors the mux data channel's teardown).
+	streamDone := make(chan struct{})
+	defer close(streamDone)
+	go func() {
+		select {
+		case <-n.ctx.Done():
+			_ = s.Reset()
+		case <-streamDone:
+		}
+	}()
 	buf := make([]byte, maxBootRelayEnvelope)
 	for {
 		// The write loop sends a loopback heartbeat every 15s, so the boot
@@ -485,14 +517,26 @@ func (n *Node) handleBootRelayFrame(boot peer.ID, data []byte) {
 		if derr != nil {
 			log.Debug("[boot-relay] downlink decrypt error from origin %s (via %s): %v",
 				srcPeer.String(), boot.String(), derr)
+			n.relayDiag.finalDecFail()
 			n.recordPeerRxDecrypt(srcPeer, false)
+			// Self-heal parity with the overlay-relay path (handleRelayFrame):
+			// a persistent inner-open failure means srcPeer↔us keys diverged.
+			// Without the throttled resync nudge, a boot-relay-only peer had to
+			// wait for the reconciler's next full round — minutes of one-way
+			// blackhole that looked exactly like "connects but no data", and
+			// with no direct path the peer never resyncs on its own.
+			n.maybeResyncOnDecryptFail(srcPeer)
 			return
 		}
+		n.recordPeerRxDecrypt(srcPeer, true)
+		n.maybeMarkReadyOnDecrypt(srcPeer, true)
 		innerPayload = dec
 	}
 	seqID, unpacked, uerr := obfuscate.Unpack(innerPayload)
 	if uerr != nil {
 		log.Debug("[boot-relay] downlink Unpack err=%v from origin=%s; dropping", uerr, srcPeer.String())
+		n.relayDiag.finalUnpack()
+		n.recordPeerRxDecrypt(srcPeer, false)
 		return
 	}
 	// Return-path liveness and provenance are recorded by
