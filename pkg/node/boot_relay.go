@@ -236,15 +236,37 @@ func (n *Node) forgetBootRelayStarted(boot peer.ID, gen uint64) {
 }
 
 // hasBootRelayUplink reports whether a persistent boot-relay uplink to boot is
-// currently established. It is the gate used by canEgressToPeer and
-// relayHopForTarget for the relay-over-backbone path: a peer is reachable
+// currently established AND still usable. It is the gate used by canEgressToPeer
+// and relayHopForTarget for the relay-over-backbone path: a peer is reachable
 // through boot B iff the uplink to B is alive (the boot itself is a relay, not a
 // mesh peer, so we hold no cipher / "ready" flag for it).
+//
+// A map entry alone is not enough — registration tracks ownership, not
+// deliverability. bootRelayWriteLoop removes its own entry on every exit path,
+// but a conn whose context has been cancelled is unusable the instant it is
+// cancelled, so this re-checks ctx too. Without it a dead boot would keep being
+// selected as a hop for the whole re-open backoff, so in a multi-boot
+// deployment traffic would stall against the dead boot instead of falling over
+// to a healthy sibling.
 func (n *Node) hasBootRelayUplink(boot peer.ID) bool {
 	n.bootRelayMu.Lock()
-	_, ok := n.bootRelayConns[boot]
+	rc, ok := n.bootRelayConns[boot]
 	n.bootRelayMu.Unlock()
-	return ok
+	if !ok {
+		return false
+	}
+	// rc.ctx is written once at construction and never reassigned, so reading
+	// it outside the lock is safe; the map lookup above is what publishes the
+	// pointer.
+	//
+	// A nil context is the bare &bootRelayConn{boot: ...} stub several routing
+	// tests register to fake a live uplink. It has no writer and no context,
+	// and a nil context interface panics on Done(), so it is reported alive
+	// rather than read.
+	if rc.ctx == nil {
+		return true
+	}
+	return rc.ctx.Err() == nil
 }
 
 // isBootRelayBlacklisted reports whether boot is currently blacklisted (its
@@ -356,12 +378,18 @@ func (n *Node) bootRelaySubmit(boot peer.ID, env []byte, onSent, onFail func()) 
 func (n *Node) bootRelayWriteLoop(rc *bootRelayConn) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
+	// Unregister on EVERY exit path, declared before stream.Close so the close
+	// (which wakes the downlink reader) runs first. A failed write drains,
+	// cancels rc and returns: without this bootRelayConns[boot] kept pointing
+	// at a dead conn, so hasBootRelayUplink reported a live uplink for the
+	// whole re-open backoff and relayHopForTarget kept sending every frame for
+	// the target to this boot. The frames were not lost — bootRelaySubmit
+	// rejects the cancelled conn — but nothing fell over to a healthy sibling
+	// boot until the entry was replaced by a successful re-open. unregister is
+	// guarded, so the reader path's unregister for the same rc is a no-op.
+	defer n.bootRelayUnregister(rc.boot, rc)
 	// Close the stream on exit so the downlink reader wakes immediately
-	// instead of parking until its 60 s read deadline. Without this,
-	// bootRelayConns[boot] still points at a dead rc for up to 60 s after
-	// the writer dies, and every bootRelaySubmit in that window enqueues
-	// into an undrained channel and returns success — the frame is silently
-	// lost with no onFail.
+	// instead of parking until its 60 s read deadline.
 	defer rc.stream.Close()
 
 	for {
