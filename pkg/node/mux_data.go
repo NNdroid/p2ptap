@@ -84,7 +84,11 @@ func (n *Node) handleDataMuxRelay(s network.Stream, from peer.ID, payload []byte
 	}
 	relayDecScratch := acquireMuxDecScratch()
 	defer releaseMuxDecScratch(relayDecScratch)
-	n.handleRelayFrame(from, payload, &relayDecScratch)
+	// A second buffer for the end-to-end inner decrypt: the inner payload
+	// aliases relayDecScratch, so reusing it would be an in-place AEAD open.
+	relayInnerScratch := acquireMuxDecScratch()
+	defer releaseMuxDecScratch(relayInnerScratch)
+	n.handleRelayFrame(from, payload, &relayDecScratch, &relayInnerScratch)
 }
 
 // handleDataMuxBootRelay handles a boot-relay frame arriving on the mux data

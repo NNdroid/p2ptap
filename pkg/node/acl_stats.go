@@ -20,7 +20,7 @@ func (n *Node) checkACL(frame []byte, peerID string, isTx bool) bool {
 	if c == nil || !c.ACL.Enable {
 		return true // ACL disabled — fast path, no recording
 	}
-	allowed, matchedRuleID := MatchACL(&c.ACL, frame, peerID, isTx)
+	allowed, matchedRuleID := matchCompiledRules(n.compiledACLFor(c), frame, peerID, isTx)
 	if n.aclStats == nil {
 		return allowed // counters disabled (e.g. unit test)
 	}

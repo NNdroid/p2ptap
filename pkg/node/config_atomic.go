@@ -1,6 +1,7 @@
 package node
 
 import (
+	"net"
 	"slices"
 	"sync/atomic"
 
@@ -63,6 +64,34 @@ func loadNodeConfig(slot *atomic.Pointer[config.Config], fallback *config.Config
 		return c
 	}
 	return fallback
+}
+
+// advertisedNetsCache is the parsed form of config.AdvertisedSubnets: the
+// operator's CIDR strings are parsed once per configuration snapshot, so the
+// per-frame subnet check is a Contains() instead of a ParseCIDR().
+//
+// It invalidates itself on snapshot identity — SetConfig publishes a new
+// *config.Config pointer on every hot reload, so a stale cache is impossible
+// and no reload hook has to remember to rebuild it.
+type advertisedNetsCache struct {
+	cfg  *config.Config
+	nets []*net.IPNet
+}
+
+// parseAdvertisedSubnets parses a CIDR list once, dropping unparseable entries
+// (the old per-frame loop skipped them with the same err == nil test, so a
+// typo'd subnet is inert either way).
+func parseAdvertisedSubnets(subnets []string) []*net.IPNet {
+	if len(subnets) == 0 {
+		return nil
+	}
+	nets := make([]*net.IPNet, 0, len(subnets))
+	for _, sub := range subnets {
+		if _, cidr, err := net.ParseCIDR(sub); err == nil && cidr != nil {
+			nets = append(nets, cidr)
+		}
+	}
+	return nets
 }
 
 // applyObfuscationConfig re-applies the obfuscation settings to the packer and

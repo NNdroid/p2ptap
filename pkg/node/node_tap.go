@@ -874,10 +874,14 @@ func (n *Node) processTapFrame(payload []byte) bool {
 			return true
 		}
 
+		// PERF: render the base58 once and reuse it for every bookkeeping call
+		// and log below (peer.ID.String() is ~930ns / 2 allocs apiece).
+		targetPeerStr := n.peerIDString(targetPeer)
+
 		// Outbound ACL: check the frame against configured rules before sending.
 		// This was missing entirely — only inbound (isTx=false) was enforced,
 		// making every operator-configured outbound deny rule dead code.
-		if !n.checkACL(payload, n.peerIDString(targetPeer), true) {
+		if !n.checkACL(payload, targetPeerStr, true) {
 			return true
 		}
 
@@ -896,12 +900,12 @@ func (n *Node) processTapFrame(payload []byte) bool {
 		}
 		packedCopy = packedCopy[:totalLen]
 		n.Collector.RecordPacketDir(payload, true)
-		n.Collector.RecordTxSeq(n.peerIDString(targetPeer), seqID)
+		n.Collector.RecordTxSeq(targetPeerStr, seqID)
 		if n.Collector != nil {
-			n.Collector.CaptureFrameWithPeers(observer.DirTx, payload, "self", n.peerIDString(targetPeer))
+			n.Collector.CaptureFrameWithPeers(observer.DirTx, payload, "self", targetPeerStr)
 		}
 		if log.IsDebug() {
-			log.Debug("Tx Pack: seq=%d origLen=%d packedLen=%d mode=%s dst=%s", seqID, readN, totalLen, n.Packer.Mode, targetPeer.String())
+			log.Debug("Tx Pack: seq=%d origLen=%d packedLen=%d mode=%s dst=%s", seqID, readN, totalLen, n.Packer.Mode, targetPeerStr)
 		}
 
 		if hasRoute && !route.IsDirect && route.NextHop != "" && route.NextHop != targetPeer && route.NextHop != n.Host.ID() && !n.isBootstrapPeer(route.NextHop) {

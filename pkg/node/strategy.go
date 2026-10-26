@@ -475,7 +475,10 @@ func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, cipher obfu
 		}
 		data = enc
 		innerPooled = true
-	} else {
+	} else if log.IsDebug() {
+		// Guarded: arguments are evaluated at the call site regardless of level,
+		// and this branch runs on EVERY frame in plaintext mode (no negotiated
+		// cipher) — an unguarded String() here is ~0.9µs + 2 allocs per frame.
 		log.Debug("Tx: SENDING FRAME TO %s IN PLAINTEXT — no per-peer cipher negotiated (encryption disabled or handshake incomplete)",
 			targetPeer.String())
 	}

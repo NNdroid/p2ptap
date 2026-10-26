@@ -136,7 +136,11 @@ func (n *Node) rewriteRxDstMAC(payload []byte) {
 		}
 		if n.isLocalSubnetIP(dstIP) {
 			if !bytes.Equal(payload[0:6], n.localMAC) && !(ethType == packet.EtherTypeARP && isBroadcastOrMulticastMAC(payload[0:6])) {
-				log.Debug("MAC rewrite %s (local dst / subnet): dstIP=%s oldDstMAC=%s newDstMAC=%s", kind, dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+				// Guarded: the args render an IP and two MACs, and this runs on
+				// every locally-destined frame of a LAN-gateway node.
+				if log.IsDebug() {
+					log.Debug("MAC rewrite %s (local dst / subnet): dstIP=%s oldDstMAC=%s newDstMAC=%s", kind, dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+				}
 				copy(payload[0:6], n.localMAC)
 			}
 			return
@@ -148,7 +152,11 @@ func (n *Node) rewriteRxDstMAC(payload []byte) {
 		// Frames to another peer's TAP IP are handled first by the MAC table
 		// lookup above, so nothing that belongs to a peer is ever Exit-hijacked.
 		if exitOn && !n.isMeshLocalIP(dstIP) {
-			log.Debug("MAC rewrite %s (exit transit): dstIP=%s oldDstMAC=%s newDstMAC=%s", kind, dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+			// Guarded: on an Exit Node this branch is every frame heading outside
+			// the mesh, and the args render an IP and two MACs per call.
+			if log.IsDebug() {
+				log.Debug("MAC rewrite %s (exit transit): dstIP=%s oldDstMAC=%s newDstMAC=%s", kind, dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+			}
 			n.rewriteDstMACForExit(payload, exitConfigured)
 		}
 		return
@@ -158,13 +166,18 @@ func (n *Node) rewriteRxDstMAC(payload []byte) {
 		dstIP := net.IP(payload[38:54])
 		if n.isLocalSubnetIP(dstIP) {
 			if !bytes.Equal(payload[0:6], n.localMAC) {
-				log.Debug("MAC rewrite IPv6 (local dst / subnet): dstIP=%s oldDstMAC=%s newDstMAC=%s", dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+				// Guarded: same per-frame cost as the IPv4 twin above.
+				if log.IsDebug() {
+					log.Debug("MAC rewrite IPv6 (local dst / subnet): dstIP=%s oldDstMAC=%s newDstMAC=%s", dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+				}
 				copy(payload[0:6], n.localMAC)
 			}
 			return
 		}
 		if exitOn && !n.isMeshLocalIP(dstIP) {
-			log.Debug("MAC rewrite IPv6 (exit transit): dstIP=%s oldDstMAC=%s newDstMAC=%s", dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+			if log.IsDebug() {
+				log.Debug("MAC rewrite IPv6 (exit transit): dstIP=%s oldDstMAC=%s newDstMAC=%s", dstIP.String(), net.HardwareAddr(payload[0:6]).String(), net.HardwareAddr(n.localMAC).String())
+			}
 			n.rewriteDstMACForExit(payload, exitConfigured)
 		}
 	}
@@ -395,10 +408,12 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 		}
 	}
 
-	// PERF: per-frame path — peer.String() is base58 (~930ns, 2 allocs),
-	// evaluated at the call site regardless of log level. Keep guarded.
+	// PERF: render once, below. Everything in this block feeds the string to a
+	// bookkeeping call or a log, and peer.ID.String() is base58 (~930ns, 2
+	// allocs) evaluated at the call site regardless of log level.
+	peerStr := n.peerIDString(remotePeer)
 	if log.IsDebug() {
-		log.Debug("Rx unpacked: seq=%d payloadLen=%d frameLen=%d from peer=%s", seqID, len(payload), len(frameData), remotePeer.String())
+		log.Debug("Rx unpacked: seq=%d payloadLen=%d frameLen=%d from peer=%s", seqID, len(payload), len(frameData), peerStr)
 	}
 
 	// Per-peer deduplication: each peer has its own seqID space,
@@ -421,10 +436,8 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 	// from an older session must not reset the current replay window.
 	if dup, reason := peerDedup.IsDuplicateReason(seqID); dup {
 		n.Collector.RecordDedup()
-		// PERF: cached base58 (see peer_idstr.go) — pid.String() would cost
-		// ~933ns/2allocs on EVERY frame just to feed a bookkeeping call.
-		n.Collector.RecordPeerDedup(n.peerIDString(remotePeer))
-		log.Debug("Duplicate frame seq=%d from peer %s", seqID, remotePeer.String())
+		n.Collector.RecordPeerDedup(peerStr)
+		log.Debug("Duplicate frame seq=%d from peer %s", seqID, peerStr)
 		// A SameSeq drop is redundant multi-path delivery of a frame we
 		// already handed to TAP — nothing is wrong with the link. Any other
 		// reason means the sender is not aligned with the window we anchored
@@ -441,15 +454,15 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 	// Accepted by the dedup window: reset the peer's desync window so a
 	// healed link cannot keep re-firing the resync forever.
 	n.recordPeerDedupDesync(remotePeer, false)
-	n.Collector.RecordRxSeq(n.peerIDString(remotePeer), seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
+	n.Collector.RecordRxSeq(peerStr, seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
 
 	// ACL Firewall Filtering check
-	if !n.checkACL(payload, n.peerIDString(remotePeer), false) {
-		log.Debug("🛡️ ACL Firewall blocked Rx frame seq=%d from peer %s", seqID, remotePeer.String())
+	if !n.checkACL(payload, peerStr, false) {
+		log.Debug("🛡️ ACL Firewall blocked Rx frame seq=%d from peer %s", seqID, peerStr)
 		return
 	}
 	if log.IsDebug() && n.config().ACL.Enable {
-		log.Debug("ACL passed: seq=%d from peer=%s", seqID, remotePeer.String())
+		log.Debug("ACL passed: seq=%d from peer=%s", seqID, peerStr)
 	}
 
 	dstMAC, srcMAC, okExtract := vswitch.ExtractEthernetMACs(payload)
@@ -495,7 +508,7 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 		n.learnPeerAddressFromFrame(remotePeer, srcMAC, payload)
 		if log.IsDebug() {
 			log.Debug("Rx frame: seq=%d len=%d src=%s dst=%s from_peer=%s %s",
-				seqID, len(payload), net.HardwareAddr(srcMAC[:]).String(), net.HardwareAddr(dstMAC[:]).String(), remotePeer.String(), describeEthernetFrame(payload))
+				seqID, len(payload), net.HardwareAddr(srcMAC[:]).String(), net.HardwareAddr(dstMAC[:]).String(), peerStr, describeEthernetFrame(payload))
 		}
 
 		// Content-based dedup ONLY for broadcast/multicast frames:
@@ -506,13 +519,13 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 			contentHash := fnvHash64(payload)
 			if n.bcastDedup.isDuplicate(remotePeer, contentHash) {
 				n.Collector.RecordDedup()
-				log.Debug("Content-dup broadcast frame hash=0x%x from peer %s dropped", contentHash, remotePeer.String())
+				log.Debug("Content-dup broadcast frame hash=0x%x from peer %s dropped", contentHash, peerStr)
 				return
 			}
 		}
 
 	} else {
-		log.Debug("Rx frame: seq=%d len=%d (MAC extract failed) from_peer=%s", seqID, len(payload), remotePeer.String())
+		log.Debug("Rx frame: seq=%d len=%d (MAC extract failed) from_peer=%s", seqID, len(payload), peerStr)
 	}
 
 	// Topology throughput is TAP payload, not the padded/encrypted frame read
@@ -522,7 +535,7 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 	n.Collector.RecordRecv(len(payload))
 	n.Collector.RecordPacketDir(payload, false)
 	if n.Collector != nil {
-		n.Collector.CaptureFrameWithPeers(observer.DirRx, payload, n.peerIDString(remotePeer), "self")
+		n.Collector.CaptureFrameWithPeers(observer.DirRx, payload, peerStr, "self")
 	}
 	if len(payload) >= 14 {
 		// Fix up rx frame SrcMAC: some peers (especially Windows) may send
@@ -1121,6 +1134,7 @@ func (n *Node) handleRelayStream(s network.Stream) {
 	// iteration. Consumers are synchronous (deliverRelayedFrameToTAP) or copy
 	// (fragment reassembly, repack-forward), so the buffer never escapes.
 	relayDecScratch := make([]byte, 0, 9600)
+	relayInnerScratch := make([]byte, 0, 9600)
 	for {
 		readN, err := ReadFrame(s, buf)
 		if err != nil || readN == 0 {
@@ -1129,7 +1143,7 @@ func (n *Node) handleRelayStream(s network.Stream) {
 		if n.protoTracker != nil {
 			n.protoTracker.RelayData.RecordRx(1, uint64(readN))
 		}
-		n.handleRelayFrame(remotePeer, buf[:readN], &relayDecScratch)
+		n.handleRelayFrame(remotePeer, buf[:readN], &relayDecScratch, &relayInnerScratch)
 	}
 }
 
@@ -1159,9 +1173,14 @@ func (n *Node) packRelayFrame(finalDst, source peer.ID, ttl uint8, payload []byt
 // goroutine: for handleRelayStream it is the per-stream read buffer, for the mux
 // path it is a private per-frame copy.
 //
-// relayDecScratch is the caller's reusable decrypt scratch, rebased on each call
-// so steady-state frames allocate nothing. It must not escape the call.
-func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch *[]byte) {
+// relayDecScratch is the caller's reusable OUTER-envelope decrypt scratch;
+// relayInnerScratch is the second, used for the end-to-end inner decrypt when
+// this node is the final destination. They must be distinct buffers: the inner
+// payload is a slice of the outer scratch (or of the read buffer), so opening
+// it into the same buffer would be an in-place AEAD open over overlapping
+// memory — the trap called out in frag.go. Both are rebased on each call so
+// steady-state frames allocate nothing, and neither may escape the call.
+func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch, relayInnerScratch *[]byte) {
 	// HOP-BY-HOP envelope decryption. The origin sealed the outer relay
 	// frame with the cipher negotiated for THIS hop, so the relay decrypts
 	// with the cipher for its immediate neighbor (remotePeer) — the same
@@ -1274,8 +1293,13 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 	// on one frame from a hop it did not authenticate.
 	originVerified := false
 	if srcPeer != "" {
-		srcStr := srcPeer.String()
-		remoteStr := remotePeer.String()
+		// PERF: feed seenOrigins from the base58 cache. These two renders are
+		// unconditional (~0.9µs and 2 allocs apiece) and then hashed again by
+		// sync.Map as their keys; the rest of this file already goes through
+		// peerIDString(). The key space is unchanged — the cache renders the
+		// same base58 as peer.ID.String().
+		srcStr := n.peerIDString(srcPeer)
+		remoteStr := n.peerIDString(remotePeer)
 		if val, known := n.seenOrigins.Load(srcStr); known {
 			entry := val.(seenOriginEntry)
 			// Known origin: the frame must come from the origin itself
@@ -1287,13 +1311,18 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 			// the reaper evicts the entry (up to 5 minutes). The gate below
 			// already admits frames from the origin itself.
 			if remoteStr != srcStr && remoteStr != entry.source {
-				log.Debug("Relay frame from %s claims known srcPeer %s (source=%s) but is not origin or source; dropping",
-					remotePeer.String(), srcStr, entry.source)
+				if log.IsDebug() {
+					log.Debug("Relay frame from %s claims known srcPeer %s (source=%s) but is not origin or source; dropping",
+						remoteStr, srcStr, entry.source)
+				}
 				n.relayDiag.envBad()
 				return
 			}
-			entry.firstSeen = time.Now()
-			n.seenOrigins.Store(srcStr, entry)
+			// Throttled refresh: see seenOriginRefreshInterval.
+			if time.Since(entry.firstSeen) >= seenOriginRefreshInterval {
+				entry.firstSeen = time.Now()
+				n.seenOrigins.Store(srcStr, entry)
+			}
 			originVerified = true
 		} else if srcPeer == remotePeer && ttl == routing.MaxRelayTTL {
 			// Direct origin at full TTL: the claimed origin IS the transport
@@ -1340,10 +1369,18 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 		// us (finalDst) by the origin (srcPeer), so decrypt it with the cipher
 		// negotiated for srcPeer — NOT remotePeer (the relay hop).
 		if cipher := n.obfDecryptCipherForPeer(srcPeer); cipher != nil {
-			dec, derr := obfuscate.DecryptPayloadRegion(innerPayload, cipher)
+			// Second scratch, never relayDecScratch: innerPayload aliases the
+			// outer scratch (or the read buffer), so opening into the same
+			// buffer would be an in-place AEAD open over overlapping memory.
+			dec, derr := obfuscate.DecryptPayloadRegionInto((*relayInnerScratch)[:0], innerPayload, cipher)
 			if derr != nil {
-				log.Debug("Relayed frame decrypt error from origin %s (via %s): %v",
-					srcPeer.String(), remotePeer.String(), derr)
+				// Guarded: a key divergence puts every relayed frame here, and
+				// the args render two peer IDs plus a NonceHex on top of the
+				// failed AEAD open.
+				if log.IsDebug() {
+					log.Debug("Relayed frame decrypt error from origin %s (via %s): %v",
+						srcPeer.String(), remotePeer.String(), derr)
+				}
 				n.relayDiag.finalDecFail()
 				n.recordPeerRxDecrypt(srcPeer, false)
 				// Self-heal parity with the direct-RX path: a persistent
@@ -1355,6 +1392,7 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 				n.maybeResyncOnDecryptFail(srcPeer)
 				return
 			}
+			*relayInnerScratch = dec
 			n.recordPeerRxDecrypt(srcPeer, true)
 			n.maybeMarkReadyOnDecrypt(srcPeer, true)
 			innerPayload = dec

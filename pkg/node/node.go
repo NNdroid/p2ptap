@@ -91,7 +91,20 @@ type Node struct {
 	// capture the same slot and read a hot-reloaded config later. NewNode always
 	// allocates it; the nil fallbacks in config()/SetConfig exist only for test
 	// Nodes built with a bare &Node{}.
-	configPtr    *atomic.Pointer[config.Config]
+	configPtr *atomic.Pointer[config.Config]
+	// advertisedNets is the parsed cache of config.AdvertisedSubnets for the
+	// current snapshot (see advertisedNetsCache / advertisedNets in
+	// node_util.go). Same pointer-to-atomic shape as configPtr so test Nodes
+	// built with a bare &Node{} still get a lazy fallback; advertisedNetsMu
+	// serialises the slow parse-and-publish path only.
+	advertisedNets   *atomic.Pointer[advertisedNetsCache]
+	advertisedNetsMu sync.Mutex
+	// aclRules is the compiled ACL ruleset for the current snapshot (see
+	// compiledACL / compileACL in acl.go). Same pointer-to-atomic shape, so a
+	// bare &Node{} test Node gets a lazy fallback; aclRulesMu serialises the
+	// compile-and-publish slow path only.
+	aclRules     *atomic.Pointer[compiledACL]
+	aclRulesMu   sync.Mutex
 	TAP          tap.TAPDevice
 	MACTable     *vswitch.ShardedMACTable
 	Packer       *obfuscate.FramePacker
@@ -706,6 +719,15 @@ type seenOriginEntry struct {
 	source    string // peer.ID of the peer that first introduced this origin
 }
 
+// seenOriginRefreshInterval throttles how often an already-known origin's
+// firstSeen is refreshed. firstSeen exists only so the 5-minute reaper below
+// forgets origins nobody talks about any more, so one refresh per second is
+// indistinguishable from a refresh per frame for retention, while turning a
+// per-frame sync.Map Store (which boxes seenOriginEntry into an interface
+// value, hence a heap allocation) into nothing for high-rate relay traffic.
+// Same pattern as macLastSeenInterval in pkg/switch.
+const seenOriginRefreshInterval = time.Second
+
 func (n *Node) manuallyAuthorizeSubnet(cidr string) {
 	n.manuallyAuthSubnetsMu.Lock()
 	defer n.manuallyAuthSubnetsMu.Unlock()
@@ -897,11 +919,22 @@ func (n *Node) recordPeerRxBytes(sourcePeer peer.ID, nBytes int) {
 // fragmentation so the topology rate is independent of obfuscation settings.
 // Invalid/non-p2ptap data contributes nothing to TAP throughput.
 func tapPayloadLenFromPackedFrame(packed []byte) int {
-	_, payload, err := obfuscate.Unpack(packed)
-	if err != nil {
+	// Reads the PayloadLen field straight out of the immutable header instead of
+	// unpacking the whole frame just to ask for its payload length. Pack writes
+	// this at [11:13], and UnpackWith's only checks the nil-cipher path performs
+	// are the length bound, the magic and HeaderLen+pLen <= len(frame) — so this
+	// mirrors them and returns the same value for every input.
+	if len(packed) < obfuscate.HeaderLen {
 		return 0
 	}
-	return len(payload)
+	if binary.BigEndian.Uint16(packed[0:2]) != obfuscate.FrameMagic {
+		return 0
+	}
+	pLen := int(binary.BigEndian.Uint16(packed[11:13]))
+	if obfuscate.HeaderLen+pLen > len(packed) {
+		return 0
+	}
+	return pLen
 }
 
 // getPeerSpeed returns the locally-computed tx/rx speed (bytes/sec) for a peer.
@@ -1286,6 +1319,10 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// is why the WebRTC ICE server list can be hot-reloaded.
 	cfgSnapshot := new(atomic.Pointer[config.Config])
 	cfgSnapshot.Store(cfg)
+	// Seed the advertised-subnet cache alongside the config snapshot it is
+	// derived from, so the first data-plane frame takes the cached path.
+	advertisedNetsSlot := new(atomic.Pointer[advertisedNetsCache])
+	advertisedNetsSlot.Store(&advertisedNetsCache{cfg: cfg, nets: parseAdvertisedSubnets(cfg.AdvertisedSubnets)})
 
 	opts := []libp2p.Option{
 		libp2p.Muxer("/yamux/1.0.0", &yamuxOpt),
@@ -1842,6 +1879,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		DHT:                 kdht,
 		Config:              cfg,
 		configPtr:           cfgSnapshot,
+		advertisedNets:      advertisedNetsSlot,
 		TAP:                 tapDev,
 		MACTable:            macTable,
 		Packer:              packer,

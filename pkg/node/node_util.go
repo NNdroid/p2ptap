@@ -66,21 +66,54 @@ func parseHWMac(s string) net.HardwareAddr {
 	return nil
 }
 
+// parsedAdvertisedSubnets returns the parsed advertised subnets for the current
+// config snapshot. Hot path: one atomic load and a pointer comparison, no
+// allocation. The slow path parses once and publishes; two goroutines racing on
+// a new snapshot both parse but only one Store wins, and both return the same
+// nets.
+func (n *Node) parsedAdvertisedSubnets() []*net.IPNet {
+	slot := n.advertisedNetsSlot()
+	cfg := n.config()
+	if cfg == nil {
+		return nil
+	}
+	if p := slot.Load(); p != nil && p.cfg == cfg {
+		return p.nets
+	}
+
+	n.advertisedNetsMu.Lock()
+	defer n.advertisedNetsMu.Unlock()
+	cfg = n.config()
+	if cfg == nil {
+		return nil
+	}
+	if p := slot.Load(); p != nil && p.cfg == cfg {
+		return p.nets
+	}
+	nets := parseAdvertisedSubnets(cfg.AdvertisedSubnets)
+	slot.Store(&advertisedNetsCache{cfg: cfg, nets: nets})
+	return nets
+}
+
+// advertisedNetsSlot returns the cache slot, allocating it on first use.
+// NewNode seeds it before the data plane starts; the lazy path only serves test
+// Nodes built with a bare &Node{}, which cannot race with a hot reload.
+func (n *Node) advertisedNetsSlot() *atomic.Pointer[advertisedNetsCache] {
+	if n.advertisedNets == nil {
+		n.advertisedNets = new(atomic.Pointer[advertisedNetsCache])
+	}
+	return n.advertisedNets
+}
+
 // isLocalAdvertisedSubnet reports whether target IP falls within any of this
 // node's own advertised subnets (i.e. this node is the LAN gateway).
 func (n *Node) isLocalAdvertisedSubnet(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	c := n.config()
-	if c == nil || len(c.AdvertisedSubnets) == 0 {
-		return false
-	}
-	for _, sub := range c.AdvertisedSubnets {
-		if _, cidr, err := net.ParseCIDR(sub); err == nil && cidr != nil {
-			if cidr.Contains(ip) {
-				return true
-			}
+	for _, cidr := range n.parsedAdvertisedSubnets() {
+		if cidr.Contains(ip) {
+			return true
 		}
 	}
 	return false
@@ -1095,6 +1128,12 @@ func (n *Node) learnPeerAddressFromFrame(srcPeer peer.ID, srcMAC net.HardwareAdd
 				m = val.(PeerMeta)
 			}
 			changed := false
+			// PERF: hoisted once. Every String() below was computed 2-4 times per
+			// frame, and TapIP was re-split into a []string, all ahead of the
+			// steady-state early returns — about 1.5-2µs and 4-6 allocs per frame
+			// with nothing to show for it.
+			srcIPStr := srcIP.String()
+			srcMACStr := srcMAC.String()
 			if m.TapIP == "" {
 				// Anti-spoof: before writing a fresh TapIP on the first frame,
 				// verify the claimed srcIP is not already owned by another peer.
@@ -1102,8 +1141,8 @@ func (n *Node) learnPeerAddressFromFrame(srcPeer peer.ID, srcMAC net.HardwareAdd
 				// function sets the attacker's peerMeta with the victim's IP,
 				// then emits GARP mapping victim's IP → attacker's MAC — a
 				// one-frame L2 MITM.
-				if !n.isIPClaimedByOtherPeer(srcIP.String(), srcPeer) {
-					m.TapIP = srcIP.String() + "/24"
+				if !n.isIPClaimedByOtherPeer(srcIPStr, srcPeer) {
+					m.TapIP = srcIPStr + "/24"
 					changed = true
 				}
 			}
@@ -1112,18 +1151,18 @@ func (n *Node) learnPeerAddressFromFrame(srcPeer peer.ID, srcMAC net.HardwareAdd
 			// attacker sends srcIP=victim's TapIP and the function overwrites the
 			// attacker's peerMeta with the victim's IP, then emits GARP/NA mapping
 			// victim's IP → attacker's MAC — a one-frame L2 MITM.
-			cleanTapIP := strings.Split(m.TapIP, "/")[0]
-			if m.TapIP != "" && cleanTapIP != srcIP.String() {
+			cleanTapIP, _, _ := strings.Cut(m.TapIP, "/")
+			if m.TapIP != "" && cleanTapIP != srcIPStr {
 				// srcIP does not match the sender's advertised TapIP — don't learn
 				// or emit GARP/NA. But do learn the MAC if it differs.
-				if m.TapMAC == "" || m.TapMAC != srcMAC.String() {
-					m.TapMAC = srcMAC.String()
+				if m.TapMAC == "" || m.TapMAC != srcMACStr {
+					m.TapMAC = srcMACStr
 					n.storePeerMeta(srcPeer, m)
 				}
 				return
 			}
-			if (m.TapMAC == "" || m.TapMAC != srcMAC.String()) && cleanTapIP == srcIP.String() {
-				m.TapMAC = srcMAC.String()
+			if (m.TapMAC == "" || m.TapMAC != srcMACStr) && cleanTapIP == srcIPStr {
+				m.TapMAC = srcMACStr
 				changed = true
 			}
 			if changed {
@@ -1153,25 +1192,28 @@ func (n *Node) learnPeerAddressFromFrame(srcPeer peer.ID, srcMAC net.HardwareAdd
 				m = val.(PeerMeta)
 			}
 			changed := false
+			// PERF: hoisted once, same as the IPv4 twin above.
+			srcIPStr := srcIP.String()
+			srcMACStr := srcMAC.String()
 			if m.TapIPv6 == "" {
 				// Anti-spoof: before writing a fresh TapIPv6 on the first frame,
 				// verify the claimed srcIP is not already owned by another peer.
-				if !n.isIPClaimedByOtherPeer(srcIP.String(), srcPeer) {
-					m.TapIPv6 = srcIP.String() + "/64"
+				if !n.isIPClaimedByOtherPeer(srcIPStr, srcPeer) {
+					m.TapIPv6 = srcIPStr + "/64"
 					changed = true
 				}
 			}
-			cleanTapIPv6 := strings.Split(m.TapIPv6, "/")[0]
-			if m.TapIPv6 != "" && cleanTapIPv6 != srcIP.String() {
+			cleanTapIPv6, _, _ := strings.Cut(m.TapIPv6, "/")
+			if m.TapIPv6 != "" && cleanTapIPv6 != srcIPStr {
 				// Anti-spoof: srcIP doesn't match the sender's advertised TapIPv6.
-				if m.TapMAC == "" || m.TapMAC != srcMAC.String() {
-					m.TapMAC = srcMAC.String()
+				if m.TapMAC == "" || m.TapMAC != srcMACStr {
+					m.TapMAC = srcMACStr
 					n.storePeerMeta(srcPeer, m)
 				}
 				return
 			}
-			if (m.TapMAC == "" || m.TapMAC != srcMAC.String()) && cleanTapIPv6 == srcIP.String() {
-				m.TapMAC = srcMAC.String()
+			if (m.TapMAC == "" || m.TapMAC != srcMACStr) && cleanTapIPv6 == srcIPStr {
+				m.TapMAC = srcMACStr
 				changed = true
 			}
 			if changed {
