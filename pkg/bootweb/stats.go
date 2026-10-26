@@ -162,9 +162,9 @@ type UnauthEventDTO struct {
 
 // UnauthStatsDTO holds aggregate counters and recent events for unauthenticated data.
 type UnauthStatsDTO struct {
-	TotalDropped int64              `json:"total_dropped"`
-	ByType       map[string]int64   `json:"by_type"`
-	RecentEvents []UnauthEventDTO   `json:"recent_events"`
+	TotalDropped int64            `json:"total_dropped"`
+	ByType       map[string]int64 `json:"by_type"`
+	RecentEvents []UnauthEventDTO `json:"recent_events"`
 }
 
 // NetworkGroup groups peers by their PSK Network ID.

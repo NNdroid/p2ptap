@@ -21,10 +21,10 @@ import (
 )
 
 const (
-	mqBenchDuration     = 2 * time.Second
-	mqBenchFlows        = 32
-	mqBenchDrainSize    = 128
-	mqBenchWarmupTarget = 2000
+	mqBenchDuration      = 2 * time.Second
+	mqBenchFlows         = 32
+	mqBenchDrainSize     = 128
+	mqBenchWarmupTarget  = 2000
 	mqBenchWarmupTimeout = 2 * time.Second
 )
 

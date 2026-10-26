@@ -210,29 +210,29 @@ func (n *Node) dispatchWorker(id int) {
 			}
 		}
 	}()
-		// Batch-drain grouping is REUSED across wake-ups. A busy worker wakes up
-		// thousands of times per second, and the old code allocated a fresh map
-		// (plus one slice per key) on every single one — steady, pointless GC
-		// pressure on the egress hot path. Keys are bounded by (peer count × kind),
-		// so keeping them and truncating their slices costs nothing.
-		batches := make(map[batchTasksKey][]dispatchTask, 4)
-		// Reuse one worker-local view for the at-most-64 drained tasks.
-		// This removes per-group [][]byte allocations from the hot path.
-		var batchScratch [64][]byte
-		for {
-			select {
-			case <-n.ctx.Done():
-				return
-			case task := <-n.dispatchCh:
-				// Batch drain: collect up to 64 pending tasks grouped by target.
-				for k, v := range batches {
-					batches[k] = v[:0] // keep capacity, drop the previous contents
-				}
-				batches[batchTasksKey{kind: task.kind, target: task.target}] =
-					append(batches[batchTasksKey{kind: task.kind, target: task.target}], task)
+	// Batch-drain grouping is REUSED across wake-ups. A busy worker wakes up
+	// thousands of times per second, and the old code allocated a fresh map
+	// (plus one slice per key) on every single one — steady, pointless GC
+	// pressure on the egress hot path. Keys are bounded by (peer count × kind),
+	// so keeping them and truncating their slices costs nothing.
+	batches := make(map[batchTasksKey][]dispatchTask, 4)
+	// Reuse one worker-local view for the at-most-64 drained tasks.
+	// This removes per-group [][]byte allocations from the hot path.
+	var batchScratch [64][]byte
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case task := <-n.dispatchCh:
+			// Batch drain: collect up to 64 pending tasks grouped by target.
+			for k, v := range batches {
+				batches[k] = v[:0] // keep capacity, drop the previous contents
+			}
+			batches[batchTasksKey{kind: task.kind, target: task.target}] =
+				append(batches[batchTasksKey{kind: task.kind, target: task.target}], task)
 
-			drainLoop:
-				for i := 0; i < 63; i++ {
+		drainLoop:
+			for i := 0; i < 63; i++ {
 				select {
 				case t := <-n.dispatchCh:
 					key := batchTasksKey{kind: t.kind, target: t.target}
@@ -307,15 +307,15 @@ func (n *Node) dispatchWorker(id int) {
 								n.Collector.RecordSent(t.origLen)
 							}
 						}
-					ucancel()
-					for i, t := range tasks {
-						if t.owned {
-							releaseFrameBuf(batch[i])
+						ucancel()
+						for i, t := range tasks {
+							if t.owned {
+								releaseFrameBuf(batch[i])
+							}
+							batch[i] = nil
 						}
-						batch[i] = nil
 					}
-					}
-					case 1: // broadcast — executed directly by worker
+				case 1: // broadcast — executed directly by worker
 					// Broadcast fans out one L2 frame to N peers; count TX once per task.
 					if len(tasks) == 1 {
 						data := tasks[0].data
@@ -368,20 +368,20 @@ func (n *Node) dispatchWorker(id int) {
 									}
 									return
 								}
-				select {
-					case n.relayFallbackSem <- struct{}{}:
-						go func() {
-							defer func() { <-n.relayFallbackSem }()
-							ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
-							defer cancel()
-							if derr := n.Dispatcher.SendToPeer(ctx, t.target, t.data); derr == nil {
-								n.Collector.RecordSent(t.origLen)
-							}
-							if owned {
-								releaseFrameBuf(t.data)
-							}
-						}()
-					default:
+								select {
+								case n.relayFallbackSem <- struct{}{}:
+									go func() {
+										defer func() { <-n.relayFallbackSem }()
+										ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
+										defer cancel()
+										if derr := n.Dispatcher.SendToPeer(ctx, t.target, t.data); derr == nil {
+											n.Collector.RecordSent(t.origLen)
+										}
+										if owned {
+											releaseFrameBuf(t.data)
+										}
+									}()
+								default:
 									if owned {
 										releaseFrameBuf(t.data)
 									}
@@ -510,26 +510,26 @@ func (n *Node) sendDispatchTask(task dispatchTask) {
 				}
 			},
 			func() {
-			if n.peerStalled(task.target) {
-				if owned {
-					releaseFrameBuf(task.data)
+				if n.peerStalled(task.target) {
+					if owned {
+						releaseFrameBuf(task.data)
+					}
+					return
 				}
-				return
-			}
 				select {
-					case n.relayFallbackSem <- struct{}{}:
-						go func() {
-							defer func() { <-n.relayFallbackSem }()
-							ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
-							defer cancel()
-							if derr := n.Dispatcher.SendToPeer(ctx, task.target, task.data); derr == nil {
-								n.Collector.RecordSent(task.origLen)
-							}
-							if owned {
-								releaseFrameBuf(task.data)
-							}
-						}()
-					default:
+				case n.relayFallbackSem <- struct{}{}:
+					go func() {
+						defer func() { <-n.relayFallbackSem }()
+						ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
+						defer cancel()
+						if derr := n.Dispatcher.SendToPeer(ctx, task.target, task.data); derr == nil {
+							n.Collector.RecordSent(task.origLen)
+						}
+						if owned {
+							releaseFrameBuf(task.data)
+						}
+					}()
+				default:
 					if owned {
 						releaseFrameBuf(task.data)
 					}

@@ -17,7 +17,7 @@ import (
 // code in pkg/node that references MuxControlProtocolID / MuxDataProtocolID.
 const (
 	MuxControlProtocolID = mux.ControlProtocolID
-	MuxDataProtocolID   = mux.DataProtocolID
+	MuxDataProtocolID    = mux.DataProtocolID
 )
 
 // Re-export tag constants.
@@ -32,21 +32,21 @@ const (
 
 // Re-export data kind constants.
 const (
-	MuxDataKindVTP      = mux.KindVTP
-	MuxDataKindRelay    = mux.KindRelay
+	MuxDataKindVTP       = mux.KindVTP
+	MuxDataKindRelay     = mux.KindRelay
 	MuxDataKindBootRelay = mux.KindBootRelay
 )
 
 // Re-export direction constants.
 const (
-	MuxDirRequest  = mux.DirRequest
-	MuxDirResponse = mux.DirResponse
+	MuxDirRequest   = mux.DirRequest
+	MuxDirResponse  = mux.DirResponse
 	MuxDirBroadcast = mux.DirBroadcast
 )
 
 // muxHeaderLen and muxDataHeaderLen are aliases for the shared package.
 const (
-	muxHeaderLen    = mux.HeaderLen
+	muxHeaderLen     = mux.HeaderLen
 	muxDataHeaderLen = mux.DataHeaderLen
 )
 
@@ -96,10 +96,10 @@ func (m *muxStream) Write(p []byte) (int, error) {
 	return mux.WriteFrame(m.sess.stream, m.sess.tag, MuxDirResponse, m.sess.reqID, p)
 }
 
-func (m *muxStream) Close() error       { return nil }
-func (m *muxStream) CloseWrite() error   { return nil }
-func (m *muxStream) CloseRead() error    { return nil }
-func (m *muxStream) Reset() error        { return nil }
+func (m *muxStream) Close() error      { return nil }
+func (m *muxStream) CloseWrite() error { return nil }
+func (m *muxStream) CloseRead() error  { return nil }
+func (m *muxStream) Reset() error      { return nil }
 
 // Set*Deadline are no-ops, and deliberately so: muxStream.Read returns either
 // the already-delivered request bytes or io.EOF and can never block, so there
@@ -112,12 +112,12 @@ func (m *muxStream) SetDeadline(time.Time) error      { return nil }
 func (m *muxStream) SetReadDeadline(time.Time) error  { return nil }
 func (m *muxStream) SetWriteDeadline(time.Time) error { return nil }
 
-func (m *muxStream) ID() string                     { return m.sess.stream.ID() }
-func (m *muxStream) Protocol() protocol.ID          { return m.sess.stream.Protocol() }
+func (m *muxStream) ID() string                       { return m.sess.stream.ID() }
+func (m *muxStream) Protocol() protocol.ID            { return m.sess.stream.Protocol() }
 func (m *muxStream) SetProtocol(id protocol.ID) error { return m.sess.stream.SetProtocol(id) }
-func (m *muxStream) Stat() network.Stats            { return m.sess.stream.Stat() }
-func (m *muxStream) Conn() network.Conn             { return m.sess.stream.Conn() }
-func (m *muxStream) Scope() network.StreamScope      { return &network.NullScope{} }
+func (m *muxStream) Stat() network.Stats              { return m.sess.stream.Stat() }
+func (m *muxStream) Conn() network.Conn               { return m.sess.stream.Conn() }
+func (m *muxStream) Scope() network.StreamScope       { return &network.NullScope{} }
 func (m *muxStream) ResetWithError(code network.StreamErrorCode) error {
 	return m.sess.stream.ResetWithError(code)
 }
@@ -171,20 +171,20 @@ func (m *muxInitStream) Read(p []byte) (int, error) {
 	}
 }
 
-func (m *muxInitStream) Close() error       { return m.stream.Close() }
-func (m *muxInitStream) CloseWrite() error   { return nil }
-func (m *muxInitStream) CloseRead() error    { return nil }
-func (m *muxInitStream) Reset() error        { return nil }
+func (m *muxInitStream) Close() error                     { return m.stream.Close() }
+func (m *muxInitStream) CloseWrite() error                { return nil }
+func (m *muxInitStream) CloseRead() error                 { return nil }
+func (m *muxInitStream) Reset() error                     { return nil }
 func (m *muxInitStream) SetDeadline(time.Time) error      { return nil }
 func (m *muxInitStream) SetReadDeadline(time.Time) error  { return nil }
 func (m *muxInitStream) SetWriteDeadline(time.Time) error { return nil }
 
-func (m *muxInitStream) ID() string                     { return m.stream.ID() }
-func (m *muxInitStream) Protocol() protocol.ID          { return m.stream.Protocol() }
+func (m *muxInitStream) ID() string                       { return m.stream.ID() }
+func (m *muxInitStream) Protocol() protocol.ID            { return m.stream.Protocol() }
 func (m *muxInitStream) SetProtocol(id protocol.ID) error { return m.stream.SetProtocol(id) }
-func (m *muxInitStream) Stat() network.Stats            { return m.stream.Stat() }
-func (m *muxInitStream) Conn() network.Conn             { return m.stream.Conn() }
-func (m *muxInitStream) Scope() network.StreamScope      { return &network.NullScope{} }
+func (m *muxInitStream) Stat() network.Stats              { return m.stream.Stat() }
+func (m *muxInitStream) Conn() network.Conn               { return m.stream.Conn() }
+func (m *muxInitStream) Scope() network.StreamScope       { return &network.NullScope{} }
 func (m *muxInitStream) ResetWithError(code network.StreamErrorCode) error {
 	return m.stream.ResetWithError(code)
 }

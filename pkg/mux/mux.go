@@ -36,15 +36,15 @@ const (
 
 // Data-channel kind tags (1 byte each).
 const (
-	KindVTP      uint8 = 0x00
-	KindRelay    uint8 = 0x01
+	KindVTP       uint8 = 0x00
+	KindRelay     uint8 = 0x01
 	KindBootRelay uint8 = 0x02
 )
 
 // Direction bytes for the control channel.
 const (
-	DirRequest  uint8 = 0x00
-	DirResponse uint8 = 0x01
+	DirRequest   uint8 = 0x00
+	DirResponse  uint8 = 0x01
 	DirBroadcast uint8 = 0x02
 )
 

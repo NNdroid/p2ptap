@@ -1243,25 +1243,25 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	inboundCounts := make(map[string]int)
 	outboundCounts := make(map[string]int)
 
-		for _, conn := range n.Host.Network().Conns() {
-			remotePeer := conn.RemotePeer()
-			ma := conn.RemoteMultiaddr()
-			remoteAddr := ma.String()
-			transport := "P2P"
-			if maddrutil.IsCircuitRelay(ma) {
-				transport = "Circuit Relay"
-			} else {
-				switch TransportOfConn(conn) {
-				case "quic":
-					transport = "QUIC"
-				case "webtransport":
-					transport = "WebTransport"
-				case "webrtc":
-					transport = "WebRTC"
-				case "tcp":
-					transport = "TCP"
-				}
+	for _, conn := range n.Host.Network().Conns() {
+		remotePeer := conn.RemotePeer()
+		ma := conn.RemoteMultiaddr()
+		remoteAddr := ma.String()
+		transport := "P2P"
+		if maddrutil.IsCircuitRelay(ma) {
+			transport = "Circuit Relay"
+		} else {
+			switch TransportOfConn(conn) {
+			case "quic":
+				transport = "QUIC"
+			case "webtransport":
+				transport = "WebTransport"
+			case "webrtc":
+				transport = "WebRTC"
+			case "tcp":
+				transport = "TCP"
 			}
+		}
 
 		peerName := n.relayHopLabel(remotePeer)
 

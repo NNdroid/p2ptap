@@ -134,7 +134,6 @@ func diffListeners(desired, current []multiaddr.Multiaddr) (toAdd, toRemove []mu
 	return toAdd, toRemove
 }
 
-
 func parseListenAddrs(strs []string) []multiaddr.Multiaddr {
 	out := make([]multiaddr.Multiaddr, 0, len(strs))
 	for _, s := range strs {

@@ -1003,25 +1003,25 @@ func (n *Node) pingPongProbePeer(pid peer.ID) {
 	if !muxSucceeded {
 		// Legacy fallback: reuse the persistent echo stream.
 		ok = n.echoPool.WithStream(pid, func(s network.Stream) error {
-		// Exclude stream lookup/opening from the wire RTT. Cold connection setup
-		// is a separate availability metric, not round-trip latency.
-		start := time.Now()
-		_ = s.SetWriteDeadline(time.Now().Add(pingPongWriteTimeout))
-		if err := WriteFrame(s, pingPayload); err != nil {
-			return err
-		}
-		_ = s.SetReadDeadline(time.Now().Add(pingPongReadTimeout))
-		rn, rerr := ReadFrame(s, replyBuf)
-		rtt := time.Since(start)
-		isValidEcho := (rerr == nil || rerr == io.EOF) && rn >= 4 && bytes.Equal(replyBuf[:4], pingPayload)
-		if !isValidEcho {
-			log.Debug("Ping-pong echo read failed for %s rtt=%dms readBytes=%d err=%v",
-				pid.String(), rtt.Milliseconds(), rn, rerr)
-			return fmt.Errorf("bad echo: readBytes=%d err=%v", rn, rerr)
-		}
-		measuredRTT = rtt
-		log.Debug("Ping-pong OK for %s RTT=%dms", pid.String(), rtt.Milliseconds())
-		return nil
+			// Exclude stream lookup/opening from the wire RTT. Cold connection setup
+			// is a separate availability metric, not round-trip latency.
+			start := time.Now()
+			_ = s.SetWriteDeadline(time.Now().Add(pingPongWriteTimeout))
+			if err := WriteFrame(s, pingPayload); err != nil {
+				return err
+			}
+			_ = s.SetReadDeadline(time.Now().Add(pingPongReadTimeout))
+			rn, rerr := ReadFrame(s, replyBuf)
+			rtt := time.Since(start)
+			isValidEcho := (rerr == nil || rerr == io.EOF) && rn >= 4 && bytes.Equal(replyBuf[:4], pingPayload)
+			if !isValidEcho {
+				log.Debug("Ping-pong echo read failed for %s rtt=%dms readBytes=%d err=%v",
+					pid.String(), rtt.Milliseconds(), rn, rerr)
+				return fmt.Errorf("bad echo: readBytes=%d err=%v", rn, rerr)
+			}
+			measuredRTT = rtt
+			log.Debug("Ping-pong OK for %s RTT=%dms", pid.String(), rtt.Milliseconds())
+			return nil
 		})
 	}
 

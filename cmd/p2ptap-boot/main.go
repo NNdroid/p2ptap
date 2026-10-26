@@ -1205,15 +1205,15 @@ func makeBootRelayHandler(rr *relayRouter) func(network.Stream) {
 func makeBootRelayBackboneHandler(rr *relayRouter, hub *peekMapHub) func(network.Stream) {
 	return func(s network.Stream) {
 		remotePeer := s.Conn().RemotePeer()
-	if !hub.isMesh(remotePeer) {
-				log.Warn("[boot-relay] rejecting backbone stream from non-mesh peer %s", remotePeer.ShortString())
-				bootAlerts.Add("warn", "boot_relay_backbone_denied", remotePeer.ShortString(),
-					fmt.Sprintf("Boot-relay backbone access denied: %s is not a configured mesh peer", remotePeer.ShortString()))
-				unauthTracker.Record(unauthTypeBootRelay, remotePeer.ShortString(),
-					"Boot-relay backbone denied: not a configured mesh peer")
-				_ = s.Close()
-				return
-			}
+		if !hub.isMesh(remotePeer) {
+			log.Warn("[boot-relay] rejecting backbone stream from non-mesh peer %s", remotePeer.ShortString())
+			bootAlerts.Add("warn", "boot_relay_backbone_denied", remotePeer.ShortString(),
+				fmt.Sprintf("Boot-relay backbone access denied: %s is not a configured mesh peer", remotePeer.ShortString()))
+			unauthTracker.Record(unauthTypeBootRelay, remotePeer.ShortString(),
+				"Boot-relay backbone denied: not a configured mesh peer")
+			_ = s.Close()
+			return
+		}
 		rr.registerMesh(remotePeer, s)
 		defer func() {
 			rr.unregisterMesh(remotePeer)
@@ -1369,14 +1369,14 @@ func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter, hub *peekMapHub, entri
 			// no handshake for IsAuthenticated to see, so it is false for every
 			// peer and this handler would silently drop all tunnels — exactly how
 			// the data-plane makeBootRelayHandler scopes the same check.
-		if !acl.IsAuthenticated(remotePeer) {
-			acl.waitForAuth(remotePeer, 2*time.Second)
-		}
-		if !acl.IsAuthenticated(remotePeer) {
-			unauthTracker.Record(unauthTypeRelayCtrl, remotePeer.ShortString(),
-				"Relay-ctrl tunnel dropped: unauthenticated peer")
-			return
-		}
+			if !acl.IsAuthenticated(remotePeer) {
+				acl.waitForAuth(remotePeer, 2*time.Second)
+			}
+			if !acl.IsAuthenticated(remotePeer) {
+				unauthTracker.Record(unauthTypeRelayCtrl, remotePeer.ShortString(),
+					"Relay-ctrl tunnel dropped: unauthenticated peer")
+				return
+			}
 			if !acl.AllowConnect(hdr.Origin, nil, hdr.Target) {
 				return
 			}
@@ -3052,26 +3052,26 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 	log.Debug("[auth] peer %s provided an incorrect PSK (no matching network)", remotePeer.String())
 	if gSecurity != nil {
 		banned, delay := gSecurity.Auth.RecordFailure(phyIP, remotePeer)
-	if banned {
-				bootAlerts.Add("error", "auth_banned", remotePeer.ShortString(),
-					fmt.Sprintf("🛑 触发防暴力破解封禁: %s (%s) 认证错误过多，临时封禁 5 分钟", remotePeer.ShortString(), phyIP))
-				unauthTracker.Record(unauthTypeAuthFail, remotePeer.ShortString(),
-					fmt.Sprintf("PSK auth banned: %s (%s) — too many failures", remotePeer.ShortString(), phyIP))
-			} else {
-				bootAlerts.Add("error", "auth_failed", remotePeer.ShortString(),
-					fmt.Sprintf("Peer %s failed PSK authentication (no matching network)", remotePeer.ShortString()))
-				unauthTracker.Record(unauthTypeAuthFail, remotePeer.ShortString(),
-					"PSK authentication failed (no matching network)")
-			}
-		if delay > 0 {
-			time.Sleep(delay)
-		}
-	} else {
+		if banned {
+			bootAlerts.Add("error", "auth_banned", remotePeer.ShortString(),
+				fmt.Sprintf("🛑 触发防暴力破解封禁: %s (%s) 认证错误过多，临时封禁 5 分钟", remotePeer.ShortString(), phyIP))
+			unauthTracker.Record(unauthTypeAuthFail, remotePeer.ShortString(),
+				fmt.Sprintf("PSK auth banned: %s (%s) — too many failures", remotePeer.ShortString(), phyIP))
+		} else {
 			bootAlerts.Add("error", "auth_failed", remotePeer.ShortString(),
 				fmt.Sprintf("Peer %s failed PSK authentication (no matching network)", remotePeer.ShortString()))
 			unauthTracker.Record(unauthTypeAuthFail, remotePeer.ShortString(),
 				"PSK authentication failed (no matching network)")
 		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+	} else {
+		bootAlerts.Add("error", "auth_failed", remotePeer.ShortString(),
+			fmt.Sprintf("Peer %s failed PSK authentication (no matching network)", remotePeer.ShortString()))
+		unauthTracker.Record(unauthTypeAuthFail, remotePeer.ShortString(),
+			"PSK authentication failed (no matching network)")
+	}
 	_, _ = s.Write([]byte{0x00}) // Auth failed response
 }
 
@@ -3334,11 +3334,11 @@ func transportAndPort(a multiaddr.Multiaddr) (family, port string) {
 // frame. This lets the boot's existing protocol handlers (which expect
 // network.Stream) work transparently over the mux control channel.
 type bootMuxStream struct {
-	stream  network.Stream
-	tag     uint8
-	reqID   uint32
-	request []byte
-	rpos    int
+	stream   network.Stream
+	tag      uint8
+	reqID    uint32
+	request  []byte
+	rpos     int
 	deadline time.Time
 }
 
@@ -3355,10 +3355,10 @@ func (b *bootMuxStream) Write(p []byte) (int, error) {
 	return mux.WriteFrame(b.stream, b.tag, mux.DirResponse, b.reqID, p)
 }
 
-func (b *bootMuxStream) Close() error           { return nil }
-func (b *bootMuxStream) CloseWrite() error      { return nil }
-func (b *bootMuxStream) CloseRead() error       { return nil }
-func (b *bootMuxStream) Reset() error           { return nil }
+func (b *bootMuxStream) Close() error      { return nil }
+func (b *bootMuxStream) CloseWrite() error { return nil }
+func (b *bootMuxStream) CloseRead() error  { return nil }
+func (b *bootMuxStream) Reset() error      { return nil }
 func (b *bootMuxStream) SetDeadline(t time.Time) error {
 	b.deadline = t
 	return nil
@@ -3512,14 +3512,14 @@ func makePeekMapHandler(h host.Host, hub *peekMapHub, nodeName string, acl *pskA
 		// (including cross-network peers when the resolver is nil), leaking
 		// the entire mesh topology to a non-member.
 		if acl != nil && !acl.RequireAuth(remotePeer) {
-				log.Warn("[peek-map] refusing unauthenticated peer %s", remotePeer.ShortString())
-				bootAlerts.Add("warn", "unauth_peek_map", remotePeer.ShortString(),
-					fmt.Sprintf("Peer %s opened peek-map without PSK auth; connection refused", remotePeer.ShortString()))
-				unauthTracker.Record(unauthTypePeekMap, remotePeer.ShortString(),
-					"Peek-map connection refused: unauthenticated peer")
-				_ = s.Close()
-				return
-			}
+			log.Warn("[peek-map] refusing unauthenticated peer %s", remotePeer.ShortString())
+			bootAlerts.Add("warn", "unauth_peek_map", remotePeer.ShortString(),
+				fmt.Sprintf("Peer %s opened peek-map without PSK auth; connection refused", remotePeer.ShortString()))
+			unauthTracker.Record(unauthTypePeekMap, remotePeer.ShortString(),
+				"Peek-map connection refused: unauthenticated peer")
+			_ = s.Close()
+			return
+		}
 
 		hub.register(remotePeer, s)
 		// Announce this boot node to the freshly connected client (and, since

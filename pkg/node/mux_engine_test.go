@@ -19,49 +19,49 @@ import (
 
 // netStream wraps a net.Conn and implements network.Stream.
 type netStream struct {
-	conn     net.Conn
-	id       string
-	protoID  protocol.ID
+	conn    net.Conn
+	id      string
+	protoID protocol.ID
 }
 
-func (s *netStream) Read(p []byte) (int, error)         { return s.conn.Read(p) }
-func (s *netStream) Write(p []byte) (int, error)        { return s.conn.Write(p) }
-func (s *netStream) Close() error                        { return s.conn.Close() }
-func (s *netStream) CloseWrite() error                   { return nil }
-func (s *netStream) CloseRead() error                    { return nil }
-func (s *netStream) Reset() error                        { return nil }
+func (s *netStream) Read(p []byte) (int, error)                     { return s.conn.Read(p) }
+func (s *netStream) Write(p []byte) (int, error)                    { return s.conn.Write(p) }
+func (s *netStream) Close() error                                   { return s.conn.Close() }
+func (s *netStream) CloseWrite() error                              { return nil }
+func (s *netStream) CloseRead() error                               { return nil }
+func (s *netStream) Reset() error                                   { return nil }
 func (s *netStream) ResetWithError(_ network.StreamErrorCode) error { return nil }
-func (s *netStream) SetDeadline(t time.Time) error        { return s.conn.SetDeadline(t) }
-func (s *netStream) SetReadDeadline(t time.Time) error   { return s.conn.SetReadDeadline(t) }
-func (s *netStream) SetWriteDeadline(t time.Time) error  { return s.conn.SetWriteDeadline(t) }
-func (s *netStream) ID() string                           { return s.id }
-func (s *netStream) Protocol() protocol.ID               { return s.protoID }
-func (s *netStream) SetProtocol(id protocol.ID) error    { s.protoID = id; return nil }
-func (s *netStream) Stat() network.Stats                 { return network.Stats{} }
-func (s *netStream) Conn() network.Conn                  { return &netConn{conn: s.conn} }
-func (s *netStream) Scope() network.StreamScope          { return &network.NullScope{} }
+func (s *netStream) SetDeadline(t time.Time) error                  { return s.conn.SetDeadline(t) }
+func (s *netStream) SetReadDeadline(t time.Time) error              { return s.conn.SetReadDeadline(t) }
+func (s *netStream) SetWriteDeadline(t time.Time) error             { return s.conn.SetWriteDeadline(t) }
+func (s *netStream) ID() string                                     { return s.id }
+func (s *netStream) Protocol() protocol.ID                          { return s.protoID }
+func (s *netStream) SetProtocol(id protocol.ID) error               { s.protoID = id; return nil }
+func (s *netStream) Stat() network.Stats                            { return network.Stats{} }
+func (s *netStream) Conn() network.Conn                             { return &netConn{conn: s.conn} }
+func (s *netStream) Scope() network.StreamScope                     { return &network.NullScope{} }
 
 // netConn wraps a net.Conn and implements network.Conn.
 type netConn struct {
 	conn net.Conn
 }
 
-func (c *netConn) Close() error                                { return c.conn.Close() }
-func (c *netConn) LocalPeer() peer.ID                          { return "" }
-func (c *netConn) RemotePeer() peer.ID                         { return "" }
-func (c *netConn) RemotePublicKey() ic.PubKey                  { return nil }
-func (c *netConn) ConnState() network.ConnectionState          { return network.ConnectionState{} }
-func (c *netConn) LocalMultiaddr() ma.Multiaddr                { return nil }
-func (c *netConn) RemoteMultiaddr() ma.Multiaddr               { return nil }
-func (c *netConn) Stat() network.ConnStats                     { return network.ConnStats{} }
-func (c *netConn) Scope() network.ConnScope                    { return &network.NullScope{} }
-func (c *netConn) CloseWithError(_ network.ConnErrorCode) error { return nil }
-func (c *netConn) ID() string                                    { return "netconn" }
+func (c *netConn) Close() error                                      { return c.conn.Close() }
+func (c *netConn) LocalPeer() peer.ID                                { return "" }
+func (c *netConn) RemotePeer() peer.ID                               { return "" }
+func (c *netConn) RemotePublicKey() ic.PubKey                        { return nil }
+func (c *netConn) ConnState() network.ConnectionState                { return network.ConnectionState{} }
+func (c *netConn) LocalMultiaddr() ma.Multiaddr                      { return nil }
+func (c *netConn) RemoteMultiaddr() ma.Multiaddr                     { return nil }
+func (c *netConn) Stat() network.ConnStats                           { return network.ConnStats{} }
+func (c *netConn) Scope() network.ConnScope                          { return &network.NullScope{} }
+func (c *netConn) CloseWithError(_ network.ConnErrorCode) error      { return nil }
+func (c *netConn) ID() string                                        { return "netconn" }
 func (c *netConn) NewStream(context.Context) (network.Stream, error) { return nil, nil }
-func (c *netConn) GetStreams() []network.Stream                  { return nil }
-func (c *netConn) IsClosed() bool                                { return false }
-func (c *netConn) String() string                                { return "netconn" }
-func (c *netConn) As(_ any) bool                                 { return false }
+func (c *netConn) GetStreams() []network.Stream                      { return nil }
+func (c *netConn) IsClosed() bool                                    { return false }
+func (c *netConn) String() string                                    { return "netconn" }
+func (c *netConn) As(_ any) bool                                     { return false }
 
 // TestMuxEngineSend verifies the Send (fire-and-forget) path of muxEngine.
 func TestMuxEngineSend(t *testing.T) {

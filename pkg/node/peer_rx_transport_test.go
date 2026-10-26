@@ -15,21 +15,21 @@ import (
 // transportLabelForConn, which only reads RemoteMultiaddr.
 type fakePeerConn struct{ addr multiaddr.Multiaddr }
 
-func (c *fakePeerConn) Close() error                                            { return nil }
-func (c *fakePeerConn) LocalPeer() peer.ID                                      { return "" }
-func (c *fakePeerConn) RemotePeer() peer.ID                                     { return "" }
-func (c *fakePeerConn) RemotePublicKey() ic.PubKey                              { return nil }
-func (c *fakePeerConn) ConnState() network.ConnectionState                      { return network.ConnectionState{} }
-func (c *fakePeerConn) LocalMultiaddr() multiaddr.Multiaddr                     { return c.addr }
-func (c *fakePeerConn) RemoteMultiaddr() multiaddr.Multiaddr                    { return c.addr }
-func (c *fakePeerConn) Stat() network.ConnStats                                 { return network.ConnStats{} }
-func (c *fakePeerConn) Scope() network.ConnScope                                { return nil }
-func (c *fakePeerConn) CloseWithError(network.ConnErrorCode) error              { return nil }
-func (c *fakePeerConn) ID() string                                              { return "" }
-func (c *fakePeerConn) NewStream(context.Context) (network.Stream, error)       { return nil, nil }
-func (c *fakePeerConn) GetStreams() []network.Stream                            { return nil }
-func (c *fakePeerConn) IsClosed() bool                                          { return false }
-func (c *fakePeerConn) As(target any) bool                                      { return false }
+func (c *fakePeerConn) Close() error                                      { return nil }
+func (c *fakePeerConn) LocalPeer() peer.ID                                { return "" }
+func (c *fakePeerConn) RemotePeer() peer.ID                               { return "" }
+func (c *fakePeerConn) RemotePublicKey() ic.PubKey                        { return nil }
+func (c *fakePeerConn) ConnState() network.ConnectionState                { return network.ConnectionState{} }
+func (c *fakePeerConn) LocalMultiaddr() multiaddr.Multiaddr               { return c.addr }
+func (c *fakePeerConn) RemoteMultiaddr() multiaddr.Multiaddr              { return c.addr }
+func (c *fakePeerConn) Stat() network.ConnStats                           { return network.ConnStats{} }
+func (c *fakePeerConn) Scope() network.ConnScope                          { return nil }
+func (c *fakePeerConn) CloseWithError(network.ConnErrorCode) error        { return nil }
+func (c *fakePeerConn) ID() string                                        { return "" }
+func (c *fakePeerConn) NewStream(context.Context) (network.Stream, error) { return nil, nil }
+func (c *fakePeerConn) GetStreams() []network.Stream                      { return nil }
+func (c *fakePeerConn) IsClosed() bool                                    { return false }
+func (c *fakePeerConn) As(target any) bool                                { return false }
 
 func TestTransportLabelForConn(t *testing.T) {
 	for _, tt := range []struct {

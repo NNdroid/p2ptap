@@ -21,9 +21,9 @@ import (
 type muxEngine struct {
 	node *Node
 
-	mu       sync.Mutex
-	streams  map[peer.ID]network.Stream
-	writeMu  map[peer.ID]*sync.Mutex
+	mu      sync.Mutex
+	streams map[peer.ID]network.Stream
+	writeMu map[peer.ID]*sync.Mutex
 
 	sessionsMu sync.Mutex
 	sessions   map[uint32]*muxSession

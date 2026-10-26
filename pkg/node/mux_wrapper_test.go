@@ -13,8 +13,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	ma "github.com/multiformats/go-multiaddr"
 
-	mux "p2ptap/pkg/mux"
 	"p2ptap/pkg/meta"
+	mux "p2ptap/pkg/mux"
 )
 
 // mockStream is a minimal network.Stream backed by in-memory buffers.
@@ -37,42 +37,42 @@ func newMockStream(c *mockConn) *mockStream {
 func (m *mockStream) Read(p []byte) (int, error)  { return m.readBuf.Read(p) }
 func (m *mockStream) Write(p []byte) (int, error) { return m.writeBuf.Write(p) }
 
-func (m *mockStream) Close() error                 { return nil }
-func (m *mockStream) CloseWrite() error             { return nil }
-func (m *mockStream) CloseRead() error              { return nil }
-func (m *mockStream) Reset() error                  { return nil }
+func (m *mockStream) Close() error                                   { return nil }
+func (m *mockStream) CloseWrite() error                              { return nil }
+func (m *mockStream) CloseRead() error                               { return nil }
+func (m *mockStream) Reset() error                                   { return nil }
 func (m *mockStream) ResetWithError(_ network.StreamErrorCode) error { return nil }
-func (m *mockStream) SetDeadline(_ time.Time) error      { return nil }
-func (m *mockStream) SetReadDeadline(_ time.Time) error  { return nil }
-func (m *mockStream) SetWriteDeadline(_ time.Time) error { return nil }
-func (m *mockStream) ID() string                     { return m.id }
-func (m *mockStream) Protocol() protocol.ID          { return m.protocol }
-func (m *mockStream) SetProtocol(id protocol.ID) error { m.protocol = id; return nil }
-func (m *mockStream) Stat() network.Stats            { return network.Stats{} }
-func (m *mockStream) Conn() network.Conn             { return m.conn }
-func (m *mockStream) Scope() network.StreamScope     { return &network.NullScope{} }
+func (m *mockStream) SetDeadline(_ time.Time) error                  { return nil }
+func (m *mockStream) SetReadDeadline(_ time.Time) error              { return nil }
+func (m *mockStream) SetWriteDeadline(_ time.Time) error             { return nil }
+func (m *mockStream) ID() string                                     { return m.id }
+func (m *mockStream) Protocol() protocol.ID                          { return m.protocol }
+func (m *mockStream) SetProtocol(id protocol.ID) error               { m.protocol = id; return nil }
+func (m *mockStream) Stat() network.Stats                            { return network.Stats{} }
+func (m *mockStream) Conn() network.Conn                             { return m.conn }
+func (m *mockStream) Scope() network.StreamScope                     { return &network.NullScope{} }
 
 // mockConn is a minimal network.Conn for testing.
 type mockConn struct {
 	remote peer.ID
 }
 
-func (c *mockConn) Close() error                          { return nil }
-func (c *mockConn) LocalPeer() peer.ID                    { return "" }
-func (c *mockConn) RemotePeer() peer.ID                   { return c.remote }
-func (c *mockConn) RemotePublicKey() ic.PubKey            { return nil }
-func (c *mockConn) ConnState() network.ConnectionState    { return network.ConnectionState{} }
-func (c *mockConn) LocalMultiaddr() ma.Multiaddr          { return nil }
-func (c *mockConn) RemoteMultiaddr() ma.Multiaddr         { return nil }
-func (c *mockConn) Stat() network.ConnStats               { return network.ConnStats{} }
-func (c *mockConn) Scope() network.ConnScope              { return &network.NullScope{} }
-func (c *mockConn) CloseWithError(_ network.ConnErrorCode) error { return nil }
-func (c *mockConn) ID() string                             { return "mockconn" }
+func (c *mockConn) Close() error                                      { return nil }
+func (c *mockConn) LocalPeer() peer.ID                                { return "" }
+func (c *mockConn) RemotePeer() peer.ID                               { return c.remote }
+func (c *mockConn) RemotePublicKey() ic.PubKey                        { return nil }
+func (c *mockConn) ConnState() network.ConnectionState                { return network.ConnectionState{} }
+func (c *mockConn) LocalMultiaddr() ma.Multiaddr                      { return nil }
+func (c *mockConn) RemoteMultiaddr() ma.Multiaddr                     { return nil }
+func (c *mockConn) Stat() network.ConnStats                           { return network.ConnStats{} }
+func (c *mockConn) Scope() network.ConnScope                          { return &network.NullScope{} }
+func (c *mockConn) CloseWithError(_ network.ConnErrorCode) error      { return nil }
+func (c *mockConn) ID() string                                        { return "mockconn" }
 func (c *mockConn) NewStream(context.Context) (network.Stream, error) { return nil, nil }
-func (c *mockConn) GetStreams() []network.Stream           { return nil }
-func (c *mockConn) IsClosed() bool                         { return false }
-func (c *mockConn) String() string                         { return "mockconn-" + c.remote.String() }
-func (c *mockConn) As(_ any) bool                          { return false }
+func (c *mockConn) GetStreams() []network.Stream                      { return nil }
+func (c *mockConn) IsClosed() bool                                    { return false }
+func (c *mockConn) String() string                                    { return "mockconn-" + c.remote.String() }
+func (c *mockConn) As(_ any) bool                                     { return false }
 
 // TestMuxTagForProto verifies the protocol.ID → mux tag mapping.
 func TestMuxTagForProto(t *testing.T) {
@@ -465,8 +465,8 @@ func TestMuxInitStreamDelegatedMethods(t *testing.T) {
 // with an empty request returns EOF immediately.
 func TestMuxStreamEmptyRequestNoPanic(t *testing.T) {
 	sess := &muxSession{
-		tag:    mux.TagEcho,
-		reqID:  1,
+		tag:   mux.TagEcho,
+		reqID: 1,
 		// stream and respCh are not needed for the empty request test
 		respCh: make(chan []byte, 1),
 	}

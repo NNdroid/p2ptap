@@ -32,7 +32,6 @@ func TestIsVirtualIP(t *testing.T) {
 	}
 }
 
-
 // TestFilterAdvertisedAddrsDropsLoopbackAndTap pins the behaviour that the
 // addresses we broadcast to remote peers must NEVER include loopback
 // (127.0.0.0/8, ::1) or the TAP virtual device. A peer that learns a loopback
@@ -108,4 +107,3 @@ func mustMA(s string) multiaddr.Multiaddr {
 	}
 	return ma
 }
-
