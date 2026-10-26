@@ -20,11 +20,18 @@ import (
 var nftLog = logger.New("NFTables")
 
 type NFTManager struct {
-	mu     sync.Mutex
-	cfg    *config.ExitNodeConfig
-	active bool
-	tapIf  string // TAP iface name, captured at setup for MSS-clamp cleanup
-	mss    int    // configured MSS clamp, 0 = disabled
+	mu  sync.Mutex
+	cfg *config.ExitNodeConfig
+
+	// exitActive and subnetActive are tracked separately: the two rulesets use
+	// different tables and different lifecycles. A single shared flag used to
+	// make CleanupExitNodeNAT flip active=false on a subnet-router node while
+	// leaving p2ptap_subnet_nat installed forever.
+	exitActive   bool
+	subnetActive bool
+
+	tapIf string // TAP iface name, captured at setup for MSS-clamp cleanup
+	mss   int    // configured MSS clamp, 0 = disabled
 }
 
 func NewNFTManager(cfg *config.ExitNodeConfig) *NFTManager {
@@ -113,9 +120,31 @@ func (m *NFTManager) SetupExitNodeNAT(wanIfName, tapIfName string, mss int) erro
 	}
 
 	// Fatal if forwarding cannot be enabled: the Exit Node would otherwise
-	// silently blackhole all client traffic.
+	// silently blackhole all client traffic. Writing /proc/sys requires root,
+	// so this is exactly how an unprivileged exit node fails — log it loudly
+	// rather than letting the caller's error-handling decide whether it is seen.
 	if err := m.EnableIPForwarding(); err != nil {
+		nftLog.Error("FATAL: IP forwarding enable failed: %v — Exit Node NAT is installed but cannot forward, so all client traffic will be blackholed", err)
 		return fmt.Errorf("IP forwarding enable failed: %w", err)
+	}
+
+	// Re-install, never append. The kernel accepts a second "add chain" for an
+	// existing chain, and every later "add rule" APPENDS a duplicate MASQ rule
+	// (verified on kernel 6.12: two identical rules after one re-run). Each WebUI
+	// config save, exit-node toggle, or service restart would otherwise add
+	// another copy, and changing exit_node.wan_interface would leave the old
+	// interface's rule alive forever still masquerading its traffic. Tearing the
+	// tables down first also clears the MSS clamp that lives in the same chain,
+	// so a changed MTU cannot accumulate stale clamps either.
+	m.removeNFTTables(
+		&nftables.Table{Family: nftables.TableFamilyIPv4, Name: "p2ptap_nat"},
+		&nftables.Table{Family: nftables.TableFamilyIPv6, Name: "p2ptap_nat6"},
+	)
+	// The iptables fallback clamp lives outside the nft tables, so remove the
+	// previous value explicitly when the clamp amount changed.
+	if m.tapIf != "" && m.mss > 0 && m.mss != mss {
+		m.removeMSSClampIPTables("ip", m.tapIf, m.mss)
+		m.removeMSSClampIPTables("ip6", m.tapIf, m.mss)
 	}
 
 	c, err := nftables.New()
@@ -131,6 +160,10 @@ func (m *NFTManager) SetupExitNodeNAT(wanIfName, tapIfName string, mss int) erro
 	}
 
 	if err := c.Flush(); err != nil {
+		// Permission failures here (no CAP_NET_ADMIN) are as fatal as the
+		// forwarding failure above: NAT rules partially installed with no
+		// matching kernel capability blackhole client traffic.
+		nftLog.Error("FATAL: nftables flush failed: %v — Exit Node NAT could not be installed, client traffic will be blackholed", err)
 		return fmt.Errorf("nftables flush rules error: %w", err)
 	}
 
@@ -146,7 +179,7 @@ func (m *NFTManager) SetupExitNodeNAT(wanIfName, tapIfName string, mss int) erro
 		m.addMSSClamp("ip6", "p2ptap_nat6", tapIfName, mss)
 	}
 
-	m.active = true
+	m.exitActive = true
 	nftLog.Info("Successfully configured Exit Node NAT masquerade via nftables (wan=%s, tap=%s, families=v4+v6, mss-clamp=%d)", wanIfName, tapIfName, mss)
 	return nil
 }
@@ -159,8 +192,16 @@ func (m *NFTManager) SetupSubnetRouterNAT(tapIfName string) error {
 	defer m.mu.Unlock()
 
 	if err := m.EnableIPForwarding(); err != nil {
+		nftLog.Error("FATAL: IP forwarding enable failed for subnet router: %v — advertised subnets will be blackholed", err)
 		return fmt.Errorf("IP forwarding enable failed for subnet router: %w", err)
 	}
+
+	// Re-install rather than append, same reason as SetupExitNodeNAT: a re-run
+	// otherwise appends duplicate MASQ rules to the same chain.
+	m.removeNFTTables(
+		&nftables.Table{Family: nftables.TableFamilyIPv4, Name: "p2ptap_subnet_nat"},
+		&nftables.Table{Family: nftables.TableFamilyIPv6, Name: "p2ptap_subnet_nat6"},
+	)
 
 	c, err := nftables.New()
 	if err != nil {
@@ -175,10 +216,11 @@ func (m *NFTManager) SetupSubnetRouterNAT(tapIfName string) error {
 	}
 
 	if err := c.Flush(); err != nil {
+		nftLog.Error("FATAL: nftables flush failed for subnet router: %v — advertised subnets will be blackholed", err)
 		return fmt.Errorf("nftables flush rules error: %w", err)
 	}
 
-	m.active = true
+	m.subnetActive = true
 	nftLog.Info("Successfully configured Subnet Router NAT masquerade via nftables (tap=%s, families=v4+v6)", tapIfName)
 	return nil
 }
@@ -279,29 +321,76 @@ func (m *NFTManager) removeMSSClampIPTables(family, tapIfName string, mss int) {
 	_ = exec.Command(bin, args...).Run()
 }
 
-// CleanupExitNodeNAT removes both v4 and v6 p2ptap NAT tables.
+// removeNFTTables deletes the named tables, ignoring ones that do not exist.
+// nftables exposes no "delete if exists" form, so the Flush error is
+// deliberately unclassified: a non-existent table is the normal case on a
+// first run, and a genuine failure (missing CAP_NET_ADMIN) resurfaces on the
+// very next add batch, which does surface its error.
+func (m *NFTManager) removeNFTTables(tables ...*nftables.Table) {
+	c, err := nftables.New()
+	if err != nil {
+		nftLog.Warn("nftables connect failed while removing NAT tables: %v", err)
+		return
+	}
+	for _, t := range tables {
+		c.DelTable(t)
+	}
+	if err := c.Flush(); err != nil {
+		nftLog.Debug("stale NAT table removal: %v", err)
+	}
+}
+
+// CleanupExitNodeNAT removes both v4 and v6 exit-node NAT tables plus the
+// iptables TCPMSS fallback clamp.
 func (m *NFTManager) CleanupExitNodeNAT() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if !m.active {
+	if !m.exitActive {
 		return nil
 	}
 
-	c, err := nftables.New()
-	if err != nil {
-		return err
-	}
-
-	c.DelTable(&nftables.Table{Family: nftables.TableFamilyIPv4, Name: "p2ptap_nat"})
-	c.DelTable(&nftables.Table{Family: nftables.TableFamilyIPv6, Name: "p2ptap_nat6"})
-
-	_ = c.Flush()
-	m.active = false
+	m.removeNFTTables(
+		&nftables.Table{Family: nftables.TableFamilyIPv4, Name: "p2ptap_nat"},
+		&nftables.Table{Family: nftables.TableFamilyIPv6, Name: "p2ptap_nat6"},
+	)
+	m.exitActive = false
 	// Best-effort removal of the iptables TCPMSS fallback clamp (only present
 	// when the kernel lacked the nft TCPOPT expression).
 	m.removeMSSClampIPTables("ip", m.tapIf, m.mss)
 	m.removeMSSClampIPTables("ip6", m.tapIf, m.mss)
 	nftLog.Info("Cleared Exit Node nftables NAT rules")
 	return nil
+}
+
+// CleanupSubnetRouterNAT removes the subnet-router NAT tables. It used to be
+// unreachable: CleanupExitNodeNAT deleted only the exit-node tables while
+// sharing the same active flag, so a subnet router whose advertised subnets
+// were removed left p2ptap_subnet_nat installed until the host rebooted.
+func (m *NFTManager) CleanupSubnetRouterNAT() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.subnetActive {
+		return nil
+	}
+
+	m.removeNFTTables(
+		&nftables.Table{Family: nftables.TableFamilyIPv4, Name: "p2ptap_subnet_nat"},
+		&nftables.Table{Family: nftables.TableFamilyIPv6, Name: "p2ptap_subnet_nat6"},
+	)
+	m.subnetActive = false
+	nftLog.Info("Cleared Subnet Router nftables NAT rules")
+	return nil
+}
+
+// CleanupAllNAT tears down both rulesets. Called on node shutdown so a
+// restarting exit node does not accumulate a fresh copy of every rule on each
+// start (SetupExitNodeNAT now self-cleans, but an explicit teardown also
+// covers a node that was decommissioned between runs).
+func (m *NFTManager) CleanupAllNAT() error {
+	if err := m.CleanupExitNodeNAT(); err != nil {
+		return err
+	}
+	return m.CleanupSubnetRouterNAT()
 }

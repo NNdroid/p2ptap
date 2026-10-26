@@ -105,14 +105,11 @@ func (n *Node) applyHotReload(cfg *config.Config) {
 			len(cfg.StunServers), len(cfg.TurnServers))
 	}
 
-	if n.NFTManager != nil {
-		n.NFTManager.UpdateConfig(&cfg.ExitNode)
-		if cfg.ExitNode.Enable {
-			_ = n.NFTManager.SetupExitNodeNAT(cfg.ExitNode.WANInterface, cfg.TapName, computeExitMSS(cfg.MTU, cfg.Obfuscation.Mode))
-		} else {
-			_ = n.NFTManager.CleanupExitNodeNAT()
-		}
-	}
+	// Both rulesets are reconciled independently: a reload that only touched
+	// advertised_subnets must not leave the old subnet NAT tables behind, and
+	// one that only toggled exit_node must not tear down a valid subnet ruleset.
+	n.applyExitNodeNAT(cfg)
+	n.applySubnetRouterNAT(cfg)
 	if n.Packer != nil {
 		n.applyObfuscationConfig(cfg)
 	}

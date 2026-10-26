@@ -253,366 +253,378 @@ func (n *Node) handleStream(s network.Stream) {
 			log.Debug("Rx raw frame: len=%d from peer=%s", readN, remotePeer.String())
 		}
 
-		frameData := buf[:readN] // may be reassigned below if reassembled
+		frameData := buf[:readN]
 
-		// CONCURRENCY CONTRACT: `buf` belongs exclusively to this stream-reader
-		// goroutine and is reused on each iteration. The MAC-rewrite paths below
-		// mutate frameData (== buf[:readN]) in place. This is safe ONLY because
-		// the eventual TAP write (n.tapWrite -> n.TAP.Write) is synchronous and
-		// returns before the next loop iteration reuses `buf`.
-		// Do NOT let `buf`/`frameData` escape this goroutine (e.g. hand it to a
-		// background send or the urgent-write channel) without copying first, or
-		// a concurrent read would observe torn/overwritten frame bytes.
-
-		if len(frameData) < obfuscate.HeaderLen {
-			// PERF: malformed-traffic path — every junk frame lands here, so
-			// keep the base58 peer.String() behind the level check.
-			if log.IsDebug() {
-				log.Debug("Short frame (%d bytes) from peer %s, skipping", len(frameData), remotePeer.String())
-			}
-			continue
-		}
-
-		// ── Per-peer payload DECRYPTION happens FIRST (v2 obfuscation) ──
-		// decryptPeerFrame returns (plaintext, decrypted, garbage). garbage==true
-		// means a cipher was negotiated but AEAD-open failed: the bytes are
-		// ciphertext we cannot open, so DROP them — never forward to the TAP. A
-		// successful decrypt replaces frameData with the plaintext; the no-cipher
-		// case leaves frameData unchanged (legitimate plaintext). The plaintext
-		// lands in decScratch (rebased) — zero alloc in steady state.
-		dec, decOK, garbage := n.decryptPeerFrame(decScratch, frameData, remotePeer)
-		if garbage {
-			// PERF: hit on EVERY frame during a key-divergence storm — keep guarded.
-			if log.IsDebug() {
-				log.Debug("Rx: dropping undecryptable ciphertext frame from %s", remotePeer.String())
-			}
-			n.recordPeerRxDecrypt(remotePeer, false)
-			// Self-heal: if this keeps failing, re-run SeqSync to re-anchor keys.
-			n.maybeResyncOnDecryptFail(remotePeer)
-			continue
-		}
-		if decOK {
-			frameData = dec
-			decScratch = dec
-		}
-
-		// PSK-required fail-closed (RX twin of canEgressToPeer): a plaintext frame
-		// from a peer we have not negotiated an encrypted cipher with carries no
-		// proof the sender knows the PSK, so it must never reach the TAP device.
-		// (A wrong-PSK peer's ENCRYPTED frames already fail AEAD-open above and
-		// drop as garbage; this closes the plaintext-covert-channel hole.)
-		if !decOK && n.pskRequired() && !n.hasNegotiatedCipher(remotePeer) {
-			if log.IsDebug() {
-				log.Debug("Rx: dropping plaintext frame from %s — PSK network requires a negotiated cipher", remotePeer.String())
-			}
-			continue
-		}
-
-		// ── Deobfuscation (parse header, extract payload) ──
-		seqID, payload, err := obfuscate.Unpack(frameData)
-		if err != nil {
-			// PERF: also a per-frame path while keys are diverged — keep guarded.
-			if log.IsDebug() {
-				log.Debug("Frame unpack error from peer %s: %v", remotePeer.String(), err)
-			}
-			// Both decrypt AND unpack failed => genuinely invalid frame. Record
-			// the failure so the recent-window Decrypt-Fail signal can fire only
-			// for real garbage (not benign plaintext during the handshake window).
-			n.recordPeerRxDecrypt(remotePeer, false)
-			// Self-heal via the throttled resync path (threshold + cooldown,
-			// then ForceSyncSeq → triggerPeerRekey's single-flight guard). This
-			// avoids spawning an unguarded ForceSyncSeq per failing frame, which
-			// previously fanned out into many concurrent handshakes that could
-			// cross ephemeral generations and diverge the two ends' keys.
-			n.maybeResyncOnDecryptFail(remotePeer)
-			continue
-		}
-		// Valid p2ptap frame (encrypted or plaintext). Recording success here
-		// resets the recent-error window so a plaintext peer never sticks in
-		// "Decrypt Fail", and self-heals readiness for plaintext-capable peers.
-		n.recordPeerRxDecrypt(remotePeer, true)
-		n.maybeMarkReadyOnDecrypt(remotePeer, true)
-
-		// Unpack now hard-fails on a bad magic, so any frame that reaches here
-		// is a valid p2ptap overlay frame. Still enforce the magic check as a
-		// belt-and-suspenders guard against stray/garbage traffic leaking into
-		// the TAP device.
-		if len(frameData) < 2 || binary.BigEndian.Uint16(frameData[0:2]) != obfuscate.FrameMagic {
-			// PERF: stray-traffic path — keep the base58 cost behind the check.
-			if log.IsDebug() {
-				log.Debug("Rejected non-p2ptap frame from peer %s (bad magic, len=%d)",
-					remotePeer.String(), len(frameData))
-			}
-			continue
-		}
-
-		// ── Tunnel fragmentation reassembly ──
-		// A frame may be one fragment of a larger obfuscated TAP frame. If the
-		// deobfuscated outer payload is a fragment envelope, buffer it and wait
-		// for the rest; once complete, re-deobfuscate the reassembled original
-		// frame to obtain the real TAP payload + seqID. Non-fragment frames use
-		// the payload/seqID from the first Unpack directly.
-		if n.fragRX != nil && isFragPayload(payload) {
-			finalPacked, complete := n.fragRX.reassemble(remotePeer, payload, reasmChannelDirect, obfuscate.ConnEpochFromSeq(seqID))
-			if !complete {
-				continue // more fragments pending
-			}
-			// ── DECRYPT the reassembled inner frame BEFORE unpacking ──
-			// Reuses the same scratch: the outer fragment envelope (frameData) is
-			// dead here — reassemble() copied every chunk it keeps.
-			fdec, fdecOK, fgarbage := n.decryptPeerFrame(decScratch, finalPacked, remotePeer)
-			if fgarbage {
-				if log.IsDebug() {
-					log.Debug("Rx: dropping undecryptable reassembled ciphertext from %s", remotePeer.String())
-				}
-				n.recordPeerRxDecrypt(remotePeer, false)
-				n.maybeResyncOnDecryptFail(remotePeer)
-				continue
-			}
-			if fdecOK {
-				finalPacked = fdec
-				decScratch = fdec
-			}
-			seqID, payload, err = obfuscate.Unpack(finalPacked)
-			if err != nil {
-				log.Debug("Reassembled frame unpack error from peer %s: %v", remotePeer.String(), err)
-				continue
-			}
-		}
-
-		// PERF: per-frame path — peer.String() is base58 (~930ns, 2 allocs),
-		// evaluated at the call site regardless of log level. Keep guarded.
-		if log.IsDebug() {
-			log.Debug("Rx unpacked: seq=%d payloadLen=%d frameLen=%d from peer=%s", seqID, len(payload), len(frameData), remotePeer.String())
-		}
-
-		// Per-peer deduplication: each peer has its own seqID space,
-		// so seqIDs from different peers never collide (unlike the
-		// previous global dedup that could falsely discard frames from
-		// peer B whose seqID happened to match peer A's).
-		n.dedupPeersMu.RLock()
-		peerDedup, ok := n.dedupPeers[remotePeer]
-		n.dedupPeersMu.RUnlock()
-		if !ok {
-			n.dedupPeersMu.Lock()
-			peerDedup = n.dedupPeers[remotePeer]
-			if peerDedup == nil {
-				peerDedup = obfuscate.NewDeduplicator()
-				n.dedupPeers[remotePeer] = peerDedup
-			}
-			n.dedupPeersMu.Unlock()
-		}
-		// Only SeqSync may change an established epoch. A delayed data frame
-		// from an older session must not reset the current replay window.
-		if dup, reason := peerDedup.IsDuplicateReason(seqID); dup {
-			n.Collector.RecordDedup()
-			// PERF: cached base58 (see peer_idstr.go) — pid.String() would cost
-			// ~933ns/2allocs on EVERY frame just to feed a bookkeeping call.
-			n.Collector.RecordPeerDedup(n.peerIDString(remotePeer))
-			log.Debug("Duplicate frame seq=%d from peer %s", seqID, remotePeer.String())
-			// A SameSeq drop is redundant multi-path delivery of a frame we
-			// already handed to TAP — nothing is wrong with the link. Any other
-			// reason means the sender is not aligned with the window we anchored
-			// for it, and unlike a decrypt failure this path used to have no
-			// recovery at all: the frame was perfectly well formed and opened
-			// cleanly, so every other subsystem read the link as healthy and
-			// nobody ever healed it.
-			if reason != obfuscate.DedupDropSameSeq {
-				n.recordPeerDedupDesync(remotePeer, true)
-				n.maybeResyncOnDedupDesync(remotePeer)
-			}
-			continue
-		}
-		// Accepted by the dedup window: reset the peer's desync window so a
-		// healed link cannot keep re-firing the resync forever.
-		n.recordPeerDedupDesync(remotePeer, false)
-		n.Collector.RecordRxSeq(n.peerIDString(remotePeer), seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
-
-		// ACL Firewall Filtering check
-		if !n.checkACL(payload, n.peerIDString(remotePeer), false) {
-			log.Debug("🛡️ ACL Firewall blocked Rx frame seq=%d from peer %s", seqID, remotePeer.String())
-			continue
-		}
-		if log.IsDebug() && n.config().ACL.Enable {
-			log.Debug("ACL passed: seq=%d from peer=%s", seqID, remotePeer.String())
-		}
-
-		dstMAC, srcMAC, okExtract := vswitch.ExtractEthernetMACs(payload)
-		// CORRECTNESS: a runt frame cannot carry trustworthy L2 addressing, so
-		// it must not feed MAC learning or the observed-MAC table.
-		//
-		// ExtractEthernetMACs only needs 12 bytes, so a short control payload
-		// (e.g. a 19-byte stream warm-up probe) still "parses": its payload
-		// bytes [0:6]/[6:12] get read as dst/src MAC. Recording that bogus src
-		// MAC as the peer's observed wire MAC then poisons rebuildARPIndex
-		// (which prefers the observed MAC over the advertised metadata MAC), so
-		// EVERY peer ends up indexed under the same garbage MAC and the ARP
-		// index collapses onto it — ARP replies return the wrong MAC and frames
-		// get delivered to the wrong peer. That was the root cause of the
-		// three-node mesh failure (A->C and B->C "no delivery").
-		//
-		// Require a legal minimum: a 14-byte Ethernet header plus a minimal
-		// ARP (28) or IPv4 (20) header.
-		if okExtract && len(payload) >= minEthernetFrameLen {
-			// Capture the RAW (pre-normalization) source MAC the peer truly
-			// emits on the wire when sending from its own TAP interface.
-			// Only record when the packet originated from the peer's own TapIP,
-			// avoiding false-positive MAC mismatches when an exit node / router forwards
-			// LAN or routed traffic.
-			if rawSrc := net.HardwareAddr(srcMAC); len(rawSrc) == 6 {
-				if n.isFrameFromPeerSelf(remotePeer, payload) {
-					n.recordPeerObservedTapMAC(remotePeer, rawSrc)
-				}
-			}
-
-			// Normalize the learned source MAC to the peer's configured TapMAC
-			// when known. Some peers (e.g. Windows) emit EUI-64 / synthetic
-			// MACs in the SrcMAC field; learning those verbatim would explode
-			// the MAC table with one entry per distinct random MAC. See also
-			// the SrcMAC fix-up below for pcap display.
-			if realMAC := n.lookupPeerTapMAC(remotePeer); realMAC != nil {
-				srcMAC = realMAC
-			}
-			n.MACTable.Learn(srcMAC, remotePeer)
-
-			// Auto-learn peer IPv4 / IPv6 into ARP/NDP index and inject GARP/NA into local TAP
-			// ensuring the local OS can immediately return unicast replies without unproxied broadcast delay.
-			n.learnPeerAddressFromFrame(remotePeer, srcMAC, payload)
-			if log.IsDebug() {
-				log.Debug("Rx frame: seq=%d len=%d src=%s dst=%s from_peer=%s %s",
-					seqID, len(payload), net.HardwareAddr(srcMAC[:]).String(), net.HardwareAddr(dstMAC[:]).String(), remotePeer.String(), describeEthernetFrame(payload))
-			}
-
-			// Content-based dedup ONLY for broadcast/multicast frames:
-			// when the same L2 broadcast/multicast payload arrives via multiple peer streams or
-			// redundant paths, only the first copy is written to TAP.
-			// Unicast frames are handled by per-peer SeqID sliding window deduplication above.
-			if isBroadcastOrMulticastMAC(dstMAC) {
-				contentHash := fnvHash64(payload)
-				if n.bcastDedup.isDuplicate(remotePeer, contentHash) {
-					n.Collector.RecordDedup()
-					log.Debug("Content-dup broadcast frame hash=0x%x from peer %s dropped", contentHash, remotePeer.String())
-					continue
-				}
-			}
-
-		} else {
-			log.Debug("Rx frame: seq=%d len=%d (MAC extract failed) from_peer=%s", seqID, len(payload), remotePeer.String())
-		}
-
-		// Topology throughput is TAP payload, not the padded/encrypted frame read
-		// from the stream. Recording here also counts a fragmented frame exactly
-		// once, after reassembly, decryption, deduplication, and ACL validation.
-		n.recordPeerRxBytes(remotePeer, len(payload))
-		n.Collector.RecordRecv(len(payload))
-		n.Collector.RecordPacketDir(payload, false)
-		if n.Collector != nil {
-			n.Collector.CaptureFrameWithPeers(observer.DirRx, payload, n.peerIDString(remotePeer), "self")
-		}
-		if len(payload) >= 14 {
-			// Fix up rx frame SrcMAC: some peers (especially Windows) may send
-			// frames with an EUI-64 derived synthetic MAC in the SrcMAC field
-			// instead of their configured TapMAC.  Replace it with the real
-			// TapMAC from peer metadata so the pcap table shows a consistent,
-			// address-book MAC.
-			capturePayload := payload // avoid copying for the common case
-			if okExtract {
-				if realMAC := n.lookupPeerTapMAC(remotePeer); realMAC != nil {
-					frameSrc := net.HardwareAddr(payload[6:12])
-					if frameSrc.String() != realMAC.String() {
-						capturePayload = make([]byte, len(payload))
-						copy(capturePayload, payload)
-						copy(capturePayload[6:12], realMAC)
-					}
-				}
-			}
-			n.Collector.RecordFrame(capturePayload)
-		}
-		n.IPTracker.ExtractAndRecord(payload, false)
-
-		// Data is actively flowing — reset ping-pong fail count for this peer.
-		// Prevents spurious reconnects when yamux flow control delays echo streams
-		// but the application-level connection is healthy.
-		n.resetPingPongFailCountForPeer(remotePeer)
-
+		// CONCURRENCY CONTRACT: `frameData` (== buf[:readN]) belongs exclusively
+		// to this stream-reader goroutine and may be mutated in place by the
+		// MAC-rewrite paths in handleDirectFrame. Safe because enqueueTapWrite
+		// copies the payload into a pooled buffer before returning.
+		n.handleDirectFrame(remotePeer, frameData, &decScratch)
 		frameCount++
 
-		if n.Interceptor != nil && n.Interceptor.MatchAndHandle(payload, tapInjectionWriter{node: n}) {
-			log.Debug("Frame intercepted by userspace WebUI interceptor from peer %s", remotePeer.String())
-			continue
-		}
+	}
+}
 
-		// L2 MAC fixup for frames about to be written into the local TAP device
-		// (destined-for-us Dst MAC rewrite, and Exit-Node transit rewrite). Shared
-		// with the relay-receive path via rewriteRxDstMAC so the two write-back
-		// paths stay identical (see that function for the full rationale).
-		n.rewriteRxDstMAC(payload)
+// handleDirectFrame processes one inbound VTP frame from a directly connected
+// peer: decrypt -> unpack -> fragment reassembly -> dedup -> ACL -> MAC
+// learning -> TAP write. Shared by the legacy per-peer data stream
+// (handleStream) and the unified mux data channel (handleDataMuxVTP) so the
+// two RX paths cannot drift.
+//
+// frameData may be mutated in place by the MAC-rewrite paths below, so it must
+// belong exclusively to the calling goroutine: for handleStream that is the
+// per-stream read buffer, for the mux path it is a private per-frame copy.
+//
+// decScratch is the caller's reusable decrypt scratch, rebased on each call so
+// steady-state frames allocate nothing. It must not escape the call.
+func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratch *[]byte) {
 
-		// End-to-end TAP-probe capture. The peer's ICMP echo reply (which left
-		// the peer's real TAP, traversed the overlay, and is about to be injected
-		// into OUR real TAP) is captured here on the inbound path. We cannot rely
-		// on it looping back through the TAP read fd — a TUN/TAP device does not
-		// re-deliver written frames to its own read side — so the capture must
-		// happen here to make ProbeTapForward a genuine both-directions TAP-path
-		// test. The OS also receives the reply (a harmless stray, since no local
-		// socket originated the request).
-		n.maybeDeliverProbeReply(payload)
-		n.observeTapICMPEchoReply(remotePeer, payload, time.Now())
-
-		// Peer-side probe ack. Probe frames remain synchronous so the ack still
-		// means the native TAP write has completed, while ordinary bulk traffic
-		// is handed to the dedicated writer below.
-		tapProbeFrame := false
-		if pid, tok, ok := n.isTapProbeRequest(payload); ok {
-			tapProbeFrame = true
-			dstIP := net.IP(payload[14+16 : 14+20])
-			ackFlag := tapProbeAckFlagIPMismatch
-			if n.localV4IP != nil && dstIP.Equal(n.localV4IP) {
-				ackFlag = tapProbeAckFlagIPMatched
-			}
-			// Queue synchronously before the TAP write; the old goroutine could
-			// race the success drain and leave a stale ack for a later frame.
-			n.sendTapProbeAckAfterTAP(pid, tok, ackFlag)
-		}
-
-		if n.TAP == nil {
-			log.Warn("TAP device is nil, cannot write frame")
-			if tapProbeFrame {
-				n.takeDeferredProbeAcks()
-			}
-			continue
-		}
-
-		recordGateway := false
-		if cfg := n.config(); cfg != nil && cfg.ExitNode.Enable && !n.isExitNodeActive() && len(payload) >= 6 && payload[0]&1 == 0 {
-			recordGateway = true
-		}
-
-		if !tapProbeFrame {
-			if err := n.enqueueTapWrite(payload, recordGateway, ""); err != nil {
-				log.Warn("TAP write enqueue/fallback error: %v", err)
-			}
-			continue
-		}
-
-		// Diagnostic probe: preserve synchronous completion semantics.
+	if len(frameData) < obfuscate.HeaderLen {
+		// PERF: malformed-traffic path — every junk frame lands here, so
+		// keep the base58 peer.String() behind the level check.
 		if log.IsDebug() {
-			log.Debug("TAP write: seq=%d len=%d dstMAC=%s to %s", seqID, len(payload), net.HardwareAddr(payload[0:6]).String(), n.TAP.Name())
+			log.Debug("Short frame (%d bytes) from peer %s, skipping", len(frameData), remotePeer.String())
 		}
-		wn, werr := n.tapWrite(payload)
-		if werr != nil {
-			log.Warn("TAP write error: %v", werr)
-			n.takeDeferredProbeAcks()
-		} else {
-			log.Debug("TAP write ok: %d bytes to %s", wn, n.TAP.Name())
-			if deferred := n.takeDeferredProbeAcks(); len(deferred) > 0 {
-				for _, d := range deferred {
-					go n.sendTapProbeAck(d.prober, d.token, d.flag)
+		return
+	}
+
+	// ── Per-peer payload DECRYPTION happens FIRST (v2 obfuscation) ──
+	// decryptPeerFrame returns (plaintext, decrypted, garbage). garbage==true
+	// means a cipher was negotiated but AEAD-open failed: the bytes are
+	// ciphertext we cannot open, so DROP them — never forward to the TAP. A
+	// successful decrypt replaces frameData with the plaintext; the no-cipher
+	// case leaves frameData unchanged (legitimate plaintext). The plaintext
+	// lands in decScratch (rebased) — zero alloc in steady state.
+	dec, decOK, garbage := n.decryptPeerFrame(*decScratch, frameData, remotePeer)
+	if garbage {
+		// PERF: hit on EVERY frame during a key-divergence storm — keep guarded.
+		if log.IsDebug() {
+			log.Debug("Rx: dropping undecryptable ciphertext frame from %s", remotePeer.String())
+		}
+		n.recordPeerRxDecrypt(remotePeer, false)
+		// Self-heal: if this keeps failing, re-run SeqSync to re-anchor keys.
+		n.maybeResyncOnDecryptFail(remotePeer)
+		return
+	}
+	if decOK {
+		frameData = dec
+		*decScratch = dec
+	}
+
+	// PSK-required fail-closed (RX twin of canEgressToPeer): a plaintext frame
+	// from a peer we have not negotiated an encrypted cipher with carries no
+	// proof the sender knows the PSK, so it must never reach the TAP device.
+	// (A wrong-PSK peer's ENCRYPTED frames already fail AEAD-open above and
+	// drop as garbage; this closes the plaintext-covert-channel hole.)
+	if !decOK && n.pskRequired() && !n.hasNegotiatedCipher(remotePeer) {
+		if log.IsDebug() {
+			log.Debug("Rx: dropping plaintext frame from %s — PSK network requires a negotiated cipher", remotePeer.String())
+		}
+		return
+	}
+
+	// ── Deobfuscation (parse header, extract payload) ──
+	seqID, payload, err := obfuscate.Unpack(frameData)
+	if err != nil {
+		// PERF: also a per-frame path while keys are diverged — keep guarded.
+		if log.IsDebug() {
+			log.Debug("Frame unpack error from peer %s: %v", remotePeer.String(), err)
+		}
+		// Both decrypt AND unpack failed => genuinely invalid frame. Record
+		// the failure so the recent-window Decrypt-Fail signal can fire only
+		// for real garbage (not benign plaintext during the handshake window).
+		n.recordPeerRxDecrypt(remotePeer, false)
+		// Self-heal via the throttled resync path (threshold + cooldown,
+		// then ForceSyncSeq → triggerPeerRekey's single-flight guard). This
+		// avoids spawning an unguarded ForceSyncSeq per failing frame, which
+		// previously fanned out into many concurrent handshakes that could
+		// cross ephemeral generations and diverge the two ends' keys.
+		n.maybeResyncOnDecryptFail(remotePeer)
+		return
+	}
+	// Valid p2ptap frame (encrypted or plaintext). Recording success here
+	// resets the recent-error window so a plaintext peer never sticks in
+	// "Decrypt Fail", and self-heals readiness for plaintext-capable peers.
+	n.recordPeerRxDecrypt(remotePeer, true)
+	n.maybeMarkReadyOnDecrypt(remotePeer, true)
+
+	// Unpack now hard-fails on a bad magic, so any frame that reaches here
+	// is a valid p2ptap overlay frame. Still enforce the magic check as a
+	// belt-and-suspenders guard against stray/garbage traffic leaking into
+	// the TAP device.
+	if len(frameData) < 2 || binary.BigEndian.Uint16(frameData[0:2]) != obfuscate.FrameMagic {
+		// PERF: stray-traffic path — keep the base58 cost behind the check.
+		if log.IsDebug() {
+			log.Debug("Rejected non-p2ptap frame from peer %s (bad magic, len=%d)",
+				remotePeer.String(), len(frameData))
+		}
+		return
+	}
+
+	// ── Tunnel fragmentation reassembly ──
+	// A frame may be one fragment of a larger obfuscated TAP frame. If the
+	// deobfuscated outer payload is a fragment envelope, buffer it and wait
+	// for the rest; once complete, re-deobfuscate the reassembled original
+	// frame to obtain the real TAP payload + seqID. Non-fragment frames use
+	// the payload/seqID from the first Unpack directly.
+	if n.fragRX != nil && isFragPayload(payload) {
+		finalPacked, complete := n.fragRX.reassemble(remotePeer, payload, reasmChannelDirect, obfuscate.ConnEpochFromSeq(seqID))
+		if !complete {
+			return // more fragments pending
+		}
+		// ── DECRYPT the reassembled inner frame BEFORE unpacking ──
+		// Reuses the same scratch: the outer fragment envelope (frameData) is
+		// dead here — reassemble() copied every chunk it keeps.
+		fdec, fdecOK, fgarbage := n.decryptPeerFrame(*decScratch, finalPacked, remotePeer)
+		if fgarbage {
+			if log.IsDebug() {
+				log.Debug("Rx: dropping undecryptable reassembled ciphertext from %s", remotePeer.String())
+			}
+			n.recordPeerRxDecrypt(remotePeer, false)
+			n.maybeResyncOnDecryptFail(remotePeer)
+			return
+		}
+		if fdecOK {
+			finalPacked = fdec
+			*decScratch = fdec
+		}
+		seqID, payload, err = obfuscate.Unpack(finalPacked)
+		if err != nil {
+			log.Debug("Reassembled frame unpack error from peer %s: %v", remotePeer.String(), err)
+			return
+		}
+	}
+
+	// PERF: per-frame path — peer.String() is base58 (~930ns, 2 allocs),
+	// evaluated at the call site regardless of log level. Keep guarded.
+	if log.IsDebug() {
+		log.Debug("Rx unpacked: seq=%d payloadLen=%d frameLen=%d from peer=%s", seqID, len(payload), len(frameData), remotePeer.String())
+	}
+
+	// Per-peer deduplication: each peer has its own seqID space,
+	// so seqIDs from different peers never collide (unlike the
+	// previous global dedup that could falsely discard frames from
+	// peer B whose seqID happened to match peer A's).
+	n.dedupPeersMu.RLock()
+	peerDedup, ok := n.dedupPeers[remotePeer]
+	n.dedupPeersMu.RUnlock()
+	if !ok {
+		n.dedupPeersMu.Lock()
+		peerDedup = n.dedupPeers[remotePeer]
+		if peerDedup == nil {
+			peerDedup = obfuscate.NewDeduplicator()
+			n.dedupPeers[remotePeer] = peerDedup
+		}
+		n.dedupPeersMu.Unlock()
+	}
+	// Only SeqSync may change an established epoch. A delayed data frame
+	// from an older session must not reset the current replay window.
+	if dup, reason := peerDedup.IsDuplicateReason(seqID); dup {
+		n.Collector.RecordDedup()
+		// PERF: cached base58 (see peer_idstr.go) — pid.String() would cost
+		// ~933ns/2allocs on EVERY frame just to feed a bookkeeping call.
+		n.Collector.RecordPeerDedup(n.peerIDString(remotePeer))
+		log.Debug("Duplicate frame seq=%d from peer %s", seqID, remotePeer.String())
+		// A SameSeq drop is redundant multi-path delivery of a frame we
+		// already handed to TAP — nothing is wrong with the link. Any other
+		// reason means the sender is not aligned with the window we anchored
+		// for it, and unlike a decrypt failure this path used to have no
+		// recovery at all: the frame was perfectly well formed and opened
+		// cleanly, so every other subsystem read the link as healthy and
+		// nobody ever healed it.
+		if reason != obfuscate.DedupDropSameSeq {
+			n.recordPeerDedupDesync(remotePeer, true)
+			n.maybeResyncOnDedupDesync(remotePeer)
+		}
+		return
+	}
+	// Accepted by the dedup window: reset the peer's desync window so a
+	// healed link cannot keep re-firing the resync forever.
+	n.recordPeerDedupDesync(remotePeer, false)
+	n.Collector.RecordRxSeq(n.peerIDString(remotePeer), seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
+
+	// ACL Firewall Filtering check
+	if !n.checkACL(payload, n.peerIDString(remotePeer), false) {
+		log.Debug("🛡️ ACL Firewall blocked Rx frame seq=%d from peer %s", seqID, remotePeer.String())
+		return
+	}
+	if log.IsDebug() && n.config().ACL.Enable {
+		log.Debug("ACL passed: seq=%d from peer=%s", seqID, remotePeer.String())
+	}
+
+	dstMAC, srcMAC, okExtract := vswitch.ExtractEthernetMACs(payload)
+	// CORRECTNESS: a runt frame cannot carry trustworthy L2 addressing, so
+	// it must not feed MAC learning or the observed-MAC table.
+	//
+	// ExtractEthernetMACs only needs 12 bytes, so a short control payload
+	// (e.g. a 19-byte stream warm-up probe) still "parses": its payload
+	// bytes [0:6]/[6:12] get read as dst/src MAC. Recording that bogus src
+	// MAC as the peer's observed wire MAC then poisons rebuildARPIndex
+	// (which prefers the observed MAC over the advertised metadata MAC), so
+	// EVERY peer ends up indexed under the same garbage MAC and the ARP
+	// index collapses onto it — ARP replies return the wrong MAC and frames
+	// get delivered to the wrong peer. That was the root cause of the
+	// three-node mesh failure (A->C and B->C "no delivery").
+	//
+	// Require a legal minimum: a 14-byte Ethernet header plus a minimal
+	// ARP (28) or IPv4 (20) header.
+	if okExtract && len(payload) >= minEthernetFrameLen {
+		// Capture the RAW (pre-normalization) source MAC the peer truly
+		// emits on the wire when sending from its own TAP interface.
+		// Only record when the packet originated from the peer's own TapIP,
+		// avoiding false-positive MAC mismatches when an exit node / router forwards
+		// LAN or routed traffic.
+		if rawSrc := net.HardwareAddr(srcMAC); len(rawSrc) == 6 {
+			if n.isFrameFromPeerSelf(remotePeer, payload) {
+				n.recordPeerObservedTapMAC(remotePeer, rawSrc)
+			}
+		}
+
+		// Normalize the learned source MAC to the peer's configured TapMAC
+		// when known. Some peers (e.g. Windows) emit EUI-64 / synthetic
+		// MACs in the SrcMAC field; learning those verbatim would explode
+		// the MAC table with one entry per distinct random MAC. See also
+		// the SrcMAC fix-up below for pcap display.
+		if realMAC := n.lookupPeerTapMAC(remotePeer); realMAC != nil {
+			srcMAC = realMAC
+		}
+		n.MACTable.Learn(srcMAC, remotePeer)
+
+		// Auto-learn peer IPv4 / IPv6 into ARP/NDP index and inject GARP/NA into local TAP
+		// ensuring the local OS can immediately return unicast replies without unproxied broadcast delay.
+		n.learnPeerAddressFromFrame(remotePeer, srcMAC, payload)
+		if log.IsDebug() {
+			log.Debug("Rx frame: seq=%d len=%d src=%s dst=%s from_peer=%s %s",
+				seqID, len(payload), net.HardwareAddr(srcMAC[:]).String(), net.HardwareAddr(dstMAC[:]).String(), remotePeer.String(), describeEthernetFrame(payload))
+		}
+
+		// Content-based dedup ONLY for broadcast/multicast frames:
+		// when the same L2 broadcast/multicast payload arrives via multiple peer streams or
+		// redundant paths, only the first copy is written to TAP.
+		// Unicast frames are handled by per-peer SeqID sliding window deduplication above.
+		if isBroadcastOrMulticastMAC(dstMAC) {
+			contentHash := fnvHash64(payload)
+			if n.bcastDedup.isDuplicate(remotePeer, contentHash) {
+				n.Collector.RecordDedup()
+				log.Debug("Content-dup broadcast frame hash=0x%x from peer %s dropped", contentHash, remotePeer.String())
+				return
+			}
+		}
+
+	} else {
+		log.Debug("Rx frame: seq=%d len=%d (MAC extract failed) from_peer=%s", seqID, len(payload), remotePeer.String())
+	}
+
+	// Topology throughput is TAP payload, not the padded/encrypted frame read
+	// from the stream. Recording here also counts a fragmented frame exactly
+	// once, after reassembly, decryption, deduplication, and ACL validation.
+	n.recordPeerRxBytes(remotePeer, len(payload))
+	n.Collector.RecordRecv(len(payload))
+	n.Collector.RecordPacketDir(payload, false)
+	if n.Collector != nil {
+		n.Collector.CaptureFrameWithPeers(observer.DirRx, payload, n.peerIDString(remotePeer), "self")
+	}
+	if len(payload) >= 14 {
+		// Fix up rx frame SrcMAC: some peers (especially Windows) may send
+		// frames with an EUI-64 derived synthetic MAC in the SrcMAC field
+		// instead of their configured TapMAC.  Replace it with the real
+		// TapMAC from peer metadata so the pcap table shows a consistent,
+		// address-book MAC.
+		capturePayload := payload // avoid copying for the common case
+		if okExtract {
+			if realMAC := n.lookupPeerTapMAC(remotePeer); realMAC != nil {
+				frameSrc := net.HardwareAddr(payload[6:12])
+				if frameSrc.String() != realMAC.String() {
+					capturePayload = make([]byte, len(payload))
+					copy(capturePayload, payload)
+					copy(capturePayload[6:12], realMAC)
 				}
 			}
-			if recordGateway && n.Collector != nil {
-				n.Collector.RecordGatewayPacket()
+		}
+		n.Collector.RecordFrame(capturePayload)
+	}
+	n.IPTracker.ExtractAndRecord(payload, false)
+
+	// Data is actively flowing — reset ping-pong fail count for this peer.
+	// Prevents spurious reconnects when yamux flow control delays echo streams
+	// but the application-level connection is healthy.
+	n.resetPingPongFailCountForPeer(remotePeer)
+
+	if n.Interceptor != nil && n.Interceptor.MatchAndHandle(payload, tapInjectionWriter{node: n}) {
+		log.Debug("Frame intercepted by userspace WebUI interceptor from peer %s", remotePeer.String())
+		return
+	}
+
+	// L2 MAC fixup for frames about to be written into the local TAP device
+	// (destined-for-us Dst MAC rewrite, and Exit-Node transit rewrite). Shared
+	// with the relay-receive path via rewriteRxDstMAC so the two write-back
+	// paths stay identical (see that function for the full rationale).
+	n.rewriteRxDstMAC(payload)
+
+	// End-to-end TAP-probe capture. The peer's ICMP echo reply (which left
+	// the peer's real TAP, traversed the overlay, and is about to be injected
+	// into OUR real TAP) is captured here on the inbound path. We cannot rely
+	// on it looping back through the TAP read fd — a TUN/TAP device does not
+	// re-deliver written frames to its own read side — so the capture must
+	// happen here to make ProbeTapForward a genuine both-directions TAP-path
+	// test. The OS also receives the reply (a harmless stray, since no local
+	// socket originated the request).
+	n.maybeDeliverProbeReply(payload)
+	n.observeTapICMPEchoReply(remotePeer, payload, time.Now())
+
+	// Peer-side probe ack. Probe frames remain synchronous so the ack still
+	// means the native TAP write has completed, while ordinary bulk traffic
+	// is handed to the dedicated writer below.
+	tapProbeFrame := false
+	if pid, tok, ok := n.isTapProbeRequest(payload); ok {
+		tapProbeFrame = true
+		dstIP := net.IP(payload[14+16 : 14+20])
+		ackFlag := tapProbeAckFlagIPMismatch
+		if n.localV4IP != nil && dstIP.Equal(n.localV4IP) {
+			ackFlag = tapProbeAckFlagIPMatched
+		}
+		// Queue synchronously before the TAP write; the old goroutine could
+		// race the success drain and leave a stale ack for a later frame.
+		n.sendTapProbeAckAfterTAP(pid, tok, ackFlag)
+	}
+
+	if n.TAP == nil {
+		log.Warn("TAP device is nil, cannot write frame")
+		if tapProbeFrame {
+			n.takeDeferredProbeAcks()
+		}
+		return
+	}
+
+	recordGateway := false
+	if cfg := n.config(); cfg != nil && cfg.ExitNode.Enable && !n.isExitNodeActive() && len(payload) >= 6 && payload[0]&1 == 0 {
+		recordGateway = true
+	}
+
+	if !tapProbeFrame {
+		if err := n.enqueueTapWrite(payload, recordGateway, ""); err != nil {
+			log.Warn("TAP write enqueue/fallback error: %v", err)
+		}
+		return
+	}
+
+	// Diagnostic probe: preserve synchronous completion semantics.
+	if log.IsDebug() {
+		log.Debug("TAP write: seq=%d len=%d dstMAC=%s to %s", seqID, len(payload), net.HardwareAddr(payload[0:6]).String(), n.TAP.Name())
+	}
+	wn, werr := n.tapWrite(payload)
+	if werr != nil {
+		log.Warn("TAP write error: %v", werr)
+		n.takeDeferredProbeAcks()
+	} else {
+		log.Debug("TAP write ok: %d bytes to %s", wn, n.TAP.Name())
+		if deferred := n.takeDeferredProbeAcks(); len(deferred) > 0 {
+			for _, d := range deferred {
+				go n.sendTapProbeAck(d.prober, d.token, d.flag)
 			}
+		}
+		if recordGateway && n.Collector != nil {
+			n.Collector.RecordGatewayPacket()
 		}
 	}
 }
@@ -1094,321 +1106,335 @@ func (n *Node) handleRelayStream(s network.Stream) {
 		if n.protoTracker != nil {
 			n.protoTracker.RelayData.RecordRx(1, uint64(readN))
 		}
-		data := buf[:readN]
+		n.handleRelayFrame(remotePeer, buf[:readN], &relayDecScratch)
+	}
+}
 
-		// HOP-BY-HOP envelope decryption. The origin sealed the outer relay
-		// frame with the cipher negotiated for THIS hop, so the relay decrypts
-		// with the cipher for its immediate neighbor (remotePeer) — the same
-		// shared ECDH key. If a cipher is negotiated but AEAD-open fails the
-		// envelope is genuine ciphertext we cannot open: DROP it (garbage==true)
-		// rather than letting it reach UnpackRelayFrame as garbage.
-		if rdec, rdecOK, rgarbage := n.decryptPeerFrame(relayDecScratch, data, remotePeer); rgarbage {
-			log.Debug("Rx: dropping undecryptable relay envelope from %s", remotePeer.String())
-			n.relayDiag.hopGarbage()
-			n.recordPeerRxDecrypt(remotePeer, false)
-			n.maybeResyncOnDecryptFail(remotePeer)
-			continue
-		} else if rdecOK {
-			data = rdec
-			relayDecScratch = rdec
-		}
+// handleRelayFrame processes one inbound overlay-relay frame: hop-by-hop
+// envelope decrypt, unwrap the carrying obfuscate frame, fragment reassembly,
+// envelope unpack, origin verification, then deliver or forward. Shared by the
+// legacy per-peer relay stream (handleRelayStream) and the unified mux data
+// channel (handleDataMuxRelay) so the two RX paths cannot drift.
+//
+// data may be mutated in place and must belong exclusively to the calling
+// goroutine: for handleRelayStream it is the per-stream read buffer, for the mux
+// path it is a private per-frame copy.
+//
+// relayDecScratch is the caller's reusable decrypt scratch, rebased on each call
+// so steady-state frames allocate nothing. It must not escape the call.
+func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch *[]byte) {
+	// HOP-BY-HOP envelope decryption. The origin sealed the outer relay
+	// frame with the cipher negotiated for THIS hop, so the relay decrypts
+	// with the cipher for its immediate neighbor (remotePeer) — the same
+	// shared ECDH key. If a cipher is negotiated but AEAD-open fails the
+	// envelope is genuine ciphertext we cannot open: DROP it (garbage==true)
+	// rather than letting it reach UnpackRelayFrame as garbage.
+	if rdec, rdecOK, rgarbage := n.decryptPeerFrame(*relayDecScratch, data, remotePeer); rgarbage {
+		log.Debug("Rx: dropping undecryptable relay envelope from %s", remotePeer.String())
+		n.relayDiag.hopGarbage()
+		n.recordPeerRxDecrypt(remotePeer, false)
+		n.maybeResyncOnDecryptFail(remotePeer)
+		return
+	} else if rdecOK {
+		data = rdec
+		*relayDecScratch = rdec
+	}
 
-		// ── Unwrap the obfuscate frame that CARRIES the relay envelope ──
-		// The origin wraps every relay envelope in a p2ptap obfuscate frame (see
-		// sealRelayEnvelopeForHop) so the envelope can be sealed hop-by-hop, and
-		// the send path may additionally have fragmented that frame. Both layers
-		// are peeled here to recover the bare envelope for UnpackRelayFrame.
-		//
-		// Two bugs are fixed relative to the previous version:
-		//   1. It parsed the relay header from `data` (the still-wrapped frame)
-		//      instead of the unpacked payload, so a correctly wrapped envelope
-		//      could never be decoded.
-		//   2. It did `continue` on ANY Unpack error, silently discarding every
-		//      bare envelope. We now fall through and let UnpackRelayFrame try,
-		//      which keeps interop with peers running an older build.
-		envelope := data
-		if outerSeq, outer, uerr := obfuscate.Unpack(data); uerr == nil {
-			if n.fragRX != nil && isFragPayload(outer) {
-				finalPacked, complete := n.fragRX.reassemble(remotePeer, outer, reasmChannelRelay, obfuscate.ConnEpochFromSeq(outerSeq))
-				if !complete {
-					continue // more fragments pending
-				}
-				// ── DECRYPT the reassembled inner frame BEFORE unpacking ──
-				// Same scratch reuse: the outer fragment envelope is dead —
-				// reassemble() copied every chunk it keeps.
-				rfdec, rfdecOK, rfgarbage := n.decryptPeerFrame(relayDecScratch, finalPacked, remotePeer)
-				if rfgarbage {
-					log.Debug("Rx: dropping undecryptable reassembled relay envelope from %s", remotePeer.String())
-					n.recordPeerRxDecrypt(remotePeer, false)
-					n.maybeResyncOnDecryptFail(remotePeer)
-					continue
-				}
-				if rfdecOK {
-					finalPacked = rfdec
-					relayDecScratch = rfdec
-				}
-				if _, reassembled, rerr := obfuscate.Unpack(finalPacked); rerr == nil {
-					envelope = reassembled
-				} else {
-					envelope = finalPacked
-				}
+	// ── Unwrap the obfuscate frame that CARRIES the relay envelope ──
+	// The origin wraps every relay envelope in a p2ptap obfuscate frame (see
+	// sealRelayEnvelopeForHop) so the envelope can be sealed hop-by-hop, and
+	// the send path may additionally have fragmented that frame. Both layers
+	// are peeled here to recover the bare envelope for UnpackRelayFrame.
+	//
+	// Two bugs are fixed relative to the previous version:
+	//   1. It parsed the relay header from `data` (the still-wrapped frame)
+	//      instead of the unpacked payload, so a correctly wrapped envelope
+	//      could never be decoded.
+	//   2. It did `return` on ANY Unpack error, silently discarding every
+	//      bare envelope. We now fall through and let UnpackRelayFrame try,
+	//      which keeps interop with peers running an older build.
+	envelope := data
+	if outerSeq, outer, uerr := obfuscate.Unpack(data); uerr == nil {
+		if n.fragRX != nil && isFragPayload(outer) {
+			finalPacked, complete := n.fragRX.reassemble(remotePeer, outer, reasmChannelRelay, obfuscate.ConnEpochFromSeq(outerSeq))
+			if !complete {
+				return // more fragments pending
+			}
+			// ── DECRYPT the reassembled inner frame BEFORE unpacking ──
+			// Same scratch reuse: the outer fragment envelope is dead —
+			// reassemble() copied every chunk it keeps.
+			rfdec, rfdecOK, rfgarbage := n.decryptPeerFrame(*relayDecScratch, finalPacked, remotePeer)
+			if rfgarbage {
+				log.Debug("Rx: dropping undecryptable reassembled relay envelope from %s", remotePeer.String())
+				n.recordPeerRxDecrypt(remotePeer, false)
+				n.maybeResyncOnDecryptFail(remotePeer)
+				return
+			}
+			if rfdecOK {
+				finalPacked = rfdec
+				*relayDecScratch = rfdec
+			}
+			if _, reassembled, rerr := obfuscate.Unpack(finalPacked); rerr == nil {
+				envelope = reassembled
 			} else {
-				envelope = outer
+				envelope = finalPacked
 			}
 		} else {
-			log.Debug("Relay frame from %s is not obfuscate-wrapped (%v); parsing it as a bare relay envelope",
-				remotePeer.String(), uerr)
+			envelope = outer
 		}
-
-		finalDst, srcPeer, ttl, innerPayload, err := routing.UnpackRelayFrame(envelope)
-		if err != nil {
-			log.Debug("Relay stream unpack error from %s: %v", remotePeer.String(), err)
-			n.relayDiag.envBad()
-			continue
-		}
-		n.relayDiag.recv()
-		// First-hop origin verification. Every envelope carries two claims: who
-		// sent it (the transport peer, authenticated by libp2p) and who
-		// originated it (srcPeer, attacker-writable). Only the first is ever
-		// authenticated, so what follows is a set of path-shape consistency
-		// checks, not an identity proof.
-		//
-		//  1. Claimed origin == transport peer at full TTL: a definitive first
-		//     hop. The sender is authenticated and the path length matches the
-		//     claim.
-		//
-		//  2. Claimed origin != transport peer: a relay hop, so it must have
-		//     been decremented at least once — 1 <= ttl < MaxRelayTTL. This is
-		//     the ordinary shape of multi-hop traffic. In a hub-and-spoke mesh
-		//     a destination spoke's very first view of a peer is through the hub,
-		//     already one hop down, so demanding full TTL here breaks every such
-		//     path.
-		//
-		//  3. Anything else — ttl == MaxRelayTTL carried by someone other than
-		//     the claimed origin — advertises a zero-hop path that does not
-		//     exist. Drop. This is the pre-ROUND 8 check
-		//     (ttl == MaxRelayTTL && srcPeer != remotePeer).
-		//
-		// ROUND 8 FIX: TTL-downgrade bypass. Rule 3 alone was bypassed by
-		// setting ttl = MaxRelayTTL - 1 while re-claiming an already-known
-		// origin from a different carrier. seenOrigins closes that half: once an
-		// origin has been observed, later sightings must come from the origin
-		// itself or from the peer that first introduced it. This is the only
-		// half that is decidable — the two claims are indistinguishable at the
-		// first sighting, so the first sighting is shape-checked, not
-		// authenticated, and the re-attribution is where the gate bites.
-		if srcPeer != "" {
-			srcStr := srcPeer.String()
-			remoteStr := remotePeer.String()
-			if val, known := n.seenOrigins.Load(srcStr); known {
-				entry := val.(seenOriginEntry)
-				// Known origin: the frame must come from the origin itself
-				// or from the peer that first introduced it.
-				//
-				// entry.source is deliberately never updated here: re-pointing it
-				// to the origin on a direct frame would revoke the first carrier
-				// and blackhole every carrier-carried frame for that origin until
-				// the reaper evicts the entry (up to 5 minutes). The gate below
-				// already admits frames from the origin itself.
-				if remoteStr != srcStr && remoteStr != entry.source {
-					log.Debug("Relay frame from %s claims known srcPeer %s (source=%s) but is not origin or source; dropping",
-						remotePeer.String(), srcStr, entry.source)
-					n.relayDiag.envBad()
-					continue
-				}
-				entry.firstSeen = time.Now()
-				n.seenOrigins.Store(srcStr, entry)
-			} else if srcPeer == remotePeer && ttl == routing.MaxRelayTTL {
-				// Direct origin at full TTL.
-				n.seenOrigins.Store(srcStr, seenOriginEntry{firstSeen: time.Now(), source: remoteStr})
-			} else if ttl >= 1 && ttl < routing.MaxRelayTTL {
-				// First sighting carried by a relay: legitimate multi-hop, with
-				// at least one decrement already applied by an upstream hop.
-				n.seenOrigins.Store(srcStr, seenOriginEntry{firstSeen: time.Now(), source: remoteStr})
-			} else {
-				// Full TTL claimed over a path that is not the claimed origin.
-				log.Debug("Relay frame from %s claims unseen srcPeer %s with ttl=%d; dropping",
-					remotePeer.String(), srcStr, ttl)
-				n.relayDiag.envBad()
-				continue
-			}
-		}
-		// Return-path liveness signal: we just received a frame ORIGINATING at
-		// srcPeer (even if we are merely forwarding it), so its return path to
-		// us is currently alive. Recorded for the ping-pong probe's outbound-vs-
-		// return distinction in an asymmetric-routing mesh. The frame reached us
-		// over the overlay envelope carried by remotePeer, so annotate that hop —
-		// srcPeer may well have its own live direct connection to us unused.
-		n.notePeerRxTransport(srcPeer, "overlay-relay", remotePeer)
-		// relayHopRx: the hop (remotePeer) itself just carried a frame to us. A
-		// pure-forwarding hop is never srcPeer, so this is the only signal that
-		// advances for it — relayStreamPool anchors its failure-streak clear on
-		// this so a healthy-but-silent forwarder is not mis-blacklisted.
-		if remotePeer != "" && remotePeer != srcPeer {
-			n.noteRelayHopRx(remotePeer)
-			n.recordPeekMapOrigin(srcPeer, remotePeer, 1, false)
-		} else if remotePeer != "" {
-			// Final hop where the carrier IS the origin: still counts as the hop
-			// delivering to us.
-			n.noteRelayHopRx(remotePeer)
-		}
-		if finalDst == n.Host.ID() {
-			// Destination reached: the INNER payload is END-TO-END encrypted for
-			// us (finalDst) by the origin (srcPeer), so decrypt it with the cipher
-			// negotiated for srcPeer — NOT remotePeer (the relay hop).
-			if cipher := n.obfDecryptCipherForPeer(srcPeer); cipher != nil {
-				dec, derr := obfuscate.DecryptPayloadRegion(innerPayload, cipher)
-				if derr != nil {
-					log.Debug("Relayed frame decrypt error from origin %s (via %s): %v",
-						srcPeer.String(), remotePeer.String(), derr)
-					n.relayDiag.finalDecFail()
-					n.recordPeerRxDecrypt(srcPeer, false)
-					// Self-heal parity with the direct-RX path: a persistent
-					// inner-open failure here means srcPeer↔us keys diverged
-					// (e.g. one side restarted). Without the throttled resync
-					// nudge, relay-only peers had to wait for the reconciler's
-					// next full round — minutes of one-way blackhole that
-					// looked exactly like "connects but no data".
-					n.maybeResyncOnDecryptFail(srcPeer)
-					continue
-				}
-				n.recordPeerRxDecrypt(srcPeer, true)
-				n.maybeMarkReadyOnDecrypt(srcPeer, true)
-				innerPayload = dec
-			}
-
-			// Unpack the (now decrypted) obfuscated frame back to raw Ethernet for TAP delivery.
-			seqID, unpacked, uerr := obfuscate.Unpack(innerPayload)
-			if uerr != nil {
-				// The end-to-end decrypted inner payload did not yield a valid
-				// obfuscate frame. This happens when the origin sent a malformed
-				// frame or the shared (srcPeer ↔ us) cipher drifted. The payload is
-				// either still-encrypted ciphertext or garbage — writing it into the
-				// kernel TAP would inject corrupt packets onto the local LAN, so DROP
-				// it. (Previously this fell through and wrote `innerPayload` raw.)
-				log.Debug("Relay Unpack: err=%v, dropping undecodable inner payload len=%d from origin=%s (via %s)",
-					uerr, len(innerPayload), srcPeer.String(), remotePeer.String())
-				n.relayDiag.finalUnpack()
-				n.recordPeerRxDecrypt(srcPeer, false)
-				continue
-			}
-			log.Debug("Relay Unpack: seq=%d payloadLen=%d innerLen=%d ttl=%d from=%s",
-				seqID, len(unpacked), len(innerPayload), ttl, remotePeer.String())
-			// Deliver through the shared relayed-frame TAP path (also used by the
-			// boot-relay / relay-over-backbone downlink). Keyed on the TRUE origin
-			// (srcPeer); remotePeer is the transport (via) peer.
-			n.deliverRelayedFrameToTAP(unpacked, srcPeer, remotePeer, seqID)
-			continue
-		}
-
-		// Destination is another peer: forward frame if TTL > 1.
-		// ACL check: the relay node evaluates the ACL on the (srcPeer → finalDst)
-		// pair before forwarding, so a peer blocked from reaching a target by
-		// local ACL cannot use a third-party relay as a bypass.
-		if ttl > 1 {
-			if !n.checkRelayTransitACL(srcPeer, finalDst) {
-				log.Debug("Relay forward denied by ACL: %s → %s (via %s, ttl=%d)",
-					srcPeer.String(), finalDst.String(), remotePeer.String(), ttl)
-				continue
-			}
-			nextHop := finalDst
-			if route, ok := n.overlayRoute(finalDst, int(ttl)-1, remotePeer); ok {
-				nextHop = route.NextHop
-			} else if !n.routeHopUsable(finalDst, finalDst) {
-				n.relayDiag.loopGuard()
-				continue
-			}
-			// Loop guard: never hand the frame straight back to the peer that
-			// just delivered it. That would form a 2-node relay cycle (bounded
-			// only by TTL) that wastes bandwidth and delays delivery; if the
-			// only route we know loops back to the sender, drop the frame and
-			// let the source retransmit over a better path. A legitimate
-			// single-hop delivery resolves to nextHop == finalDst (never the
-			// sender), so this guard cannot suppress a correct forward.
-			if nextHop == remotePeer {
-				log.Debug("Relay forward to %s looped back to sender %s; dropping (ttl=%d)", finalDst.String(), remotePeer.String(), ttl)
-				n.relayDiag.loopGuard()
-				continue
-			}
-
-			// NOTE: a previous version short-circuited here when nextHop was
-			// directly connected, handing innerPayload straight to
-			// Dispatcher.SendToPeer(finalDst, ...). That path was doubly broken
-			// and silently corrupted every frame it touched:
-			//
-			//  1. WRONG KEY OWNERSHIP. innerPayload is END-TO-END sealed with the
-			//     cipher of the pair (srcPeer ↔ finalDst). Delivering it over our
-			//     own direct stream makes finalDst's RX path treat US as the
-			//     sender, so it opens the frame with the (us ↔ finalDst) cipher —
-			//     a key that cannot possibly open it. Only the relay envelope
-			//     carries srcPeer, which is exactly what finalDst needs to pick
-			//     the right key (see the finalDst == n.Host.ID() branch above).
-			//  2. DOUBLE ENCRYPTION. SendToPeer seals whatever it is given with
-			//     the target's cipher, so the already-sealed inner frame got a
-			//     second AEAD layer. finalDst peels exactly one, leaving
-			//     ciphertext in the payload region; Unpack still succeeds (magic
-			//     and length live in the cleartext header), so the garbage was
-			//     written to the TAP device as if it were a valid Ethernet frame.
-			//     No error was logged anywhere — the classic "link looks healthy
-			//     but ping never replies" failure.
-			//
-			// Keeping the envelope is also not a performance loss: when
-			// nextHop == finalDst the envelope is delivered in a single hop and
-			// unwrapped by handleRelayStream on arrival.
-			repacked, err := routing.PackRelayFrame(finalDst, srcPeer, ttl-1, innerPayload)
-			if err == nil {
-				// HOP-BY-HOP re-encryption: seal the forwarded envelope for the
-				// NEXT hop, mirroring what the origin did for the first hop. The
-				// relay never touches the inner frame (it stays end-to-end
-				// encrypted for finalDst), only the outer envelope, so each hop
-				// opens exactly the envelope addressed to it.
-				//
-				// This MUST go through sealRelayEnvelopeForHop: a bare relay
-				// envelope is NOT an obfuscate frame, so calling
-				// EncryptPayloadRegion on it directly (as this code used to)
-				// reads the PayloadLen field out of the middle of the base58
-				// destination PeerID and fails with ErrFrameCorrupted every
-				// single time. The old `if eerr == nil` guard then swallowed that
-				// error and forwarded the envelope in PLAINTEXT, which the hop
-				// dropped at its AEAD gate. sealRelayEnvelopeForHop packs the
-				// envelope into a real obfuscate frame first, and is shared with
-				// the two origin-side call sites so the three paths cannot drift.
-				sealed, serr := n.sealRelayEnvelopeForHop(nextHop, repacked)
-				if serr != nil {
-					log.Warn("Relay forward to %s via %s aborted: %v",
-						finalDst.String(), nextHop.String(), serr)
-					n.relayDiag.sealFail()
-					continue
-				}
-				// Use persistent relay pool instead of per-frame NewStream.
-				// onSent=nil: forwarding does not double-count RecordSent (origin already counted).
-				// onFail: silently drop; source will retransmit.
-				if !n.relayPool.Submit(nextHop, sealed,
-					nil, // onSent — no double-counting
-					func() {
-						log.Debug("Relay forward to %s via %s permanently failed",
-							finalDst.String(), nextHop.String())
-					},
-				) {
-					n.relayDiag.fwdPoolFull()
-				}
-			} else {
-				log.Warn("Relay forward repack failed for dst %s src %s: %v",
-					finalDst.String(), srcPeer.String(), err)
-			}
-			continue
-		}
-		// Not the destination and the TTL budget is spent: the envelope dies
-		// here. This is the ONLY thing that terminates an overlay-relay cycle
-		// (a stale route table pointing hops at each other), so the drop has to
-		// be observable. When this count sat in the PackRelayFrame error branch
-		// below it was unreachable — PackRelayFrame only errors on an absurdly
-		// long peer-ID string — so a live cycle left every diag counter at zero
-		// and showed up nowhere in /api/relay/diag or the periodic drop summary.
-		n.relayDiag.ttlExpired()
-		log.Debug("Relay envelope expired at a non-destination hop: src=%s dst=%s via=%s ttl=%d; dropping",
-			srcPeer.String(), finalDst.String(), remotePeer.String(), ttl)
+	} else {
+		log.Debug("Relay frame from %s is not obfuscate-wrapped (%v); parsing it as a bare relay envelope",
+			remotePeer.String(), uerr)
 	}
+
+	finalDst, srcPeer, ttl, innerPayload, err := routing.UnpackRelayFrame(envelope)
+	if err != nil {
+		log.Debug("Relay stream unpack error from %s: %v", remotePeer.String(), err)
+		n.relayDiag.envBad()
+		return
+	}
+	n.relayDiag.recv()
+	// First-hop origin verification. Every envelope carries two claims: who
+	// sent it (the transport peer, authenticated by libp2p) and who
+	// originated it (srcPeer, attacker-writable). Only the first is ever
+	// authenticated, so what follows is a set of path-shape consistency
+	// checks, not an identity proof.
+	//
+	//  1. Claimed origin == transport peer at full TTL: a definitive first
+	//     hop. The sender is authenticated and the path length matches the
+	//     claim.
+	//
+	//  2. Claimed origin != transport peer: a relay hop, so it must have
+	//     been decremented at least once — 1 <= ttl < MaxRelayTTL. This is
+	//     the ordinary shape of multi-hop traffic. In a hub-and-spoke mesh
+	//     a destination spoke's very first view of a peer is through the hub,
+	//     already one hop down, so demanding full TTL here breaks every such
+	//     path.
+	//
+	//  3. Anything else — ttl == MaxRelayTTL carried by someone other than
+	//     the claimed origin — advertises a zero-hop path that does not
+	//     exist. Drop. This is the pre-ROUND 8 check
+	//     (ttl == MaxRelayTTL && srcPeer != remotePeer).
+	//
+	// ROUND 8 FIX: TTL-downgrade bypass. Rule 3 alone was bypassed by
+	// setting ttl = MaxRelayTTL - 1 while re-claiming an already-known
+	// origin from a different carrier. seenOrigins closes that half: once an
+	// origin has been observed, later sightings must come from the origin
+	// itself or from the peer that first introduced it. This is the only
+	// half that is decidable — the two claims are indistinguishable at the
+	// first sighting, so the first sighting is shape-checked, not
+	// authenticated, and the re-attribution is where the gate bites.
+	if srcPeer != "" {
+		srcStr := srcPeer.String()
+		remoteStr := remotePeer.String()
+		if val, known := n.seenOrigins.Load(srcStr); known {
+			entry := val.(seenOriginEntry)
+			// Known origin: the frame must come from the origin itself
+			// or from the peer that first introduced it.
+			//
+			// entry.source is deliberately never updated here: re-pointing it
+			// to the origin on a direct frame would revoke the first carrier
+			// and blackhole every carrier-carried frame for that origin until
+			// the reaper evicts the entry (up to 5 minutes). The gate below
+			// already admits frames from the origin itself.
+			if remoteStr != srcStr && remoteStr != entry.source {
+				log.Debug("Relay frame from %s claims known srcPeer %s (source=%s) but is not origin or source; dropping",
+					remotePeer.String(), srcStr, entry.source)
+				n.relayDiag.envBad()
+				return
+			}
+			entry.firstSeen = time.Now()
+			n.seenOrigins.Store(srcStr, entry)
+		} else if srcPeer == remotePeer && ttl == routing.MaxRelayTTL {
+			// Direct origin at full TTL.
+			n.seenOrigins.Store(srcStr, seenOriginEntry{firstSeen: time.Now(), source: remoteStr})
+		} else if ttl >= 1 && ttl < routing.MaxRelayTTL {
+			// First sighting carried by a relay: legitimate multi-hop, with
+			// at least one decrement already applied by an upstream hop.
+			n.seenOrigins.Store(srcStr, seenOriginEntry{firstSeen: time.Now(), source: remoteStr})
+		} else {
+			// Full TTL claimed over a path that is not the claimed origin.
+			log.Debug("Relay frame from %s claims unseen srcPeer %s with ttl=%d; dropping",
+				remotePeer.String(), srcStr, ttl)
+			n.relayDiag.envBad()
+			return
+		}
+	}
+	// Return-path liveness signal: we just received a frame ORIGINATING at
+	// srcPeer (even if we are merely forwarding it), so its return path to
+	// us is currently alive. Recorded for the ping-pong probe's outbound-vs-
+	// return distinction in an asymmetric-routing mesh. The frame reached us
+	// over the overlay envelope carried by remotePeer, so annotate that hop —
+	// srcPeer may well have its own live direct connection to us unused.
+	n.notePeerRxTransport(srcPeer, "overlay-relay", remotePeer)
+	// relayHopRx: the hop (remotePeer) itself just carried a frame to us. A
+	// pure-forwarding hop is never srcPeer, so this is the only signal that
+	// advances for it — relayStreamPool anchors its failure-streak clear on
+	// this so a healthy-but-silent forwarder is not mis-blacklisted.
+	if remotePeer != "" && remotePeer != srcPeer {
+		n.noteRelayHopRx(remotePeer)
+		n.recordPeekMapOrigin(srcPeer, remotePeer, 1, false)
+	} else if remotePeer != "" {
+		// Final hop where the carrier IS the origin: still counts as the hop
+		// delivering to us.
+		n.noteRelayHopRx(remotePeer)
+	}
+	if finalDst == n.Host.ID() {
+		// Destination reached: the INNER payload is END-TO-END encrypted for
+		// us (finalDst) by the origin (srcPeer), so decrypt it with the cipher
+		// negotiated for srcPeer — NOT remotePeer (the relay hop).
+		if cipher := n.obfDecryptCipherForPeer(srcPeer); cipher != nil {
+			dec, derr := obfuscate.DecryptPayloadRegion(innerPayload, cipher)
+			if derr != nil {
+				log.Debug("Relayed frame decrypt error from origin %s (via %s): %v",
+					srcPeer.String(), remotePeer.String(), derr)
+				n.relayDiag.finalDecFail()
+				n.recordPeerRxDecrypt(srcPeer, false)
+				// Self-heal parity with the direct-RX path: a persistent
+				// inner-open failure here means srcPeer↔us keys diverged
+				// (e.g. one side restarted). Without the throttled resync
+				// nudge, relay-only peers had to wait for the reconciler's
+				// next full round — minutes of one-way blackhole that
+				// looked exactly like "connects but no data".
+				n.maybeResyncOnDecryptFail(srcPeer)
+				return
+			}
+			n.recordPeerRxDecrypt(srcPeer, true)
+			n.maybeMarkReadyOnDecrypt(srcPeer, true)
+			innerPayload = dec
+		}
+
+		// Unpack the (now decrypted) obfuscated frame back to raw Ethernet for TAP delivery.
+		seqID, unpacked, uerr := obfuscate.Unpack(innerPayload)
+		if uerr != nil {
+			// The end-to-end decrypted inner payload did not yield a valid
+			// obfuscate frame. This happens when the origin sent a malformed
+			// frame or the shared (srcPeer ↔ us) cipher drifted. The payload is
+			// either still-encrypted ciphertext or garbage — writing it into the
+			// kernel TAP would inject corrupt packets onto the local LAN, so DROP
+			// it. (Previously this fell through and wrote `innerPayload` raw.)
+			log.Debug("Relay Unpack: err=%v, dropping undecodable inner payload len=%d from origin=%s (via %s)",
+				uerr, len(innerPayload), srcPeer.String(), remotePeer.String())
+			n.relayDiag.finalUnpack()
+			n.recordPeerRxDecrypt(srcPeer, false)
+			return
+		}
+		log.Debug("Relay Unpack: seq=%d payloadLen=%d innerLen=%d ttl=%d from=%s",
+			seqID, len(unpacked), len(innerPayload), ttl, remotePeer.String())
+		// Deliver through the shared relayed-frame TAP path (also used by the
+		// boot-relay / relay-over-backbone downlink). Keyed on the TRUE origin
+		// (srcPeer); remotePeer is the transport (via) peer.
+		n.deliverRelayedFrameToTAP(unpacked, srcPeer, remotePeer, seqID)
+		return
+	}
+
+	// Destination is another peer: forward frame if TTL > 1.
+	// ACL check: the relay node evaluates the ACL on the (srcPeer → finalDst)
+	// pair before forwarding, so a peer blocked from reaching a target by
+	// local ACL cannot use a third-party relay as a bypass.
+	if ttl > 1 {
+		if !n.checkRelayTransitACL(srcPeer, finalDst) {
+			log.Debug("Relay forward denied by ACL: %s → %s (via %s, ttl=%d)",
+				srcPeer.String(), finalDst.String(), remotePeer.String(), ttl)
+			return
+		}
+		nextHop := finalDst
+		if route, ok := n.overlayRoute(finalDst, int(ttl)-1, remotePeer); ok {
+			nextHop = route.NextHop
+		} else if !n.routeHopUsable(finalDst, finalDst) {
+			n.relayDiag.loopGuard()
+			return
+		}
+		// Loop guard: never hand the frame straight back to the peer that
+		// just delivered it. That would form a 2-node relay cycle (bounded
+		// only by TTL) that wastes bandwidth and delays delivery; if the
+		// only route we know loops back to the sender, drop the frame and
+		// let the source retransmit over a better path. A legitimate
+		// single-hop delivery resolves to nextHop == finalDst (never the
+		// sender), so this guard cannot suppress a correct forward.
+		if nextHop == remotePeer {
+			log.Debug("Relay forward to %s looped back to sender %s; dropping (ttl=%d)", finalDst.String(), remotePeer.String(), ttl)
+			n.relayDiag.loopGuard()
+			return
+		}
+
+		// NOTE: a previous version short-circuited here when nextHop was
+		// directly connected, handing innerPayload straight to
+		// Dispatcher.SendToPeer(finalDst, ...). That path was doubly broken
+		// and silently corrupted every frame it touched:
+		//
+		//  1. WRONG KEY OWNERSHIP. innerPayload is END-TO-END sealed with the
+		//     cipher of the pair (srcPeer ↔ finalDst). Delivering it over our
+		//     own direct stream makes finalDst's RX path treat US as the
+		//     sender, so it opens the frame with the (us ↔ finalDst) cipher —
+		//     a key that cannot possibly open it. Only the relay envelope
+		//     carries srcPeer, which is exactly what finalDst needs to pick
+		//     the right key (see the finalDst == n.Host.ID() branch above).
+		//  2. DOUBLE ENCRYPTION. SendToPeer seals whatever it is given with
+		//     the target's cipher, so the already-sealed inner frame got a
+		//     second AEAD layer. finalDst peels exactly one, leaving
+		//     ciphertext in the payload region; Unpack still succeeds (magic
+		//     and length live in the cleartext header), so the garbage was
+		//     written to the TAP device as if it were a valid Ethernet frame.
+		//     No error was logged anywhere — the classic "link looks healthy
+		//     but ping never replies" failure.
+		//
+		// Keeping the envelope is also not a performance loss: when
+		// nextHop == finalDst the envelope is delivered in a single hop and
+		// unwrapped by handleRelayStream on arrival.
+		repacked, err := routing.PackRelayFrame(finalDst, srcPeer, ttl-1, innerPayload)
+		if err == nil {
+			// HOP-BY-HOP re-encryption: seal the forwarded envelope for the
+			// NEXT hop, mirroring what the origin did for the first hop. The
+			// relay never touches the inner frame (it stays end-to-end
+			// encrypted for finalDst), only the outer envelope, so each hop
+			// opens exactly the envelope addressed to it.
+			//
+			// This MUST go through sealRelayEnvelopeForHop: a bare relay
+			// envelope is NOT an obfuscate frame, so calling
+			// EncryptPayloadRegion on it directly (as this code used to)
+			// reads the PayloadLen field out of the middle of the base58
+			// destination PeerID and fails with ErrFrameCorrupted every
+			// single time. The old `if eerr == nil` guard then swallowed that
+			// error and forwarded the envelope in PLAINTEXT, which the hop
+			// dropped at its AEAD gate. sealRelayEnvelopeForHop packs the
+			// envelope into a real obfuscate frame first, and is shared with
+			// the two origin-side call sites so the three paths cannot drift.
+			sealed, serr := n.sealRelayEnvelopeForHop(nextHop, repacked)
+			if serr != nil {
+				log.Warn("Relay forward to %s via %s aborted: %v",
+					finalDst.String(), nextHop.String(), serr)
+				n.relayDiag.sealFail()
+				return
+			}
+			// Use persistent relay pool instead of per-frame NewStream.
+			// onSent=nil: forwarding does not double-count RecordSent (origin already counted).
+			// onFail: silently drop; source will retransmit.
+			if !n.relayPool.Submit(nextHop, sealed,
+				nil, // onSent — no double-counting
+				func() {
+					log.Debug("Relay forward to %s via %s permanently failed",
+						finalDst.String(), nextHop.String())
+				},
+			) {
+				n.relayDiag.fwdPoolFull()
+			}
+		} else {
+			log.Warn("Relay forward repack failed for dst %s src %s: %v",
+				finalDst.String(), srcPeer.String(), err)
+		}
+		return
+	}
+	// Not the destination and the TTL budget is spent: the envelope dies
+	// here. This is the ONLY thing that terminates an overlay-relay cycle
+	// (a stale route table pointing hops at each other), so the drop has to
+	// be observable. When this count sat in the PackRelayFrame error branch
+	// below it was unreachable — PackRelayFrame only errors on an absurdly
+	// long peer-ID string — so a live cycle left every diag counter at zero
+	// and showed up nowhere in /api/relay/diag or the periodic drop summary.
+	n.relayDiag.ttlExpired()
+	log.Debug("Relay envelope expired at a non-destination hop: src=%s dst=%s via=%s ttl=%d; dropping",
+		srcPeer.String(), finalDst.String(), remotePeer.String(), ttl)
 }
 
 // EchoProtocolID is a dedicated stream protocol for real end-to-end P2P echo testing.

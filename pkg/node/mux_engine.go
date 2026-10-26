@@ -325,6 +325,20 @@ func (e *muxEngine) handleDataStream(s network.Stream) {
 			log.Error("mux handleDataStream panic (from %s): %v", from.ShortString(), r)
 		}
 	}()
+	// Reset on node shutdown, matching handleStream/handleRelayStream. An idle
+	// data channel (peer connected but sending nothing) would otherwise pin this
+	// goroutine and its 65 KiB read buffer for the node's entire lifetime.
+	if n := e.node; n.ctx != nil {
+		streamDone := make(chan struct{})
+		defer close(streamDone)
+		go func() {
+			select {
+			case <-n.ctx.Done():
+				_ = s.Reset()
+			case <-streamDone:
+			}
+		}()
+	}
 	buf := make([]byte, maxFrameLen+mux.DataHeaderLen)
 
 	for {
@@ -340,6 +354,9 @@ func (e *muxEngine) handleDataStream(s network.Stream) {
 		case mux.KindRelay:
 			p := append([]byte(nil), payload...)
 			go e.node.handleDataMuxRelay(s, from, p)
+		case mux.KindBootRelay:
+			p := append([]byte(nil), payload...)
+			go e.node.handleDataMuxBootRelay(s, from, p)
 		default:
 			log.Warn("mux data: unknown kind %d from %s", kind, from.ShortString())
 		}

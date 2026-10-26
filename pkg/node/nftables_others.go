@@ -70,6 +70,16 @@ func (m *NFTManager) CleanupExitNodeNAT() error {
 	return nil
 }
 
+// CleanupSubnetRouterNAT is a no-op on non-Linux platforms.
+func (m *NFTManager) CleanupSubnetRouterNAT() error {
+	return nil
+}
+
+// CleanupAllNAT tears down both NAT rulesets; a no-op on non-Linux platforms.
+func (m *NFTManager) CleanupAllNAT() error {
+	return nil
+}
+
 func osWriteFile(path string, data []byte, perm os.FileMode) error {
 	f, err := os.OpenFile(path, os.O_WRONLY, perm)
 	if err != nil {

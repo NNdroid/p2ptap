@@ -409,76 +409,88 @@ func (n *Node) handleBootRelayDownlink(s network.Stream, boot peer.ID) {
 		if err != nil || readN == 0 {
 			return
 		}
-		// Boot-relay downlink bytes count toward the BootRelay channel (folded
-		// into the unified Datapath card's "Relayed" split).
-		if n.protoTracker != nil {
-			n.protoTracker.BootRelay.RecordRx(1, uint64(readN))
-		}
-		data := buf[:readN]
-		netID, kind, proto, finalDst, srcPeer, _, innerPayload, uerr := routing.UnpackBootRelayFrame(data)
-		if uerr != nil {
-			hexLen := len(data)
-			if hexLen > 32 {
-				hexLen = 32
-			}
-			log.Warn("[boot-relay] downlink unpack error from %s (local commit=%s): %v, raw_hex=%x", boot.String(), version.ShortCommit(), uerr, data[:hexLen])
-			continue
-
-		}
-		if finalDst != n.Host.ID() {
-			// The boot only sends us frames destined for us; a misrouted frame
-			// is harmless to ignore.
-			continue
-		}
-		// Defense in depth: the boot already enforces that a local delivery's
-		// netID equals the receiver's network, but re-verify here so a frame that
-		// slipped through (e.g. a misconfigured/permissive boot) cannot inject
-		// traffic tagged for a different PSK network into this node. Data AND
-		// control frames are both gated; a control handshake is exactly what an
-		// attacker would forge to establish a bogus cipher.
-		if netID != n.bootRelayNetID {
-			log.Debug("[boot-relay] downlink drop netID mismatch from %s (frame net=%s, local net=%s)",
-				boot.ShortString(), netID, n.bootRelayNetID)
-			continue
-		}
-
-		// Control-plane frames (SeqSync / LSA / Meta / Echo for a relay-only
-		// peer) carry the raw inner protocol bytes and must NOT be decrypted with
-		// a per-peer cipher — that cipher is exactly what the handshake is trying
-		// to establish, so it does not exist yet. They are multiplexed onto the
-		// same boot-relay uplink as data frames and dispatched to the matching
-		// local control handler with the logical peer set to srcPeer.
-		if kind == routing.BootRelayKindControl {
-			n.deliverBootRelayControl(finalDst, srcPeer, proto, boot, innerPayload)
-			continue
-		}
-		// Decrypt the inner payload with the cipher negotiated for srcPeer.
-		if cipher := n.obfDecryptCipherForPeer(srcPeer); cipher != nil {
-			dec, derr := obfuscate.DecryptPayloadRegion(innerPayload, cipher)
-			if derr != nil {
-				log.Debug("[boot-relay] downlink decrypt error from origin %s (via %s): %v",
-					srcPeer.String(), boot.String(), derr)
-				n.recordPeerRxDecrypt(srcPeer, false)
-				continue
-			}
-			innerPayload = dec
-		}
-		seqID, unpacked, uerr := obfuscate.Unpack(innerPayload)
-		if uerr != nil {
-			log.Debug("[boot-relay] downlink Unpack err=%v from origin=%s; dropping", uerr, srcPeer.String())
-			continue
-		}
-		// Return-path liveness and provenance tracking: only record after
-		// successful decryption and unpack, so a malformed or undecryptable
-		// frame cannot keep a stale peer connection alive. The frame travelled
-		// relay-over-backbone through boot, so that boot is the hop the return
-		// side actually used.
-		n.notePeerRxTransport(srcPeer, "overlay-relay", boot)
-		if boot != "" && boot != srcPeer {
-			n.recordPeekMapOrigin(srcPeer, boot, 1, false)
-		}
-		n.deliverRelayedFrameToTAP(unpacked, srcPeer, boot, seqID)
+		n.handleBootRelayFrame(boot, buf[:readN])
 	}
+}
+
+// handleBootRelayFrame processes one boot-relay downlink frame: unpack the
+// envelope, verify the destination and network, then either dispatch a
+// control-plane frame or decrypt + unpack the end-to-end TAP payload and write
+// it to the local TAP. Shared by the dedicated boot-relay uplink
+// (handleBootRelayDownlink) and the unified mux data channel
+// (handleDataMuxBootRelay) so the two RX paths cannot drift.
+//
+// data must belong exclusively to the calling goroutine: for the uplink it is
+// the per-stream read buffer, for the mux path it is a private per-frame copy.
+func (n *Node) handleBootRelayFrame(boot peer.ID, data []byte) {
+	// Boot-relay downlink bytes count toward the BootRelay channel (folded
+	// into the unified Datapath card's "Relayed" split).
+	if n.protoTracker != nil {
+		n.protoTracker.BootRelay.RecordRx(1, uint64(len(data)))
+	}
+	netID, kind, proto, finalDst, srcPeer, _, innerPayload, uerr := routing.UnpackBootRelayFrame(data)
+	if uerr != nil {
+		hexLen := len(data)
+		if hexLen > 32 {
+			hexLen = 32
+		}
+		log.Warn("[boot-relay] downlink unpack error from %s (local commit=%s): %v, raw_hex=%x", boot.String(), version.ShortCommit(), uerr, data[:hexLen])
+		return
+
+	}
+	if finalDst != n.Host.ID() {
+		// The boot only sends us frames destined for us; a misrouted frame
+		// is harmless to ignore.
+		return
+	}
+	// Defense in depth: the boot already enforces that a local delivery's
+	// netID equals the receiver's network, but re-verify here so a frame that
+	// slipped through (e.g. a misconfigured/permissive boot) cannot inject
+	// traffic tagged for a different PSK network into this node. Data AND
+	// control frames are both gated; a control handshake is exactly what an
+	// attacker would forge to establish a bogus cipher.
+	if netID != n.bootRelayNetID {
+		log.Debug("[boot-relay] downlink drop netID mismatch from %s (frame net=%s, local net=%s)",
+			boot.ShortString(), netID, n.bootRelayNetID)
+		return
+	}
+
+	// Control-plane frames (SeqSync / LSA / Meta / Echo for a relay-only
+	// peer) carry the raw inner protocol bytes and must NOT be decrypted with
+	// a per-peer cipher — that cipher is exactly what the handshake is trying
+	// to establish, so it does not exist yet. They are multiplexed onto the
+	// same boot-relay uplink as data frames and dispatched to the matching
+	// local control handler with the logical peer set to srcPeer.
+	if kind == routing.BootRelayKindControl {
+		n.deliverBootRelayControl(finalDst, srcPeer, proto, boot, innerPayload)
+		return
+	}
+	// Decrypt the inner payload with the cipher negotiated for srcPeer.
+	if cipher := n.obfDecryptCipherForPeer(srcPeer); cipher != nil {
+		dec, derr := obfuscate.DecryptPayloadRegion(innerPayload, cipher)
+		if derr != nil {
+			log.Debug("[boot-relay] downlink decrypt error from origin %s (via %s): %v",
+				srcPeer.String(), boot.String(), derr)
+			n.recordPeerRxDecrypt(srcPeer, false)
+			return
+		}
+		innerPayload = dec
+	}
+	seqID, unpacked, uerr := obfuscate.Unpack(innerPayload)
+	if uerr != nil {
+		log.Debug("[boot-relay] downlink Unpack err=%v from origin=%s; dropping", uerr, srcPeer.String())
+		return
+	}
+	// Return-path liveness and provenance tracking: only record after
+	// successful decryption and unpack, so a malformed or undecryptable
+	// frame cannot keep a stale peer connection alive. The frame travelled
+	// relay-over-backbone through boot, so that boot is the hop the return
+	// side actually used.
+	n.notePeerRxTransport(srcPeer, "overlay-relay", boot)
+	if boot != "" && boot != srcPeer {
+		n.recordPeekMapOrigin(srcPeer, boot, 1, false)
+	}
+	n.deliverRelayedFrameToTAP(unpacked, srcPeer, boot, seqID)
 }
 
 // sendToPeerViaBootRelay delivers packedData to a peer reachable only through a

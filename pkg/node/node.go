@@ -2043,13 +2043,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			return ips
 		},
 		OnExitNodeChanged: func() {
-			cfg := node.config()
-			node.NFTManager.UpdateConfig(&cfg.ExitNode)
-			if cfg.ExitNode.Enable {
-				_ = node.NFTManager.SetupExitNodeNAT(cfg.ExitNode.WANInterface, cfg.TapName, computeExitMSS(cfg.MTU, cfg.Obfuscation.Mode))
-			} else {
-				_ = node.NFTManager.CleanupExitNodeNAT()
-			}
+			node.applyExitNodeNAT(node.config())
 			// Exit-node state changed -> announce updated node info to the
 			// peek-map broadcast channel so every other client sees the new state.
 			go node.publishPeekMapSelf()
@@ -2827,6 +2821,45 @@ func (n *Node) SetupWebUI() error {
 	return nil
 }
 
+// applyExitNodeNAT installs or tears down the exit-node NAT ruleset from cfg.
+// Failures are logged, never swallowed: a silently-failed setup is how an exit
+// node ends up with NAT rules installed but no working forwarding, which
+// blackholes every byte of client traffic while looking perfectly healthy.
+func (n *Node) applyExitNodeNAT(cfg *config.Config) {
+	if n.NFTManager == nil || cfg == nil {
+		return
+	}
+	n.NFTManager.UpdateConfig(&cfg.ExitNode)
+	if !cfg.ExitNode.Enable {
+		if err := n.NFTManager.CleanupExitNodeNAT(); err != nil {
+			log.Warn("Exit Node NAT teardown failed: %v", err)
+		}
+		return
+	}
+	if err := n.NFTManager.SetupExitNodeNAT(cfg.ExitNode.WANInterface, cfg.TapName, computeExitMSS(cfg.MTU, cfg.Obfuscation.Mode)); err != nil {
+		log.Error("Exit Node NAT setup failed: %v", err)
+	}
+}
+
+// applySubnetRouterNAT installs or tears down the subnet-router NAT ruleset.
+// Reconciled separately from the exit node: the two use different tables and
+// different lifecycles, and clearing advertised subnets used to leave
+// p2ptap_subnet_nat installed until the host rebooted.
+func (n *Node) applySubnetRouterNAT(cfg *config.Config) {
+	if n.NFTManager == nil || cfg == nil {
+		return
+	}
+	if len(cfg.AdvertisedSubnets) > 0 {
+		if err := n.NFTManager.SetupSubnetRouterNAT(cfg.TapName); err != nil {
+			log.Error("Subnet Router NAT setup failed: %v", err)
+		}
+		return
+	}
+	if err := n.NFTManager.CleanupSubnetRouterNAT(); err != nil {
+		log.Warn("Subnet Router NAT teardown failed: %v", err)
+	}
+}
+
 // computeExitMSS returns the TCP MSS to clamp on the Exit Node server's
 // POSTROUTING chain so client tunnel traffic survives the real (reduced) path
 // MTU. We must NOT shrink the client's TAP MTU (#2 is explicitly forbidden), so
@@ -2989,12 +3022,11 @@ func (n *Node) Start() {
 		log.Info("DHT discovery loop started for PSK network")
 	}
 
-	// Setup Exit Node NAT or Subnet Router NAT if enabled in config
-	if n.Config.ExitNode.Enable {
-		_ = n.NFTManager.SetupExitNodeNAT(n.Config.ExitNode.WANInterface, n.Config.TapName, computeExitMSS(n.Config.MTU, n.Config.Obfuscation.Mode))
-	} else if len(n.Config.AdvertisedSubnets) > 0 {
-		_ = n.NFTManager.SetupSubnetRouterNAT(n.Config.TapName)
-	}
+	// Setup Exit Node NAT or Subnet Router NAT if enabled in config.
+	// The two are independent rulesets with independent tables, so apply both
+	// rather than treating them as either/or.
+	n.applyExitNodeNAT(n.Config)
+	n.applySubnetRouterNAT(n.Config)
 
 	// Start roam handling: watch for NIC changes and rotate listeners.
 	n.startRoamWatcher()
@@ -4178,6 +4210,14 @@ func (n *Node) Close() error {
 	log.Info("Shutting down node...")
 	if n.Gateway != nil {
 		_ = n.Gateway.ClearExitNode()
+	}
+	// Tear down our own NAT rulesets too. Without this every restart of an exit
+	// node re-appended a duplicate MASQ rule on top of the previous run's, and a
+	// node decommissioned between runs kept masquerading after it stopped.
+	if n.NFTManager != nil {
+		if err := n.NFTManager.CleanupAllNAT(); err != nil {
+			log.Warn("NAT teardown on shutdown failed: %v", err)
+		}
 	}
 	n.cancel()
 
