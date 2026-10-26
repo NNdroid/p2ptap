@@ -690,6 +690,24 @@ func (n *Node) nextLSASeq() uint64 {
 	return n.lsaSeq.Add(1)
 }
 
+// frameLSAForMux returns the length-prefixed form of an already-marshalled LSA.
+//
+// handleLSAStream parses its stream one ReadFrame at a time whichever transport
+// delivered it. On the legacy lsaPool path lsaStreamPool.Submit calls WriteFrame,
+// so the payload is already prefixed there. The mux control channel hands the
+// mux frame's payload to the handler byte-for-byte, and every other mux protocol
+// (Meta at meta.go, Echo at node_connect.go) compensates by prefixing before it
+// calls Send/SendRecv. LSA was the one caller that passed raw JSON, so the first
+// four bytes of the payload ({"or...) were parsed as a BigEndian frame length
+// (2065854322) and the whole LSA was dropped as "frame too large" — which left
+// lsaCache empty and broke snapshot replay for late-joining peers.
+func frameLSAForMux(data []byte) []byte {
+	framed := make([]byte, frameLenSize+len(data))
+	binary.BigEndian.PutUint32(framed[:frameLenSize], uint32(len(data)))
+	copy(framed[frameLenSize:], data)
+	return framed
+}
+
 func (n *Node) broadcastLSA(seq uint64) {
 	c := n.config()
 	lsa := n.Router.BuildLSA(seq, routing.NodeIdentity{
@@ -750,7 +768,7 @@ func (n *Node) broadcastLSA(seq uint64) {
 		}
 		// Try the unified mux control channel first; fall back to the
 		// legacy per-protocol stream for peers that don't support mux.
-		if n.muxEngine != nil && n.muxEngine.Send(pID, mux.TagLSA, data) {
+		if n.muxEngine != nil && n.muxEngine.Send(pID, mux.TagLSA, frameLSAForMux(data)) {
 			if n.protoTracker != nil {
 				n.protoTracker.LSA.RecordTx(1, uint64(len(data)))
 			}
@@ -935,6 +953,7 @@ func (n *Node) handleLSAStream(s network.Stream) {
 				// Done asynchronously so a single unreachable peer (whose Submit
 				// may block on a reconnect timeout) cannot stall this handler's
 				// ReadFrame loop and stop us processing other peers' LSA frames.
+				muxForwardData := frameLSAForMux(forwardData)
 				for _, pID := range n.Host.Network().Peers() {
 					if pID == n.Host.ID() || pID == senderID {
 						continue
@@ -944,7 +963,7 @@ func (n *Node) handleLSAStream(s network.Stream) {
 					}
 					fwd := pID
 					go func() {
-						if n.muxEngine != nil && n.muxEngine.Send(fwd, mux.TagLSA, forwardData) {
+						if n.muxEngine != nil && n.muxEngine.Send(fwd, mux.TagLSA, muxForwardData) {
 							return
 						}
 						if !n.lsaPool.Submit(fwd, forwardData) {
@@ -1048,8 +1067,9 @@ func (n *Node) pushLSASnapshotToPeer(target peer.ID) {
 	for _, lsa := range snapshot {
 		// Refresh TTL so the snapshot can propagate onward from the receiver
 		// (the cached copy may have arrived with an almost-exhausted TTL).
-		// Mark as snapshot so the receiver bypasses the seenOrigins first-hop
-		// check — the receiver may not be directly connected to the origin.
+		// Mark as snapshot so the receiver may admit a FIRST sighting of an
+		// origin it is not directly connected to; an origin the receiver already
+		// knows still takes the strict origin/source check (see handleLSAStream).
 		replay := *lsa
 		replay.TTL = routing.DefaultLSATTL
 		replay.Snapshot = true
@@ -1057,7 +1077,7 @@ func (n *Node) pushLSASnapshotToPeer(target peer.ID) {
 		if err != nil {
 			continue
 		}
-		if n.muxEngine != nil && n.muxEngine.Send(target, mux.TagLSA, data) {
+		if n.muxEngine != nil && n.muxEngine.Send(target, mux.TagLSA, frameLSAForMux(data)) {
 			sent++
 			continue
 		}
