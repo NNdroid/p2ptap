@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"net"
 	"runtime"
 	"strings"
@@ -13,6 +14,12 @@ import (
 	"p2ptap/pkg/packet"
 	"p2ptap/pkg/version"
 )
+
+// broadcastMACAddr is compared byte-wise on every counted frame. The previous
+// form compared dstMAC.String() against "ff:ff:ff:ff:ff:ff", which formatted
+// and allocated a fresh string for every RX and TX frame just to answer a
+// question a 6-byte memcmp settles immediately.
+var broadcastMACAddr = net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 
 type StatsCollector struct {
 	configState webConfigState
@@ -157,6 +164,13 @@ type StatsCollector struct {
 	rxSpeed       uint64
 	txPPS         uint64
 	rxPPS         uint64
+
+	// memStats is sampled by the 2 s speedTicker rather than per /api/stats
+	// request. runtime.ReadMemStats walks the entire heap, and the dashboard
+	// polls this endpoint twice a second, so reading it inline put a whole-heap
+	// scan on the request path for no visible gain. Sampling once at
+	// construction keeps the very first response non-zero.
+	memStats runtime.MemStats
 
 	// tapSelfTest, if set by the node, runs a non-destructive read/write
 	// sanity check on the underlying TAP device. Stored as a func returning a
@@ -428,6 +442,7 @@ func NewStatsCollector() *StatsCollector {
 		lastSpeedCalc:        time.Now(),
 		done:                 make(chan struct{}),
 	}
+	s.sampleMemStats()
 	go s.speedTicker()
 	return s
 }
@@ -442,10 +457,23 @@ func (s *StatsCollector) speedTicker() {
 		select {
 		case <-ticker.C:
 			s.tickSpeed(time.Now())
+			s.sampleMemStats()
 		case <-s.done:
 			return
 		}
 	}
+}
+
+// sampleMemStats refreshes the cached heap snapshot for GetResponse. The read
+// happens outside our lock — runtime.ReadMemStats walks every live heap
+// object, so holding the collector lock across it would stall every DTO
+// publisher behind a full-heap scan.
+func (s *StatsCollector) sampleMemStats() {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	s.mu.Lock()
+	s.memStats = m
+	s.mu.Unlock()
 }
 
 func (s *StatsCollector) Stop() {
@@ -478,7 +506,7 @@ func (s *StatsCollector) RecordPacketDir(payload []byte, isTx bool) {
 			atomic.AddUint64(&s.rxUnicastPkts, 1)
 			atomic.AddUint64(&s.cumRxUnicastPkts, 1)
 		}
-	} else if dstMAC.String() == "ff:ff:ff:ff:ff:ff" {
+	} else if bytes.Equal(dstMAC, broadcastMACAddr) {
 		// Broadcast
 		if isTx {
 			atomic.AddUint64(&s.txBroadcastPkts, 1)
@@ -717,9 +745,6 @@ func (s *StatsCollector) tickSpeed(now time.Time) {
 }
 
 func (s *StatsCollector) GetResponse() StatsResponse {
-	var mStats runtime.MemStats
-	runtime.ReadMemStats(&mStats)
-
 	// Roll throughput counters forward (brief write lock, mutations only).
 	s.tickSpeed(time.Now())
 
@@ -730,6 +755,11 @@ func (s *StatsCollector) GetResponse() StatsResponse {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// Heap numbers come from the ticker's 2 s sample, not from a ReadMemStats
+	// here: that call walks the whole heap and the dashboard polls this
+	// endpoint twice a second.
+	mStats := s.memStats
 
 	txSpd := s.txSpeed
 	rxSpd := s.rxSpeed

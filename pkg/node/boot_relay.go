@@ -679,8 +679,14 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 		// ensuring the local OS can immediately return unicast replies without unproxied broadcast delay.
 		n.learnPeerAddressFromFrame(srcPeer, srcMAC, tapPayload)
 
-		log.Debug("Rx relayed frame: len=%d src=%s dst=%s from_peer=%s",
-			len(tapPayload), net.HardwareAddr(srcMAC[:]).String(), net.HardwareAddr(dstMAC[:]).String(), viaPeer.String())
+		// Guarded: this is the per-relay-frame path, and Go evaluates the three
+		// .String() calls at the call site regardless of level — two MAC
+		// format-and-allocate plus one base58 peer encode on every frame, even
+		// at info. Roughly 3 allocations and 3 µs per frame that never print.
+		if log.IsDebug() {
+			log.Debug("Rx relayed frame: len=%d src=%s dst=%s from_peer=%s",
+				len(tapPayload), net.HardwareAddr(srcMAC[:]).String(), net.HardwareAddr(dstMAC[:]).String(), viaPeer.String())
+		}
 	}
 
 	// Content-based frame dedup ONLY for broadcast/multicast relayed frames.

@@ -217,7 +217,9 @@ type ACLStats struct {
 	mu          sync.RWMutex
 	startedAt   time.Time
 	ruleHits    map[string]*uint64 // rule_id -> atomic hit count
-	recentDrops []ACLDropRecord    // ring buffer, capped at recentDropsCap
+	recentDrops []ACLDropRecord    // fixed-capacity ring, written in place
+	dropsStart  int                // index of the OLDEST live drop record
+	dropsCount  int                // live drop records, <= len(recentDrops)
 }
 
 const recentDropsCap = 50
@@ -241,7 +243,7 @@ func newACLStats() *ACLStats {
 	return &ACLStats{
 		startedAt:   time.Now(),
 		ruleHits:    make(map[string]*uint64),
-		recentDrops: make([]ACLDropRecord, 0, recentDropsCap),
+		recentDrops: make([]ACLDropRecord, recentDropsCap),
 	}
 }
 
@@ -276,15 +278,20 @@ func (s *ACLStats) recordRuleHit(ruleID string) {
 }
 
 // recordDrop bumps the global drop counter and appends to the recent-drops
-// ring buffer (oldest entry is discarded when full).
+// ring buffer (oldest entry is overwritten when full).
 func (s *ACLStats) recordDrop(rec ACLDropRecord) {
 	atomic.AddUint64(&s.dropped, 1)
 	s.mu.Lock()
-	if len(s.recentDrops) >= recentDropsCap {
-		// Drop the oldest entry.
-		s.recentDrops = append(s.recentDrops[1:], rec)
+	// The ring is fixed-capacity and written in place. dropsStart names the
+	// oldest live slot and dropsCount how many slots are live; those two are
+	// what snapshot() uses to know which slots are valid, so they must be
+	// updated together with the write above.
+	if s.dropsCount < len(s.recentDrops) {
+		s.recentDrops[(s.dropsStart+s.dropsCount)%len(s.recentDrops)] = rec
+		s.dropsCount++
 	} else {
-		s.recentDrops = append(s.recentDrops, rec)
+		s.recentDrops[s.dropsStart] = rec
+		s.dropsStart = (s.dropsStart + 1) % len(s.recentDrops)
 	}
 	s.mu.Unlock()
 }
@@ -322,10 +329,12 @@ func (s *ACLStats) snapshot() ACLStatsSnapshot {
 		return hits[i].RuleID < hits[j].RuleID
 	})
 
-	// Copy the recent-drops ring (oldest first, cap to current length).
+	// Copy the recent-drops ring (oldest first, skipping the unused slots).
 	s.mu.RLock()
-	drops := make([]ACLDropRecord, len(s.recentDrops))
-	copy(drops, s.recentDrops)
+	drops := make([]ACLDropRecord, s.dropsCount)
+	for i := range drops {
+		drops[i] = s.recentDrops[(s.dropsStart+i)%len(s.recentDrops)]
+	}
 	s.mu.RUnlock()
 
 	return ACLStatsSnapshot{

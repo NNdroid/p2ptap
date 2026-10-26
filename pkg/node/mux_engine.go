@@ -29,7 +29,34 @@ type muxEngine struct {
 	sessions   map[uint32]*muxSession
 
 	nextReqID atomic.Uint32
+
+	// inflightStreams counts concurrently-handled inbound mux streams (control
+	// and data together). Both handlers are registered as libp2p stream
+	// handlers and this node runs a NullResourceManager, so there is no
+	// stream-count backstop anywhere else: a peer can open as many streams as
+	// it likes, and each one pins a goroutine plus a watchdog goroutine plus a
+	// 1 MiB (control) or 66 KiB (data) read buffer until the peer closes. The
+	// cap is resource discipline, not an authentication control — it follows
+	// the relayCtrlInflight pattern.
+	inflightStreams atomic.Int64
+
+	// inflightDataFrames bounds the per-frame goroutine fan-out on the data
+	// channel. Each forked handler runs the full decrypt → dedup → ACL → MAC
+	// learn → TAP pipeline, so an unbounded fork rate is an unbounded CPU
+	// budget handed to any connected peer.
+	inflightDataFrames atomic.Int64
 }
+
+// muxInflightStreamsMax caps concurrent inbound mux streams per node. Well
+// above any plausible mesh size (streams are per connection, not per frame);
+// a refusal above it costs an attacker a reset rather than a pinned buffer.
+const muxInflightStreamsMax = 1024
+
+// muxInflightDataFramesMax caps concurrent data-channel frame handlers. One
+// stream is normally processed serially by design (the legacy
+// handleStream/handleRelayStream shape), so this is far above what a single
+// well-behaved peer can queue while the pipeline drains it.
+const muxInflightDataFramesMax = 1024
 
 func newMuxEngine(n *Node) *muxEngine {
 	return &muxEngine{
@@ -78,10 +105,19 @@ func (e *muxEngine) handleControlStream(s network.Stream) {
 	e.handleStream(s, from)
 }
 
-// handleStream reads mux frames from an accepted mux stream and dispatches
-// them to protocol handlers.
+// handleStream reads mux frames from a mux stream and dispatches them to
+// protocol handlers. It serves both directions: streams the node dialed
+// (getOrOpenLocked) and streams a peer opened at us (handleControlStream).
 func (e *muxEngine) handleStream(s network.Stream, from peer.ID) {
 	defer s.Close()
+	if e.inflightStreams.Add(1) > muxInflightStreamsMax {
+		e.inflightStreams.Add(-1)
+		log.Debug("mux: inflight stream cap (%d) reached; refusing stream from %s", muxInflightStreamsMax, from.ShortString())
+		_ = s.Reset()
+		return
+	}
+	defer e.inflightStreams.Add(-1)
+
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("mux handleStream panic (from %s): %v", from.ShortString(), r)
@@ -129,16 +165,35 @@ func (e *muxEngine) handleStream(s network.Stream, from peer.ID) {
 				request: append([]byte(nil), payload...),
 				respCh:  make(chan []byte, 1),
 			}
-			if dir == mux.DirRequest {
-				e.sessionsMu.Lock()
-				e.sessions[reqID] = sess
-				e.sessionsMu.Unlock()
-			}
+			// No e.sessions entry for an INBOUND request. sess.respCh is never
+			// read for one: the handler replies straight onto this stream via
+			// muxStream.Write, which is a direct field access, not a map lookup.
+			// Storing the entry leaked one map slot + struct + channel + payload
+			// copy forever for every request frame, and reqID is a guessable
+			// global counter — a peer spraying distinct reqIDs grew the table
+			// without bound (1 MiB payloads) and could pre-empt a reqID we had
+			// not yet issued.
 			e.dispatch(from, tag, sess)
 
 		case mux.DirResponse:
 			e.sessionsMu.Lock()
 			sess := e.sessions[reqID]
+			if sess != nil && (sess.stream != s || sess.tag != tag) {
+				// A DirResponse is routed by reqID alone otherwise. reqID is a
+				// single global atomic counter starting at 1, so an inbound
+				// peer can open one stream and spray low reqIDs; unknown ones
+				// are dropped silently, and a hit delivers its payload as our
+				// own answer to a live SendRecv. Meta responses are not
+				// authenticated downstream (meta.go checks only an embedded
+				// length) and feed learnMACFromMeta / RegisterIPMAC /
+				// processSubnetRoutes plus a GARP straight into the local LAN.
+				// A legitimate reply always arrives on the stream the request
+				// went out on, carrying the request's tag.
+				log.Warn("mux: dropping forged response reqID=%d tag=%d on stream %s from %s",
+					reqID, tag, sess.stream.ID(), from.ShortString())
+				delete(e.sessions, reqID)
+				sess = nil
+			}
 			delete(e.sessions, reqID)
 			e.sessionsMu.Unlock()
 			if sess != nil {
@@ -204,8 +259,11 @@ func (e *muxEngine) Send(target peer.ID, tag uint8, payload []byte) bool {
 		return false
 	}
 	if _, err := mux.WriteFrame(s, tag, mux.DirBroadcast, 0, payload); err != nil {
+		// closeLocked removed the stale entry, so getOrOpenLocked opens a fresh
+		// stream — and starts its reader, which is the whole point of using it
+		// here rather than dialling the stream directly.
 		e.closeLocked(target)
-		s = e.openLocked(target)
+		s = e.getOrOpenLocked(ctx, target)
 		if s == nil {
 			return false
 		}
@@ -238,11 +296,10 @@ func (e *muxEngine) SendRecv(target peer.ID, tag uint8, payload []byte, timeout 
 
 	reqID := e.nextReqID.Add(1)
 	sess := &muxSession{
-		tag:      tag,
-		reqID:    reqID,
-		stream:   s,
-		respCh:   make(chan []byte, 1),
-		deadline: time.Now().Add(timeout),
+		tag:    tag,
+		reqID:  reqID,
+		stream: s,
+		respCh: make(chan []byte, 1),
 	}
 	e.sessionsMu.Lock()
 	e.sessions[reqID] = sess
@@ -262,23 +319,14 @@ func (e *muxEngine) SendRecv(target peer.ID, tag uint8, payload []byte, timeout 
 	case resp := <-sess.respCh:
 		return resp, nil
 	case <-ctx.Done():
+		// There is no separate time.After arm: ctx already carries this
+		// timeout, so one was unreachable. It cost a second timer per request
+		// and, worse, would have reported a node shutdown as "request timeout".
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("mux: request timeout (tag=%d, target=%s): %w", tag, target.ShortString(), ctx.Err())
+		}
 		return nil, ctx.Err()
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("mux: request timeout (tag=%d, target=%s)", tag, target.ShortString())
 	}
-}
-
-func (e *muxEngine) openLocked(target peer.ID) network.Stream {
-	ctx, cancel := context.WithTimeout(e.node.ctx, 15*time.Second)
-	defer cancel()
-	s, err := e.node.openControlStream(ctx, target, mux.ControlProtocolID)
-	if err != nil {
-		return nil
-	}
-	e.mu.Lock()
-	e.streams[target] = s
-	e.mu.Unlock()
-	return s
 }
 
 func (e *muxEngine) closeLocked(target peer.ID) {
@@ -340,6 +388,13 @@ func (e *muxEngine) DropConnStreams(target peer.ID, deadConn network.Conn) bool 
 func (e *muxEngine) handleDataStream(s network.Stream) {
 	defer s.Close()
 	from := s.Conn().RemotePeer()
+	if e.inflightStreams.Add(1) > muxInflightStreamsMax {
+		e.inflightStreams.Add(-1)
+		log.Debug("mux data: inflight stream cap (%d) reached; refusing stream from %s", muxInflightStreamsMax, from.ShortString())
+		_ = s.Reset()
+		return
+	}
+	defer e.inflightStreams.Add(-1)
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("mux handleDataStream panic (from %s): %v", from.ShortString(), r)
@@ -359,14 +414,16 @@ func (e *muxEngine) handleDataStream(s network.Stream) {
 			}
 		}()
 	}
-	// Sized to maxBootRelayEnvelope, NOT maxFrameLen: every data-channel kind
+	// Sized to MaxDataFramePayload, NOT maxFrameLen: every data-channel kind
 	// carries an obfuscate frame (VTP), a relay envelope (Relay) or a boot-relay
 	// envelope (BootRelay), all of which are capped at ~65670 bytes by the
 	// obfuscate frame limit. The control channel keeps maxFrameLen because LSA
 	// snapshots carry up to maxLSANeighbors neighbours per origin and genuinely
 	// approach the full budget — the data channel never does. This was 1 MiB,
-	// 16x the largest frame it can ever see.
-	buf := make([]byte, maxBootRelayEnvelope+mux.DataHeaderLen)
+	// 16x the largest frame it can ever see. Sizing it from the mux constant
+	// rather than a node-local one is what keeps this bound and the
+	// WriteDataFrame bound on the other side of the link from drifting apart.
+	buf := make([]byte, mux.MaxDataFramePayload+mux.DataHeaderLen)
 
 	for {
 		kind, payload, err := mux.ReadDataFrame(s, buf)
@@ -374,17 +431,28 @@ func (e *muxEngine) handleDataStream(s network.Stream) {
 			return
 		}
 
+		// The legacy handleStream/handleRelayStream process frames serially in
+		// this one goroutine, which is itself the backpressure. Forking per
+		// frame removes it, so cap the fan-out: without this, any connected
+		// peer can convert frame rate straight into handler-goroutine rate,
+		// each running the full decrypt → dedup → ACL → MAC-learn → TAP path.
+		if e.inflightDataFrames.Add(1) > muxInflightDataFramesMax {
+			e.inflightDataFrames.Add(-1)
+			if log.IsDebug() {
+				log.Debug("mux data: frame fan-out cap (%d) reached; dropping frame from %s", muxInflightDataFramesMax, from.ShortString())
+			}
+			continue
+		}
+
 		switch kind {
 		case mux.KindVTP:
-			p := append([]byte(nil), payload...)
-			go e.node.handleDataMuxVTP(s, from, p)
+			go e.node.handleDataMuxVTP(s, from, append([]byte(nil), payload...), &e.inflightDataFrames)
 		case mux.KindRelay:
-			p := append([]byte(nil), payload...)
-			go e.node.handleDataMuxRelay(s, from, p)
+			go e.node.handleDataMuxRelay(s, from, append([]byte(nil), payload...), &e.inflightDataFrames)
 		case mux.KindBootRelay:
-			p := append([]byte(nil), payload...)
-			go e.node.handleDataMuxBootRelay(s, from, p)
+			go e.node.handleDataMuxBootRelay(s, from, append([]byte(nil), payload...), &e.inflightDataFrames)
 		default:
+			e.inflightDataFrames.Add(-1)
 			log.Warn("mux data: unknown kind %d from %s", kind, from.ShortString())
 		}
 	}

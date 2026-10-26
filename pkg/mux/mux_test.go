@@ -311,3 +311,160 @@ func TestHeaderLen(t *testing.T) {
 		t.Errorf("DataHeaderLen = %d, want 5", DataHeaderLen)
 	}
 }
+
+// TestWriteDataFrameRejectsOversizePayload verifies the data channel refuses a
+// payload its peers cannot read. The receiver sizes its read buffer to
+// MaxDataFramePayload + DataHeaderLen, so a payload above MaxDataFramePayload
+// would pass the writer, be rejected one RTT later as "invalid data frame
+// length", and tear the stream down with no local error.
+func TestWriteDataFrameRejectsOversizePayload(t *testing.T) {
+	var buf bytes.Buffer
+	if _, err := WriteDataFrame(&buf, KindVTP, make([]byte, MaxDataFramePayload)); err != nil {
+		t.Fatalf("a payload of exactly MaxDataFramePayload must be accepted, got: %v", err)
+	}
+	if _, err := WriteDataFrame(&buf, KindVTP, make([]byte, MaxDataFramePayload+1)); err == nil {
+		t.Fatal("a payload one byte over MaxDataFramePayload must be rejected")
+	}
+}
+
+// TestWriteDataFrameBoundMatchesReader verifies the writer's ceiling is exactly
+// what a reader buffer of MaxDataFramePayload + DataHeaderLen will accept, so
+// the two sides of the link cannot disagree.
+func TestWriteDataFrameBoundMatchesReader(t *testing.T) {
+	var buf bytes.Buffer
+	payload := make([]byte, MaxDataFramePayload)
+	if _, err := WriteDataFrame(&buf, KindBootRelay, payload); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	readBuf := make([]byte, MaxDataFramePayload+DataHeaderLen)
+	kind, got, err := ReadDataFrame(&buf, readBuf)
+	if err != nil {
+		t.Fatalf("reader refused a frame the writer accepted: %v", err)
+	}
+	if kind != KindBootRelay {
+		t.Errorf("kind = %d, want %d", kind, KindBootRelay)
+	}
+	if len(got) != MaxDataFramePayload {
+		t.Errorf("payload = %d bytes, want %d", len(got), MaxDataFramePayload)
+	}
+}
+
+// shortWriter returns a small number of bytes per Write call and nil, the
+// classic partial write. A single w.Write(buf) would emit a truncated frame
+// and desync the stream permanently; writeAll must retry until complete.
+type shortWriter struct {
+	out   bytes.Buffer
+	chunk int
+	calls int
+}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	w.calls++
+	n := w.chunk
+	if n > len(p) {
+		n = len(p)
+	}
+	w.out.Write(p[:n])
+	return n, nil
+}
+
+// TestWriteFrameCompletesPartialWrites verifies a partial writer still produces
+// a complete, well-formed frame.
+func TestWriteFrameCompletesPartialWrites(t *testing.T) {
+	payload := []byte("partial-write control payload")
+	w := &shortWriter{chunk: 3}
+	if _, err := WriteFrame(w, TagMeta, DirRequest, 7, payload); err != nil {
+		t.Fatalf("WriteFrame error: %v", err)
+	}
+	if w.calls < 2 {
+		t.Fatalf("expected multiple Write calls for a chunked writer, got %d", w.calls)
+	}
+
+	want := HeaderLen - 4 + len(payload)
+	readBuf := make([]byte, 4+want)
+	tag, dir, reqID, got, err := ReadFrame(&w.out, readBuf)
+	if err != nil {
+		t.Fatalf("reader rejected the assembled frame: %v", err)
+	}
+	if tag != TagMeta || dir != DirRequest || reqID != 7 {
+		t.Errorf("header = (tag=%d dir=%d reqID=%d), want (3,0,7)", tag, dir, reqID)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("payload = %q, want %q", got, payload)
+	}
+}
+
+// TestWriteDataFrameCompletesPartialWrites is the data-channel counterpart.
+func TestWriteDataFrameCompletesPartialWrites(t *testing.T) {
+	payload := make([]byte, 4096)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	w := &shortWriter{chunk: 100}
+	if _, err := WriteDataFrame(w, KindRelay, payload); err != nil {
+		t.Fatalf("WriteDataFrame error: %v", err)
+	}
+
+	readBuf := make([]byte, 4+1+len(payload))
+	kind, got, err := ReadDataFrame(&w.out, readBuf)
+	if err != nil {
+		t.Fatalf("reader rejected the assembled frame: %v", err)
+	}
+	if kind != KindRelay {
+		t.Errorf("kind = %d, want %d", kind, KindRelay)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Error("payload was corrupted by the partial-write retry")
+	}
+}
+
+// TestWriteAllErrorsOnZeroProgress guards against a writer that makes no
+// progress: writeAll must report instead of spinning.
+func TestWriteAllErrorsOnZeroProgress(t *testing.T) {
+	z := &zeroWriter{}
+	if _, err := writeAll(z, []byte("abc")); err != io.ErrShortWrite {
+		t.Fatalf("err = %v, want io.ErrShortWrite", err)
+	}
+}
+
+// TestWriteAllPropagatesWriteError verifies an error from the underlying writer
+// is returned, together with every byte written before it — including the
+// bytes the failing call itself reported. A writer is allowed to return n > 0
+// alongside an error; advancing past those bytes first would consume the error
+// and emit a truncated frame, which is the very desync this helper exists to
+// prevent.
+func TestWriteAllPropagatesWriteError(t *testing.T) {
+	sentinel := errors.New("boom")
+	w := &errWriter{err: sentinel, chunk: 4, failOnCall: 3}
+	n, err := writeAll(w, make([]byte, 64))
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err = %v, want the underlying error", err)
+	}
+	if n != 12 {
+		t.Errorf("n = %d, want 12 (2 successful chunks plus the failing call's 4 bytes)", n)
+	}
+}
+
+type zeroWriter struct{}
+
+func (z *zeroWriter) Write(p []byte) (int, error) { return 0, nil }
+
+// errWriter writes small chunks, then returns bytes alongside an error.
+type errWriter struct {
+	err        error
+	chunk      int
+	failOnCall int
+	calls      int
+}
+
+func (e *errWriter) Write(p []byte) (int, error) {
+	e.calls++
+	n := e.chunk
+	if n > len(p) {
+		n = len(p)
+	}
+	if e.calls >= e.failOnCall {
+		return n, e.err
+	}
+	return n, nil
+}

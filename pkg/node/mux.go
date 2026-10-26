@@ -52,12 +52,11 @@ const (
 
 // muxSession tracks a single request/response exchange on a mux stream.
 type muxSession struct {
-	tag      uint8
-	reqID    uint32
-	stream   network.Stream
-	request  []byte
-	respCh   chan []byte
-	deadline time.Time
+	tag     uint8
+	reqID   uint32
+	stream  network.Stream
+	request []byte
+	respCh  chan []byte
 }
 
 // muxStream implements network.Stream on top of a muxSession. Protocol
@@ -101,15 +100,17 @@ func (m *muxStream) Close() error       { return nil }
 func (m *muxStream) CloseWrite() error   { return nil }
 func (m *muxStream) CloseRead() error    { return nil }
 func (m *muxStream) Reset() error        { return nil }
-func (m *muxStream) SetDeadline(t time.Time) error {
-	m.sess.deadline = t
-	return nil
-}
-func (m *muxStream) SetReadDeadline(t time.Time) error {
-	m.sess.deadline = t
-	return nil
-}
-func (m *muxStream) SetWriteDeadline(time.Time) error  { return nil }
+
+// Set*Deadline are no-ops, and deliberately so: muxStream.Read returns either
+// the already-delivered request bytes or io.EOF and can never block, so there
+// is nothing for a deadline to bound. They are kept because protocol handlers
+// (handleTapProbeAck, handleMetaStream, handleSeqSync) call them unconditionally
+// on an opaque network.Stream. An earlier version stored the value in
+// muxSession.deadline, which was written but never read — a caller could easily
+// have believed the deadline was live.
+func (m *muxStream) SetDeadline(time.Time) error      { return nil }
+func (m *muxStream) SetReadDeadline(time.Time) error  { return nil }
+func (m *muxStream) SetWriteDeadline(time.Time) error { return nil }
 
 func (m *muxStream) ID() string                     { return m.sess.stream.ID() }
 func (m *muxStream) Protocol() protocol.ID          { return m.sess.stream.Protocol() }

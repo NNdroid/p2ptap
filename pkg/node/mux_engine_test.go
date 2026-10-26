@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -498,5 +499,246 @@ func TestMuxEngineSendNoStream(t *testing.T) {
 	eng.mu.Unlock()
 	if exists {
 		t.Log("stream still exists (handleStream may not have cleaned up yet)")
+	}
+}
+
+// TestMuxEngineDropsForgedResponseWrongStream verifies that a DirResponse
+// carrying a live reqID but arriving on a stream other than the one the
+// request was sent on is dropped, not delivered. reqID is a single global
+// atomic counter starting at 1, so an inbound peer can open one stream and
+// spray low reqIDs guessing at one we have in flight; routing by reqID alone
+// would hand its payload to the waiting SendRecv as if it were the remote
+// peer's answer.
+func TestMuxEngineDropsForgedResponseWrongStream(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	target := peer.ID("target-peer")
+	forger := peer.ID("forger-peer")
+
+	pipeA1, pipeB1 := net.Pipe()
+	defer pipeA1.Close()
+	defer pipeB1.Close()
+	pipeA2, pipeB2 := net.Pipe()
+	defer pipeA2.Close()
+	defer pipeB2.Close()
+
+	s1 := &netStream{conn: pipeA1, id: "s1", protoID: mux.ControlProtocolID}
+	s2 := &netStream{conn: pipeA2, id: "s2", protoID: mux.ControlProtocolID}
+
+	eng := newMuxEngine(&Node{ctx: ctx})
+	eng.mu.Lock()
+	eng.streams[target] = s1
+	eng.mu.Unlock()
+
+	go eng.handleStream(s1, target)
+	go eng.handleStream(s2, forger)
+
+	// net.Pipe is synchronous, so WriteFrame only returns once handleStream
+	// has read the frame — that gives us a deterministic barrier below.
+	reqCh := make(chan uint32, 1)
+	go func() {
+		buf := make([]byte, maxFrameLen+mux.HeaderLen)
+		for {
+			_, dir, reqID, _, err := mux.ReadFrame(pipeB1, buf)
+			if err != nil {
+				return
+			}
+			if dir == mux.DirRequest {
+				reqCh <- reqID
+			}
+		}
+	}()
+
+	type outcome struct {
+		resp []byte
+		err  error
+	}
+	outCh := make(chan outcome, 1)
+	go func() {
+		resp, err := eng.SendRecv(target, mux.TagMeta, []byte("body"), 3*time.Second)
+		outCh <- outcome{resp: resp, err: err}
+	}()
+
+	reqID := <-reqCh
+
+	// Forge a response on the FORGER's stream carrying our live reqID and tag.
+	if _, err := mux.WriteFrame(pipeB2, mux.TagMeta, mux.DirResponse, reqID, []byte("forged")); err != nil {
+		t.Fatalf("forged response write failed: %v", err)
+	}
+
+	select {
+	case o := <-outCh:
+		if o.err == nil {
+			t.Fatalf("SendRecv accepted a forged response from another stream: %q", o.resp)
+		}
+		if o.err != context.DeadlineExceeded && o.err.Error() != "mux: request timeout (tag=3, target="+string(target)+"): context deadline exceeded" {
+			// Tolerate both the raw ctx error and the wrapped timeout message.
+			if !strings.Contains(o.err.Error(), "deadline") && !strings.Contains(o.err.Error(), "timeout") {
+				t.Fatalf("expected a timeout, got: %v", o.err)
+			}
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("SendRecv did not return")
+	}
+
+	eng.sessionsMu.Lock()
+	_, live := eng.sessions[reqID]
+	eng.sessionsMu.Unlock()
+	if live {
+		t.Fatal("session still live after the send timed out; the deferred delete did not run")
+	}
+}
+
+// TestMuxEngineDropsForgedResponseWrongTag verifies that a DirResponse on the
+// correct stream but carrying a tag that does not match the pending session is
+// dropped. The response tag is written by muxStream.Write from the request's
+// tag, so a legitimate reply always matches.
+func TestMuxEngineDropsForgedResponseWrongTag(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	target := peer.ID("target-peer")
+	pipeA, pipeB := net.Pipe()
+	defer pipeA.Close()
+	defer pipeB.Close()
+
+	s := &netStream{conn: pipeA, id: "s1", protoID: mux.ControlProtocolID}
+	eng := newMuxEngine(&Node{ctx: ctx})
+	eng.mu.Lock()
+	eng.streams[target] = s
+	eng.mu.Unlock()
+
+	go eng.handleStream(s, target)
+
+	reqCh := make(chan uint32, 1)
+	go func() {
+		buf := make([]byte, maxFrameLen+mux.HeaderLen)
+		for {
+			_, dir, reqID, _, err := mux.ReadFrame(pipeB, buf)
+			if err != nil {
+				return
+			}
+			if dir == mux.DirRequest {
+				reqCh <- reqID
+			}
+		}
+	}()
+
+	type outcome struct {
+		resp []byte
+		err  error
+	}
+	outCh := make(chan outcome, 1)
+	go func() {
+		resp, err := eng.SendRecv(target, mux.TagMeta, []byte("body"), 3*time.Second)
+		outCh <- outcome{resp: resp, err: err}
+	}()
+
+	reqID := <-reqCh
+
+	// Same stream and reqID as the live session, but a tag that does not
+	// match it. A legitimate reply cannot look like this.
+	if _, err := mux.WriteFrame(pipeB, mux.TagEcho, mux.DirResponse, reqID, []byte("forged")); err != nil {
+		t.Fatalf("forged response write failed: %v", err)
+	}
+
+	select {
+	case o := <-outCh:
+		if o.err == nil {
+			t.Fatalf("SendRecv accepted a response with a mismatched tag: %q", o.resp)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("SendRecv did not return")
+	}
+}
+
+// TestMuxEngineAcceptsLegitimateResponse guards the regression risk of the
+// forged-response checks above: a reply on the originating stream carrying the
+// request's tag must still be delivered.
+func TestMuxEngineAcceptsLegitimateResponse(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	target := peer.ID("target-peer")
+	pipeA, pipeB := net.Pipe()
+	defer pipeA.Close()
+	defer pipeB.Close()
+
+	s := &netStream{conn: pipeA, id: "s1", protoID: mux.ControlProtocolID}
+	eng := newMuxEngine(&Node{ctx: ctx})
+	eng.mu.Lock()
+	eng.streams[target] = s
+	eng.mu.Unlock()
+
+	go eng.handleStream(s, target)
+
+	go func() {
+		buf := make([]byte, maxFrameLen+mux.HeaderLen)
+		for {
+			tag, dir, reqID, payload, err := mux.ReadFrame(pipeB, buf)
+			if err != nil {
+				return
+			}
+			if dir != mux.DirRequest {
+				continue
+			}
+			resp := append([]byte("ack:"), payload...)
+			if _, err := mux.WriteFrame(pipeB, tag, mux.DirResponse, reqID, resp); err != nil {
+				return
+			}
+		}
+	}()
+
+	resp, err := eng.SendRecv(target, mux.TagMeta, []byte("hello"), 5*time.Second)
+	if err != nil {
+		t.Fatalf("SendRecv error: %v", err)
+	}
+	if string(resp) != "ack:hello" {
+		t.Fatalf("resp = %q, want %q", resp, "ack:hello")
+	}
+}
+
+// TestMuxEngineInboundRequestNotStored verifies an inbound DirRequest is never
+// entered into the sessions table. That table exists to route a DirResponse
+// back to the SendRecv that issued the request; an inbound request's reply
+// goes straight onto its own stream via muxStream.Write, so the entry was pure
+// waste — one map slot, one struct, one channel and one payload copy, retained
+// forever per request frame because reqID only leaves the table when a
+// matching DirResponse arrives. Tag 0xFF has no handler, so each dispatched
+// frame takes the default log.Warn branch and no goroutine is spawned.
+func TestMuxEngineInboundRequestNotStored(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	forger := peer.ID("forger-peer")
+	pipeA, pipeB := net.Pipe()
+	defer pipeA.Close()
+	defer pipeB.Close()
+
+	s := &netStream{conn: pipeA, id: "s1", protoID: mux.ControlProtocolID}
+	eng := newMuxEngine(&Node{ctx: ctx})
+
+	go eng.handleStream(s, forger)
+
+	const frames = 64
+	reqIDs := make([]uint32, 0, frames)
+	for i := 0; i < frames; i++ {
+		reqID := uint32(1000 + i)
+		if _, err := mux.WriteFrame(pipeB, 0xFF, mux.DirRequest, reqID, []byte("req")); err != nil {
+			t.Fatalf("write frame %d failed: %v", i, err)
+		}
+		reqIDs = append(reqIDs, reqID)
+	}
+
+	eng.sessionsMu.Lock()
+	defer eng.sessionsMu.Unlock()
+	for _, reqID := range reqIDs {
+		if sess := eng.sessions[reqID]; sess != nil {
+			t.Fatalf("inbound request reqID=%d was stored in sessions (stream=%s)", reqID, sess.stream.ID())
+		}
+	}
+	if n := len(eng.sessions); n != 0 {
+		t.Fatalf("sessions has %d entries after %d inbound requests, want 0", n, frames)
 	}
 }

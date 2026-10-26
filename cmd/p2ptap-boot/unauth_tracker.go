@@ -24,11 +24,12 @@ type UnauthStats struct {
 // UnauthTracker is a thread-safe tracker for unauthenticated data events.
 // It maintains atomic per-category counters and a ring buffer of recent events.
 type UnauthTracker struct {
-	mu      sync.RWMutex
-	events  []UnauthEvent
-	max     int
+	mu       sync.RWMutex
+	ring     []UnauthEvent // fixed-capacity ring, written in place
+	start    int           // index of the OLDEST live event
+	count    int           // live events, <= len(ring)
 	counters map[string]*atomic.Int64
-	total   atomic.Int64
+	total    atomic.Int64
 }
 
 // Unauth event type constants.
@@ -47,9 +48,12 @@ const (
 var unauthTracker = newUnauthTracker(200)
 
 func newUnauthTracker(max int) *UnauthTracker {
+	// The ring is indexed with %len, so it must never be zero-length.
+	if max <= 0 {
+		max = 200
+	}
 	t := &UnauthTracker{
-		events: make([]UnauthEvent, 0, max),
-		max:    max,
+		ring:     make([]UnauthEvent, max),
 		counters: make(map[string]*atomic.Int64),
 	}
 	for _, typ := range []string{
@@ -73,10 +77,15 @@ func (t *UnauthTracker) Record(eventType, peerID, detail string) {
 	}
 
 	t.mu.Lock()
-	if len(t.events) >= t.max {
-		t.events = t.events[1:]
+	// Write into the preallocated ring in place; start marks the oldest live
+	// slot and count how many slots are live, so both move with the write.
+	if t.count < len(t.ring) {
+		t.ring[(t.start+t.count)%len(t.ring)] = ev
+		t.count++
+	} else {
+		t.ring[t.start] = ev
+		t.start = (t.start + 1) % len(t.ring)
 	}
-	t.events = append(t.events, ev)
 	t.mu.Unlock()
 }
 
@@ -91,11 +100,12 @@ func (t *UnauthTracker) Stats() UnauthStats {
 	}
 
 	t.mu.RLock()
-	n := len(t.events)
+	// Newest first, matching the previous slice-backed buffer.
+	n := t.count
 	if n > 0 {
 		stats.RecentEvents = make([]UnauthEvent, n)
-		for i := range t.events {
-			stats.RecentEvents[n-1-i] = t.events[i]
+		for i := range stats.RecentEvents {
+			stats.RecentEvents[n-1-i] = t.ring[(t.start+i)%len(t.ring)]
 		}
 	}
 	t.mu.RUnlock()

@@ -1339,8 +1339,13 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 			n.recordPeerRxDecrypt(srcPeer, false)
 			return
 		}
-		log.Debug("Relay Unpack: seq=%d payloadLen=%d innerLen=%d ttl=%d from=%s",
-			seqID, len(unpacked), len(innerPayload), ttl, remotePeer.String())
+		// Guarded: this is the per-relay-frame SUCCESS path, and Go evaluates
+		// remotePeer.String() (a base58 encode) at the call site regardless of
+		// the log level.
+		if log.IsDebug() {
+			log.Debug("Relay Unpack: seq=%d payloadLen=%d innerLen=%d ttl=%d from=%s",
+				seqID, len(unpacked), len(innerPayload), ttl, remotePeer.String())
+		}
 		// Deliver through the shared relayed-frame TAP path (also used by the
 		// boot-relay / relay-over-backbone downlink). Keyed on the TRUE origin
 		// (srcPeer); remotePeer is the transport (via) peer.
@@ -2229,8 +2234,12 @@ func (n *Node) isFrameFromPeerSelf(p peer.ID, frame []byte) bool {
 		return true
 	}
 	meta := val.(PeerMeta)
-	peerTapIP := strings.Split(meta.TapIP, "/")[0]
-	peerTapIPv6 := strings.Split(meta.TapIPv6, "/")[0]
+	// Cut, not Split: this runs on every direct and every relayed frame, and
+	// Split allocates a slice plus a string per field for a value that only
+	// ever needs its prefix. Cut allocates nothing. Both return the whole
+	// string when "/" is absent, so the behaviour is identical.
+	peerTapIP, _, _ := strings.Cut(meta.TapIP, "/")
+	peerTapIPv6, _, _ := strings.Cut(meta.TapIPv6, "/")
 
 	etherType := uint16(frame[12])<<8 | uint16(frame[13])
 	if etherType == 0x0800 && len(frame) >= 34 { // IPv4

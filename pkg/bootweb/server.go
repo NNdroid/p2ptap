@@ -148,9 +148,16 @@ func (s *Server) Start() error {
 	}
 
 	s.httpServer = &http.Server{
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		Handler: mux,
+		// IdleTimeout and MaxHeaderBytes mirror the mesh WebUI server
+		// (pkg/web/server.go). Without IdleTimeout the default is 0, i.e. idle
+		// keep-alive connections are never closed and pin descriptors
+		// indefinitely; without MaxHeaderBytes the default is 1 MB, large enough
+		// to absorb a header flood.
+		ReadTimeout:    15 * time.Second,
+		WriteTimeout:   15 * time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 1 << 18,
 	}
 
 	go func() {

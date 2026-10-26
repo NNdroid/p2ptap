@@ -410,13 +410,20 @@ func TestMuxStreamDelegatedMethods(t *testing.T) {
 		t.Error("Scope() should return a non-nil scope")
 	}
 
-	// SetDeadline should store the deadline on the session.
+	// Set*Deadline are documented no-ops on muxStream: Read can never block,
+	// so there is nothing for a deadline to bound. They must stay error-free
+	// because protocol handlers call them unconditionally on an opaque
+	// network.Stream. A stored-but-unread deadline value previously made this
+	// contract invisible.
 	d := time.Now().Add(5 * time.Second)
 	if err := ms.SetDeadline(d); err != nil {
 		t.Errorf("SetDeadline error: %v", err)
 	}
-	if !ms.sess.deadline.Equal(d) {
-		t.Errorf("deadline not stored on session")
+	if err := ms.SetReadDeadline(d); err != nil {
+		t.Errorf("SetReadDeadline error: %v", err)
+	}
+	if err := ms.SetWriteDeadline(d); err != nil {
+		t.Errorf("SetWriteDeadline error: %v", err)
 	}
 }
 

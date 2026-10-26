@@ -679,12 +679,7 @@ func (n *Node) sealRelayEnvelopeForHop(hop peer.ID, envelope []byte) ([]byte, er
 	// instead of a blanket +4096 slack — eliminates a 4KB heap alloc per relayed
 	// frame on the hot path (MaxPackedLen mirrors Pack's own size guards, so it
 	// is safe by construction).
-	outBuf := make([]byte, n.Packer.MaxPackedLen(len(envelope)))
-	totalLen, err := n.Packer.Pack(seqID, envelope, outBuf)
-	if err != nil {
-		return nil, fmt.Errorf("pack relay envelope for hop %s: %w", hop.String(), err)
-	}
-	packed := outBuf[:totalLen]
+	maxPacked := n.Packer.MaxPackedLen(len(envelope))
 
 	cipher := n.obfCipherForPeer(hop)
 	if cipher == nil {
@@ -692,9 +687,28 @@ func (n *Node) sealRelayEnvelopeForHop(hop peer.ID, envelope []byte) ([]byte, er
 		// SeqSync handshake is still in flight). The envelope travels as a
 		// plaintext obfuscate frame, which the hop accepts because
 		// decryptPeerFrame deliberately skips decryption for a nil cipher.
-		return packed, nil
+		// The frame is handed straight out to the caller, which owns it and
+		// writes it, so this buffer cannot come from the pool.
+		outBuf := make([]byte, maxPacked)
+		totalLen, err := n.Packer.Pack(seqID, envelope, outBuf)
+		if err != nil {
+			return nil, fmt.Errorf("pack relay envelope for hop %s: %w", hop.String(), err)
+		}
+		return outBuf[:totalLen], nil
 	}
-	sealed, err := n.sealPeerFrame(hop, cipher, packed)
+
+	// outBuf is Pack scratch only: EncryptPayloadRegionInto allocates the sealed
+	// result into its own buffer, so outBuf is never handed out and can go back
+	// to the pool. Previously it was a fresh ~1.5KB allocation per hop that was
+	// discarded immediately after the seal, the second of the two heap allocs a
+	// forwarded frame paid per hop.
+	outBuf := acquireFrameBuf(maxPacked)
+	defer releaseFrameBuf(outBuf)
+	totalLen, err := n.Packer.Pack(seqID, envelope, outBuf)
+	if err != nil {
+		return nil, fmt.Errorf("pack relay envelope for hop %s: %w", hop.String(), err)
+	}
+	sealed, err := n.sealPeerFrame(hop, cipher, outBuf[:totalLen])
 	if err != nil {
 		// Unlike before, this is now a hard error: sending the envelope
 		// unencrypted would guarantee a drop at the hop and leak the relay

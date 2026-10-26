@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/binary"
+	"fmt"
 	"testing"
 	"time"
 
@@ -112,6 +113,36 @@ func TestACLStats(t *testing.T) {
 	}
 	if snap.RecentDrops[0].PeerID != "p1" {
 		t.Errorf("RecentDrops[0]: got %+v", snap.RecentDrops[0])
+	}
+}
+
+// TestACLStatsDropRingEvictsOldest pins the recent-drops ring: past the cap the
+// oldest records are overwritten in place, the drop counter keeps counting, and
+// snapshot() returns the surviving window oldest-first.
+func TestACLStatsDropRingEvictsOldest(t *testing.T) {
+	s := newACLStats()
+	total := recentDropsCap * 2
+	for i := 0; i < total; i++ {
+		s.recordDrop(ACLDropRecord{
+			Time:   timeNow(),
+			PeerID: fmt.Sprintf("p%d", i),
+			Reason: "rule:r1",
+			Dir:    "inbound",
+		})
+	}
+
+	snap := s.snapshot()
+	if snap.Dropped != uint64(total) {
+		t.Fatalf("Dropped: got %d, want %d", snap.Dropped, total)
+	}
+	if got := len(snap.RecentDrops); got != recentDropsCap {
+		t.Fatalf("RecentDrops len: got %d, want %d", got, recentDropsCap)
+	}
+	for i, rec := range snap.RecentDrops {
+		want := fmt.Sprintf("p%d", total-recentDropsCap+i)
+		if rec.PeerID != want {
+			t.Fatalf("RecentDrops[%d].PeerID = %q, want %q", i, rec.PeerID, want)
+		}
 	}
 }
 

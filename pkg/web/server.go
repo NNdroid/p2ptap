@@ -155,6 +155,11 @@ func (s *Server) SetRelayDiagProvider(f func() any) {
 
 var webLog = logger.New("WebUI")
 
+// maxAPIRequestBodyBytes caps every /api request body (enforced in
+// authRequired, which wraps every /api handler). The largest legitimate body
+// is a full config save, which is an order of magnitude below this.
+const maxAPIRequestBodyBytes = 1 << 20
+
 // loadCfg returns the currently active config. The pointer is replaced atomically
 // on hot-reload, so callers must always read through this accessor rather than
 // caching the *config.Config pointer, to avoid data races with the data plane.
@@ -291,6 +296,16 @@ func (s *Server) authRequired(next func(http.ResponseWriter, *http.Request)) fun
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+
+		// Bound the request body before dispatching. Every POST under /api
+		// decodes JSON straight from r.Body, and json.Decoder allocates the
+		// whole body; /api/config does it twice (RawMessage map, then
+		// Marshal, then Unmarshal into a Config). ReadTimeout caps duration,
+		// not size, so an authenticated client that dribbles megabytes across
+		// the timeout window would allocate them all. Capping here covers all
+		// handlers at once instead of per-decoder, and the cap is far above
+		// the largest legitimate config.
+		r.Body = http.MaxBytesReader(w, r.Body, maxAPIRequestBodyBytes)
 
 		next(w, r)
 	}
@@ -1851,14 +1866,14 @@ func (s *Server) resolvePeerID(target string) (peer.ID, string) {
 		return id, "peer_id"
 	}
 
-	// Snapshot ActivePeers once so we hold the collector mutex for the entire
-	// scan instead of reacquiring it for each comparison.
-	s.collector.mu.Lock()
+	// Snapshot ActivePeers once so we hold the collector lock for the entire
+	// scan instead of reacquiring it for each comparison. RLock: read-only.
+	s.collector.mu.RLock()
 	snapshot := make([]*PeerInfoDTO, len(s.collector.ActivePeers))
 	for i := range s.collector.ActivePeers {
 		snapshot[i] = &s.collector.ActivePeers[i]
 	}
-	s.collector.mu.Unlock()
+	s.collector.mu.RUnlock()
 
 	lower := strings.ToLower(normTarget)
 	for _, p := range snapshot {
@@ -1943,8 +1958,8 @@ func multiaddrStringContainsHost(maStr, host string) bool {
 // peers so the API can attach it to "peer not found" errors and the frontend
 // can suggest candidates to the user.
 func (s *Server) summarizeKnownPeers(limit int) []string {
-	s.collector.mu.Lock()
-	defer s.collector.mu.Unlock()
+	s.collector.mu.RLock()
+	defer s.collector.mu.RUnlock()
 	out := make([]string, 0, limit)
 	for _, p := range s.collector.ActivePeers {
 		if len(out) >= limit {
@@ -1966,8 +1981,8 @@ func (s *Server) summarizeKnownPeers(limit int) []string {
 
 // peerInfoByID returns the cached ActivePeers entry for a peer, or nil.
 func (s *Server) peerInfoByID(pid string) *PeerInfoDTO {
-	s.collector.mu.Lock()
-	defer s.collector.mu.Unlock()
+	s.collector.mu.RLock()
+	defer s.collector.mu.RUnlock()
 	for i := range s.collector.ActivePeers {
 		if s.collector.ActivePeers[i].PeerID == pid {
 			return &s.collector.ActivePeers[i]
@@ -2128,7 +2143,7 @@ func (s *Server) traceRouteLive(dest peer.ID) ([]observer.TracerouteHop, *routin
 // is unavailable. Per-leg detail is unavailable in the cache, so hops carry
 // identity only.
 func (s *Server) traceRouteCached(dest peer.ID) ([]observer.TracerouteHop, bool, string, int64, int64, bool) {
-	s.collector.mu.Lock()
+	s.collector.mu.RLock()
 	var matched observer.RouteInfoDTO
 	found := false
 	for i := range s.collector.RoutesTable {
@@ -2139,7 +2154,7 @@ func (s *Server) traceRouteCached(dest peer.ID) ([]observer.TracerouteHop, bool,
 			break
 		}
 	}
-	s.collector.mu.Unlock()
+	s.collector.mu.RUnlock()
 	if !found || len(matched.Path) == 0 {
 		return nil, false, "", 0, 0, false
 	}
@@ -2212,8 +2227,11 @@ func (s *Server) buildHops(path []peer.ID, router *routing.Router, peerMap map[s
 // so a traceroute (which needs identity for every hop) does not re-lock and
 // re-scan the ActivePeers slice once per field.
 func (s *Server) snapshotPeers() map[string]*PeerInfoDTO {
-	s.collector.mu.Lock()
-	defer s.collector.mu.Unlock()
+	// RLock: read-only. UpdatePeers replaces the slice wholesale rather than
+	// mutating entries in place, so the pointers handed back into the old
+	// backing array are stable after publication.
+	s.collector.mu.RLock()
+	defer s.collector.mu.RUnlock()
 	m := make(map[string]*PeerInfoDTO, len(s.collector.ActivePeers))
 	for i := range s.collector.ActivePeers {
 		p := &s.collector.ActivePeers[i]

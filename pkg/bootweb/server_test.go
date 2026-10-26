@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -298,5 +299,29 @@ func TestCollectDashboardPeerAddressFields(t *testing.T) {
 	// The previously-seen list is served by the provider, capped by the caller.
 	if len(dash.LastSeenPeers) != 1 || dash.LastSeenPeers[0].PeerID != "12D3KooWSeenBefore" {
 		t.Fatalf("LastSeenPeers = %+v", dash.LastSeenPeers)
+	}
+}
+
+// TestAlertBufferRingEvictsOldest pins the alert ring: past the cap the oldest
+// alerts are overwritten in place and GetAll keeps returning newest-first.
+func TestAlertBufferRingEvictsOldest(t *testing.T) {
+	const ringCap = 5
+	b := NewAlertBuffer(ringCap)
+	total := ringCap * 2
+	for i := 0; i < total; i++ {
+		b.Add("info", fmt.Sprintf("type_%d", i), "peer", fmt.Sprintf("msg_%d", i))
+	}
+
+	got := b.GetAll()
+	if len(got) != ringCap {
+		t.Fatalf("GetAll len: got %d, want %d", len(got), ringCap)
+	}
+	// Newest first: the surviving window is the last ringCap of the 0-indexed
+	// adds, so output slot i holds add total-1-i.
+	for i, ev := range got {
+		want := total - 1 - i
+		if ev.Type != fmt.Sprintf("type_%d", want) || ev.Message != fmt.Sprintf("msg_%d", want) {
+			t.Fatalf("GetAll[%d] = type=%q msg=%q, want type_%d/msg_%d", i, ev.Type, ev.Message, want, want)
+		}
 	}
 }

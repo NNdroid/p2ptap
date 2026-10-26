@@ -314,8 +314,9 @@ type MeshPeerInfo struct {
 // AlertBuffer is a thread-safe ring buffer for diagnostic alert events.
 type AlertBuffer struct {
 	mu     sync.RWMutex
-	alerts []AlertEventDTO
-	max    int
+	alerts []AlertEventDTO // fixed-capacity ring, written in place
+	start  int             // index of the OLDEST live alert
+	count  int             // live alerts, <= len(alerts)
 }
 
 // NewAlertBuffer creates an AlertBuffer with capacity.
@@ -323,13 +324,10 @@ func NewAlertBuffer(max int) *AlertBuffer {
 	if max <= 0 {
 		max = 300
 	}
-	return &AlertBuffer{
-		alerts: make([]AlertEventDTO, 0, max),
-		max:    max,
-	}
+	return &AlertBuffer{alerts: make([]AlertEventDTO, max)}
 }
 
-// Add appends an alert to the ring buffer, evicting the oldest when full.
+// Add appends an alert to the ring buffer, overwriting the oldest when full.
 func (ab *AlertBuffer) Add(level, alertType, peerID, message string) {
 	ab.mu.Lock()
 	defer ab.mu.Unlock()
@@ -340,19 +338,24 @@ func (ab *AlertBuffer) Add(level, alertType, peerID, message string) {
 		PeerID:    peerID,
 		Message:   message,
 	}
-	if len(ab.alerts) >= ab.max {
-		ab.alerts = ab.alerts[1:]
+	// Write in place: the slice-shift form copied all 300 alerts on every Add,
+	// which lands on the auth path during an auth flood.
+	if ab.count < len(ab.alerts) {
+		ab.alerts[(ab.start+ab.count)%len(ab.alerts)] = ev
+		ab.count++
+	} else {
+		ab.alerts[ab.start] = ev
+		ab.start = (ab.start + 1) % len(ab.alerts)
 	}
-	ab.alerts = append(ab.alerts, ev)
 }
 
 // GetAll returns a copy of all alerts in reverse chronological order (newest first).
 func (ab *AlertBuffer) GetAll() []AlertEventDTO {
 	ab.mu.RLock()
 	defer ab.mu.RUnlock()
-	out := make([]AlertEventDTO, len(ab.alerts))
-	for i, a := range ab.alerts {
-		out[len(ab.alerts)-1-i] = a
+	out := make([]AlertEventDTO, ab.count)
+	for i := range out {
+		out[ab.count-1-i] = ab.alerts[(ab.start+i)%len(ab.alerts)]
 	}
 	return out
 }
