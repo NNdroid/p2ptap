@@ -92,6 +92,26 @@ func (e *muxEngine) handleStream(s network.Stream, from peer.ID) {
 		}
 		e.mu.Unlock()
 	}()
+	// Reset on node shutdown, matching handleDataStream. The control channel is
+	// idle between events by design (LSA/Meta updates arrive on their own
+	// cadence, with no heartbeat), so no read deadline is set here — one would
+	// tear down healthy idle streams. Without the ctx.Done reset, however, a
+	// stream whose peer vanished silently pinned this goroutine and its 1 MiB
+	// read buffer until the node's own shutdown tore the host down.
+	if n := e.node; n.ctx != nil {
+		streamDone := make(chan struct{})
+		defer close(streamDone)
+		go func() {
+			select {
+			case <-n.ctx.Done():
+				_ = s.Reset()
+			case <-streamDone:
+			}
+		}()
+	}
+	// maxFrameLen rather than a tighter bound: an LSA snapshot carries up to
+	// maxLSANeighbors neighbours per origin, so the control channel is the only
+	// mux channel whose frames can approach the full frame budget.
 	buf := make([]byte, maxFrameLen+mux.HeaderLen)
 
 	for {
@@ -339,7 +359,14 @@ func (e *muxEngine) handleDataStream(s network.Stream) {
 			}
 		}()
 	}
-	buf := make([]byte, maxFrameLen+mux.DataHeaderLen)
+	// Sized to maxBootRelayEnvelope, NOT maxFrameLen: every data-channel kind
+	// carries an obfuscate frame (VTP), a relay envelope (Relay) or a boot-relay
+	// envelope (BootRelay), all of which are capped at ~65670 bytes by the
+	// obfuscate frame limit. The control channel keeps maxFrameLen because LSA
+	// snapshots carry up to maxLSANeighbors neighbours per origin and genuinely
+	// approach the full budget — the data channel never does. This was 1 MiB,
+	// 16x the largest frame it can ever see.
+	buf := make([]byte, maxBootRelayEnvelope+mux.DataHeaderLen)
 
 	for {
 		kind, payload, err := mux.ReadDataFrame(s, buf)

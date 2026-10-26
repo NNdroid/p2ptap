@@ -490,7 +490,7 @@ func (n *Node) deliverBootRelayControl(finalDst, srcPeer peer.ID, proto protocol
 	// steering return frames to an attacker-influenced hop.
 	n.notePeerRxTransport(srcPeer, "overlay-relay", viaBoot)
 	if viaBoot != "" && viaBoot != srcPeer {
-		n.recordPeekMapOrigin(srcPeer, viaBoot, 1, false)
+		n.recordPeekMapOrigin(srcPeer, viaBoot, 1, n.isBootstrapPeer(viaBoot))
 	}
 	// Copy BOTH fields out of the downlink's REUSED read buffer. The downlink
 	// loop calls ReadFrame(s, buf) on the very next iteration, which overwrites

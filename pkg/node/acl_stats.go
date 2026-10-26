@@ -81,14 +81,63 @@ func (n *Node) checkRelayTransitACL(srcPeer, finalDst peer.ID) bool {
 	// operator placed ahead of a specific accept be overridden on the relay path
 	// only, i.e. under-deny relative to the direct path. Ignoring protocol/port
 	// here can only over-deny, which is the safe direction.
+	//
+	// Two MatchACL guards MUST be mirrored here, or the transit check silently
+	// diverges from the direct path it is meant to pre-empt:
+	//
+	//   - MatchACL treats an EMPTY peer_id as match-all (its guard is
+	//     `rule.PeerID != "" && ...`), which is how the WebUI's "deny all" rule
+	//     is written. Treating empty as match-nothing let such a rule deny every
+	//     direct frame while leaving relay transit wide open — the exact bounce
+	//     bypass this check exists to close.
+	//   - A relay frame is inbound-like (heading INTO the network toward
+	//     finalDst), so `direction:"outbound"` rules do not apply here — the
+	//     direct-path twin is MatchACL with isTx=false. Honouring only peer_id
+	//     applied an "outbound only" deny to transit traffic that never leaves us.
+	src := srcPeer.String()
 	for _, rule := range c.ACL.Rules {
-		if rule.PeerID == srcPeer.String() || rule.PeerID == "*" {
-			action := strings.ToLower(rule.Action)
-			return action == "accept" || action == "allow"
+		if dir := strings.ToLower(rule.Direction); dir == "outbound" {
+			continue
 		}
+		if rule.PeerID != "" && rule.PeerID != "*" && rule.PeerID != src {
+			continue
+		}
+		allowed := strings.ToLower(rule.Action) == "accept" || strings.ToLower(rule.Action) == "allow"
+		n.recordRelayTransitACL(rule.RuleID, src, allowed)
+		return allowed
 	}
 	defAct := strings.ToLower(c.ACL.DefaultAction)
-	return defAct == "accept" || defAct == "allow" || defAct == ""
+	allowed := defAct == "accept" || defAct == "allow" || defAct == ""
+	n.recordRelayTransitACL("", src, allowed)
+	return allowed
+}
+
+// recordRelayTransitACL folds a relay-transit decision into the same ACL
+// counters as the direct path, so the WebUI firewall card shows relay
+// activity too. Before this checkRelayTransitACL made decisions that never
+// appeared in the counters: a `{peer_id:"*", action:"deny"}` rule would show
+// zero hits while still dropping every transited frame, making the drop
+// invisible. Best-effort: aclStats is nil in hand-built test nodes.
+func (n *Node) recordRelayTransitACL(ruleID, src string, allowed bool) {
+	if n.aclStats == nil {
+		return
+	}
+	if allowed {
+		n.aclStats.recordAccept()
+		n.aclStats.recordRuleHit(ruleID)
+		return
+	}
+	reason := "default"
+	if ruleID != "" {
+		reason = "rule:" + ruleID
+	}
+	n.aclStats.recordDrop(ACLDropRecord{
+		Time:   time.Now(),
+		PeerID: src,
+		RuleID: ruleID,
+		Reason: reason,
+		Dir:    "inbound",
+	})
 }
 
 // ACLStatsSnapshotDTO is the JSON shape returned to the WebUI. Defined here

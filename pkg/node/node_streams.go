@@ -576,8 +576,11 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 	// means the native TAP write has completed, while ordinary bulk traffic
 	// is handed to the dedicated writer below.
 	tapProbeFrame := false
+	var probePID peer.ID
+	var probeTok uint64
 	if pid, tok, ok := n.isTapProbeRequest(payload); ok {
 		tapProbeFrame = true
+		probePID, probeTok = pid, tok
 		dstIP := net.IP(payload[14+16 : 14+20])
 		ackFlag := tapProbeAckFlagIPMismatch
 		if n.localV4IP != nil && dstIP.Equal(n.localV4IP) {
@@ -591,7 +594,7 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 	if n.TAP == nil {
 		log.Warn("TAP device is nil, cannot write frame")
 		if tapProbeFrame {
-			n.takeDeferredProbeAcks()
+			n.takeDeferredProbeAck(probePID, probeTok)
 		}
 		return
 	}
@@ -615,10 +618,10 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 	wn, werr := n.tapWrite(payload)
 	if werr != nil {
 		log.Warn("TAP write error: %v", werr)
-		n.takeDeferredProbeAcks()
+		n.takeDeferredProbeAck(probePID, probeTok)
 	} else {
 		log.Debug("TAP write ok: %d bytes to %s", wn, n.TAP.Name())
-		if deferred := n.takeDeferredProbeAcks(); len(deferred) > 0 {
+		if deferred := n.takeDeferredProbeAck(probePID, probeTok); len(deferred) > 0 {
 			for _, d := range deferred {
 				go n.sendTapProbeAck(d.prober, d.token, d.flag)
 			}
@@ -1224,6 +1227,16 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 	// half that is decidable — the two claims are indistinguishable at the
 	// first sighting, so the first sighting is shape-checked, not
 	// authenticated, and the re-attribution is where the gate bites.
+	// originVerified distinguishes the two branches of the gate above: a
+	// sighting where srcPeer is either already known (so the carrier was
+	// checked against the recorded first source) or IS the transport peer.
+	// A shape-checked FIRST sighting of an otherwise-unknown srcPeer is not
+	// verified — any peer ID in the right TTL range is admitted there.
+	// Liveness and provenance records key on srcPeer, so they are written
+	// only for verified origins: an unverified first sighting must not be able
+	// to stamp a peer's return-path as alive, or re-point its peek-map origin,
+	// on one frame from a hop it did not authenticate.
+	originVerified := false
 	if srcPeer != "" {
 		srcStr := srcPeer.String()
 		remoteStr := remotePeer.String()
@@ -1245,9 +1258,12 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 			}
 			entry.firstSeen = time.Now()
 			n.seenOrigins.Store(srcStr, entry)
+			originVerified = true
 		} else if srcPeer == remotePeer && ttl == routing.MaxRelayTTL {
-			// Direct origin at full TTL.
+			// Direct origin at full TTL: the claimed origin IS the transport
+			// peer, which libp2p authenticated, so the claim is sound.
 			n.seenOrigins.Store(srcStr, seenOriginEntry{firstSeen: time.Now(), source: remoteStr})
+			originVerified = true
 		} else if ttl >= 1 && ttl < routing.MaxRelayTTL {
 			// First sighting carried by a relay: legitimate multi-hop, with
 			// at least one decrement already applied by an upstream hop.
@@ -1266,14 +1282,18 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 	// return distinction in an asymmetric-routing mesh. The frame reached us
 	// over the overlay envelope carried by remotePeer, so annotate that hop —
 	// srcPeer may well have its own live direct connection to us unused.
-	n.notePeerRxTransport(srcPeer, "overlay-relay", remotePeer)
+	if originVerified {
+		n.notePeerRxTransport(srcPeer, "overlay-relay", remotePeer)
+	}
 	// relayHopRx: the hop (remotePeer) itself just carried a frame to us. A
 	// pure-forwarding hop is never srcPeer, so this is the only signal that
 	// advances for it — relayStreamPool anchors its failure-streak clear on
 	// this so a healthy-but-silent forwarder is not mis-blacklisted.
 	if remotePeer != "" && remotePeer != srcPeer {
 		n.noteRelayHopRx(remotePeer)
-		n.recordPeekMapOrigin(srcPeer, remotePeer, 1, false)
+		if originVerified {
+			n.recordPeekMapOrigin(srcPeer, remotePeer, 1, n.isBootstrapPeer(remotePeer))
+		}
 	} else if remotePeer != "" {
 		// Final hop where the carrier IS the origin: still counts as the hop
 		// delivering to us.
@@ -1355,6 +1375,21 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 		if nextHop == remotePeer {
 			log.Debug("Relay forward to %s looped back to sender %s; dropping (ttl=%d)", finalDst.String(), remotePeer.String(), ttl)
 			n.relayDiag.loopGuard()
+			return
+		}
+
+		// A p2ptap-boot can never be an overlay relay next hop: relayPool refuses
+		// boot peers outright (it is a relay-over-backbone uplink, not an overlay
+		// relay peer). Without this branch a frame whose route resolved to a boot
+		// was submitted to the pool, silently rejected, and miscounted as a
+		// pool-full forward drop — the relay looked healthy while every such
+		// frame died here with only a debug log. routeHopUsable deliberately
+		// admits boots (so the ORIGIN side can egress through them), which is
+		// exactly how this route reaches the transit path. The origin-side
+		// branches (node_tap.go, strategy.relayFallbackIfPossible) already take
+		// the boot-relay path for the same hop; the transit path did not.
+		if n.isBootstrapPeer(nextHop) {
+			n.forwardRelayEnvelopeViaBootRelay(finalDst, nextHop, srcPeer, innerPayload)
 			return
 		}
 
@@ -1595,16 +1630,30 @@ func (n *Node) queueDeferredProbeAck(d deferredProbeAck) {
 	n.deferredProbeAcksMu.Unlock()
 }
 
-// takeDeferredProbeAcks drains and returns acks queued for the frame that was
-// just written into the TAP device (called only on write success).
-func (n *Node) takeDeferredProbeAcks() []deferredProbeAck {
+// takeDeferredProbeAck returns the pending acks queued for ONE probe frame
+// (matched on prober + token) and removes them from the queue.
+//
+// It must NOT drain the whole queue: every frame is processed in its own
+// goroutine, so a blanket drain let a concurrent probe frame collect THIS
+// frame's ack. If that concurrent write then failed, this frame's ack had
+// already been sent for a delivery that never happened — precisely the lie the
+// deferral exists to prevent ("acked a frame that was never delivered to the
+// TAP"). A concurrent write that succeeded simply sends the ack a moment
+// early, which is harmless; a concurrent write that failed no longer steals
+// an ack it was never entitled to.
+func (n *Node) takeDeferredProbeAck(prober peer.ID, token uint64) []deferredProbeAck {
 	n.deferredProbeAcksMu.Lock()
 	defer n.deferredProbeAcksMu.Unlock()
-	if len(n.deferredProbeAcks) == 0 {
-		return nil
+	var out []deferredProbeAck
+	kept := n.deferredProbeAcks[:0]
+	for _, d := range n.deferredProbeAcks {
+		if d.prober == prober && d.token == token {
+			out = append(out, d)
+		} else {
+			kept = append(kept, d)
+		}
 	}
-	out := n.deferredProbeAcks
-	n.deferredProbeAcks = nil
+	n.deferredProbeAcks = kept
 	return out
 }
 

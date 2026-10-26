@@ -22,6 +22,20 @@ import (
 // path (or drops, and the source retransmits).
 const bootRelayMaxQueue = 128
 
+// maxBootRelayEnvelope is the largest boot-relay frame on the wire:
+//
+//	obfuscate.MaxSealedFrameSize (65551) + relay header (~98B for two
+//	46-char peer.IDs) + boot-relay prefix (21B) = 65670 bytes.
+//
+// ReadFrame rejects any frame larger than its destination buffer ("frame too
+// large") and drops it SILENTLY, so every relay read path MUST allocate at
+// least this much or max-size envelopes are lost. 64 KiB (65536) is 134 bytes
+// too small for the envelope alone — the boot-relay downlink used to size its
+// buffer to exactly obfuscate.MaxSealedFrameSize and dropped the largest valid
+// frames. Rounded up to 66000 for headroom, matching p2ptap-boot's own
+// constant so the two sides cannot drift apart again.
+const maxBootRelayEnvelope = 66000
+
 // bootRelayBlacklistTTL is how long a boot stays blacklisted after its uplink
 // repeatedly failed to establish. 30s allows rapid self-healing recovery from transient blips.
 const bootRelayBlacklistTTL = 30 * time.Second
@@ -396,7 +410,7 @@ func (n *Node) bootRelayDrain(rc *bootRelayConn) {
 // boot itself never holds that key.
 func (n *Node) handleBootRelayDownlink(s network.Stream, boot peer.ID) {
 	defer s.Close()
-	buf := make([]byte, obfuscate.MaxSealedFrameSize)
+	buf := make([]byte, maxBootRelayEnvelope)
 	for {
 		// The write loop sends a loopback heartbeat every 15s, so the boot
 		// echoes at least one frame down this stream per interval. A 60s
@@ -481,15 +495,11 @@ func (n *Node) handleBootRelayFrame(boot peer.ID, data []byte) {
 		log.Debug("[boot-relay] downlink Unpack err=%v from origin=%s; dropping", uerr, srcPeer.String())
 		return
 	}
-	// Return-path liveness and provenance tracking: only record after
-	// successful decryption and unpack, so a malformed or undecryptable
-	// frame cannot keep a stale peer connection alive. The frame travelled
-	// relay-over-backbone through boot, so that boot is the hop the return
-	// side actually used.
-	n.notePeerRxTransport(srcPeer, "overlay-relay", boot)
-	if boot != "" && boot != srcPeer {
-		n.recordPeekMapOrigin(srcPeer, boot, 1, false)
-	}
+	// Return-path liveness and provenance are recorded by
+	// deliverRelayedFrameToTAP, and only AFTER its PSK gate — recording them
+	// here too would double-count every boot-relay frame, and would stamp
+	// liveness on a frame that then fails the PSK check. Decrypt+unpack
+	// success alone is not enough to keep a peer connection alive.
 	n.deliverRelayedFrameToTAP(unpacked, srcPeer, boot, seqID)
 }
 
@@ -541,6 +551,41 @@ func (sd *StrategyDispatcher) sendToPeerViaBootRelay(target, bootHop peer.ID, pa
 	return nil
 }
 
+// forwardRelayEnvelopeViaBootRelay hands a relay-transit frame whose route
+// resolved to a p2ptap-boot to the relay-over-backbone uplink, instead of the
+// overlay relay pool (which refuses boot hops outright). innerPayload is
+// already END-TO-END sealed for finalDst by srcPeer, so it is wrapped directly
+// in the boot-relay envelope — it must NOT be re-sealed. Re-sealing would wrap
+// the frame in the (us ↔ finalDst) cipher, which finalDst cannot open, and the
+// destination's Unpack would still succeed on the cleartext header, writing
+// garbage to the TAP with no error anywhere: the classic "link healthy, no
+// replies" failure. The envelope carries srcPeer, not our own ID, as its source
+// so finalDst picks the (srcPeer ↔ finalDst) cipher.
+func (n *Node) forwardRelayEnvelopeViaBootRelay(finalDst, bootHop, srcPeer peer.ID, innerPayload []byte) {
+	env, err := routing.PackBootRelayFrame(n.bootRelayNetID, routing.BootRelayKindData, "",
+		finalDst, srcPeer, routing.MaxRelayTTL, innerPayload)
+	if err != nil {
+		log.Warn("Relay forward to %s via boot %s aborted: boot-relay pack failed: %v",
+			finalDst.String(), bootHop.String(), err)
+		n.relayDiag.sealFail()
+		return
+	}
+	// MaxRelayTTL (not the decremented overlay ttl) is deliberate: the boot
+	// router floods the backbone only when ttl > 1, and a boot-relay bridge is
+	// one hop regardless of how many overlay hops the origin budgeted. The
+	// backbone flood is single-hop and fromMesh frames are never re-flooded, so
+	// this cannot loop.
+	if !n.bootRelaySubmit(bootHop, env,
+		nil, // onSent — forwarding does not double-count the origin's tx bytes
+		func() {
+			log.Debug("Relay forward to %s via boot %s permanently failed",
+				finalDst.String(), bootHop.String())
+		},
+	) {
+		n.relayDiag.uplinkGone()
+	}
+}
+
 // deliverRelayedFrameToTAP writes a decrypted, unpacked relayed Ethernet frame
 // into the local TAP device, applying the same dedup / ACL / MAC-learn /
 // exit-node / dst-MAC-fixup steps as the overlay-relay receive path. srcPeer is
@@ -565,9 +610,13 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 	}
 	// Valid end-to-end frame: record return-path liveness and success. Via peer
 	// is the carrier of this frame, so it is the hop the return side used.
+	// isBootstrapPeer derives the peek-map IsBoot bit here rather than at each
+	// call site: this helper is reached from BOTH the overlay-relay and the
+	// boot-relay path, and hard-coding false (as it used to) recorded a frame
+	// that demonstrably came through a boot as if it came from an ordinary hop.
 	n.notePeerRxTransport(srcPeer, "overlay-relay", viaPeer)
 	if viaPeer != "" && viaPeer != srcPeer {
-		n.recordPeekMapOrigin(srcPeer, viaPeer, 1, false)
+		n.recordPeekMapOrigin(srcPeer, viaPeer, 1, n.isBootstrapPeer(viaPeer))
 	}
 	n.recordPeerRxDecrypt(srcPeer, true)
 	n.maybeMarkReadyOnDecrypt(srcPeer, true)
@@ -677,8 +726,11 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 	n.maybeDeliverProbeReply(tapPayload)
 	n.observeTapICMPEchoReply(srcPeer, tapPayload, time.Now())
 	tapProbeFrame := false
+	var probePID peer.ID
+	var probeTok uint64
 	if pid, tok, ok := n.isTapProbeRequest(tapPayload); ok {
 		tapProbeFrame = true
+		probePID, probeTok = pid, tok
 		dstIP := net.IP(tapPayload[14+16 : 14+20])
 		ackFlag := tapProbeAckFlagIPMismatch
 		if n.localV4IP != nil && dstIP.Equal(n.localV4IP) {
@@ -689,7 +741,7 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 
 	if n.TAP == nil {
 		if tapProbeFrame {
-			n.takeDeferredProbeAcks()
+			n.takeDeferredProbeAck(probePID, probeTok)
 		}
 		return
 	}
@@ -707,10 +759,10 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 	// Synchronous probe path: complete accounting and ack only on write success.
 	wn, werr := n.tapWrite(tapPayload)
 	if werr != nil || wn != len(tapPayload) {
-		n.takeDeferredProbeAcks()
+		n.takeDeferredProbeAck(probePID, probeTok)
 		return
 	}
-	if deferred := n.takeDeferredProbeAcks(); len(deferred) > 0 {
+	if deferred := n.takeDeferredProbeAck(probePID, probeTok); len(deferred) > 0 {
 		for _, d := range deferred {
 			go n.sendTapProbeAck(d.prober, d.token, d.flag)
 		}

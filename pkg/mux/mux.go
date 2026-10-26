@@ -54,9 +54,20 @@ const HeaderLen = 10 // 4B frameLen + 1B tag + 1B dir + 4B reqID
 // DataHeaderLen is the data-channel frame header size (excluding payload).
 const DataHeaderLen = 5 // 4B frameLen + 1B kind
 
+// MaxPayloadLen bounds the payload of a single mux frame on either channel.
+// It matches the node's per-frame limit (framing.maxFrameLen, 1 MiB): a peer
+// sizes its read buffer to that value, so a larger payload would be rejected
+// there as "invalid frame length" and tear down the stream. Failing here
+// instead reports the error at the point it is actually actionable, rather
+// than as a confusing peer-side stream reset one RTT later.
+const MaxPayloadLen = 1 << 20
+
 // WriteFrame writes a control-channel mux frame to w.
 // Format: [4B BE frameLen][1B tag][1B dir][4B BE reqID][payload]
 func WriteFrame(w io.Writer, tag uint8, dir uint8, reqID uint32, payload []byte) (int, error) {
+	if len(payload) > MaxPayloadLen {
+		return 0, fmt.Errorf("mux: payload too large: %d > %d", len(payload), MaxPayloadLen)
+	}
 	frameLen := HeaderLen - 4 + len(payload)
 	buf := make([]byte, 4+frameLen)
 	binary.BigEndian.PutUint32(buf[:4], uint32(frameLen))
@@ -89,6 +100,9 @@ func ReadFrame(r io.Reader, buf []byte) (tag uint8, dir uint8, reqID uint32, pay
 // WriteDataFrame writes a data-channel mux frame to w.
 // Format: [4B BE frameLen][1B kind][payload]
 func WriteDataFrame(w io.Writer, kind uint8, payload []byte) (int, error) {
+	if len(payload) > MaxPayloadLen {
+		return 0, fmt.Errorf("mux: data payload too large: %d > %d", len(payload), MaxPayloadLen)
+	}
 	frameLen := 1 + len(payload)
 	buf := make([]byte, 4+frameLen)
 	binary.BigEndian.PutUint32(buf[:4], uint32(frameLen))
