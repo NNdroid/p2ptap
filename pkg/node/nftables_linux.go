@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/google/nftables"
@@ -32,6 +33,12 @@ type NFTManager struct {
 
 	tapIf string // TAP iface name, captured at setup for MSS-clamp cleanup
 	mss   int    // configured MSS clamp, 0 = disabled
+
+	// Last failure detail from each MSS-clamp attempt, retained so the
+	// addMSSClamp Warn can name the concrete cause of both paths at once.
+	// Both are per-family, so the final family processed wins in the log line.
+	mssClampNFTFail string
+	mssClampIPTFail string
 }
 
 func NewNFTManager(cfg *config.ExitNodeConfig) *NFTManager {
@@ -230,23 +237,52 @@ func (m *NFTManager) SetupSubnetRouterNAT(tapIfName string) error {
 // (reduced) tunnel path MTU instead of being fragmented or blackholed.
 //
 // Compatibility: the preferred mechanism is the nftables TCPOPT set expression,
-// but some kernels (notably minimal/OpenWrt builds) return EOPNOTSUPP for it. In
-// that case we transparently fall back to the iptables/ip6tables TCPMSS target,
-// which is supported far more widely. The clamp is best-effort: if neither
-// mechanism is available we degrade to a Debug log rather than a warning, because
-// the Exit Node still routes client traffic via masquerade.
+// but some kernels (notably minimal/OpenWrt and Debian cloud images, where the
+// nft_tcponly module is not shipped) return EOPNOTSUPP for it. In that case we
+// transparently fall back to the iptables/ip6tables TCPMSS target, which is
+// supported far more widely.
+//
+// Both paths can still fail together: an nftables-only host (nft installed, no
+// iptables userspace) with no nft_tcponly module has NO way to clamp MSS. That
+// is degrading, not fatal — the Exit Node still routes client traffic via
+// masquerade and RFC 1122 PMTU discovery takes over — but it must be visible.
+// A missing clamp is the usual suspect for "large TCP packets fail through the
+// exit node", so the failure is logged at Warn with the concrete cause of both
+// attempts rather than swallowed at Debug.
 func (m *NFTManager) addMSSClamp(family, tableName, tapIfName string, mss int) {
 	if tapIfName == "" || mss <= 0 {
 		return
 	}
-	if m.addMSSClampNFT(family, tableName, tapIfName, mss) {
+	if ok, _ := m.addMSSClampNFT(family, tableName, tapIfName, mss); ok {
 		return
 	}
-	if m.addMSSClampIPTables(family, tapIfName, mss) {
+	if ok, _ := m.addMSSClampIPTables(family, tapIfName, mss); ok {
 		nftLog.Info("added TCP MSS clamp (mss=%d) on %s via iptables TCPMSS fallback (tap=%s)", mss, family, tapIfName)
 		return
 	}
-	nftLog.Debug("TCP MSS clamp (mss=%d) unavailable on %s (nft + iptables both unsupported by kernel); skipping (best-effort optimization)", mss, family)
+	nftLog.Warn("TCP MSS clamp (mss=%d) NOT installed on %s — traffic will rely on PMTU discovery instead of an advertised-clamp. nft: %s | iptables: %s",
+		mss, family, m.mssClampNFTFail, m.mssClampIPTFail)
+}
+
+// nftErrDetail returns a short, log-friendly summary of an nft/iptables failure:
+// the last non-empty output line, else the error string. Keeps one operator-facing
+// line per attempt instead of a multi-hundred-byte kernel backtrace in the log.
+func nftErrDetail(err error, out []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	last := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		if s := strings.TrimSpace(lines[i]); s != "" {
+			last = s
+			break
+		}
+	}
+	if last == "" {
+		last = err.Error()
+	}
+	if len(last) > 160 {
+		last = last[:160] + "..."
+	}
+	return last
 }
 
 // addMSSClampNFT installs the clamp via the nft CLI. google/nftables v0.3.0
@@ -254,28 +290,33 @@ func (m *NFTManager) addMSSClamp(family, tableName, tapIfName string, mss int) {
 // idempotently (skipped if an identical clamp already exists). Returns false if
 // the kernel does not support the expression, so the caller can fall back to
 // iptables.
-func (m *NFTManager) addMSSClampNFT(family, tableName, tapIfName string, mss int) bool {
+func (m *NFTManager) addMSSClampNFT(family, tableName, tapIfName string, mss int) (bool, string) {
 	probe := fmt.Sprintf("nft list chain %s %s postrouting 2>/dev/null | grep -q 'maxseg set %d'", family, tableName, mss)
 	if out, err := exec.Command("sh", "-c", probe).CombinedOutput(); err == nil && len(out) == 0 {
 		nftLog.Debug("MSS clamp (mss=%d) already present on %s/%s", mss, family, tableName)
-		return true
+		return true, ""
 	}
 	// Run nft directly (NOT via `sh -c`). The rule contains shell metacharacters
 	// (&, (), |) that the shell would otherwise interpret as syntax — `(syn|rst)`
 	// would be parsed as a subshell pipeline and fail with "Syntax error: word
 	// unexpected", leaving the clamp never installed. Passing the rule as discrete
 	// argv tokens hands those characters to nft literally.
+	// `== syn` (not `!= 0`) is what the iptables fallback's `--tcp-flags SYN,RST
+	// SYN` actually means: SYN set, RST clear. `!= 0` would also match plain RST
+	// packets, and clamping the MSS on a RST is a no-op that just adds an
+	// unrelated match to the rule.
 	args := []string{"add", "rule", family, tableName, "postrouting",
 		"iifname", tapIfName,
-		"tcp", "flags", "&", "(syn|rst)", "!=", "0",
+		"tcp", "flags", "&", "(syn|rst)", "==", "syn",
 		"tcp", "option", "maxseg", "set", strconv.Itoa(mss),
 	}
-	if _, err := exec.Command("nft", args...).CombinedOutput(); err != nil {
-		nftLog.Debug("nft MSS clamp (mss=%d) on %s/%s unsupported by kernel: %v", mss, family, tableName, err)
-		return false
+	out, err := exec.Command("nft", args...).CombinedOutput()
+	if err != nil {
+		m.mssClampNFTFail = nftErrDetail(err, out)
+		return false, ""
 	}
 	nftLog.Info("added TCP MSS clamp (mss=%d) on %s/%s postrouting (tap=%s)", mss, family, tableName, tapIfName)
-	return true
+	return true, ""
 }
 
 // addMSSClampIPTables installs the clamp via the iptables/ip6tables TCPMSS
@@ -283,7 +324,7 @@ func (m *NFTManager) addMSSClampNFT(family, tableName, tapIfName string, mss int
 // expression. It is scoped identically to the nft variant: forwarded (FORWARD
 // chain) TCP SYN/RST packets that entered via the TAP interface. Idempotent via
 // a -C existence check.
-func (m *NFTManager) addMSSClampIPTables(family, tapIfName string, mss int) bool {
+func (m *NFTManager) addMSSClampIPTables(family, tapIfName string, mss int) (bool, string) {
 	bin := "iptables"
 	if family == "ip6" {
 		bin = "ip6tables"
@@ -293,14 +334,15 @@ func (m *NFTManager) addMSSClampIPTables(family, tapIfName string, mss int) bool
 		"-j", "TCPMSS", "--set-mss", strconv.Itoa(mss)}
 	if _, err := exec.Command(bin, args...).CombinedOutput(); err == nil {
 		nftLog.Debug("%s TCPMSS clamp (mss=%d) already present (tap=%s)", bin, mss, tapIfName)
-		return true
+		return true, ""
 	}
 	args[2] = "-A" // switch -C (check) to -A (append)
-	if _, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
-		nftLog.Debug("%s TCPMSS clamp (mss=%d) unsupported by kernel: %v", bin, mss, err)
-		return false
+	out, err := exec.Command(bin, args...).CombinedOutput()
+	if err != nil {
+		m.mssClampIPTFail = nftErrDetail(err, out)
+		return false, ""
 	}
-	return true
+	return true, ""
 }
 
 // removeMSSClampIPTables best-effort removes the iptables fallback clamp
