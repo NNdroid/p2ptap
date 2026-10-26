@@ -1408,6 +1408,9 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			if !sent("force_private_reachability") {
 				incoming.ForcePrivateReachability = c.ForcePrivateReachability
 			}
+			if !sent("relay_header_multihash") {
+				incoming.RelayHeaderMultihash = c.RelayHeaderMultihash
+			}
 			// Durations: Validate clamps an out-of-range value back to its default,
 			// so an omitted one would silently overwrite a user-tuned timeout.
 			if !sent("hole_punch_timeout") {

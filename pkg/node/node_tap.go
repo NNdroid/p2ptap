@@ -496,7 +496,7 @@ func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, pack
 		// to) read frame[11:13] inside the base58 PeerID string, always returned
 		// ErrFrameCorrupted, and — with the old `if eerr==nil` guard — sent the
 		// envelope in plaintext, which the hop silently dropped.
-		if relayBuf, err := routing.PackRelayFrame(exitPID, n.Host.ID(), routing.MaxRelayTTL, inner); err == nil {
+		if relayBuf, err := n.packRelayFrame(exitPID, n.Host.ID(), routing.MaxRelayTTL, inner); err == nil {
 			sealed, serr := n.sealRelayEnvelopeForHop(route.NextHop, relayBuf)
 			if serr != nil {
 				log.Warn("Tx exit-transit: hop seal via %s failed: %v (frame dropped rather than sent in plaintext)",
@@ -941,7 +941,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 			// for the relay hop, so only that hop can read the routing header. The
 			// inner payload stays end-to-end encrypted for targetPeer and is never
 			// readable by the relay.
-			if relayBuf, rerr := routing.PackRelayFrame(targetPeer, n.Host.ID(), routing.MaxRelayTTL, inner); rerr != nil {
+			if relayBuf, rerr := n.packRelayFrame(targetPeer, n.Host.ID(), routing.MaxRelayTTL, inner); rerr != nil {
 				log.Warn("Tx overlay relay: pack envelope for %s failed: %v; dispatching plaintext packed fallback", targetPeer.String(), rerr)
 				n.dispatchNonblocking(dispatchTask{
 					kind:    0,

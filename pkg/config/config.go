@@ -309,6 +309,18 @@ type Config struct {
 	// streams; lower it to pick up a restored direct path sooner, raise it to
 	// prefer the relay for a path that keeps flapping.
 	RelayUpgradeFlapWindow time.Duration `json:"relay_upgrade_flap_window"`
+	// RelayHeaderMultihash sends p2ptap's own overlay relay frames with the
+	// compact 0x03 header, which carries peer IDs as raw multihash bytes
+	// instead of base58 CID strings. Default: false.
+	//
+	// It is off by default because it is a wire-format change that every node
+	// on a transit path must speak: every relay hop repacks the envelope, and
+	// boot relays parse it to decide where to forward. A v2-only peer in the
+	// middle rejects a v3 envelope, so the frame is dropped between the two
+	// hops that already speak v3. Enable it only on a fleet where every
+	// overlay relay hop and every boot relay has been upgraded. Readers always
+	// accept both header versions, so leaving it off is safe on a mixed fleet.
+	RelayHeaderMultihash bool `json:"relay_header_multihash"`
 }
 
 // Accepted ranges for the relay-upgrade durations. Validate() rejects values

@@ -738,7 +738,7 @@ func (sd *StrategyDispatcher) sendToPeerViaOverlayRelay(targetPeer, relayHop pee
 	}
 
 	// 2. Wrap in an overlay relay frame.
-	relayBuf, err := routing.PackRelayFrame(targetPeer, n.Host.ID(), routing.MaxRelayTTL, inner)
+	relayBuf, err := n.packRelayFrame(targetPeer, n.Host.ID(), routing.MaxRelayTTL, inner)
 	if err != nil {
 		return fmt.Errorf("overlay relay pack for %s failed: %w", targetPeer.String(), err)
 	}

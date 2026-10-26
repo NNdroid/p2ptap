@@ -1133,6 +1133,22 @@ func (n *Node) handleRelayStream(s network.Stream) {
 	}
 }
 
+// packRelayFrame wraps inner in the overlay relay envelope, choosing the header
+// version from the running config. Callers that must reach an un-upgraded peer
+// keep calling routing.PackRelayFrame directly: PackBootRelayFrame in
+// particular, because a boot relay has to parse the inner envelope in order to
+// decide where to forward the frame.
+//
+// The version is read through config(), not Config, so a live config save takes
+// effect without a restart. That is one atomic load on the TX path, which is
+// nothing next to the two base58 encodings the v2 header used to cost per frame.
+func (n *Node) packRelayFrame(finalDst, source peer.ID, ttl uint8, payload []byte) ([]byte, error) {
+	if c := n.config(); c != nil && c.RelayHeaderMultihash {
+		return routing.PackRelayFrameV3(finalDst, source, ttl, payload)
+	}
+	return routing.PackRelayFrame(finalDst, source, ttl, payload)
+}
+
 // handleRelayFrame processes one inbound overlay-relay frame: hop-by-hop
 // envelope decrypt, unwrap the carrying obfuscate frame, fragment reassembly,
 // envelope unpack, origin verification, then deliver or forward. Shared by the
@@ -1442,7 +1458,7 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 		// Keeping the envelope is also not a performance loss: when
 		// nextHop == finalDst the envelope is delivered in a single hop and
 		// unwrapped by handleRelayStream on arrival.
-		repacked, err := routing.PackRelayFrame(finalDst, srcPeer, ttl-1, innerPayload)
+		repacked, err := n.packRelayFrame(finalDst, srcPeer, ttl-1, innerPayload)
 		if err == nil {
 			// HOP-BY-HOP re-encryption: seal the forwarded envelope for the
 			// NEXT hop, mirroring what the origin did for the first hop. The

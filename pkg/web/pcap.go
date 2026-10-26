@@ -95,8 +95,10 @@ type PacketCapture struct {
 	mu        sync.Mutex
 	running   atomic.Bool
 	seq       uint64
-	cap       int // ring capacity
-	buf       []CapturedFrame
+	cap       int             // fixed ring capacity
+	buf       []CapturedFrame // fixed-capacity ring, written in place
+	start     int             // index of the OLDEST live frame
+	count     int             // live frames, <= cap
 	startTime time.Time
 	filePath  string // where to persist captured frames (empty = disabled)
 	lastSave  time.Time
@@ -143,7 +145,7 @@ func NewPacketCapture(capacity int, filePath string) *PacketCapture {
 	}
 	p := &PacketCapture{
 		cap:       capacity,
-		buf:       make([]CapturedFrame, 0, capacity),
+		buf:       make([]CapturedFrame, capacity),
 		filePath:  filePath,
 		saveEvery: 2 * time.Second,
 		maxHex:    64,
@@ -262,7 +264,20 @@ func (p *PacketCapture) Toggle() bool {
 // Clear empties the buffer (but keeps the running state).
 func (p *PacketCapture) Clear() {
 	p.mu.Lock()
-	p.buf = p.buf[:0]
+	// Zero the live slots as well as resetting the counters: each slot holds a
+	// few hundred bytes of strings (Hex + RawB64 + protocol summary), so merely
+	// forgetting them would keep ~cap*500B of dead strings pinned by the ring
+	// array until the next overwrite sweep. Clear is an admin action, not a hot
+	// path, so the one-time O(count) sweep is worth releasing them immediately.
+	for i := 0; i < p.count; i++ {
+		idx := p.start + i
+		if idx >= p.cap {
+			idx -= p.cap
+		}
+		p.buf[idx] = CapturedFrame{}
+	}
+	p.start = 0
+	p.count = 0
 	p.saveLocked()
 	p.mu.Unlock()
 	// Notify live subscribers AFTER releasing p.mu so a slow consumer cannot
@@ -316,19 +331,31 @@ func (p *PacketCapture) AddWithPeers(dir CaptureDir, frame []byte, fromPeer, toP
 		cf.ToPeer = toPeer
 	}
 	p.seq++
-	if len(p.buf) >= p.cap {
-		// Ring overwrite. Shifting by ONE entry per frame is O(cap) memmove on
-		// EVERY captured frame (cap=20000 entries under p.mu, synchronously on
-		// the TAP TX/RX path) — at wire rate that stalls the datapath. Drop the
-		// oldest half in a single shift instead: amortized O(1) per frame, the
-		// buffer stays ordered newest-last, and all Since-scan consumers are
-		// unaffected (they only rely on ascending Seq).
-		drop := len(p.buf) / 2
-		copy(p.buf[0:], p.buf[drop:])
-		p.buf = p.buf[:len(p.buf)-drop]
-		p.buf[len(p.buf)-1] = cf
+	// Fixed-capacity ring: write the next free slot, or overwrite the oldest.
+	// The previous "drop the oldest half" compaction was amortised O(1) but its
+	// worst case still moved ~cap/2 CapturedFrame values (~500B each, so ~5MB)
+	// under p.mu on the TAP TX/RX path at wire rate, and handed ~20MB of
+	// short-lived strings to the GC on every frame. A single in-place slot
+	// assignment is O(1) in the worst case and allocates nothing. Seq stays
+	// monotonic because it is a separate counter, so all consumers that rely on
+	// ascending Seq are unaffected.
+	//
+	// The index is written with a branch rather than %cap: cap is a variable,
+	// so the modulo would not constant-fold, and this is the one line executed
+	// on every captured frame.
+	if p.count < p.cap {
+		idx := p.start + p.count
+		if idx == p.cap {
+			idx = 0
+		}
+		p.buf[idx] = cf
+		p.count++
 	} else {
-		p.buf = append(p.buf, cf)
+		p.buf[p.start] = cf
+		p.start++
+		if p.start == p.cap {
+			p.start = 0
+		}
 	}
 	// Best-effort throttled persistence.
 	if p.filePath != "" && time.Since(p.lastSave) > p.saveEvery {
@@ -345,14 +372,35 @@ func (p *PacketCapture) AddWithPeers(dir CaptureDir, frame []byte, fromPeer, toP
 
 // Snapshot returns frames with Seq > since (for incremental polling). When
 // since == 0 it returns all buffered frames. A limit caps the response size.
+// Frames are returned oldest-first, matching the ring's Seq ordering.
 func (p *PacketCapture) Snapshot(since uint64, limit int) []CapturedFrame {
 	p.touchConsumer()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]CapturedFrame, 0)
-	for i := range p.buf {
-		if p.buf[i].Seq > since {
-			out = append(out, p.buf[i])
+	if p.count == 0 {
+		return out
+	}
+	// Short-circuit a fully-caught-up poller: the newest frame is the last
+	// live slot, so once its Seq is at or below since there is nothing newer
+	// anywhere in the ring and the scan can be skipped entirely.
+	if since > 0 {
+		last := p.start + p.count - 1
+		if last >= p.cap {
+			last -= p.cap
+		}
+		if p.buf[last].Seq <= since {
+			return out
+		}
+	}
+	for i := 0; i < p.count; i++ {
+		idx := p.start + i
+		if idx >= p.cap {
+			idx -= p.cap
+		}
+		cf := p.buf[idx]
+		if cf.Seq > since {
+			out = append(out, cf)
 			if limit > 0 && len(out) >= limit {
 				break
 			}
@@ -438,7 +486,7 @@ func (p *PacketCapture) State() CaptureState {
 	defer p.mu.Unlock()
 	st := CaptureState{
 		Running:       p.running.Load(),
-		Count:         len(p.buf),
+		Count:         p.count,
 		Capacity:      p.cap,
 		PersistOn:     p.filePath != "",
 		SampleEvery:   int(p.sampleEvery.Load()),
@@ -446,9 +494,13 @@ func (p *PacketCapture) State() CaptureState {
 		IdleSkip:      p.idleSkip.Load(),
 		Subscribers:   int(p.subCount.Load()),
 	}
-	if len(p.buf) > 0 {
-		st.StartSeq = p.buf[0].Seq
-		st.LastSeq = p.buf[len(p.buf)-1].Seq
+	if p.count > 0 {
+		st.StartSeq = p.buf[p.start].Seq
+		last := p.start + p.count - 1
+		if last >= p.cap {
+			last -= p.cap
+		}
+		st.LastSeq = p.buf[last].Seq
 	}
 	if !p.startTime.IsZero() {
 		st.StartTime = p.startTime.Format(time.RFC3339)
@@ -475,17 +527,38 @@ func (p *PacketCapture) Load() (int, error) {
 	if err := json.Unmarshal(data, &loaded); err != nil {
 		return 0, err
 	}
-	if len(loaded) > p.cap {
-		loaded = loaded[len(loaded)-p.cap:]
+	n := len(loaded)
+	if n > p.cap {
+		loaded = loaded[n-p.cap:]
+		n = p.cap
 	}
-	p.buf = loaded
+	p.start = 0
+	p.count = 0
+	for i := range loaded {
+		p.buf[i] = loaded[i]
+		p.count++
+	}
 	// Resume the sequence counter past the loaded frames.
-	for _, f := range loaded {
-		if f.Seq >= p.seq {
-			p.seq = f.Seq + 1
+	for i := 0; i < p.count; i++ {
+		if p.buf[i].Seq >= p.seq {
+			p.seq = p.buf[i].Seq + 1
 		}
 	}
-	return len(loaded), nil
+	return p.count, nil
+}
+
+// live returns the live ring window in oldest-first order. Caller must hold
+// p.mu.
+func (p *PacketCapture) live() []CapturedFrame {
+	out := make([]CapturedFrame, 0, p.count)
+	for i := 0; i < p.count; i++ {
+		idx := p.start + i
+		if idx >= p.cap {
+			idx -= p.cap
+		}
+		out = append(out, p.buf[idx])
+	}
+	return out
 }
 
 // saveLocked persists the buffer to disk. Caller must hold p.mu.
@@ -494,7 +567,7 @@ func (p *PacketCapture) saveLocked() {
 		return
 	}
 	p.lastSave = time.Now()
-	data, err := json.Marshal(p.buf)
+	data, err := json.Marshal(p.live())
 	if err != nil {
 		return
 	}
