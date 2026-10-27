@@ -141,6 +141,20 @@ func rxbpACL() config.ACLConfig {
 	}
 }
 
+// e2eBenchCollector builds a production WebUI collector with the pcap ring
+// armed, so the measured path pays the same per-frame capture cost production
+// pays while the operator has the packet panel open. A noopCollector would make
+// RecordFrame / RecordPacketDir / RecordTxSeq / CaptureFrameWithPeers no-ops
+// and report B/op that is uncomparable across the four e2e slices. Node.Close
+// type-asserts the injected collector to interface{ Stop() } (node.go:4366) and
+// stops it, so teardown needs nothing extra.
+func e2eBenchCollector() *web.StatsCollector {
+	c := web.NewStatsCollector()
+	c.Pcap.SetIdleSkip(false)
+	c.Pcap.Start()
+	return c
+}
+
 // rxbpFrame is an Ethernet + IPv4 + UDP frame of exactly size bytes:
 // 14 (Ethernet) + 20 (IPv4) + 8 (UDP) + (size-42) bytes of payload. Dst MAC is
 // the RX node's own MAC so rewriteRxDstMAC and MAC learning see a
@@ -230,13 +244,11 @@ func rxbpSetup(b *testing.B, aclOn bool) *rxbpHarness {
 		cfgB.ACL = rxbpACL()
 	}
 
-	// The real WebUI collector, with the pcap ring armed. NewStatsCollector
-	// leaves capture idle-skipped (no live subscriber), which would make the
-	// capture stage a no-op; SetIdleSkip(false) + Start() puts the production
-	// "operator has the packet panel open" cost on the measured path.
-	collector := web.NewStatsCollector()
-	collector.Pcap.SetIdleSkip(false)
-	collector.Pcap.Start()
+	// The real WebUI collector, with the pcap ring armed. See e2eBenchCollector:
+	// NewStatsCollector leaves capture idle-skipped (no live subscriber), which
+	// would make the capture stage a no-op; SetIdleSkip(false) + Start() puts the
+	// production "operator has the packet panel open" cost on the measured path.
+	collector := e2eBenchCollector()
 
 	nodeA, err := NewNodeWithTAP(cfgA, tapA, nil)
 	if err != nil {

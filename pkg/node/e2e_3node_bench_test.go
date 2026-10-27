@@ -1,7 +1,13 @@
 package node
 
-// e2e_3node_bench_test.go — the one benchmark in this package that measures the
-// REAL end-to-end frame path, not a sliced-off stage of it.
+// e2e_3node_bench_test.go — 3-node topology benchmarks. *_Mesh runs a full A-B-C
+// mesh; *_Relay runs A -- B(relay) -- C with NO A<->C link so every frame must be
+// routed. All four measure the real A TAP -> destination TAP path, pipelined
+// (Throughput) or one frame at a time (Latency). This is not the ONLY end-to-end
+// benchmark in the package: BenchmarkE2ERelayThroughput in
+// e2e_relay_bench_test.go reaches the same shape through a different topology,
+// and BenchmarkE2EFullPathTCP in e2e_rxpath_bench_test.go is the untrimmed
+// two-node control.
 //
 // WHAT IS REAL HERE
 //   Topology : three live libp2p hosts, each on its own MemTAP pair, each with a
@@ -142,11 +148,15 @@ package node
 //   own channel hand-off, which is sub-microsecond.
 //
 // LOG LEVEL
-//   arp_ping_3node_test.go pins this package to LevelDebug from init(), which
-//   makes every frame pay for base58 peer.String(), SHA-256 KeyFingerprint and
-//   hex rendering on top of log I/O. Every benchmark below pins LevelInfo for
-//   the measurement and restores LevelDebug on the way out, exactly like
-//   hotpath_bench_test.go does.
+//   arp_ping_3node_test.go pins this package to LevelDebug from init(). Every
+//   benchmark below pins LevelWarn for the measurement and restores LevelWarn,
+//   deliberately NOT LevelDebug: the node teardown and drain goroutines run
+//   AFTER the deferred restore, and restoring Debug there re-logs one line per
+//   in-flight frame (a real topology leaves thousands in flight), flooding the
+//   benchmark's stdout by megabytes. LevelWarn suppresses every per-frame DEBUG
+//   line while leaving WARN+ visible. The hot-path per-frame logs are all
+//   behind log.IsDebug() (node_streams.go:515, node_tap.go:907), so Warn vs
+//   Debug costs nothing on the measured path.
 
 import (
 	"context"
@@ -252,7 +262,12 @@ func e2e3bpMakeNode(b *testing.B, idx int) *e2e3bpNode {
 	cfg.Transports.EnableWebTransport = false
 	cfg.Transports.DisableHolePunching = true
 	cfg.Transports.DisableCircuitRelay = true
-	n, err := NewNodeWithTAP(cfg, tapDev, nil)
+	// A real WebUI collector, not a noop: RecordFrame / RecordPacketDir /
+	// RecordTxSeq / CaptureFrameWithPeers are no-ops on a noopCollector, which
+	// would make the B/op and allocs/op numbers here uncomparable with the other
+	// e2e slices. Every node on the path carries one, because they all sit on
+	// the measured flow.
+	n, err := NewNodeWithTAP(cfg, tapDev, e2eBenchCollector())
 	if err != nil {
 		b.Fatalf("e2e3bp: create node %s: %v", e2e3bpNames[idx], err)
 	}
@@ -659,6 +674,20 @@ func e2e3bpRunThroughput(b *testing.B, tx, dst *e2e3bpNode, d *e2e3bpDrain, star
 	}
 	b.ReportMetric(framesPerSec, "frames/s")
 	b.ReportMetric(mbPerSec, "MB/s")
+	// frames/s and MB/s above come from the paced WRITE wall — the same span
+	// testing.B's ns/op times — so they agree with ns/op by construction. But
+	// the timed loop only waits on the sender's TAP channel, never on delivery,
+	// so on a path that drops frames the write rate overstates the rate at which
+	// frames actually reach the destination TAP. delivered_fps counts delivered
+	// frames over the whole window, write plus the bounded drain: on the mesh,
+	// which delivers everything, it sits just under frames/s by the one-time
+	// drain tail. On *_Relay the drain runs to e2e3bpSettleCap because frames
+	// get stuck in the pool, so the window is cap-bound and delivered_fps reads
+	// low; it records incomplete delivery rather than a steady rate — read it
+	// with %delivered and in_flight, which are the delivery verdict.
+	if total := time.Since(start).Seconds(); total > 0 {
+		b.ReportMetric(float64(deliveredN)/total, "delivered_fps")
+	}
 	b.ReportMetric(float64(e2e3bpFrameBytes), "bytes/frame")
 	b.ReportMetric(100*float64(deliveredN)/float64(b.N), "%delivered")
 	b.ReportMetric(float64(b.N), "written")

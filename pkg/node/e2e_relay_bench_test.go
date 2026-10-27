@@ -2,12 +2,21 @@ package node
 
 // Overlay-relay data-path benchmark.
 //
-// Every number here is produced by the REAL relay forwarding code — no stubbed
-// stage, no hand-built envelope, no manually injected PeerObf. Frames are
-// built by the same entry points production uses (packRelayFrame,
-// sealRelayEnvelopeForHop, Packer.Pack + sealPeerFrame) and consumed by
-// handleRelayFrame, the one function every inbound relay stream funnels
-// through (node_streams.go:1146).
+// WHAT IS END-TO-END
+//   BenchmarkE2ERelayThroughput is the real flow: a frame written to nodeA's
+//   TAP, resolved, packed, sealed end-to-end for C, wrapped in a relay envelope,
+//   hop-sealed for B, carried over the real libp2p stream, forwarded by nodeB
+//   (re-pack + re-seal + relay stream Submit), counted at nodeC's TAP. Every
+//   stage is live, including both stream writes.
+//
+// WHAT IS HOP-ONLY
+//   BenchmarkE2ERelayForwardHop and BenchmarkE2ERelayFinalHop are hop-level
+//   micro-benchmarks of handleRelayFrame (node_streams.go:1146), the function
+//   every inbound relay stream funnels through. They are NOT end-to-end: the
+//   envelope is built by the benchmark itself (rlbpEnvelopeBuilder /
+//   rlbpFinalHopBuilder, mirroring node_tap.go:888-958) and fed straight to
+//   handleRelayFrame, so the origin TAP entry and the A->B transport are out of
+//   scope. Read them as hop-cost breakdowns, never as end-to-end numbers.
 //
 // Topology: A(origin) -- B(relay) -- C(final destination). All three pairs are
 // connected and fully negotiated, so every cipher used anywhere on the path is
@@ -191,16 +200,29 @@ func rlbpSetup(b *testing.B) *rlbpMesh {
 	cfgB.ListenAddrs = []string{listen}
 	cfgC.ListenAddrs = []string{listen}
 
-	nodeA, err := NewNodeWithTAP(cfgA, tapA, nil)
+	// Every node carries a real WebUI collector, not a noop: the relay path
+	// exercises RecordFrame / RecordPacketDir / CaptureFrameWithPeers on A
+	// (egress), B (forward) and C (delivery), and a noopCollector would
+	// understate B/op and allocs/op against the other e2e slices.
+	colA := e2eBenchCollector()
+	nodeA, err := NewNodeWithTAP(cfgA, tapA, colA)
 	if err != nil {
+		colA.Stop()
 		b.Fatalf("rlbp: create nodeA: %v", err)
 	}
-	nodeB, err := NewNodeWithTAP(cfgB, tapB, nil)
+	colB := e2eBenchCollector()
+	nodeB, err := NewNodeWithTAP(cfgB, tapB, colB)
 	if err != nil {
+		_ = nodeA.Close() // stops colA via the stoppable type-assert
+		colB.Stop()
 		b.Fatalf("rlbp: create nodeB: %v", err)
 	}
-	nodeC, err := NewNodeWithTAP(cfgC, tapC, nil)
+	colC := e2eBenchCollector()
+	nodeC, err := NewNodeWithTAP(cfgC, tapC, colC)
 	if err != nil {
+		_ = nodeA.Close()
+		_ = nodeB.Close()
+		colC.Stop()
 		b.Fatalf("rlbp: create nodeC: %v", err)
 	}
 
@@ -735,13 +757,15 @@ func BenchmarkE2ERelayFinalHop(b *testing.B) {
 // Benchmark 3: the full multi-hop flow.
 // ---------------------------------------------------------------------------
 
-// BenchmarkE2ERelayThroughput measures the WHOLE relayed flow end to end over
-// real transports: a frame is written to nodeA's TAP, resolved, packed, sealed
+// BenchmarkE2ERelayThroughput measures the relayed flow end to end over real
+// transports: a frame is written to nodeA's TAP, resolved, packed, sealed
 // end-to-end for C, wrapped in a relay envelope, hop-sealed for B, sent over
 // the libp2p stream, forwarded by nodeB (re-pack + re-seal + relay stream
 // Submit), and counted when it reaches nodeC's TAP. Every stage is live,
 // including both libp2p stream writes, so this is the number to compare
-// against the direct link (BenchmarkThroughput_TCP).
+// against the direct link (BenchmarkThroughput_TCP). Not every delivered frame
+// rides the relay — see the direct-fallback note below — so read %delivered
+// together with %relayDelivered / %directFallback.
 //
 // Because A and C are still connected (A needs the end-to-end cipher for the
 // inner seal), the relay Submit can fail open: dispatchWorker's onFail handler

@@ -64,6 +64,7 @@ import (
 	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/observer"
 	"p2ptap/pkg/tap"
+	"p2ptap/pkg/web"
 )
 
 const (
@@ -164,11 +165,12 @@ func txbpKeeper(g *txbpGate, stop chan struct{}) {
 
 // ── TX completion collector ─────────────────────────────────────────────────
 
-// txbpSentCollector records one completed unicast write per matching frame.
-// Everything else is inherited from noopCollector so the node still sees a fully
-// functional observer.Collector.
+// txbpSentCollector wraps the production WebUI collector so the node runs the
+// real RecordFrame / RecordPacketDir / RecordTxSeq / CaptureFrameWithPeers
+// chain (see e2eBenchCollector) rather than a noop, while additionally arming
+// one completion barrier per matching frame.
 type txbpSentCollector struct {
-	noopCollector
+	*web.StatsCollector
 	gate     *txbpGate
 	frameLen int
 }
@@ -176,11 +178,13 @@ type txbpSentCollector struct {
 var _ observer.Collector = (*txbpSentCollector)(nil)
 
 // RecordSent fires after Dispatcher.SendToPeer returned nil for one dispatch
-// task — i.e. after the framed, sealed, fragmented bytes were written. Only
-// frames of the length under test are counted: control traffic (GARP, broadcast
-// waves, relay fallbacks) reaches the same callback and must not desynchronise
-// the per-iteration barrier.
+// task — i.e. after the framed, sealed, fragmented bytes were written. The
+// production collector's own RecordSent still runs (it feeds the TX counter);
+// only frames of the length under test additionally arm the barrier, because
+// control traffic (GARP, broadcast waves, relay fallbacks) reaches the same
+// callback and must not desynchronise the per-iteration barrier.
 func (c *txbpSentCollector) RecordSent(bytes int) {
+	c.StatsCollector.RecordSent(bytes)
 	if c.gate != nil && bytes == c.frameLen {
 		c.gate.mark()
 	}
@@ -250,14 +254,22 @@ func txbpSetup(b *testing.B, fragCap, frameLen int) *txbpTopo {
 	}
 
 	p.gate = txbpNewGate()
-	colA := &txbpSentCollector{gate: p.gate, frameLen: frameLen}
+	colA := &txbpSentCollector{StatsCollector: e2eBenchCollector(), gate: p.gate, frameLen: frameLen}
 
 	nodeA, err := NewNodeWithTAP(cfgA, tapA, colA)
 	if err != nil {
 		b.Fatalf("txbp: create nodeA: %v", err)
 	}
-	nodeB, err := NewNodeWithTAP(cfgB, tapB, nil)
+	// nodeB is the receiver end of the same overlay. It gets a real collector
+	// as well: nodeA's SendToPeer is throttled by the stream's flow-control
+	// window, which nodeB's RX goroutine — including its per-frame capture
+	// cost — is what drains. A noop collector here would understate the
+	// backpressure the timed loop sees.
+	colB := e2eBenchCollector()
+	nodeB, err := NewNodeWithTAP(cfgB, tapB, colB)
 	if err != nil {
+		_ = nodeA.Close() // closes nodeA's TAP and stops colA via the stoppable type-assert
+		colB.Stop()
 		b.Fatalf("txbp: create nodeB: %v", err)
 	}
 	p.nodeA, p.nodeB = nodeA, nodeB

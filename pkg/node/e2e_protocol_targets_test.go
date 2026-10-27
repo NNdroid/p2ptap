@@ -675,8 +675,12 @@ func benchThroughput(b *testing.B, pair *protocolPair, build func(seq int) []byt
 	if deliveredN == 0 {
 		b.Fatalf("throughput: ZERO frames delivered over %s — data path stalled", elapsed.Truncate(time.Millisecond))
 	}
+	// testing.B owns the "ns/op" column: b.ReportMetric with that name
+	// silently overwrites the per-iteration cost. This pump runs to a fixed
+	// frame count with b.N=1, so testing.B's own ns/op is the whole-pump wall
+	// and is the honest per-"op" cost. Do NOT report ns/op here — frames/s and
+	// MB/s carry the throughput, and the per-delivered-frame cost is 1/frames/s.
 	fps := float64(deliveredN) / elapsed.Seconds()
-	b.ReportMetric(float64(elapsed.Nanoseconds())/float64(deliveredN), "ns/op")
 	b.ReportMetric(fps, "frames/s")
 	b.ReportMetric(float64(deliveredN)*float64(len(throughputBenchPayload))/elapsed.Seconds()/1e6, "MB/s")
 	b.ReportMetric(100*float64(deliveredN)/float64(written), "%delivered")
