@@ -386,6 +386,44 @@ func e2e3bpSeedRelayRoute(b *testing.B, from, via, dst *e2e3bpNode) {
 func e2e3bpBuildMesh(b *testing.B, linkAC bool) []*e2e3bpNode {
 	b.Helper()
 	nodes := make([]*e2e3bpNode, 3)
+
+	// Ordered teardown, registered BEFORE the nodes are built so a failure
+	// partway through the loop still closes whatever was already created —
+	// including its collector, via Node.Close. b.Fatalf runs the registered
+	// cleanups, so guarding nil entries (a node never reached) is all that is
+	// needed. Node.Close closes the TAP, which closes the shared closedChan and
+	// gives the drain goroutines EOF; then the pipes, then wait for the drains,
+	// then yield so the next benchmark round cannot race this one for local
+	// socket ports.
+	b.Cleanup(func() {
+		for i := 0; i < len(nodes); i++ {
+			if nodes[i] == nil {
+				continue
+			}
+			_ = nodes[i].node.Close()
+		}
+		for i := range nodes {
+			if nodes[i] == nil {
+				continue
+			}
+			_ = nodes[i].tapDev.Close()
+			_ = nodes[i].pipe.Close()
+		}
+		for i := range nodes {
+			if nodes[i] == nil {
+				continue
+			}
+			for _, d := range nodes[i].drains {
+				select {
+				case <-d.done:
+				case <-time.After(5 * time.Second):
+					b.Logf("e2e3bp: a drain goroutine on node %s did not exit within 5s", e2e3bpNames[i])
+				}
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	})
+
 	for i := 0; i < 3; i++ {
 		nodes[i] = e2e3bpMakeNode(b, i)
 	}
@@ -418,29 +456,6 @@ func e2e3bpBuildMesh(b *testing.B, linkAC bool) []*e2e3bpNode {
 	_ = nodes[1].pipe.ConfigureIP(nodes[1].node.Config.TapIP, nodes[1].node.Config.TapIPv6)
 	_ = nodes[2].pipe.ConfigureIP(nodes[2].node.Config.TapIP, nodes[2].node.Config.TapIPv6)
 
-	// Ordered teardown: close the nodes first (Node.Close closes the TAP, which
-	// closes the shared closedChan and gives the drain goroutines EOF), then the
-	// pipes, then wait for the drains, then yield so the next benchmark round
-	// cannot race this one for local socket ports.
-	b.Cleanup(func() {
-		for i := 0; i < len(nodes); i++ {
-			_ = nodes[i].node.Close()
-		}
-		for i := range nodes {
-			_ = nodes[i].tapDev.Close()
-			_ = nodes[i].pipe.Close()
-		}
-		for i := range nodes {
-			for _, d := range nodes[i].drains {
-				select {
-				case <-d.done:
-				case <-time.After(5 * time.Second):
-					b.Logf("e2e3bp: a drain goroutine on node %s did not exit within 5s", e2e3bpNames[i])
-				}
-			}
-		}
-		time.Sleep(300 * time.Millisecond)
-	})
 	return nodes
 }
 
@@ -638,8 +653,10 @@ func e2e3bpRunThroughput(b *testing.B, tx, dst *e2e3bpNode, d *e2e3bpDrain, star
 	// The measured work is done, so whatever is still inside the pipeline is
 	// bookkeeping, not throughput. Drain it so the teardown below does not race
 	// a live stream.
+	drained := false
 	for time.Since(start) < e2e3bpSettleCap {
 		if d.frames.Load()-baseFrames+e2e3bpDrops(tx, dst)-baseDrops >= uint64(b.N) {
+			drained = true
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -660,8 +677,9 @@ func e2e3bpRunThroughput(b *testing.B, tx, dst *e2e3bpNode, d *e2e3bpDrain, star
 		b.Fatalf("e2e3bp: ZERO frames delivered over %v — the data path is stalled", started.Truncate(time.Millisecond))
 	}
 
-	// frames/s, MB/s and bytes/frame cover ONE frame written into the source
-	// TAP, not just what happened to be read back when the run ended. They come
+	// write_frames/s, MB/s and bytes/frame cover ONE frame written into the
+	// source TAP, not just what happened to be read back when the run ended.
+	// They come
 	// from time.Now() rather than testing.B's high-precision timer, so on this
 	// host they disagree with 1e9/ns_op by up to a few percent: the coarse
 	// clock's tick is about 400-505us, so a 300ms window carries roughly
@@ -674,21 +692,27 @@ func e2e3bpRunThroughput(b *testing.B, tx, dst *e2e3bpNode, d *e2e3bpDrain, star
 		framesPerSec = 1e9 / perFrameNs
 		mbPerSec = float64(e2e3bpFrameBytes) * 1e9 / perFrameNs / 1e6
 	}
-	b.ReportMetric(framesPerSec, "frames/s")
+	b.ReportMetric(framesPerSec, "write_frames/s")
 	b.ReportMetric(mbPerSec, "MB/s")
-	// There is deliberately no frames/s-style "delivery rate" here. The timed
-	// loop only waits on the sender's TAP channel, never on delivery, so a rate
-	// over the write wall would overstate the rate at which frames reach the
-	// destination TAP on a path that drops frames; and a rate over the write
-	// plus drain window collapses to ~delivered/e2e3bpSettleCap whenever the
-	// drain runs to the settle cap instead of breaking early. Which variants hit
-	// the cap depends on runtime load, so a delivery rate is either wrong or
-	// meaningless. The delivery verdict is the counts below — %delivered and
-	// in_flight — which stay honest regardless of how the drain ended.
+	// write_frames/s and MB/s are the paced WRITE-wall rates: the same span
+	// testing.B's ns/op times, so they agree with ns/op by construction. The
+	// timed loop only waits on the sender's TAP channel, never on delivery, so
+	// these OVERSTATE the rate at which frames actually reach the destination
+	// TAP on a path that drops frames (delivered ≤ written over the same
+	// window). delivered_fps is the honest delivery rate — delivered over the
+	// write plus drain wall — but it is only meaningful when the drain broke
+	// early (drained): when the drain runs to e2e3bpSettleCap the window is
+	// cap-bound and delivered/cap is not a rate, so it is omitted and
+	// %delivered / in_flight below carry the delivery verdict instead.
 	b.ReportMetric(float64(e2e3bpFrameBytes), "bytes/frame")
 	b.ReportMetric(100*float64(deliveredN)/float64(b.N), "%delivered")
 	b.ReportMetric(float64(b.N), "written")
 	b.ReportMetric(float64(deliveredN), "delivered")
+	if drained {
+		if total := time.Since(start).Seconds(); total > 0 {
+			b.ReportMetric(float64(deliveredN)/total, "delivered_fps")
+		}
+	}
 	b.ReportMetric(float64(droppedN), "dispatch_drops")
 	// in_flight is a LOWER BOUND on frames that never surfaced. The relay pool
 	// drops frames when its write queue is full ("RelayPool: write queue full ...

@@ -4360,8 +4360,10 @@ func (n *Node) Close() error {
 	case <-time.After(teardownWorkersTimeout):
 		log.Warn("Waiting for worker goroutines timed out after %s, forcing shutdown", teardownWorkersTimeout)
 	}
-	// Stop the stats collector's speed ticker so it doesn't keep ticking
-	// on a dead collector. Safe to call multiple times; idempotent.
+	// Stop the stats collector's speed ticker so it doesn't keep ticking on a
+	// dead collector. This is the only place a node stops its own collector, so
+	// it is called at most once here: the WebUI StatsCollector's Stop is
+	// close(s.done) with no once-guard, so a second Stop would panic.
 	if n.Collector != nil {
 		type stoppable interface{ Stop() }
 		if sc, ok := n.Collector.(stoppable); ok {
