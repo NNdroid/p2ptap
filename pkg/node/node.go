@@ -105,6 +105,7 @@ type Node struct {
 	// compile-and-publish slow path only.
 	aclRules     *atomic.Pointer[compiledACL]
 	aclRulesMu   sync.Mutex
+	aclRulesOnce sync.Once
 	TAP          tap.TAPDevice
 	MACTable     *vswitch.ShardedMACTable
 	Packer       *obfuscate.FramePacker

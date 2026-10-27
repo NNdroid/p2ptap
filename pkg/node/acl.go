@@ -374,12 +374,15 @@ func (n *Node) compiledACLFor(c *config.Config) *compiledACL {
 
 // aclRulesSlot returns the ACL cache slot, allocating it on first use.
 // NewNode seeds nothing here: the first ACL-enabled frame takes the slow path
-// once, which is exactly the cost the precompile pays for. Test Nodes built
-// with a bare &Node{} cannot race with a hot reload, so the lazy path is
-// safe for them too.
+// once, which is exactly the cost the precompile pays for. The allocation is
+// guarded by aclRulesOnce because several data-plane goroutines can hit the
+// first ACL-enabled frame at once (TestConfigHotReloadVsDataPlaneReads builds
+// a bare &Node{} and hammers checkACL concurrently with a hot reload), and a
+// bare check-then-set here races. After the first call, Once.Do is a single
+// atomic load, so the per-frame fast path stays lock-free.
 func (n *Node) aclRulesSlot() *atomic.Pointer[compiledACL] {
-	if n.aclRules == nil {
+	n.aclRulesOnce.Do(func() {
 		n.aclRules = new(atomic.Pointer[compiledACL])
-	}
+	})
 	return n.aclRules
 }
