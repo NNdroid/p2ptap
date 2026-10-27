@@ -253,6 +253,19 @@ var (
 	statsTickCounter int64
 )
 
+// Exit-node activation retry state. The exported SetExitNode and the Start-time
+// configureExitNode both funnel through scheduleExitRetry so a newer selection
+// supersedes an older one: a stale retry for a peer the user already replaced
+// must never re-activate that peer over the current selection, and a
+// clear/deselect must stop the chase. Retry goroutines derive from a standalone
+// context cancelled here (and by Stop), so they never outlive the session
+// beyond the single instance backstop check.
+var (
+	exitRetryMu     sync.Mutex
+	exitRetryTarget string
+	exitRetryCancel context.CancelFunc
+)
+
 // --- Native crash capture ---
 //
 // Go runtime fatal errors (e.g. "sync: unlock of unlocked mutex") call
@@ -479,21 +492,26 @@ func Start(cfgJSON string, tunFd int) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	metricsCancel = cancel
 
-	if cfgJSON != "" {
-		var rawMap map[string]any
-		if err := json.Unmarshal([]byte(cfgJSON), &rawMap); err == nil {
-			if exitPeer, ok := rawMap["exit_node_peer"].(string); ok && strings.TrimSpace(exitPeer) != "" {
-				configureExitNode(ctx, n, exitPeer)
-			}
-		}
-	}
-
 	mu.Unlock()
 	// Emit the RUNNING state outside mu: a synchronous JNI call under the
 	// global lock would deadlock if the Java handler calls back into Go
 	// (getStatsJSON, stop, etc.).  Same pattern as Stop().
 	emitStateChange("RUNNING", "Node started successfully")
 	go metricsLoop(ctx, n, collector)
+
+	// Activate the persisted exit node outside mu: configureExitNode takes mu
+	// itself (to confirm this is still the running instance) and the exit-node
+	// retry state is independent of the global lock. Running it after the
+	// RUNNING state keeps a synchronous JNI callback from re-entering while the
+	// lock is held.
+	if cfgJSON != "" {
+		var rawMap map[string]any
+		if err := json.Unmarshal([]byte(cfgJSON), &rawMap); err == nil {
+			if exitPeer, ok := rawMap["exit_node_peer"].(string); ok && strings.TrimSpace(exitPeer) != "" {
+				configureExitNode(n, exitPeer)
+			}
+		}
+	}
 	return nil
 }
 
@@ -680,6 +698,7 @@ func Stop() error {
 	if n == nil {
 		activeCollector = nil
 		mu.Unlock()
+		cancelExitRetry()
 		return nil
 	}
 
@@ -691,6 +710,10 @@ func Stop() error {
 	instance = nil
 	activeCollector = nil
 	mu.Unlock()
+	// The exit-node retry goroutines are Background-derived (not tied to the
+	// metrics context), so Stop must cancel them explicitly or a pending
+	// activation would keep chasing a node that is being torn down.
+	cancelExitRetry()
 
 	// Release the collector's background goroutine (speedTicker ticks every 2s
 	// and only exits when s.done is closed). metricsLoopInner returns on
@@ -1145,12 +1168,51 @@ func (a *P2PTap) GenerateNewIdentityKey(keyPath string) (string, error) {
 	return GenerateNewIdentityKey(keyPath)
 }
 
-// SetExitNode sets the designated peer ID and optional virtual TAP IP as the active exit gateway.
+// SetExitNode sets the designated peer ID and optional virtual TAP IP as the
+// active exit gateway.
+//
+// Unlike a naive "return setExitNodeLocked(...)", a peer whose TAP metadata has
+// not arrived yet does NOT surface as an error. The gomobile binding turns any
+// non-nil error into a Java exception, and the Android service treats an
+// exception in its hot-reload path as a fatal failure and restarts the whole
+// VPN — so switching to a still-connecting peer would reboot the tunnel. This
+// activates the peer now if it is ready, otherwise schedules a superseding
+// background retry and returns nil.
 func SetExitNode(peerID, tapIPv4, tapIPv6 string) error {
+	return activateExitNode(peerID, tapIPv4, tapIPv6)
+}
+
+// activateExitNode applies one exit-node selection, retrying in the background
+// if the peer is not ready yet. It returns nil whenever the node is running, so
+// the JNI export never throws on a transient "peer not ready".
+func activateExitNode(peerID, tapIPv4, tapIPv6 string) error {
+	target := strings.TrimSpace(peerID)
+
 	mu.Lock()
 	n := instance
+	if n == nil || n.Gateway == nil {
+		mu.Unlock()
+		cancelExitRetry()
+		return nil
+	}
+	if target == "" {
+		err := n.Gateway.ClearExitNode()
+		mu.Unlock()
+		cancelExitRetry()
+		return err
+	}
+	err := setExitNodeLocked(n, target, tapIPv4, tapIPv6)
 	mu.Unlock()
-	return setExitNodeLocked(n, peerID, tapIPv4, tapIPv6)
+
+	if exitNodeActive(n, target) {
+		cancelExitRetry()
+		return nil
+	}
+	if err != nil {
+		log.Warn("android: exit node %s not active yet: %v; will retry until its peer metadata arrives", target, err)
+	}
+	scheduleExitRetry(n, target)
+	return nil
 }
 
 // configureExitNode activates the peer the app selected as the exit gateway.
@@ -1159,10 +1221,19 @@ func SetExitNode(peerID, tapIPv4, tapIPv6 string) error {
 // too early: the peer's metadata - the TAP IP the gateway routes through - is
 // still arriving, so the call fails with "no TAP IP provided". Retrying is what
 // turns a selected exit node into one that survives a restart instead of
-// sitting at "unavailable" until someone re-selects it by hand.
-func configureExitNode(ctx context.Context, n *node.Node, peerID string) {
+// sitting at "unavailable" until someone re-selects it by hand. It shares the
+// superseding retry state with SetExitNode, so a later hot switch replaces this
+// pending activation rather than fighting it.
+func configureExitNode(n *node.Node, peerID string) {
 	target := strings.TrimSpace(peerID)
-	if err := setExitNodeLocked(n, target, "", ""); err != nil {
+	mu.Lock()
+	if instance != n {
+		mu.Unlock()
+		return
+	}
+	err := setExitNodeLocked(n, target, "", "")
+	mu.Unlock()
+	if err != nil {
 		log.Warn("android: exit node %s not initialized: %v", target, err)
 	}
 	if exitNodeActive(n, target) {
@@ -1170,7 +1241,7 @@ func configureExitNode(ctx context.Context, n *node.Node, peerID string) {
 		return
 	}
 	log.Info("android: exit node %s selected but not active yet; retrying until its peer metadata arrives", target)
-	go retryExitNode(ctx, n, target)
+	scheduleExitRetry(n, target)
 }
 
 // exitNodeActive reports whether the gateway is actually routing through peerID.
@@ -1185,8 +1256,53 @@ func exitNodeActive(n *node.Node, peerID string) bool {
 	return n.Gateway.ActiveExitPeerID() == strings.TrimSpace(peerID)
 }
 
+// scheduleExitRetry cancels any pending retry and starts a new one for target.
+// A newer selection supersedes an older one by cancelling its context and
+// replacing the pending target, so two retry loops can never fight over the
+// gateway.
+func scheduleExitRetry(n *node.Node, target string) {
+	exitRetryMu.Lock()
+	if exitRetryCancel != nil {
+		exitRetryCancel()
+		exitRetryCancel = nil
+	}
+	exitRetryTarget = target
+	ctx, cancel := context.WithCancel(context.Background())
+	exitRetryCancel = cancel
+	exitRetryMu.Unlock()
+	go retryExitNode(ctx, n, target)
+}
+
+// cancelExitRetry stops any pending retry and forgets its target. Called when
+// the exit node becomes active, is deselected, or the node is stopped.
+func cancelExitRetry() {
+	exitRetryMu.Lock()
+	if exitRetryCancel != nil {
+		exitRetryCancel()
+		exitRetryCancel = nil
+	}
+	exitRetryTarget = ""
+	exitRetryMu.Unlock()
+}
+
+// clearExitRetryIfCurrent forgets the pending retry only if it still targets
+// peerID. Used by a retry that reached its goal: if the user already switched
+// to another peer, this must not cancel that newer retry.
+func clearExitRetryIfCurrent(peerID string) {
+	exitRetryMu.Lock()
+	if exitRetryTarget == peerID {
+		if exitRetryCancel != nil {
+			exitRetryCancel()
+			exitRetryCancel = nil
+		}
+		exitRetryTarget = ""
+	}
+	exitRetryMu.Unlock()
+}
+
 // retryExitNode keeps trying to activate a selected exit node until it comes
-// up, the node is torn down, or the schedule is spent.
+// up, the node is torn down, the schedule is spent, or a newer selection
+// supersedes this one.
 //
 // The schedule is slow and long rather than fast and short. A peer on the other
 // side of a NAT may take several minutes to announce itself, and a retry that
@@ -1202,29 +1318,43 @@ func retryExitNode(ctx context.Context, n *node.Node, peerID string) {
 		}
 		// The select above can wake on the timer at the same instant Stop() runs.
 		// Re-check the context so a cancelled session returns without touching the
-		// (possibly already closed) node, and hold mu across the instance check
-		// AND setExitNodeLocked: Stop() sets instance=nil under mu, so serialising
-		// here means either we observe the teardown and bail, or Stop() waits for
-		// our attempt to finish before closing n — no window where we install
-		// exit-node routes on a node that is being torn down underneath us.
+		// (possibly already closed) node.
 		if ctx.Err() != nil {
 			return
 		}
+		// Serialise against scheduleExitRetry so a newer selection cannot slip
+		// between the "is this still the pending target?" check and the gateway
+		// call. Lock order is exitRetryMu -> mu; nothing in this package takes
+		// mu then exitRetryMu, so this cannot deadlock.
+		exitRetryMu.Lock()
+		if exitRetryTarget != peerID {
+			exitRetryMu.Unlock()
+			return
+		}
+		// Hold mu across the instance check AND setExitNodeLocked: Stop() sets
+		// instance=nil under mu, so serialising here means either we observe the
+		// teardown and bail, or Stop() waits for our attempt to finish before
+		// closing n — no window where we install exit-node routes on a node that
+		// is being torn down underneath us.
 		mu.Lock()
 		if instance != n {
 			mu.Unlock()
+			exitRetryMu.Unlock()
 			return
 		}
 		err := setExitNodeLocked(n, peerID, "", "")
 		mu.Unlock()
+		exitRetryMu.Unlock()
 		if exitNodeActive(n, peerID) {
 			log.Info("android: exit node %s active after %d retry attempt(s)", peerID, attempt)
+			clearExitRetryIfCurrent(peerID)
 			return
 		}
 		// One trail in logcat is worth having, but a peer that never comes up
 		// is not worth a warning every fifteen seconds for half an hour.
 		if attempt == exitNodeRetryMax {
 			log.Error("android: exit node %s still not active after %d retry attempts: %v", peerID, exitNodeRetryMax, err)
+			clearExitRetryIfCurrent(peerID)
 			return
 		}
 		if log.IsDebug() {
@@ -1303,14 +1433,19 @@ func UpdateTunFd(newTunFd int) error {
 	return errors.New("android: TAP device does not support UpdateFd")
 }
 
-// ClearExitNode clears the active exit node gateway.
+// ClearExitNode clears the active exit node gateway and cancels any pending
+// activation retry, so a deselected peer is not re-activated by a stale retry.
 func ClearExitNode() error {
 	mu.Lock()
 	n := instance
-	mu.Unlock()
 	if n != nil && n.Gateway != nil {
-		return n.Gateway.ClearExitNode()
+		err := n.Gateway.ClearExitNode()
+		mu.Unlock()
+		cancelExitRetry()
+		return err
 	}
+	mu.Unlock()
+	cancelExitRetry()
 	return nil
 }
 
