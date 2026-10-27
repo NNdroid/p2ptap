@@ -415,6 +415,32 @@ func (gm *GatewayManager) SetExitNode(peerID string, exitTapIPv4 string, exitTap
 		gm.originalPhysicalGW6 = gw6
 	}
 
+	// 1b. Resolve a bare-IP peerID BEFORE any route is installed. A caller may
+	// pass a bare TAP IP as peerID with empty tap IPs (e.g. a client activating
+	// by address). If this were deferred until after the route-add blocks below —
+	// which skip every family whose tap IP is empty — the bookkeeping would mark
+	// the exit active (exitActive.Store(true), activeExitIP=peerID) while no
+	// default route actually existed, black-holing all egress under a false
+	// "active" report. If the peer ID is not a bare IP and no TAP IP was given,
+	// fail loudly rather than substituting a magic address that would hijack the
+	// default route to a non-existent peer (network outage) or an unrelated peer
+	// (traffic theft).
+	if exitTapIPv4 == "" && exitTapIPv6 == "" {
+		if peerID != "" {
+			if ip := net.ParseIP(peerID); ip != nil {
+				if ip.To4() != nil {
+					exitTapIPv4 = peerID
+				} else {
+					exitTapIPv6 = peerID
+				}
+			} else {
+				return fmt.Errorf("cannot activate exit node for peer %q: no TAP IP provided and peer ID is not a bare IP address; resolve the peer's TAP IP from LSA/peer metadata first", peerID)
+			}
+		} else {
+			return fmt.Errorf("exit node requires at least one gateway IP (IPv4 or IPv6)")
+		}
+	}
+
 	// 2. Add default route(s) via TAP exit node IP(s) FIRST. Doing this before
 	//    the bypass host routes means a failure here leaves no partial TAP state
 	//    behind (addDefaultRouteOS rolls back its own routes on error).
@@ -434,25 +460,6 @@ func (gm *GatewayManager) SetExitNode(peerID string, exitTapIPv4 string, exitTap
 				_ = gm.route.delDefaultRouteOS(exitTapIPv4, gm.tapName)
 			}
 			return fmt.Errorf("failed to add IPv6 default route via TAP exit node: %w", err)
-		}
-	}
-	// If target peer is specified but bare IPs were omitted (e.g. Android client activating by Peer ID),
-	// try to parse the peer ID as a bare IP address. If it is not a valid IP, return an error
-	// rather than silently substituting a magic address — that would hijack the default route to
-	// either a non-existent peer (network outage) or an unrelated peer (traffic theft).
-	if exitTapIPv4 == "" && exitTapIPv6 == "" {
-		if peerID != "" {
-			if ip := net.ParseIP(peerID); ip != nil {
-				if ip.To4() != nil {
-					exitTapIPv4 = peerID
-				} else {
-					exitTapIPv6 = peerID
-				}
-			} else {
-				return fmt.Errorf("cannot activate exit node for peer %q: no TAP IP provided and peer ID is not a bare IP address; resolve the peer's TAP IP from LSA/peer metadata first", peerID)
-			}
-		} else {
-			return fmt.Errorf("exit node requires at least one gateway IP (IPv4 or IPv6)")
 		}
 	}
 

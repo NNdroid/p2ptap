@@ -418,6 +418,11 @@ func Start(cfgJSON string, tunFd int) error {
 	collector := web.NewStatsCollector()
 	n, err := node.NewNodeWithTAP(cfg, dev, collector)
 	if err != nil {
+		// NewStatsCollector spawned the speedTicker goroutine; nothing else will
+		// ever stop it on this failure path (instance stays nil, so Stop() has no
+		// collector to release). Stop it here or every failed Start leaks a
+		// goroutine plus the 20k-entry pcap buffer for the life of the process.
+		collector.Stop()
 		_ = dev.Close()
 		mu.Unlock()
 		return fmt.Errorf("android: create node: %w", err)
@@ -687,6 +692,17 @@ func Stop() error {
 	activeCollector = nil
 	mu.Unlock()
 
+	// Release the collector's background goroutine (speedTicker ticks every 2s
+	// and only exits when s.done is closed). metricsLoopInner returns on
+	// ctx.Done() without calling Stop, so without this every VPN session leaks
+	// the ticker goroutine and the collector's 20k-entry pcap buffer. Stop is a
+	// channel close, safe to run while a metrics tick is mid-flight (the ticker
+	// goroutine owns s.mu for its own reads; the node-side reads are guarded by
+	// stopping.Load() in metricsTick).
+	if collector != nil {
+		collector.Stop()
+	}
+
 	defer stopping.Store(false)
 	var err error
 	func() {
@@ -697,7 +713,6 @@ func Stop() error {
 		}()
 		err = n.Close()
 	}()
-	_ = collector // keep linter quiet
 	emitStateChange("IDLE", "Node stopped")
 	return err
 }
@@ -1185,13 +1200,23 @@ func retryExitNode(ctx context.Context, n *node.Node, peerID string) {
 			return
 		case <-time.After(exitNodeRetryEvery):
 		}
+		// The select above can wake on the timer at the same instant Stop() runs.
+		// Re-check the context so a cancelled session returns without touching the
+		// (possibly already closed) node, and hold mu across the instance check
+		// AND setExitNodeLocked: Stop() sets instance=nil under mu, so serialising
+		// here means either we observe the teardown and bail, or Stop() waits for
+		// our attempt to finish before closing n — no window where we install
+		// exit-node routes on a node that is being torn down underneath us.
+		if ctx.Err() != nil {
+			return
+		}
 		mu.Lock()
-		stillUs := instance == n
-		mu.Unlock()
-		if !stillUs {
+		if instance != n {
+			mu.Unlock()
 			return
 		}
 		err := setExitNodeLocked(n, peerID, "", "")
+		mu.Unlock()
 		if exitNodeActive(n, peerID) {
 			log.Info("android: exit node %s active after %d retry attempt(s)", peerID, attempt)
 			return
