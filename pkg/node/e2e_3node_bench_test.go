@@ -267,8 +267,10 @@ func e2e3bpMakeNode(b *testing.B, idx int) *e2e3bpNode {
 	// would make the B/op and allocs/op numbers here uncomparable with the other
 	// e2e slices. Every node on the path carries one, because they all sit on
 	// the measured flow.
-	n, err := NewNodeWithTAP(cfg, tapDev, e2eBenchCollector())
+	col := e2eBenchCollector()
+	n, err := NewNodeWithTAP(cfg, tapDev, col)
 	if err != nil {
+		col.Stop() // NewNodeWithTAP returns nil on error, so the collector is unowned
 		b.Fatalf("e2e3bp: create node %s: %v", e2e3bpNames[idx], err)
 	}
 	n.Start()
@@ -674,20 +676,15 @@ func e2e3bpRunThroughput(b *testing.B, tx, dst *e2e3bpNode, d *e2e3bpDrain, star
 	}
 	b.ReportMetric(framesPerSec, "frames/s")
 	b.ReportMetric(mbPerSec, "MB/s")
-	// frames/s and MB/s above come from the paced WRITE wall — the same span
-	// testing.B's ns/op times — so they agree with ns/op by construction. But
-	// the timed loop only waits on the sender's TAP channel, never on delivery,
-	// so on a path that drops frames the write rate overstates the rate at which
-	// frames actually reach the destination TAP. delivered_fps counts delivered
-	// frames over the whole window, write plus the bounded drain: on the mesh,
-	// which delivers everything, it sits just under frames/s by the one-time
-	// drain tail. On *_Relay the drain runs to e2e3bpSettleCap because frames
-	// get stuck in the pool, so the window is cap-bound and delivered_fps reads
-	// low; it records incomplete delivery rather than a steady rate — read it
-	// with %delivered and in_flight, which are the delivery verdict.
-	if total := time.Since(start).Seconds(); total > 0 {
-		b.ReportMetric(float64(deliveredN)/total, "delivered_fps")
-	}
+	// There is deliberately no frames/s-style "delivery rate" here. The timed
+	// loop only waits on the sender's TAP channel, never on delivery, so a rate
+	// over the write wall would overstate the rate at which frames reach the
+	// destination TAP on a path that drops frames; and a rate over the write
+	// plus drain window collapses to ~delivered/e2e3bpSettleCap whenever the
+	// drain runs to the settle cap instead of breaking early. Which variants hit
+	// the cap depends on runtime load, so a delivery rate is either wrong or
+	// meaningless. The delivery verdict is the counts below — %delivered and
+	// in_flight — which stay honest regardless of how the drain ended.
 	b.ReportMetric(float64(e2e3bpFrameBytes), "bytes/frame")
 	b.ReportMetric(100*float64(deliveredN)/float64(b.N), "%delivered")
 	b.ReportMetric(float64(b.N), "written")

@@ -11,7 +11,7 @@ package node
 //
 // WHAT IS HOP-ONLY
 //   BenchmarkE2ERelayForwardHop and BenchmarkE2ERelayFinalHop are hop-level
-//   micro-benchmarks of handleRelayFrame (node_streams.go:1146), the function
+//   micro-benchmarks of handleRelayFrame (node_streams.go:1183), the function
 //   every inbound relay stream funnels through. They are NOT end-to-end: the
 //   envelope is built by the benchmark itself (rlbpEnvelopeBuilder /
 //   rlbpFinalHopBuilder, mirroring node_tap.go:888-958) and fed straight to
@@ -762,10 +762,12 @@ func BenchmarkE2ERelayFinalHop(b *testing.B) {
 // end-to-end for C, wrapped in a relay envelope, hop-sealed for B, sent over
 // the libp2p stream, forwarded by nodeB (re-pack + re-seal + relay stream
 // Submit), and counted when it reaches nodeC's TAP. Every stage is live,
-// including both libp2p stream writes, so this is the number to compare
-// against the direct link (BenchmarkThroughput_TCP). Not every delivered frame
-// rides the relay — see the direct-fallback note below — so read %delivered
-// together with %relayDelivered / %directFallback.
+// including both libp2p stream writes. The legacy direct-link benchmark
+// (BenchmarkThroughput_TCP) is not a like-for-like comparator: it runs on a
+// noop collector and reports no B/op, so only the frame-rate magnitude is
+// comparable across the two, never the allocation numbers. Not every delivered
+// frame rides the relay — see the direct-fallback note below — so read
+// %delivered together with %relayDelivered / %directFallback.
 //
 // Because A and C are still connected (A needs the end-to-end cipher for the
 // inner seal), the relay Submit can fail open: dispatchWorker's onFail handler

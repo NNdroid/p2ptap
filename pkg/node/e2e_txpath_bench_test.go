@@ -258,6 +258,7 @@ func txbpSetup(b *testing.B, fragCap, frameLen int) *txbpTopo {
 
 	nodeA, err := NewNodeWithTAP(cfgA, tapA, colA)
 	if err != nil {
+		colA.Stop() // NewNodeWithTAP returns nil on error, so colA is unowned
 		b.Fatalf("txbp: create nodeA: %v", err)
 	}
 	// nodeB is the receiver end of the same overlay. It gets a real collector
