@@ -336,3 +336,28 @@ func TestACLAndSubnetConfigValidation(t *testing.T) {
 		t.Log("[config] ✓ valid ACL config accepted")
 	}
 }
+
+func TestMultipathStrategyConfig(t *testing.T) {
+	// "multipath" must validate, and the reorder knobs must carry sensible
+	// defaults for it.
+	cfg := DefaultConfig()
+	if cfg.TransportStrategy != "best_path" {
+		t.Fatalf("default transport strategy = %q, want best_path", cfg.TransportStrategy)
+	}
+	cfg.TransportStrategy = "multipath"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("multipath strategy rejected: %v", err)
+	}
+	if cfg.RxReorderWindow < 1 || cfg.RxReorderDelayMs < 1 {
+		t.Fatalf("multipath reorder defaults invalid: window=%d delay=%d", cfg.RxReorderWindow, cfg.RxReorderDelayMs)
+	}
+	// Clamping: out-of-range knobs are pinned back to their defaults.
+	cfg.RxReorderWindow = 0
+	cfg.RxReorderDelayMs = 0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("clamped reorder knobs rejected: %v", err)
+	}
+	if cfg.RxReorderWindow != 256 || cfg.RxReorderDelayMs != 200 {
+		t.Fatalf("reorder knobs not clamped to defaults: window=%d delay=%d", cfg.RxReorderWindow, cfg.RxReorderDelayMs)
+	}
+}

@@ -828,9 +828,11 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 	}
 
 	if !tapProbeFrame {
-		if err := n.enqueueTapWrite(tapPayload, false, srcPeer); err != nil {
-			log.Warn("relayed TAP write enqueue/fallback error from %s: %v", srcPeer.String(), err)
-		}
+		// Reorder gate (multipath): relayed and direct frames share the same
+		// per-peer counter space, so both feed the same per-peer reorder queue.
+		// The path key names the hop that actually carried the frame; the
+		// buffered job carries it so per-path RX is attributed on TAP delivery.
+		n.reorderTapWrite(srcPeer, seqID, tapPayload, false, srcPeer, "relay://"+viaPeer.String())
 		return
 	}
 
@@ -845,6 +847,6 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 			go n.sendTapProbeAck(d.prober, d.token, d.flag)
 		}
 	}
-	n.recordRelayedTapDelivery(srcPeer, tapPayload)
+	n.recordRelayedTapDelivery(srcPeer, tapPayload, "relay://"+viaPeer.String())
 
 }

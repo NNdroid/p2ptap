@@ -57,6 +57,11 @@ type PeerStreams struct {
 	nextStreamSelection time.Time
 	streamProbeCursor   int
 	selectionSnapshot   *peerStreamsSnapshot
+	// mpDeficit holds the DWRR deficit for the "multipath" strategy, keyed by
+	// stream. Protected by writeMu (all pickMultipathStreamIndex callers hold
+	// it). Pruned against the live topology inside pickMultipathStreamIndex and
+	// removeStreamUnderLock.
+	mpDeficit map[network.Stream]float64
 }
 
 type peerStreamsSnapshot struct {
@@ -155,11 +160,11 @@ func scoreStreamTransport(s network.Stream) int {
 	return 20 // Public WAN direct: medium priority
 }
 
-// StrategyDispatcher implements 'best_path', 'redundant', and 'fallback' transport strategies
+// StrategyDispatcher implements 'best_path', 'multipath', 'redundant', and 'fallback' transport strategies
 type StrategyDispatcher struct {
 	h                     host.Host
 	node                  *Node  // back-reference for per-peer byte tracking
-	mode                  string // "best_path", "redundant", "fallback"
+	mode                  string // "best_path", "multipath", "redundant", "fallback"
 	peersMu               sync.RWMutex
 	peerMap               map[peer.ID]*PeerStreams
 	outgoingStreamHandler func(network.Stream)
@@ -539,6 +544,7 @@ func (sd *StrategyDispatcher) removeStreamUnderLock(ps *PeerStreams, s network.S
 	ps.mu.Unlock()
 	delete(ps.writeDeadlineRenew, s)
 	delete(ps.writeQuality, s)
+	delete(ps.mpDeficit, s)
 	if ps.preferredStream == s {
 		ps.preferredStream = nil
 	}
@@ -1026,13 +1032,18 @@ func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer pe
 			return fmt.Errorf("no streams for peer %s", targetPeer)
 		}
 		return lastErr
-	default: // best_path
+	default: // best_path (and multipath: same skeleton, per-path pick below)
 		if len(streams) == 0 || streams[0] == nil {
 			return fmt.Errorf("no streams for peer %s", targetPeer.String())
 		}
 		selected := 0
 		if len(streams) > 1 {
-			selected = ps.selectStreamIndex(streams, time.Now())
+			if sd.mode == "multipath" {
+				// Weighted round-robin across all active paths.
+				selected = ps.pickMultipathStreamIndex(streams, time.Now())
+			} else {
+				selected = ps.selectStreamIndex(streams, time.Now())
+			}
 		}
 		if err := writeOne(streams[selected]); err != nil {
 			sd.removeStreamUnderLock(ps, streams[selected])

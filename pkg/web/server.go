@@ -1435,6 +1435,15 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			if !sent("transport_strategy") {
 				incoming.TransportStrategy = c.TransportStrategy
 			}
+			// Reorder-buffer knobs are ints: Validate clamps an out-of-range value
+			// back to its default, so an omitted one must not silently overwrite a
+			// user-tuned value. Same reason as hole_punch_timeout.
+			if !sent("rx_reorder_window") {
+				incoming.RxReorderWindow = c.RxReorderWindow
+			}
+			if !sent("rx_reorder_delay_ms") {
+				incoming.RxReorderDelayMs = c.RxReorderDelayMs
+			}
 			if !sent("bootstrap_peers") {
 				incoming.BootstrapPeers = c.BootstrapPeers
 			}

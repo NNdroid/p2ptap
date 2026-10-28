@@ -532,6 +532,20 @@ type Node struct {
 	peerTxBytes sync.Map // peer.ID → *atomic.Uint64 (total bytes sent TO peer)
 	peerRxBytes sync.Map // peer.ID → *atomic.Uint64 (total bytes received FROM peer)
 
+	// rxReorderEnabled gates the receive-side reorder buffer. It is set once at
+	// construction from transport_strategy=="multipath" (the strategy needs a
+	// restart to change), so best_path pays only one atomic load per frame.
+	rxReorderEnabled atomic.Bool
+	// rxReorder is the per-peer reorder buffer (peer.ID → *rxReorderQueue),
+	// created lazily on first inbound frame under multipath.
+	rxReorder     sync.Map
+	rxReorderWindow int
+	rxReorderDelay  time.Duration
+
+	// pathRx attributes accepted inbound TAP payload to the path it arrived on
+	// (pathKey → *pathRxCounters), for the per-path telemetry breakdown.
+	pathRx sync.Map
+
 	// lastPeerSpeedCalc records the timestamp of the previous per-peer speed
 	// snapshot (taken inside updateWebCollectorState, which runs on a 10s ticker).
 	// Used to divide byte deltas by the REAL elapsed interval so the displayed
@@ -1919,7 +1933,12 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		nodeName:            nodeName,
 		arpIndex:            &arpIndex{v4: make(map[uint32]arpIndexEntry), v6: make(map[[16]byte]arpIndexEntry)},
 		lsaCache:            make(map[peer.ID]*routing.LinkStatePayload),
+		rxReorderWindow:     cfg.RxReorderWindow,
+		rxReorderDelay:      time.Duration(cfg.RxReorderDelayMs) * time.Millisecond,
 	}
+	// Reorder buffer only has effect under "multipath"; best_path pays one atomic
+	// load per inbound frame to skip it.
+	node.rxReorderEnabled.Store(cfg.TransportStrategy == "multipath")
 	// Seed the LSA sequence counter from wall-clock nanoseconds so a RESTARTED
 	// node never re-uses a sequence its peers already recorded (they would
 	// reject every LSA from us as stale until CleanStaleNodes purged us, i.e.
@@ -2616,6 +2635,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				node.MACTable.CleanPeer(debounceID)
 				node.Dispatcher.RemovePeer(debounceID)
 				node.removePeerObf(debounceID)
+				node.forgetPeerTelemetry(debounceID)
 				// Drop the peer's self-reported metadata (NodeName, TapIP, TapMAC,
 				// AdvertisedSubnets) so a departed peer cannot keep its IP/MAC/subnet
 				// reservations alive in the ARP index and the WebUI. The router

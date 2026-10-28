@@ -272,7 +272,7 @@ func (n *Node) handleStream(s network.Stream) {
 		// to this stream-reader goroutine and may be mutated in place by the
 		// MAC-rewrite paths in handleDirectFrame. Safe because enqueueTapWrite
 		// copies the payload into a pooled buffer before returning.
-		n.handleDirectFrame(remotePeer, frameData, &decScratch)
+		n.handleDirectFrame(remotePeer, frameData, &decScratch, transportName)
 		frameCount++
 
 	}
@@ -284,13 +284,15 @@ func (n *Node) handleStream(s network.Stream) {
 // (handleStream) and the unified mux data channel (handleDataMuxVTP) so the
 // two RX paths cannot drift.
 //
-// frameData may be mutated in place by the MAC-rewrite paths below, so it must
-// belong exclusively to the calling goroutine: for handleStream that is the
-// per-stream read buffer, for the mux path it is a private per-frame copy.
+// pathKey is the transport key of the stream the frame arrived on (used for
+// per-path receive attribution). frameData may be mutated in place by the
+// MAC-rewrite paths below, so it must belong exclusively to the calling
+// goroutine: for handleStream that is the per-stream read buffer, for the mux
+// path it is a private per-frame copy.
 //
 // decScratch is the caller's reusable decrypt scratch, rebased on each call so
 // steady-state frames allocate nothing. It must not escape the call.
-func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratch *[]byte) {
+func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratch *[]byte, pathKey string) {
 
 	if len(frameData) < obfuscate.HeaderLen {
 		// PERF: malformed-traffic path — every junk frame lands here, so
@@ -532,6 +534,7 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 	// from the stream. Recording here also counts a fragmented frame exactly
 	// once, after reassembly, decryption, deduplication, and ACL validation.
 	n.recordPeerRxBytes(remotePeer, len(payload))
+	n.recordPeerRxBytesOnPath(remotePeer, pathKey, len(payload))
 	n.Collector.RecordRecv(len(payload))
 	n.Collector.RecordPacketDir(payload, false)
 	if n.Collector != nil {
@@ -618,9 +621,11 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 	}
 
 	if !tapProbeFrame {
-		if err := n.enqueueTapWrite(payload, recordGateway, ""); err != nil {
-			log.Warn("TAP write enqueue/fallback error: %v", err)
-		}
+		// Reorder gate: under "multipath" this delivers in counter order across
+		// all paths; otherwise a zero-overhead passthrough to enqueueTapWrite.
+		// Per-path RX for direct frames is attributed above with pathKey; the
+		// reorder job carries no pathKey so finishTapWriteJob won't double-count.
+		n.reorderTapWrite(remotePeer, seqID, payload, recordGateway, "", "")
 		return
 	}
 

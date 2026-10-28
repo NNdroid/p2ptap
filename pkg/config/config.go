@@ -246,7 +246,16 @@ type Config struct {
 	EnableMDNS              bool              `json:"enable_mdns"`
 	WebUI                   WebUIConfig       `json:"web_ui"`
 	Transports              TransportsConfig  `json:"transports"`
-	TransportStrategy       string            `json:"transport_strategy"` // "best_path", "redundant", "fallback"
+	TransportStrategy       string            `json:"transport_strategy"` // "best_path", "multipath", "redundant", "fallback"
+	// RxReorderWindow bounds the receive-side reorder buffer (in frames) for the
+	// "multipath" strategy. Cross-path reordering is re-assembled in counter
+	// order before the TAP write; a frame stuck at the head longer than
+	// RxReorderDelayMs is force-released so a lost frame cannot stall the stream.
+	// Ignored (zero overhead) unless transport_strategy is "multipath".
+	RxReorderWindow int `json:"rx_reorder_window"`
+	// RxReorderDelayMs is the head-of-line force-release timeout for the reorder
+	// buffer, in milliseconds. Bounds the extra latency multipath adds.
+	RxReorderDelayMs int `json:"rx_reorder_delay_ms"`
 	NodeName                string            `json:"node_name"`          // e.g. "my-node" or empty for os.Hostname()
 	TapName                 string            `json:"tap_name"`
 	TapIP                   string            `json:"tap_ip"`        // e.g. "10.0.0.1/24"
@@ -412,6 +421,10 @@ func DefaultConfig() *Config {
 			DisableHolePunching: false,
 		},
 		TransportStrategy: "best_path",
+		// Reorder buffer defaults: 256 frames / 200 ms HOL bound. Only active
+		// under "multipath" (see RxReorderWindow/RxReorderDelayMs).
+		RxReorderWindow: 256,
+		RxReorderDelayMs: 200,
 		NodeName:          hostName,
 		TapName:           "p2ptap0",
 		TapIP:             "10.0.0.1/24",
@@ -659,8 +672,23 @@ func (c *Config) Validate() error {
 	}
 
 	// --- Transport strategy ---
-	if c.TransportStrategy != "best_path" && c.TransportStrategy != "redundant" && c.TransportStrategy != "fallback" {
-		return fmt.Errorf("invalid config: transport_strategy: '%s' must be 'best_path', 'redundant', or 'fallback'", c.TransportStrategy)
+	if c.TransportStrategy != "best_path" && c.TransportStrategy != "multipath" &&
+		c.TransportStrategy != "redundant" && c.TransportStrategy != "fallback" {
+		return fmt.Errorf("invalid config: transport_strategy: '%s' must be 'best_path', 'multipath', 'redundant', or 'fallback'", c.TransportStrategy)
+	}
+
+	// --- Receive reorder buffer (multipath only) ---
+	if c.RxReorderWindow <= 0 {
+		c.RxReorderWindow = 256
+	}
+	if c.RxReorderWindow > 1024 {
+		c.RxReorderWindow = 1024 // bounded by the dedup tolerance
+	}
+	if c.RxReorderDelayMs <= 0 {
+		c.RxReorderDelayMs = 200
+	}
+	if c.RxReorderDelayMs > 5000 {
+		c.RxReorderDelayMs = 5000
 	}
 
 	// --- Log level ---

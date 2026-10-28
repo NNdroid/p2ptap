@@ -529,7 +529,7 @@ func rxbpRunRX(b *testing.B, h *rxbpHarness, sz rxbpSize) {
 		if rerr != nil || readN == 0 {
 			b.Fatalf("rxbp: preflight read %d: n=%d err=%v", i, readN, rerr)
 		}
-		h.nodeB.handleDirectFrame(h.peerA, buf[:readN], &scratch)
+		h.nodeB.handleDirectFrame(h.peerA, buf[:readN], &scratch, "")
 	}
 	if !h.waitFor(deliveredBefore+uint64(rxbpPreflight), 10*time.Second) {
 		b.Fatalf("rxbp: preflight delivered %d/%d frames -- the RX chain is dropping them",
@@ -550,7 +550,7 @@ func rxbpRunRX(b *testing.B, h *rxbpHarness, sz rxbpSize) {
 		if readN == 0 {
 			b.Fatalf("rxbp: zero-length frame %d -- ran past the end of the wire image", i)
 		}
-		h.nodeB.handleDirectFrame(h.peerA, buf[:readN], &scratch)
+		h.nodeB.handleDirectFrame(h.peerA, buf[:readN], &scratch, "")
 	}
 	b.StopTimer()
 

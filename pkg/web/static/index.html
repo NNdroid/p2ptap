@@ -982,10 +982,11 @@
                 <div class="config-row">
                     <div>
                         <div class="config-row-label" data-i18n="strategy_lbl">Transport Strategy</div>
-                        <div class="config-row-desc" data-i18n="strategy_desc">How packets are routed across P2P links</div>
+                        <div class="config-row-desc" data-i18n="strategy_desc">Selects among existing streams; does not create extra transports. Multipath balances across all live paths and needs a restart.</div>
                     </div>
                     <select id="cfgStrategy" class="form-select ext145">
                         <option value="best_path" data-i18n="strategy_best_path">best_path (Best Path Priority)</option>
+                        <option value="multipath" data-i18n="strategy_multipath">multipath (Multi-Path Load Balance)</option>
                         <option value="redundant" data-i18n="strategy_redundant">redundant (Dual-Send Redundant)</option>
                         <option value="fallback" data-i18n="strategy_fallback">fallback (Failover Fallback)</option>
                     </select>

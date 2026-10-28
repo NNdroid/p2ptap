@@ -68,6 +68,10 @@ func RestartRequiredFields(old, new *Config) []string {
 	// (transport pnet + SeqSync salt), so it needs a restart.
 	add("psk", old.PSK != new.PSK)
 	add("transport_strategy", old.TransportStrategy != new.TransportStrategy)
+	// The reorder buffer is configured once when the Node is built, and only has
+	// effect under "multipath"; both knobs need a restart to apply.
+	add("rx_reorder_window", old.RxReorderWindow != new.RxReorderWindow)
+	add("rx_reorder_delay_ms", old.RxReorderDelayMs != new.RxReorderDelayMs)
 
 	// Every WebUI knob is read once, when the Server is constructed: the
 	// bearer token and the packet-capture sampling are both applied in

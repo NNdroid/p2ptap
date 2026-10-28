@@ -534,6 +534,7 @@ func (n *Node) reconnectPeer(pid peer.ID) {
 	n.echoPool.Invalidate(pid)
 	n.clearCachedHandshakeEph(pid)
 	n.peerReady.Delete(pid)
+	n.forgetPeerTelemetry(pid)
 
 	// Close any stale / hung swarm connections so libp2p doesn't treat the peer
 	// as already connected and no-op the subsequent dial.
@@ -655,6 +656,7 @@ func (n *Node) triggerThrottledReconnect(pid peer.ID) {
 
 	log.Warn("Send failure to peer %s detected, triggering automatic hole-punching / reconnection...", pid.String())
 	n.Dispatcher.RemovePeer(pid)
+	n.forgetPeerTelemetry(pid)
 	// reconnectPeer performs several synchronous libp2p operations (ClosePeer,
 	// Clear backoff, SynthesizeRelayCircuitAddrs) that hold internal network
 	// locks. Running it in the dispatch worker would block that worker for the

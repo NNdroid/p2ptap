@@ -548,6 +548,15 @@
                 col_peerid: "Peer ID",
                 col_multiaddr: "Network Multiaddr",
                 col_transport: "Transport",
+                path_metrics_title: "Per-Path Link Metrics",
+                path_metrics_kind: "Kind",
+                path_metrics_path: "Path",
+                path_metrics_usable: "Use",
+                path_metrics_tx: "TX",
+                path_metrics_rx: "RX",
+                path_metrics_bps: "Est. Cap",
+                path_metrics_svc: "Svc",
+                path_metrics_updated: "Updated",
                 col_uptime: "Uptime",
                 col_rtt: "RTT Latency",
                 col_ip: "IP Address",
@@ -612,7 +621,7 @@
                 psk_desc: "Empty for public network, set key for encrypted isolation",
                 section_transport: "Transport & Logging",
                 section_transport_desc: "Routing strategy and diagnostic verbosity",
-                strategy_desc: "Selects among existing streams; does not create extra transports. Changes require a restart.",
+                strategy_desc: "Selects among existing streams; does not create extra transports. Multipath balances across all live paths and needs a restart.",
                 loglevel_desc: "Controls verbosity of console output",
                 enable_mdns_lbl: "Enable mDNS LAN Discovery",
                 enable_mdns_desc: "Auto-discover peers on the same LAN via mDNS (local network only)",
@@ -730,6 +739,9 @@
                 acl_default_drop: "DROP (deny)",
                 strategy_redundant: "Duplicate over existing streams",
                 strategy_fallback: "Failover Fallback",
+                strategy_multipath: "Multi-Path Load Balance",
+                strategy_multipath_hint: "Splits traffic across all live paths (direct + circuit relay) by measured capacity; requires the peer to also run multipath for the receive-side reorder to engage.",
+                strategy_best_path_hint: "Uses the single highest-priority live path (default).",
                 log_level_debug: "Verbose Debug",
                 log_level_info: "Standard Info",
                 log_level_warn: "Warnings Only",
@@ -4019,6 +4031,66 @@
             return `<span class="pill-badge tp-badge tp-${st}" title="${escapeHTML(detail)}">${escapeHTML(label)}</span>`;
         }
 
+        // renderPathMetrics renders the per-path breakdown table inside the peer
+        // detail panel (the "multipath" strategy's live view of how traffic splits
+        // across the direct / circuit-relay paths to a peer). Returns '' when the
+        // peer reports no per-path telemetry yet.
+        function renderPathMetrics(p) {
+            const paths = (p && Array.isArray(p.paths)) ? p.paths : [];
+            if (paths.length === 0) return '';
+            const rows = paths.map(path => {
+                const kind = path.relay_kind || 'direct';
+                const kindLabel = kind === 'circuit-relay' ? 'Circuit Relay' :
+                    (kind === 'overlay-relay' ? 'Overlay Relay' :
+                        (kind === 'boot-relay' ? 'Boot Relay' : 'Direct'));
+                const kindColor = kind === 'direct' ? 'var(--success)' : 'var(--warn)';
+                const tx = path.tx_bytes || 0;
+                const rx = path.rx_bytes || 0;
+                const bps = path.est_bps || 0;
+                const bpsStr = bps > 0 ? formatBytes(bps) + '/s' : '—';
+                const svc = path.service_ms ? (path.service_ms.toFixed(1) + ' ms') : '—';
+                const usable = path.usable ? '<span style="color:var(--success)">●</span>' : '<span style="color:var(--text-muted)">○</span>';
+                const updated = path.updated ? escapeHTML(path.updated.replace('T', ' ').replace('Z', '')) : '—';
+                return `<tr>
+                    <td><span class="pill-badge" style="padding:1px 6px;font-size:0.68rem;color:${kindColor};border-color:${kindColor};" title="${escapeHTML(path.transport || '')}">${kindLabel}</span></td>
+                    <td title="${escapeHTML(path.path_id || '')}"><code style="font-size:0.68rem;">${escapeHTML(shortMultiaddr(path.path_id))}</code></td>
+                    <td>${escapeHTML(path.priority || '')}</td>
+                    <td>${usable}</td>
+                    <td>${escapeHTML(formatBytes(tx))}</td>
+                    <td>${escapeHTML(formatBytes(rx))}</td>
+                    <td>${escapeHTML(bpsStr)}</td>
+                    <td>${escapeHTML(svc)}</td>
+                    <td title="${escapeHTML(path.updated || '')}" style="font-size:0.68rem;color:var(--text-muted);">${updated}</td>
+                </tr>`;
+            }).join('');
+            return `<div style="margin-top:10px;">
+                <div style="font-size:0.75rem;font-weight:600;color:var(--text-dim);margin-bottom:4px;">${escapeHTML(t('path_metrics_title') || 'Per-Path Link Metrics')} (${paths.length})</div>
+                <table class="mini-table" style="width:100%;border-collapse:collapse;font-size:0.72rem;">
+                    <thead><tr style="color:var(--text-muted);text-align:left;">
+                        <th style="padding:2px 4px;">${escapeHTML(t('path_metrics_kind') || 'Kind')}</th>
+                        <th style="padding:2px 4px;">${escapeHTML(t('path_metrics_path') || 'Path')}</th>
+                        <th style="padding:2px 4px;">${escapeHTML(t('col_transport') || 'Transport')}</th>
+                        <th style="padding:2px 4px;">${escapeHTML(t('path_metrics_usable') || 'Use')}</th>
+                        <th style="padding:2px 4px;">${escapeHTML(t('path_metrics_tx') || 'TX')}</th>
+                        <th style="padding:2px 4px;">${escapeHTML(t('path_metrics_rx') || 'RX')}</th>
+                        <th style="padding:2px 4px;">${escapeHTML(t('path_metrics_bps') || 'Est. Cap')}</th>
+                        <th style="padding:2px 4px;">${escapeHTML(t('path_metrics_svc') || 'Svc')}</th>
+                        <th style="padding:2px 4px;">${escapeHTML(t('path_metrics_updated') || 'Updated')}</th>
+                    </tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>`;
+        }
+
+        // shortMultiaddr compresses a long multiaddr for tight table cells while
+        // keeping the tail (e.g. the peer/relay component) readable.
+        function shortMultiaddr(ma) {
+            if (!ma) return '—';
+            const s = String(ma);
+            if (s.length <= 48) return s;
+            return s.slice(0, 22) + '…' + s.slice(-20);
+        }
+
         function getNodeColor(peer) {
             let hash = 0;
             const str = peer.peer_id || peer.node_name || "peer";
@@ -5662,6 +5734,7 @@
                                 <div><dt>${escapeHTML(t('dashboard_link_rate'))}</dt><dd>${linkRates}</dd></div>
                                 <div><dt>${escapeHTML(t('dashboard_remote_traffic'))}</dt><dd>↑ ${peerTotalTxStr} · ↓ ${peerTotalRxStr}</dd></div>
                             </dl>
+                            ${renderPathMetrics(p)}
                             <div class="peer-detail-actions">
                                 <button type="button" class="btn-glass" data-onclick="closePeerDetails(); setPingTarget(${attrStr(p.tap_ip || p.peer_id)})">Ping</button>
                                 <button type="button" class="btn-glass" data-onclick="closePeerDetails(); openSpeedTestModal(${attrStr(p.peer_id)})">${t('speedtest_btn')}</button>
@@ -5824,7 +5897,7 @@
                         } else if (routePath === 'circuit-relay') {
                             optHtml = `<span style="color:var(--warn); font-size:0.8rem;">Circuit fallback</span>`;
                         } else if (routePath === 'overlay-relay') {
-                            optHtml = `<span style="color:var(--accent-purple); font-size:0.8rem;">Overlay route</span>`;
+                            optHtml = `<span style="color:var(--accent-purple-ink); font-size:0.8rem;">Overlay route</span>`;
                         } else {
                             optHtml = `<span style="color:var(--text-muted); font-size:0.8rem;">Not verified</span>`;
                         }

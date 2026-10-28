@@ -71,7 +71,7 @@ func (n *Node) handleDataMuxVTP(s network.Stream, from peer.ID, payload []byte, 
 	n.notePeerRxTransport(from, transportLabelForConn(s.Conn()), "")
 	decScratch := acquireMuxDecScratch()
 	defer releaseMuxDecScratch(decScratch)
-	n.handleDirectFrame(from, payload, &decScratch)
+	n.handleDirectFrame(from, payload, &decScratch, s.Conn().RemoteMultiaddr().String())
 }
 
 // handleDataMuxRelay handles an overlay-relay frame arriving on the mux data

@@ -221,6 +221,10 @@ type tapWriteJob struct {
 	data          []byte
 	recordGateway bool
 	relaySrc      peer.ID
+	// pathKey attributes this job's TAP payload to a path for per-path receive
+	// telemetry. Empty for direct frames (attributed at the stream handler);
+	// "relay://<hop>" for relayed frames.
+	pathKey string
 }
 
 func (n *Node) validateTapWrite(payload []byte) error {
@@ -266,28 +270,47 @@ func (n *Node) tapWrite(payload []byte) (int, error) {
 	return nn, nil
 }
 
+// prepareTapWriteJob validates payload and pools an owned copy of it into a
+// TAP write job. The caller owns job.data and MUST hand it to
+// enqueueTapWritePrepared (which releases it after writing) or release it with
+// releaseFrameBuf(job.data) on a drop path. On validation error (runt,
+// oversized, no device) it returns err and a zero job.
+func (n *Node) prepareTapWriteJob(payload []byte, recordGateway bool, relaySrc peer.ID, pathKey string) (tapWriteJob, error) {
+	if err := n.validateTapWrite(payload); err != nil {
+		return tapWriteJob{}, err
+	}
+	frame := acquireFrameBuf(len(payload))
+	copy(frame, payload)
+	return tapWriteJob{data: frame, recordGateway: recordGateway, relaySrc: relaySrc, pathKey: pathKey}, nil
+}
+
+// enqueueTapWritePrepared hands an already-owned TAP write job to the dedicated
+// normal TAP writer. On queue saturation it falls back to the synchronous
+// boundary, preserving delivery and natural backpressure instead of turning
+// overload into packet loss. The job's pooled buffer is always released (via
+// the channel consumer or finishTapWriteJob).
+func (n *Node) enqueueTapWritePrepared(job tapWriteJob) {
+	select {
+	case n.tapWriteCh <- job:
+		return
+	default:
+		nn, err := n.tapWrite(job.data)
+		n.finishTapWriteJob(job, nn, err)
+	}
+}
+
 // enqueueTapWrite transfers an owned copy of payload to the dedicated normal
 // TAP writer. The receive-side stream scratch is reused on the next ReadFrame,
 // so copying is mandatory; acquireFrameBuf keeps the common <=2K case off the
 // heap. A full queue falls back to the synchronous boundary, providing
 // backpressure instead of dropping a valid Ethernet frame.
 func (n *Node) enqueueTapWrite(payload []byte, recordGateway bool, relaySrc peer.ID) error {
-	if err := n.validateTapWrite(payload); err != nil {
+	job, err := n.prepareTapWriteJob(payload, recordGateway, relaySrc, "")
+	if err != nil {
 		return err
 	}
-	frame := acquireFrameBuf(len(payload))
-	copy(frame, payload)
-	job := tapWriteJob{data: frame, recordGateway: recordGateway, relaySrc: relaySrc}
-	select {
-	case n.tapWriteCh <- job:
-		return nil
-	default:
-		// Queue saturation: preserve delivery and natural backpressure rather
-		// than turning overload into packet loss.
-		nn, err := n.tapWrite(frame)
-		n.finishTapWriteJob(job, nn, err)
-		return err
-	}
+	n.enqueueTapWritePrepared(job)
+	return nil
 }
 
 func (n *Node) finishTapWriteJob(job tapWriteJob, wrote int, err error) {
@@ -299,17 +322,20 @@ func (n *Node) finishTapWriteJob(job tapWriteJob, wrote int, err error) {
 		n.Collector.RecordGatewayPacket()
 	}
 	if job.relaySrc != "" {
-		n.recordRelayedTapDelivery(job.relaySrc, job.data)
+		n.recordRelayedTapDelivery(job.relaySrc, job.data, job.pathKey)
 	}
 }
 
 // recordRelayedTapDelivery preserves the relay receive accounting that must
 // happen only after the frame really reached the kernel TAP.
-func (n *Node) recordRelayedTapDelivery(srcPeer peer.ID, payload []byte) {
+func (n *Node) recordRelayedTapDelivery(srcPeer peer.ID, payload []byte, pathKey string) {
 	if n.relayDiag != nil {
 		n.relayDiag.delivered()
 	}
 	n.recordPeerRxBytes(srcPeer, len(payload))
+	if pathKey != "" {
+		n.recordPeerRxBytesOnPath(srcPeer, pathKey, len(payload))
+	}
 	n.resetPingPongFailCountForPeer(srcPeer)
 	if n.Collector != nil {
 		n.Collector.RecordRecv(len(payload))

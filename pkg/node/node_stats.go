@@ -763,6 +763,7 @@ func (n *Node) updateWebCollectorState() {
 			Transport:         transport,
 			TransportScore:    transportScore,
 			TransportPriority: transportPriority,
+			Paths:             n.buildPathMetrics(pID),
 			RTTMs:             rtt.rttMs,
 			RTTMeasured:       rtt.rttMeasured,
 			RTTSource:         rtt.source,

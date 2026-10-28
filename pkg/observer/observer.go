@@ -247,6 +247,13 @@ type PeerInfoDTO struct {
 	Transport         string   `json:"transport"`
 	TransportScore    int      `json:"transport_score"`
 	TransportPriority string   `json:"transport_priority"`
+	// Paths is the per-path breakdown of this peer's active links. The outbound
+	// Transport/TransportPriority columns above describe only the path the
+	// scheduler currently prefers; Paths lists every live path (direct QUIC/TCP,
+	// circuit-relay, overlay-relay, boot-relay) with its own measured traffic so
+	// the operator can see how multipath load is distributed. Empty when the peer
+	// has no multi-path telemetry.
+	Paths []PathMetricDTO `json:"paths,omitempty"`
 	// RTT/Jitter/Loss are populated only from completed probes.  The companion
 	// validity fields are deliberately explicit: zero is a perfectly valid RTT
 	// component, but it must never again mean the old fabricated "10ms default"
@@ -352,6 +359,55 @@ type PeerInfoDTO struct {
 	//   unknown       – no probe run yet (and no observed MAC) to judge
 	TapDataPath       string `json:"tap_data_path"`
 	TapDataPathDetail string `json:"tap_data_path_detail"` // human-readable supplement
+}
+
+// PathMetricDTO is the per-path breakdown of a peer's link quality under the
+// "multipath" transport strategy. Each entry is one active path to the peer —
+// a direct QUIC/TCP connection, a circuit-relay stream, or an overlay/boot
+// relay pool — with its own measured traffic and estimated capacity.
+type PathMetricDTO struct {
+	// PathID identifies the path. For direct/circuit paths this is the remote
+	// multiaddr (s.Conn().RemoteMultiaddr()); for overlay/boot relays it is a
+	// synthetic "relay://<hop>" key.
+	PathID string `json:"path_id"`
+	PeerID string `json:"peer_id"`
+	// Transport is the libp2p transport: "QUIC", "TCP", "WebRTC", "WebTransport",
+	// or "Circuit Relay". For overlay/boot relays it is "Overlay Relay"/"Boot Relay".
+	Transport string `json:"transport"`
+	// RelayKind classifies the path: "direct", "circuit-relay", "overlay-relay",
+	// or "boot-relay".
+	RelayKind string `json:"relay_kind"`
+	// TxBytes/TxFrames and RxBytes/RxFrames are the local measured TAP-payload
+	// traffic carried on this path. Rx is attributed per path from the stream the
+	// frame arrived on; Tx is the write-quality cumulative byte count.
+	TxBytes uint64 `json:"tx_bytes"`
+	TxFrames uint64 `json:"tx_frames"`
+	RxBytes uint64 `json:"rx_bytes"`
+	RxFrames uint64 `json:"rx_frames"`
+	// NanosPerByte is the EWMA local write cost (from recordStreamWrite).
+	NanosPerByte float64 `json:"nanos_per_byte"`
+	// EstBps is the estimated path capacity in bytes/sec (1e9 / nanosPerByte),
+	// or the topology-nominal value when no usable measurement exists yet.
+	EstBps float64 `json:"est_bps"`
+	// ServiceMs is the estimated per-frame write service time (nanosPerByte × a
+	// nominal 1500B frame), a lower-bound latency proxy derived from write
+	// backpressure. It is NOT a true RTT; RTTMs is only set from a real probe.
+	ServiceMs float64 `json:"service_ms"`
+	// RTTMs/RTTMeasured are reserved for a per-path RTT probe. A dedicated probe
+	// is a follow-up; until then RTTMeasured is always false and RTTMs is 0.
+	RTTMs       float64 `json:"rtt_ms"`
+	RTTMeasured bool    `json:"rtt_measured"`
+	// Usable reports whether the path has enough fresh write samples to be
+	// trusted for scheduling (see streamWriteQuality.usable).
+	Usable bool `json:"usable"`
+	// Active reports whether the path is currently a live stream in the peer map.
+	Active bool `json:"active"`
+	// Score and Priority mirror the topology ranking (scoreStreamTransport →
+	// "Loopback (0)"/"LAN Direct (10)"/"WAN Direct (20)"/"Relay (100)"/"Overlay (999)").
+	Score    int    `json:"score"`
+	Priority string `json:"priority"`
+	// Updated is the last write-quality update, RFC3339 ("" if never measured).
+	Updated string `json:"updated,omitempty"`
 }
 
 type SpeedTestResultDTO struct {
