@@ -107,7 +107,7 @@ func TestRxReorderDeliversInOrder(t *testing.T) {
 
 	// Counters arrive strictly in order: every frame delivers immediately.
 	for c := uint64(100); c < 104; c++ {
-		h.n.rxReorderFor(p).push(h.seqID(1, c), frame(fmt.Sprintf("f%d", c)), false, "", "")
+		h.n.rxReorderFor(p).push(h.seqID(1, c), []tapWriteJob{{data: frame(fmt.Sprintf("f%d", c))}})
 	}
 	h.waitDelivered()
 	got := h.gotFrames()
@@ -128,9 +128,9 @@ func TestRxReorderGapFillsInOrder(t *testing.T) {
 
 	// 10 delivers; 12 is buffered behind the missing 11; 11 arrives and flushes
 	// the buffered tail in order.
-	h.n.rxReorderFor(p).push(h.seqID(1, 10), frame("f10"), false, "", "")
-	h.n.rxReorderFor(p).push(h.seqID(1, 12), frame("f12"), false, "", "")
-	h.n.rxReorderFor(p).push(h.seqID(1, 11), frame("f11"), false, "", "")
+	h.n.rxReorderFor(p).push(h.seqID(1, 10), []tapWriteJob{{data: frame("f10")}})
+	h.n.rxReorderFor(p).push(h.seqID(1, 12), []tapWriteJob{{data: frame("f12")}})
+	h.n.rxReorderFor(p).push(h.seqID(1, 11), []tapWriteJob{{data: frame("f11")}})
 	h.waitDelivered()
 
 	got := h.gotFrames()
@@ -151,10 +151,10 @@ func TestRxReorderForceReleaseOnDelay(t *testing.T) {
 
 	// 10 delivers; 12 is buffered behind the (never arriving) 11; a later 13
 	// triggers the delay-based force release, flushing the buffered tail.
-	h.n.rxReorderFor(p).push(h.seqID(1, 10), frame("f10"), false, "", "")
-	h.n.rxReorderFor(p).push(h.seqID(1, 12), frame("f12"), false, "", "")
+	h.n.rxReorderFor(p).push(h.seqID(1, 10), []tapWriteJob{{data: frame("f10")}})
+	h.n.rxReorderFor(p).push(h.seqID(1, 12), []tapWriteJob{{data: frame("f12")}})
 	time.Sleep(60 * time.Millisecond)
-	h.n.rxReorderFor(p).push(h.seqID(1, 13), frame("f13"), false, "", "")
+	h.n.rxReorderFor(p).push(h.seqID(1, 13), []tapWriteJob{{data: frame("f13")}})
 	h.waitDelivered()
 
 	got := h.gotFrames()
@@ -175,11 +175,11 @@ func TestRxReorderWindowOverflowFastForwards(t *testing.T) {
 	// 10 delivers; 12,13,14 buffer behind the missing 11 (window has room).
 	// 15 is 5 counters past next(11): beyond maxWindow, so the stale tail is
 	// flushed and the queue re-anchors at 16.
-	h.n.rxReorderFor(p).push(h.seqID(1, 10), frame("f10"), false, "", "")
+	h.n.rxReorderFor(p).push(h.seqID(1, 10), []tapWriteJob{{data: frame("f10")}})
 	for _, c := range []uint64{12, 13, 14} {
-		h.n.rxReorderFor(p).push(h.seqID(1, c), frame(fmt.Sprintf("f%d", c)), false, "", "")
+		h.n.rxReorderFor(p).push(h.seqID(1, c), []tapWriteJob{{data: frame(fmt.Sprintf("f%d", c))}})
 	}
-	h.n.rxReorderFor(p).push(h.seqID(1, 15), frame("f15"), false, "", "")
+	h.n.rxReorderFor(p).push(h.seqID(1, 15), []tapWriteJob{{data: frame("f15")}})
 	h.waitDelivered()
 
 	got := h.gotFrames()
@@ -201,12 +201,12 @@ func TestRxReorderDropsLateFrameAfterFastForward(t *testing.T) {
 	p := peer.ID("rx-reorder-late")
 	h.expect(2)
 
-	h.n.rxReorderFor(p).push(h.seqID(1, 10), frame("f10"), false, "", "")
+	h.n.rxReorderFor(p).push(h.seqID(1, 10), []tapWriteJob{{data: frame("f10")}})
 	// 15 is beyond the window: fast-forward, next re-anchors at 16.
-	h.n.rxReorderFor(p).push(h.seqID(1, 15), frame("f15"), false, "", "")
+	h.n.rxReorderFor(p).push(h.seqID(1, 15), []tapWriteJob{{data: frame("f15")}})
 	h.waitDelivered()
 	// A frame from before the fast-forward is now too late: dropped, not delivered.
-	h.n.rxReorderFor(p).push(h.seqID(1, 12), frame("f12"), false, "", "")
+	h.n.rxReorderFor(p).push(h.seqID(1, 12), []tapWriteJob{{data: frame("f12")}})
 	time.Sleep(20 * time.Millisecond)
 	if got := h.gotFrames(); len(got) != 2 {
 		t.Fatalf("delivered %d frames, want 2 (late frame must be dropped): %v", len(got), got)
@@ -219,11 +219,11 @@ func TestRxReorderEpochChangeResetsWindow(t *testing.T) {
 	h.expect(3)
 
 	// Epoch 1: 10 delivers, 12 buffers behind missing 11.
-	h.n.rxReorderFor(p).push(h.seqID(1, 10), frame("e1-f10"), false, "", "")
-	h.n.rxReorderFor(p).push(h.seqID(1, 12), frame("e1-f12"), false, "", "")
+	h.n.rxReorderFor(p).push(h.seqID(1, 10), []tapWriteJob{{data: frame("e1-f10")}})
+	h.n.rxReorderFor(p).push(h.seqID(1, 12), []tapWriteJob{{data: frame("e1-f12")}})
 	// Epoch 2 starts at a lower counter: the buffered tail belongs to the old
 	// session and must flush before re-anchoring on the new epoch.
-	h.n.rxReorderFor(p).push(h.seqID(2, 5), frame("e2-f5"), false, "", "")
+	h.n.rxReorderFor(p).push(h.seqID(2, 5), []tapWriteJob{{data: frame("e2-f5")}})
 	h.waitDelivered()
 
 	got := h.gotFrames()
@@ -232,6 +232,67 @@ func TestRxReorderEpochChangeResetsWindow(t *testing.T) {
 	}
 	if got[0] != string(frame("e1-f10")) || got[1] != string(frame("e1-f12")) || got[2] != string(frame("e2-f5")) {
 		t.Fatalf("delivery = %v, want [e1-f10 e1-f12 e2-f5]", got)
+	}
+}
+
+// TestRxReorderBatchDeliversTogether verifies that a coalesced batch (several
+// sub-frames sharing one seqID) is held and released as one logical frame: all
+// sub-frames reach TAP consecutively and in order, ahead of the next counter.
+func TestRxReorderBatchDeliversTogether(t *testing.T) {
+	h := newReorderHarness(t, 64, 500*time.Millisecond)
+	p := peer.ID("rx-reorder-batch")
+	h.expect(5)
+
+	// Counter 10 is a batch of three sub-frames; 11 and 12 are plain frames.
+	batch := []tapWriteJob{
+		{data: frame("b10-a")},
+		{data: frame("b10-b")},
+		{data: frame("b10-c")},
+	}
+	h.n.rxReorderFor(p).push(h.seqID(1, 10), batch)
+	h.n.rxReorderFor(p).push(h.seqID(1, 11), []tapWriteJob{{data: frame("f11")}})
+	h.n.rxReorderFor(p).push(h.seqID(1, 12), []tapWriteJob{{data: frame("f12")}})
+	h.waitDelivered()
+
+	got := h.gotFrames()
+	if len(got) != 5 {
+		t.Fatalf("delivered %d frames, want 5: %v", len(got), got)
+	}
+	want := []string{"b10-a", "b10-b", "b10-c", "f11", "f12"}
+	for i, w := range want {
+		if got[i] != string(frame(w)) {
+			t.Fatalf("delivery[%d] = %q, want %q", i, got[i], frame(w))
+		}
+	}
+}
+
+// TestRxReorderBatchHeldBehindGap verifies a batch buffered behind a missing
+// counter is released together (in order) once the gap fills.
+func TestRxReorderBatchHeldBehindGap(t *testing.T) {
+	h := newReorderHarness(t, 64, 500*time.Millisecond)
+	p := peer.ID("rx-reorder-batch-gap")
+	h.expect(4)
+
+	// 10 delivers; the batch at 12 is buffered behind the missing 11.
+	h.n.rxReorderFor(p).push(h.seqID(1, 10), []tapWriteJob{{data: frame("f10")}})
+	batch := []tapWriteJob{
+		{data: frame("b12-a")},
+		{data: frame("b12-b")},
+	}
+	h.n.rxReorderFor(p).push(h.seqID(1, 12), batch)
+	// 11 arrives: the batch at 12 flushes together, in order.
+	h.n.rxReorderFor(p).push(h.seqID(1, 11), []tapWriteJob{{data: frame("f11")}})
+	h.waitDelivered()
+
+	got := h.gotFrames()
+	if len(got) != 4 {
+		t.Fatalf("delivered %d frames, want 4: %v", len(got), got)
+	}
+	want := []string{"f10", "f11", "b12-a", "b12-b"}
+	for i, w := range want {
+		if got[i] != string(frame(w)) {
+			t.Fatalf("delivery[%d] = %q, want %q", i, got[i], frame(w))
+		}
 	}
 }
 

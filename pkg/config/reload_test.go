@@ -167,7 +167,7 @@ func TestRestartRequiredFieldsExcludesHotReloadable(t *testing.T) {
 	newCfg.DiscoverBootMesh = !newCfg.DiscoverBootMesh
 	newCfg.AllowedSubnetPeers = append(newCfg.AllowedSubnetPeers, "peer-a")
 	newCfg.Obfuscation.Algorithm = "aes-gcm"
-	newCfg.Obfuscation.Mode = "udp+tcp"
+	newCfg.Obfuscation.PaddingRules = "0 -> 512-512"
 	newCfg.Obfuscation.StrictKeyNegotiation = !newCfg.Obfuscation.StrictKeyNegotiation
 	newCfg.ExitNode.Enable = !newCfg.ExitNode.Enable
 	newCfg.ExitNode.WANInterface = "eth0"

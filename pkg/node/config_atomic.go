@@ -104,17 +104,19 @@ func (n *Node) applyObfuscationConfig(cfg *config.Config) {
 	if n.Packer == nil {
 		return
 	}
-	if budget := obfuscate.MaxFrameForPathMTU(cfg.MTU); budget > 0 &&
-		(cfg.Obfuscation.FixedSize > budget || cfg.Obfuscation.MaxSize > budget) {
-		log.Warn("Obfuscation frame size exceeds the %d-byte datagram budget for MTU %d "+
-			"(fixed_size=%d, max_size=%d); padding is capped at the budget so frames "+
-			"are not needlessly fragmented.", budget, cfg.MTU,
-			cfg.Obfuscation.FixedSize, cfg.Obfuscation.MaxSize)
-	}
+	// Padding targets are clamped to the datagram budget at Pack time
+	// (clampFrameSize), so a rule whose target exceeds the MTU is harmless —
+	// it just pads to the budget instead of fragmenting.
 	n.Packer.UpdateConfig(&cfg.Obfuscation)
 	n.Packer.SetFrameBudget(cfg.MTU)
 	n.Packer.SetSendAlgo(n.sendAlgo())
-	log.Info("Obfuscation config hot-reloaded: mode=%s algo=%s", n.Packer.Mode, obfuscate.AlgoName(n.sendAlgo()))
+	// Drain pending coalescing buffers: their knobs may have changed, so flushing
+	// them under the old rule is cleaner than mixing two generations in one batch.
+	if n.coalescer != nil {
+		n.coalescer.flushAll()
+	}
+	log.Info("Obfuscation config hot-reloaded: enable=%t rule=%q algo=%s",
+		cfg.Obfuscation.Enable, cfg.Obfuscation.PaddingRules, obfuscate.AlgoName(n.sendAlgo()))
 }
 
 // applyHotReload publishes cfg as the new configuration snapshot and then

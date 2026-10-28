@@ -203,7 +203,7 @@ func TestConfigSavePartialRequestCannotDowngradeSecurityFields(t *testing.T) {
 	baseline.PSK = "running-mesh-secret-1"
 	baseline.WebUI.AuthToken = "running-dashboard-token"
 	baseline.ACL = config.ACLConfig{Enable: true, DefaultAction: "deny"}
-	baseline.Obfuscation = config.ObfuscationConfig{Enable: true, Mode: "auto"}
+	baseline.Obfuscation = config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 400-600"}
 	baseline.AdvertisedSubnets = []string{"192.168.1.0/24"}
 	baseline.AllowedSubnetPeers = []string{"*"}
 	baseline.AcceptAdvertisedSubnets = true
@@ -248,7 +248,7 @@ func TestConfigSavePartialRequestCannotDowngradeSecurityFields(t *testing.T) {
 		{"web_ui.auth_token", persisted.WebUI.AuthToken == "running-dashboard-token"},
 		{"psk", persisted.PSK == "running-mesh-secret-1"},
 		{"acl", persisted.ACL.Enable && persisted.ACL.DefaultAction == "deny"},
-		{"obfuscation", persisted.Obfuscation.Enable && persisted.Obfuscation.Mode == "auto"},
+		{"obfuscation", persisted.Obfuscation.Enable && persisted.Obfuscation.PaddingRules == "0 -> 400-600"},
 		{"advertised_subnets", len(persisted.AdvertisedSubnets) == 1 && persisted.AdvertisedSubnets[0] == "192.168.1.0/24"},
 		{"allowed_subnet_peers", len(persisted.AllowedSubnetPeers) == 1 && persisted.AllowedSubnetPeers[0] == "*"},
 		{"accept_advertised_subnets", persisted.AcceptAdvertisedSubnets},

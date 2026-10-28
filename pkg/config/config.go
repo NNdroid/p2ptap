@@ -148,19 +148,19 @@ type ExitNodeConfig struct {
 	WANInterface  string `json:"wan_interface"`  // Physical egress interface name (e.g. "eth0" or "auto")
 }
 
-// ObfuscationConfig defines traffic obfuscation & padding options
+// ObfuscationConfig defines traffic obfuscation & padding options.
+//
+// Padding uses a single declarative rule (PaddingRules) — the historical
+// fixed/block/random/dynamic/auto modes and the auto-detection engine are
+// removed. The rule grammar is defined in pkg/obfuscate/padding_rule.go; the
+// default rule pads payloads under 400 bytes to a random 400-600 and sends
+// 400+ naturally, with packet coalescing enabled to avoid padding when enough
+// data is buffered.
 type ObfuscationConfig struct {
-	Enable      bool   `json:"enable"`
-	Mode        string `json:"mode"`         // "fixed","block","random","dynamic","auto"
-	FixedSize   int    `json:"fixed_size"`   // target total frame size (fixed/dynamic max)
-	BlockSize   int    `json:"block_size"`   // block alignment granularity
-	JitterRange int    `json:"jitter_range"` // ±N byte random jitter on fixed/block modes (0=off)
-	MinSize     int    `json:"min_size"`     // minimum frame size for dynamic mode
-	MaxSize     int    `json:"max_size"`     // maximum frame size for dynamic mode
-
-	// Auto-detection
-	AutoDetectInterval int  `json:"auto_detect_interval"` // seconds between re-evaluations (default 30)
-	AllowModeSwitch    bool `json:"allow_mode_switch"`    // allow engine to auto-switch mode
+	Enable bool `json:"enable"`
+	// PaddingRules is the padding-specific grammar rule (band lines + optional
+	// "coalesce" directive). Empty falls back to the default rule.
+	PaddingRules string `json:"padding_rules"`
 
 	// MaxFragSize caps the per-fragment inner size (bytes) used by the tunnel's
 	// TAP-frame fragmentation layer. When 0, the node auto-derives a safe value
@@ -471,17 +471,12 @@ func DefaultConfig() *Config {
 		RelayUpgradeMaxBackoff: 30 * time.Minute,
 		RelayUpgradeFlapWindow: 5 * time.Minute,
 		Obfuscation: ObfuscationConfig{
-			Enable:               true,
-			Mode:                 "random",
-			FixedSize:            1500,
-			BlockSize:            256,
-			JitterRange:          64,
-			MinSize:              512,
-			MaxSize:              1500,
-			AutoDetectInterval:   30,
-			AllowModeSwitch:      false,
-			MaxFragSize:          0,
-			Algorithm:            "auto",
+			Enable: true,
+			// Default rule: payloads under 400 bytes pad to a random 400-600;
+			// 400+ go out naturally. Kept in sync with obfuscate.DefaultPaddingRules.
+			PaddingRules: "0 -> 400-600",
+			MaxFragSize:  0,
+			Algorithm:   "auto",
 			StrictKeyNegotiation: true,
 			// RequireAuthKeyExchange stays off by default: requiring a signature
 			// from a peer that predates the feature would refuse the handshake
@@ -770,37 +765,8 @@ func (c *Config) Validate() error {
 	}
 
 	// --- Obfuscation ---
-	validModes := map[string]bool{"fixed": true, "block": true, "random": true, "dynamic": true, "auto": true}
-	if c.Obfuscation.Mode != "" && !validModes[c.Obfuscation.Mode] {
-		return fmt.Errorf("invalid config: obfuscation.mode: '%s' must be fixed/block/random/dynamic/auto", c.Obfuscation.Mode)
-	}
-	if c.Obfuscation.Mode == "fixed" && c.Obfuscation.FixedSize <= 0 {
-		return fmt.Errorf("invalid config: obfuscation.fixed_size: must be > 0 when mode is 'fixed', got %d", c.Obfuscation.FixedSize)
-	}
-	if c.Obfuscation.Mode == "block" && c.Obfuscation.BlockSize <= 0 {
-		return fmt.Errorf("invalid config: obfuscation.block_size: must be > 0 when mode is 'block', got %d", c.Obfuscation.BlockSize)
-	}
-	if c.Obfuscation.JitterRange < 0 {
-		return fmt.Errorf("invalid config: obfuscation.jitter_range: %d must be >= 0", c.Obfuscation.JitterRange)
-	}
-	if c.Obfuscation.MinSize > 0 && c.Obfuscation.MaxSize > 0 && c.Obfuscation.MinSize > c.Obfuscation.MaxSize {
-		return fmt.Errorf("invalid config: obfuscation.min_size: %d must be <= max_size %d", c.Obfuscation.MinSize, c.Obfuscation.MaxSize)
-	}
-	// Upper bounds: the obfuscate frame header + payload cannot exceed
-	// MaxFrameSize (65535), so any configured size above that is useless
-	// and would cause ErrBufferTooSmall on every Pack call.
-	const maxObfSize = 65535
-	if c.Obfuscation.FixedSize > maxObfSize {
-		return fmt.Errorf("invalid config: obfuscation.fixed_size: %d must be <= %d", c.Obfuscation.FixedSize, maxObfSize)
-	}
-	if c.Obfuscation.BlockSize > maxObfSize {
-		return fmt.Errorf("invalid config: obfuscation.block_size: %d must be <= %d", c.Obfuscation.BlockSize, maxObfSize)
-	}
-	if c.Obfuscation.MinSize > maxObfSize {
-		return fmt.Errorf("invalid config: obfuscation.min_size: %d must be <= %d", c.Obfuscation.MinSize, maxObfSize)
-	}
-	if c.Obfuscation.MaxSize > maxObfSize {
-		return fmt.Errorf("invalid config: obfuscation.max_size: %d must be <= %d", c.Obfuscation.MaxSize, maxObfSize)
+	if err := validatePaddingRuleSyntax(c.Obfuscation.PaddingRules); err != nil {
+		return fmt.Errorf("invalid config: obfuscation.padding_rules: %w", err)
 	}
 	if c.Obfuscation.MaxFragSize < 0 {
 		return fmt.Errorf("invalid config: obfuscation.max_frag_size: %d must be >= 0 (0 = auto)", c.Obfuscation.MaxFragSize)
@@ -815,12 +781,6 @@ func (c *Config) Validate() error {
 	case "", "auto", "none", "aes-gcm", "chacha20":
 	default:
 		return fmt.Errorf("invalid config: obfuscation.algorithm: '%s' must be one of: auto, none, aes-gcm, chacha20", c.Obfuscation.Algorithm)
-	}
-	if c.Obfuscation.AutoDetectInterval <= 0 {
-		c.Obfuscation.AutoDetectInterval = 30
-	}
-	if c.Obfuscation.AutoDetectInterval > 3600 {
-		return fmt.Errorf("invalid config: obfuscation.auto_detect_interval: %d must be 1-3600 (seconds)", c.Obfuscation.AutoDetectInterval)
 	}
 	// --- ACL ---
 	if c.ACL.Enable {
@@ -1209,6 +1169,122 @@ func wrapPeerErr(field string, err error) error {
 	return fmt.Errorf("invalid config: %s: %v", field, err)
 }
 
+// validatePaddingRuleSyntax performs a self-contained structural validation of
+// the padding rule grammar. The authoritative parser lives in
+// pkg/obfuscate/padding_rule.go, but this package cannot import obfuscate
+// (obfuscate imports config for the ObfuscationConfig type), so the checks are
+// mirrored here: band lines "<floor> -> <target_min>[-<target_max>]" plus an
+// optional "coalesce on|off [max_delay_ms=N] [max_bytes=N] [max_frames=N]"
+// directive. An empty rule is valid (it falls back to the default band set at
+// parse time). Keep in sync with ParsePaddingRule.
+func validatePaddingRuleSyntax(s string) error {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	const maxFrameSize = 65535
+	seenCoalesce := false
+	lastFloor := -1
+	for lineNo, raw := range strings.Split(s, "\n") {
+		line := strings.TrimSpace(strings.TrimSuffix(raw, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "coalesce") || strings.HasPrefix(line, "Coalesce") {
+			if seenCoalesce {
+				return fmt.Errorf("line %d: duplicate 'coalesce' directive", lineNo+1)
+			}
+			seenCoalesce = true
+			if err := validateCoalesceLine(line); err != nil {
+				return fmt.Errorf("line %d: %w", lineNo+1, err)
+			}
+			continue
+		}
+		floor, targetMin, targetMax, err := parsePaddingBandLine(line)
+		if err != nil {
+			return fmt.Errorf("line %d: %w", lineNo+1, err)
+		}
+		if floor <= lastFloor {
+			return fmt.Errorf("line %d: band floors must be strictly ascending (got %d after %d)", lineNo+1, floor, lastFloor)
+		}
+		lastFloor = floor
+		if floor < 0 || targetMin < 0 || targetMax < targetMin {
+			return fmt.Errorf("line %d: need 0 <= floor <= target_min <= target_max", lineNo+1)
+		}
+		if targetMax > maxFrameSize {
+			return fmt.Errorf("line %d: target_max %d exceeds MaxFrameSize %d", lineNo+1, targetMax, maxFrameSize)
+		}
+	}
+	return nil
+}
+
+func parsePaddingBandLine(line string) (floor, targetMin, targetMax int, err error) {
+	arrow := strings.Index(line, "->")
+	if arrow < 0 {
+		return 0, 0, 0, fmt.Errorf("expected '<floor> -> <target>', got %q", line)
+	}
+	floor, err = strconv.Atoi(strings.TrimSpace(line[:arrow]))
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid floor %q", strings.TrimSpace(line[:arrow]))
+	}
+	target := strings.TrimSpace(line[arrow+2:])
+	if target == "" {
+		return 0, 0, 0, fmt.Errorf("missing target after '->'")
+	}
+	if dash := strings.Index(target, "-"); dash >= 0 {
+		tMin, e1 := strconv.Atoi(strings.TrimSpace(target[:dash]))
+		tMax, e2 := strconv.Atoi(strings.TrimSpace(target[dash+1:]))
+		if e1 != nil || e2 != nil {
+			return 0, 0, 0, fmt.Errorf("invalid target range %q", target)
+		}
+		return floor, tMin, tMax, nil
+	}
+	v, e := strconv.Atoi(target)
+	if e != nil {
+		return 0, 0, 0, fmt.Errorf("invalid target %q", target)
+	}
+	return floor, v, v, nil
+}
+
+func validateCoalesceLine(line string) error {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return fmt.Errorf("expected 'coalesce on|off [max_delay_ms=N] [max_bytes=N] [max_frames=N]'")
+	}
+	switch strings.ToLower(fields[1]) {
+	case "on", "off":
+	default:
+		return fmt.Errorf("expected 'on' or 'off', got %q", fields[1])
+	}
+	for _, f := range fields[2:] {
+		eq := strings.Index(f, "=")
+		if eq <= 0 {
+			return fmt.Errorf("expected key=value, got %q", f)
+		}
+		key := strings.TrimSpace(f[:eq])
+		val, e := strconv.Atoi(strings.TrimSpace(f[eq+1:]))
+		if e != nil {
+			return fmt.Errorf("invalid value for %q: %q", key, f[eq+1:])
+		}
+		switch key {
+		case "max_delay_ms":
+			if val < 1 || val > 100 {
+				return fmt.Errorf("max_delay_ms must be in [1,100] (got %d)", val)
+			}
+		case "max_bytes":
+			if val < 64 || val > 65535 {
+				return fmt.Errorf("max_bytes must be in [64,65535] (got %d)", val)
+			}
+		case "max_frames":
+			if val < 2 || val > 64 {
+				return fmt.Errorf("max_frames must be in [2,64] (got %d)", val)
+			}
+		default:
+			return fmt.Errorf("unknown coalesce key %q", key)
+		}
+	}
+	return nil
+}
+
 // configFilePerm picks the on-disk permission for a config file: configs that
 // carry a secret are written owner-only, everything else stays group/other
 // readable so an operator can inspect a node's settings without sudo.
@@ -1322,15 +1398,13 @@ func UpdateConfigFileDelta(configPath string, incoming *Config) error {
 	if !ok {
 		obfsMap = make(map[string]interface{})
 	}
+	// Strip the removed padding-mode keys so a config written by an old version
+	// never carries stale fields forward after this major upgrade.
+	for _, k := range []string{"mode", "fixed_size", "block_size", "jitter_range", "min_size", "max_size", "auto_detect_interval", "allow_mode_switch"} {
+		delete(obfsMap, k)
+	}
 	obfsMap["enable"] = incoming.Obfuscation.Enable
-	obfsMap["mode"] = incoming.Obfuscation.Mode
-	obfsMap["fixed_size"] = incoming.Obfuscation.FixedSize
-	obfsMap["block_size"] = incoming.Obfuscation.BlockSize
-	obfsMap["jitter_range"] = incoming.Obfuscation.JitterRange
-	obfsMap["min_size"] = incoming.Obfuscation.MinSize
-	obfsMap["max_size"] = incoming.Obfuscation.MaxSize
-	obfsMap["auto_detect_interval"] = incoming.Obfuscation.AutoDetectInterval
-	obfsMap["allow_mode_switch"] = incoming.Obfuscation.AllowModeSwitch
+	obfsMap["padding_rules"] = incoming.Obfuscation.PaddingRules
 	obfsMap["max_frag_size"] = incoming.Obfuscation.MaxFragSize
 	obfsMap["algorithm"] = incoming.Obfuscation.Algorithm
 	obfsMap["strict_key_negotiation"] = incoming.Obfuscation.StrictKeyNegotiation

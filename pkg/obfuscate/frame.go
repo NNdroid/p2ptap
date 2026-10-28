@@ -9,7 +9,6 @@ import (
 	randv2 "math/rand/v2"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"p2ptap/pkg/config"
 	"p2ptap/pkg/logger"
@@ -193,129 +192,23 @@ var FramePool = sync.Pool{
 	},
 }
 
-// autoState tracks per-mode traffic statistics for the auto-detection engine.
-type autoState struct {
-	mu          sync.Mutex
-	packetSizes []int // ring buffer of recent packet sizes
-	packetIdx   int
-	packetCount int
-}
-
-const autoRingSize = 64
-
-func newAutoState() *autoState {
-	return &autoState{packetSizes: make([]int, autoRingSize)}
-}
-
-func (a *autoState) recordSize(sz int) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.packetSizes[a.packetIdx] = sz
-	a.packetIdx = (a.packetIdx + 1) % autoRingSize
-	if a.packetCount < autoRingSize {
-		a.packetCount++
-	}
-}
-
-// entropyScore returns the normalized Shannon entropy of the size distribution
-// in [0, 1]. Entropy measures how UNIFORMLY the observed packet sizes are spread:
-//
-//	≈0  -> nearly all packets are the same size (deterministic / "dynamic" traffic)
-//	≈1  -> sizes are uniformly varied (high-entropy / "random" traffic)
-//
-// This is the discrimination signal the auto mode uses to switch padding.
-//
-// NOTE: this was historically computed as `-Σ p·p` (sum of squared probabilities),
-// which is always in [-1, 0] — never > 0.7 and always < 0.3 — so evaluate()
-// returned "dynamic" for EVERY traffic profile and the auto engine never
-// switched modes. The correct measure is Shannon entropy -Σ p·log2(p); we
-// normalize by log2(numDistinctSizes) so a fully uniform spread reads ~1.0.
-func (a *autoState) entropyScore() float64 {
-	a.mu.Lock()
-	// copy for analysis
-	count := a.packetCount
-	if count < 8 {
-		a.mu.Unlock()
-		return 0
-	}
-	sizes := make([]int, count)
-	for i := 0; i < count; i++ {
-		sizes[i] = a.packetSizes[(a.packetIdx-count+i+autoRingSize)%autoRingSize]
-	}
-	a.mu.Unlock()
-
-	seen := make(map[int]int)
-	for _, sz := range sizes {
-		seen[sz]++
-	}
-	n := float64(count)
-	var sum float64
-	for _, cnt := range seen {
-		p := float64(cnt) / n
-		if p > 0 {
-			sum -= p * math.Log2(p)
-		}
-	}
-	// Normalize to [0,1]: max entropy for k distinct sizes is log2(k).
-	if k := len(seen); k > 1 {
-		if mx := math.Log2(float64(k)); mx > 0 {
-			sum /= mx
-		}
-	}
-	if sum < 0 {
-		sum = 0
-	}
-	if sum > 1 {
-		sum = 1
-	}
-	return sum
-}
-
-func (a *autoState) evaluate() string {
-	entropy := a.entropyScore()
-	a.mu.Lock()
-	count := a.packetCount
-	a.mu.Unlock()
-	if count < 8 {
-		return "dynamic"
-	}
-	if entropy > 0.7 {
-		return "random"
-	}
-	if entropy < 0.3 {
-		return "dynamic"
-	}
-	return "block"
-}
-
-// FramePacker pads frames for traffic obfuscation & DPI resistance.
+// FramePacker pads frames for traffic obfuscation & DPI resistance using the
+// single declarative padding rule (PaddingRules). The historical fixed/block/
+// random/dynamic/auto modes and the auto-detection engine are removed.
 type FramePacker struct {
-	Enable    bool   `json:"enable"`
-	Mode      string `json:"mode"`
-	FixedSize int    `json:"fixed_size"`
-	BlockSize int    `json:"block_size"`
-	// Extended jitter & dynamic range
-	JitterRange int `json:"jitter_range"`
-	MinSize     int `json:"min_size"`
-	MaxSize     int `json:"max_size"`
-
-	// Auto-detection
-	AutoDetectInterval int  `json:"auto_detect_interval"`
-	AllowModeSwitch    bool `json:"allow_mode_switch"`
+	Enable bool `json:"enable"`
+	// Rule is the parsed padding rule (bands + coalesce knobs). Guarded by mu;
+	// the hot path reads it from the immutable params snapshot.
+	Rule *PaddingRule
 
 	seqCounter uint64 // per-source monotonic counter (low 32 bits of structured SeqID); accessed atomically
 	srcHash    uint64 // 16-bit source hash for this node's PeerID
-	auto       atomic.Pointer[autoState]
-	// lastEvalUnixNano is the last auto-mode evaluation time as Unix nanos.
-	// Kept as an int64 rather than time.Time because concurrent Pack() calls
-	// from the dispatch workers write it, and there is no atomic time.Time.
-	lastEvalUnixNano atomic.Int64
-	mu               sync.Mutex
+	mu         sync.Mutex
 
 	// params is an immutable copy-on-write view of the padding configuration.
-	// UpdateConfig and auto-mode transitions publish a new snapshot while the
-	// packet hot path only performs an atomic pointer load. This removes the
-	// previous global mutex acquisition from every Pack and MaxPackedLen call.
+	// UpdateConfig publishes a new snapshot while the packet hot path only
+	// performs an atomic pointer load. This removes the global mutex
+	// acquisition from every Pack and MaxPackedLen call.
 	params atomic.Pointer[packerParams]
 
 	// algo is the ObfType byte stamped into outgoing frames so the receiver
@@ -327,86 +220,41 @@ type FramePacker struct {
 
 	// frameBudget is the largest frame padding may grow a payload to, derived
 	// from the tunnel MTU by SetFrameBudget. It is carried in packerParams so
-	// the Pack hot path reads it from the same immutable snapshot as the mode.
+	// the Pack hot path reads it from the same immutable snapshot as the rule.
 	frameBudget int
-	// sizeConfigured reports whether FixedSize/MaxSize came from configuration.
-	// When false, applyDefaults owns them and re-derives them from frameBudget on
-	// every SetFrameBudget — otherwise the very first applyDefaults (which runs
-	// before the MTU is known) would pin them at the historic 1500 forever.
-	sizeConfigured bool
 }
 
-// NewFramePackerFull creates a FramePacker from full ObfuscationConfig.
+// NewFramePackerFull creates a FramePacker from full ObfuscationConfig. The
+// padding rule is parsed eagerly so an invalid rule is caught at construction
+// (config.Validate runs the same parse first); a nil/empty cfg falls back to
+// the default rule (0 -> 400-600) with padding disabled.
 func NewFramePackerFull(cfg *config.ObfuscationConfig) *FramePacker {
 	fp := &FramePacker{}
-	if cfg == nil || !cfg.Enable {
+	if cfg == nil {
 		fp.Enable = false
-		fp.applyDefaults()
+		fp.Rule = DefaultPaddingRule()
 		fp.publishParamsLocked()
 		return fp
 	}
 	fp.Enable = cfg.Enable
-	fp.Mode = cfg.Mode
-	fp.FixedSize = cfg.FixedSize
-	fp.BlockSize = cfg.BlockSize
-	fp.JitterRange = cfg.JitterRange
-	fp.MinSize = cfg.MinSize
-	fp.MaxSize = cfg.MaxSize
-	fp.AutoDetectInterval = cfg.AutoDetectInterval
-	fp.AllowModeSwitch = cfg.AllowModeSwitch
-	fp.sizeConfigured = cfg.FixedSize > 0 || cfg.MaxSize > 0
-	fp.applyDefaults()
-	if fp.Mode == "auto" {
-		fp.auto.Store(newAutoState())
+	rule, err := ParsePaddingRule(cfg.PaddingRules)
+	if err != nil {
+		// config.Validate rejects the same input before construction, so this is
+		// only reachable via a programmatic config that bypassed validation.
+		// Fall back to the default rule rather than carrying a broken one.
+		rule = DefaultPaddingRule()
 	}
+	fp.Rule = rule
 	fp.publishParamsLocked()
 	return fp
 }
 
-func (fp *FramePacker) applyDefaults() {
-	if fp.Mode == "" {
-		fp.Mode = "random"
-	}
-	if fp.BlockSize <= 0 {
-		fp.BlockSize = 256
-	}
-	if fp.MinSize <= 0 {
-		fp.MinSize = MinFrameSize
-	}
-	if !fp.sizeConfigured {
-		// No configured sizes: the defaults are ours, so they follow the datagram
-		// budget. Re-derived on every call so a later SetFrameBudget moves them.
-		fp.FixedSize = fp.defaultFrameSize()
-		fp.MaxSize = fp.defaultFrameSize()
-		return
-	}
-	// Sizes were configured, so they are honoured as written; only a value that
-	// was left unset (the two can be configured independently) gets the default.
-	if fp.FixedSize <= 0 {
-		fp.FixedSize = fp.defaultFrameSize()
-	}
-	if fp.MaxSize <= 0 {
-		fp.MaxSize = fp.defaultFrameSize()
-	}
-}
-
-// defaultFrameSize is the default padded frame size: the path-MTU budget when
-// SetFrameBudget has been called, otherwise the historic 1500. Padding to 1500
-// when the datagram budget is smaller only creates fragments, so the budget is
-// the right default. Explicit configuration always wins.
-func (fp *FramePacker) defaultFrameSize() int {
-	if fp.frameBudget > 0 {
-		return fp.frameBudget
-	}
-	return 1500
-}
-
 // SetFrameBudget constrains padding to frames that fit one transport datagram
-// for a tunnel of the given path MTU (see MaxFrameForPathMTU). It also
-// re-applies the size defaults, because the default fixed/max frame size IS the
-// budget; explicitly configured sizes are never touched. Call it after
-// NewFramePackerFull and after every UpdateConfig so a hot reload of the MTU is
-// picked up. A non-positive pathMTU clears the budget entirely.
+// for a tunnel of the given path MTU (see MaxFrameForPathMTU). The rule's
+// target sizes are clamped to the budget at Pack time, so a hot reload of the
+// MTU is picked up by simply re-publishing the snapshot. Call it after
+// NewFramePackerFull and after every UpdateConfig. A non-positive pathMTU
+// clears the budget entirely.
 func (fp *FramePacker) SetFrameBudget(pathMTU int) {
 	if fp == nil {
 		return
@@ -414,7 +262,6 @@ func (fp *FramePacker) SetFrameBudget(pathMTU int) {
 	fp.mu.Lock()
 	defer fp.mu.Unlock()
 	fp.frameBudget = MaxFrameForPathMTU(pathMTU)
-	fp.applyDefaults()
 	fp.publishParamsLocked()
 }
 
@@ -461,20 +308,6 @@ func (fp *FramePacker) MakeSeqID(counter, epoch uint64) uint64 {
 // Layout: [ver:4 | srcHash:16 | connEpoch:12 | counter:32].
 func (fp *FramePacker) NextSeqID(epoch uint64) uint64 {
 	return fp.MakeSeqID(fp.BumpCounter(), epoch)
-}
-
-// randomJitter returns [-jitter, +jitter].
-// Upper-bound clamped: jitter*2+1 overflows signed int for jitter > math.MaxInt/2,
-// causing randv2.IntN to panic with "invalid argument" and crash the node.
-// The clamp at 1<<20 (1 MiB) is well above any realistic MTU or frame size.
-func randomJitter(jitter int) int {
-	if jitter <= 0 {
-		return 0
-	}
-	if jitter > 1<<20 {
-		jitter = 1 << 20
-	}
-	return randv2.IntN(jitter*2+1) - jitter
 }
 
 // randomBetween returns [min, max].
@@ -528,15 +361,8 @@ func fillRandom(buf []byte) {
 // parameters. Writers publish a complete copy after config changes; readers on
 // the packet hot path load it without taking the global configuration mutex.
 type packerParams struct {
-	enable             bool
-	mode               string
-	fixedSize          int
-	blockSize          int
-	jitterRange        int
-	minSize            int
-	maxSize            int
-	autoDetectInterval int
-	allowModeSwitch    bool
+	enable bool
+	rule   *PaddingRule
 	// frameBudget caps the padded target size (see MaxFrameForPathMTU). Zero
 	// means "no cap", which is the state of a packer that was never told its
 	// tunnel MTU — tests and legacy callers.
@@ -546,17 +372,14 @@ type packerParams struct {
 // paramsFromFieldsLocked snapshots the exported compatibility fields. The caller
 // must either hold fp.mu or be in single-threaded construction before publication.
 func (fp *FramePacker) paramsFromFieldsLocked() packerParams {
+	rule := fp.Rule
+	if rule == nil {
+		rule = DefaultPaddingRule()
+	}
 	return packerParams{
-		enable:             fp.Enable,
-		mode:               fp.Mode,
-		fixedSize:          fp.FixedSize,
-		blockSize:          fp.BlockSize,
-		jitterRange:        fp.JitterRange,
-		minSize:            fp.MinSize,
-		maxSize:            fp.MaxSize,
-		autoDetectInterval: fp.AutoDetectInterval,
-		allowModeSwitch:    fp.AllowModeSwitch,
-		frameBudget:        fp.frameBudget,
+		enable:      fp.Enable,
+		rule:        rule,
+		frameBudget: fp.frameBudget,
 	}
 }
 
@@ -577,52 +400,28 @@ func (fp *FramePacker) snapshotParams() *packerParams {
 	if p := fp.params.Load(); p != nil {
 		return p
 	}
-	fp.applyDefaults()
 	fp.publishParamsLocked()
 	return fp.params.Load()
 }
 
 func (fp *FramePacker) Pack(seqID uint64, payload []byte, outBuf []byte) (int, error) {
 	p := fp.snapshotParams()
-
-	if !p.enable {
-		// When obfuscation padding is disabled, we still write the standard 15-byte header with PaddingLen=0
-		// so that Magic (0x5054), SeqID (dedup/anti-replay), ObfType (encryption), and PayloadLen are preserved.
-		return fp.packStandard(seqID, payload, outBuf, "none", p)
-	}
-
-	mode := p.mode
-	if auto := fp.auto.Load(); mode == "auto" && auto != nil {
-		auto.recordSize(len(payload))
-		if p.allowModeSwitch && p.autoDetectInterval > 0 {
-			now := time.Now()
-			if now.Sub(time.Unix(0, fp.lastEvalUnixNano.Load())) >= time.Duration(p.autoDetectInterval)*time.Second {
-				newMode := auto.evaluate()
-				if newMode != mode {
-					// Preserve the historic auto-mode behaviour (the selected mode
-					// becomes the new current mode) without overwriting a concurrent
-					// explicit hot reload that already moved away from auto.
-					fp.mu.Lock()
-					if cur := fp.params.Load(); cur != nil && cur.mode == "auto" {
-						fp.Mode = newMode
-						fp.publishParamsLocked()
-					}
-					fp.mu.Unlock()
-					mode = newMode
-				}
-				fp.lastEvalUnixNano.Store(now.UnixNano())
-			}
-		}
-	}
-
-	return fp.packStandard(seqID, payload, outBuf, mode, p)
+	return fp.packRule(seqID, payload, outBuf, p)
 }
 
-// packStandard handles fixed/block/random/dynamic modes with Magic header.
-//
-// p carries the immutable parameter snapshot taken by Pack. Reading the exported
-// fields directly here would race with UpdateConfig and could mix generations.
-func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte, mode string, p *packerParams) (int, error) {
+// PaddingSnapshot returns the current rule and whether padding is enabled, so
+// the TX coalescer can read the coalesce knobs and band thresholds without
+// taking the packer configuration mutex.
+func (fp *FramePacker) PaddingSnapshot() (*PaddingRule, bool) {
+	p := fp.snapshotParams()
+	return p.rule, p.enable
+}
+
+// packRule is the single padding path: the declarative rule decides whether to
+// pad, and to what size. p carries the immutable parameter snapshot taken by
+// Pack. Reading the exported fields directly here would race with UpdateConfig
+// and could mix generations.
+func (fp *FramePacker) packRule(seqID uint64, payload []byte, outBuf []byte, p *packerParams) (int, error) {
 	// Guard against uint16 underflow in paddingLen calculation below: if the
 	// payload is larger than MaxFrameSize-HeaderLen, overhead exceeds
 	// MaxFrameSize, targetSize gets clamped to MaxFrameSize (which is now
@@ -630,48 +429,20 @@ func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte,
 	if len(payload) > MaxFrameSize-HeaderLen {
 		return 0, ErrBufferTooSmall
 	}
-	overhead := HeaderLen + len(payload)
-	var targetSize int
-	switch mode {
-	case "none":
-		targetSize = overhead
-	case "fixed":
-		targetSize = p.fixedSize + randomJitter(p.jitterRange)
-	case "block":
-		blockSize := p.blockSize
-		if blockSize <= 0 {
-			blockSize = 256
-		}
-		blocks := overhead / blockSize
-		if overhead%blockSize != 0 {
-			blocks++
-		}
-		targetSize = blocks*blockSize + randomJitter(p.jitterRange)
-	case "dynamic":
-		// Fill to maxSize to minimize fragmentation: every frame occupies the
-		// full MTU-sized obfuscation slot regardless of payload size. This
-		// eliminates per-packet fragmentation on the wire (each obfuscated frame
-		// fits in a single QUIC/UDP datagram) and makes all packets the same
-		// size class, which is stronger for traffic analysis resistance.
-		targetSize = randomBetween(overhead, p.maxSize)
-	default: // "random" or auto
-		low := p.minSize
-		if low < overhead {
-			low = overhead
-		}
-		targetSize = randomBetween(low, p.fixedSize) + randomJitter(p.jitterRange)
+	// PaddedSize applies the band rule: payloads below their band's target_min
+	// are padded to a random target in [target_min, target_max]; payloads at or
+	// above target_min (or with no matching band) stay natural. With padding
+	// disabled the payload is written verbatim (PaddingLen=0).
+	payloadLen := len(payload)
+	if p.enable && p.rule != nil {
+		payloadLen = p.rule.PaddedSize(payloadLen)
 	}
-
-	// clampFrameSize enforces the datagram budget on top of the size chosen
-	// above. Padding is a traffic-shaping knob, not a correctness one, so a
-	// configured fixed_size/max_size above the path-MTU budget used to inflate
-	// every small frame well past what one transport datagram can carry — extra
-	// fragments with no additional confidentiality or size-normalisation.
-	targetSize = clampFrameSize(targetSize, len(payload), p.frameBudget)
+	targetSize := clampFrameSize(HeaderLen+payloadLen, len(payload), p.frameBudget)
 	if len(outBuf) < targetSize {
 		return 0, ErrBufferTooSmall
 	}
 
+	overhead := HeaderLen + len(payload)
 	paddingLen := uint16(targetSize - overhead)
 
 	// Write header (v2 includes the ObfType byte at offset 10).
@@ -705,59 +476,14 @@ func (fp *FramePacker) packStandard(seqID uint64, payload []byte, outBuf []byte,
 // ErrBufferTooSmall (it never truncates) — so the bound is safe by construction.
 func (fp *FramePacker) MaxPackedLen(payloadLen int) int {
 	p := fp.snapshotParams()
-	mode := p.mode
-	enable := p.enable
-	fixed, block, jitter := p.fixedSize, p.blockSize, p.jitterRange
-	minS, maxS := p.minSize, p.maxSize
-
-	if !enable {
-		mode = "none"
+	bound := HeaderLen + payloadLen
+	if p.enable && p.rule != nil {
+		// Worst-case padded size for this payload under the rule (target_max of
+		// its band, or the natural size when no band applies / already reaches
+		// the band target).
+		bound = HeaderLen + p.rule.MaxPaddedSize(payloadLen)
 	}
-	if block <= 0 {
-		block = 256
-	}
-
-	// Auto can switch modes at runtime; cover the worst case across candidates
-	// so we never under-allocate regardless of which mode it settles on.
-	if mode == "auto" {
-		b := overheadPlus(payloadLen)
-		b = max(b, fixed+jitter)
-		b = max(b, blockBound(payloadLen, block, jitter))
-		b = max(b, dynamicBound(payloadLen, minS, maxS))
-		return clampFrameSize(b, payloadLen, p.frameBudget)
-	}
-
-	switch mode {
-	case "none":
-		return clampFrameSize(overheadPlus(payloadLen), payloadLen, p.frameBudget)
-	case "fixed":
-		return clampFrameSize(fixed+jitter, payloadLen, p.frameBudget)
-	case "block":
-		return clampFrameSize(blockBound(payloadLen, block, jitter), payloadLen, p.frameBudget)
-	case "dynamic":
-		return clampFrameSize(dynamicBound(payloadLen, minS, maxS), payloadLen, p.frameBudget)
-	default: // "random" or unrecognised
-		return clampFrameSize(fixed+jitter, payloadLen, p.frameBudget)
-	}
-}
-
-func overheadPlus(payloadLen int) int { return HeaderLen + payloadLen }
-
-func blockBound(payloadLen, block, jitter int) int {
-	overhead := HeaderLen + payloadLen
-	blocks := overhead / block
-	if overhead%block != 0 {
-		blocks++
-	}
-	return blocks*block + jitter
-}
-
-// dynamicBound mirrors packStandard's "dynamic" branch: targetSize is
-// randomBetween(overhead, maxSize), so the maximum is simply the larger of
-// overhead and maxSize.
-func dynamicBound(payloadLen, minS, maxS int) int {
-	overhead := HeaderLen + payloadLen
-	return max(overhead, maxS)
+	return clampFrameSize(bound, payloadLen, p.frameBudget)
 }
 
 // clampFrameSize is the single place the final size guards live, shared by Pack
@@ -1045,7 +771,9 @@ func DecryptPayloadRegionInto(dst, frame []byte, cipher ObfCipher) ([]byte, erro
 	return out, nil
 }
 
-// UpdateConfig hot-reloads obfuscation settings from config.
+// UpdateConfig hot-reloads obfuscation settings from config. The rule string is
+// re-parsed here so a WebUI save takes effect without a restart; a malformed
+// rule falls back to the default (config.Validate rejects it before this runs).
 func (fp *FramePacker) UpdateConfig(cfg *config.ObfuscationConfig) {
 	if fp == nil {
 		return
@@ -1053,18 +781,10 @@ func (fp *FramePacker) UpdateConfig(cfg *config.ObfuscationConfig) {
 	fp.mu.Lock()
 	defer fp.mu.Unlock()
 	fp.Enable = cfg.Enable
-	fp.Mode = cfg.Mode
-	fp.FixedSize = cfg.FixedSize
-	fp.BlockSize = cfg.BlockSize
-	fp.JitterRange = cfg.JitterRange
-	fp.MinSize = cfg.MinSize
-	fp.MaxSize = cfg.MaxSize
-	fp.AutoDetectInterval = cfg.AutoDetectInterval
-	fp.AllowModeSwitch = cfg.AllowModeSwitch
-	fp.sizeConfigured = cfg.FixedSize > 0 || cfg.MaxSize > 0
-	fp.applyDefaults()
-	if fp.Mode == "auto" && fp.auto.Load() == nil {
-		fp.auto.Store(newAutoState())
+	rule, err := ParsePaddingRule(cfg.PaddingRules)
+	if err != nil {
+		rule = DefaultPaddingRule()
 	}
+	fp.Rule = rule
 	fp.publishParamsLocked()
 }

@@ -458,6 +458,31 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 	n.recordPeerDedupDesync(remotePeer, false)
 	n.Collector.RecordRxSeq(peerStr, seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
 
+	// Split coalesced batches before per-frame processing. Every sub-frame of a
+	// batch shares this frame's seqID, so the dedup window above ran once on the
+	// batch; the split hands each sub-frame to the same per-frame pipeline and
+	// pushes them to the reorder gate as ONE logical frame. A non-batch payload
+	// (or one whose structure is inconsistent) is delivered verbatim.
+	if subs, ok := obfuscate.SplitBatchPayload(payload); ok {
+		jobs := make([]tapWriteJob, 0, len(subs))
+		for _, sub := range subs {
+			n.deliverDirectSubFrame(remotePeer, seqID, sub, pathKey, &jobs)
+		}
+		n.reorderTapWriteBatch(remotePeer, seqID, jobs)
+		return
+	}
+	n.deliverDirectSubFrame(remotePeer, seqID, payload, pathKey, nil)
+}
+
+// deliverDirectSubFrame runs the per-frame receive pipeline for one TAP payload
+// already accepted by dedup: ACL, MAC learning, broadcast content dedup,
+// collectors, IP tracker, probe hooks, and finally the TAP write (reorder gate
+// or a synchronous probe write). For a coalesced batch, callers pass a non-nil
+// collect pointer and this function appends the prepared job instead of pushing
+// it immediately; the caller then hands the whole batch to reorderTapWriteBatch
+// so all sub-frames share one reorder counter and are released together.
+func (n *Node) deliverDirectSubFrame(remotePeer peer.ID, seqID uint64, payload []byte, pathKey string, collect *[]tapWriteJob) {
+	peerStr := n.peerIDString(remotePeer)
 	// ACL Firewall Filtering check
 	if !n.checkACL(payload, peerStr, false) {
 		log.Debug("🛡️ ACL Firewall blocked Rx frame seq=%d from peer %s", seqID, peerStr)
@@ -625,6 +650,14 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 		// all paths; otherwise a zero-overhead passthrough to enqueueTapWrite.
 		// Per-path RX for direct frames is attributed above with pathKey; the
 		// reorder job carries no pathKey so finishTapWriteJob won't double-count.
+		// In batch mode the caller collects the prepared job and pushes the whole
+		// batch at once, so all sub-frames share this seqID's reorder counter.
+		if collect != nil {
+			if job, err := n.prepareTapWriteJob(payload, recordGateway, "", pathKey); err == nil {
+				*collect = append(*collect, job)
+			}
+			return
+		}
 		n.reorderTapWrite(remotePeer, seqID, payload, recordGateway, "", "")
 		return
 	}

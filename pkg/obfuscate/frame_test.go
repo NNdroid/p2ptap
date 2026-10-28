@@ -7,45 +7,41 @@ import (
 	"p2ptap/pkg/config"
 )
 
-func TestFramePackAndUnpackModes(t *testing.T) {
-	modes := []string{"fixed", "block", "random", "dynamic", "auto"}
+func TestFramePackAndUnpackRules(t *testing.T) {
+	rules := []string{
+		"0 -> 512-512",        // fixed single target
+		"0 -> 256-256\n1024 -> 1100-1400", // multi-band
+		"0 -> 400-600",        // default-style random range
+	}
 	originalPayload := []byte("Hello P2P TAP VPN Packet Obfuscation Test Payload Data!")
 
-	for _, mode := range modes {
-		t.Run("Mode_"+mode, func(t *testing.T) {
-			t.Logf("[pack] mode=%s payloadLen=%d", mode, len(originalPayload))
-			packer := NewFramePackerFull(&config.ObfuscationConfig{Enable: true, Mode: mode, FixedSize: 512, BlockSize: 128})
+	for _, rule := range rules {
+		t.Run("Rule_"+rule, func(t *testing.T) {
+			t.Logf("[pack] rule=%q payloadLen=%d", rule, len(originalPayload))
+			packer := NewFramePackerFull(&config.ObfuscationConfig{Enable: true, PaddingRules: rule})
 			outBuf := make([]byte, 2048)
 
 			seqID := packer.NextSeqID(0)
 			totalLen, err := packer.Pack(seqID, originalPayload, outBuf)
 			if err != nil {
-				t.Fatalf("Pack failed in mode %s: %v", mode, err)
+				t.Fatalf("Pack failed with rule %q: %v", rule, err)
 			}
-			t.Logf("[pack] mode=%s seqID=%d totalLen=%d", mode, seqID, totalLen)
-
-			if mode == "fixed" && (totalLen < 512-64 || totalLen > 512+64) {
-				t.Errorf("Fixed mode expected totalLen within [448, 576], got %d", totalLen)
-			}
-
-			if mode == "block" && totalLen < 64 {
-				t.Errorf("Block mode expected totalLen >= 64, got %d", totalLen)
-			}
+			t.Logf("[pack] rule=%q seqID=%d totalLen=%d", rule, seqID, totalLen)
 
 			recvSeq, unpackedPayload, err := Unpack(outBuf[:totalLen])
 			if err != nil {
-				t.Fatalf("Unpack failed in mode %s: %v", mode, err)
+				t.Fatalf("Unpack failed with rule %q: %v", rule, err)
 			}
-			t.Logf("[unpack] mode=%s recvSeq=%d payloadLen=%d", mode, recvSeq, len(unpackedPayload))
+			t.Logf("[unpack] rule=%q recvSeq=%d payloadLen=%d", rule, recvSeq, len(unpackedPayload))
 
 			if recvSeq != seqID {
 				t.Errorf("SeqID mismatch: sent %d, got %d", seqID, recvSeq)
 			}
 
 			if !bytes.Equal(unpackedPayload, originalPayload) {
-				t.Errorf("Payload corrupted in mode %s! Got %s", mode, string(unpackedPayload))
+				t.Errorf("Payload corrupted with rule %q! Got %s", rule, string(unpackedPayload))
 			}
-			t.Logf("[ok] mode=%s round-trip verified", mode)
+			t.Logf("[ok] rule=%q round-trip verified", rule)
 		})
 	}
 }
@@ -53,7 +49,7 @@ func TestFramePackAndUnpackModes(t *testing.T) {
 func TestDeduplicator(t *testing.T) {
 	dedup := NewDeduplicator()
 	// Build structured SeqIDs via a packer so the ver/srcHash/ts fields are set.
-	p := NewFramePackerFull(&config.ObfuscationConfig{Enable: false, Mode: "fixed", FixedSize: 512, BlockSize: 128})
+	p := NewFramePackerFull(&config.ObfuscationConfig{Enable: false})
 	p.SetSourceIdentity("peerA")
 	var seqs []uint64
 	for i := 0; i < 8; i++ {
@@ -106,7 +102,7 @@ func TestDeduplicator(t *testing.T) {
 }
 
 func TestSeqIDStructure(t *testing.T) {
-	p := NewFramePackerFull(&config.ObfuscationConfig{Enable: false, Mode: "fixed", FixedSize: 512, BlockSize: 128})
+	p := NewFramePackerFull(&config.ObfuscationConfig{Enable: false})
 	p.SetSourceIdentity("nodeXYZ")
 	seq := p.NextSeqID(0)
 	t.Logf("[seqid] raw=%d structured=%v srcHash=%d counter=%d", seq, IsStructuredSeq(seq), SrcHashFromSeq(seq), CounterFromSeq(seq))
@@ -123,7 +119,7 @@ func TestSeqIDStructure(t *testing.T) {
 
 func TestSyncFromAnchorsWindow(t *testing.T) {
 	dedup := NewDeduplicator()
-	p := NewFramePackerFull(&config.ObfuscationConfig{Enable: false, Mode: "fixed", FixedSize: 512, BlockSize: 128})
+	p := NewFramePackerFull(&config.ObfuscationConfig{Enable: false})
 	p.SetSourceIdentity("peerB")
 	// Simulate peer having already sent up to seq #5000.
 	remote := make([]uint64, 5001)
@@ -283,7 +279,7 @@ func TestCorruptedFrameUnpack(t *testing.T) {
 // here would mean the two code paths disagree on the nonce — the exact bug this
 // regression test guards against.
 func TestEncryptDecryptRoundTrip(t *testing.T) {
-	packer := NewFramePackerFull(&config.ObfuscationConfig{Enable: true, Mode: "fixed", FixedSize: 1500, BlockSize: 256})
+	packer := NewFramePackerFull(&config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 1500-1500"})
 	packer.SetSourceIdentity("nodeA")
 	// Stamp the ObfType byte so the frame header agrees with the cipher we
 	// encrypt with — mirroring what the live send path does via SetSendAlgo.
@@ -343,36 +339,4 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 		t.Fatalf("UnpackWith payload mismatch: got %q want %q", got2, payload)
 	}
 	t.Logf("[rt] UnpackWith agrees with EncryptPayloadRegion (nonce shared via obfNonceFromHeader) OK")
-}
-
-// TestAutoModeEntropySwitches is a regression test for the auto-obfuscation
-// mode switcher. The entropy score was historically computed as -Σp² (always
-// negative), so evaluate() returned "dynamic" for every traffic profile and the
-// auto engine never switched to random/block padding. It must now return a
-// normalized Shannon entropy in [0,1]: varied sizes → ~1 → "random";
-// constant sizes → ~0 → "dynamic".
-func TestAutoModeEntropySwitches(t *testing.T) {
-	as := newAutoState()
-	// 1) Uniformly varied sizes ⇒ high entropy ⇒ "random".
-	as.packetCount = 0
-	for i := 0; i < autoRingSize*2; i++ {
-		as.recordSize(64 + (i % 40))
-	}
-	if s := as.entropyScore(); s < 0.7 {
-		t.Errorf("varied sizes: entropyScore=%f, want >0.7 (random traffic)", s)
-	}
-	if m := as.evaluate(); m != "random" {
-		t.Errorf("varied sizes: evaluate()=%q, want \"random\"", m)
-	}
-	// 2) Constant size ⇒ low entropy ⇒ "dynamic".
-	as = newAutoState()
-	for i := 0; i < autoRingSize*2; i++ {
-		as.recordSize(512)
-	}
-	if s := as.entropyScore(); s > 0.3 {
-		t.Errorf("constant size: entropyScore=%f, want <0.3 (dynamic traffic)", s)
-	}
-	if m := as.evaluate(); m != "dynamic" {
-		t.Errorf("constant size: evaluate()=%q, want \"dynamic\"", m)
-	}
 }

@@ -17,7 +17,7 @@ func TestFrameDestinationCapacity(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				fp := NewFramePackerFull(&config.ObfuscationConfig{Enable: true, Mode: "fixed", FixedSize: 1500})
+				fp := NewFramePackerFull(&config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 1500-1500"})
 				fp.SetSendAlgo(algo)
 				plain := make([]byte, MaxFrameSize)
 				n, err := fp.Pack(42, bytes.Repeat([]byte{0x5a}, size), plain)

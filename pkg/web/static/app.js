@@ -596,20 +596,10 @@
                 psk_lbl: "Pre-Shared Key (PSK)",
                 psk_placeholder: "Leave empty for public network, set key for encrypted isolation",
                 loglevel_lbl: "Log Level",
-                obfs_lbl: "Obfuscation Mode",
-                obfs_jitter_lbl: "Jitter Range (±bytes)",
-                obfs_jitter_desc: "Random jitter to break fixed-size patterns (0=off)",
-                obfs_fixed_size_lbl: "Fixed Packet Size",
-                obfs_fixed_size_desc: "Target frame size for fixed/dynamic-max (bytes)",
-                obfs_dynamic_lbl: "Dynamic Size Range (bytes)",
-                obfs_dynamic_desc: "Min–Max range for variable-size frames",
-                obfs_block_size_lbl: "Block Alignment Size",
-                obfs_block_size_desc: "Alignment granularity for block mode (bytes)",
-                obfs_max_safe_lbl: "Max Safe Frame Size",
-                obfs_max_safe_desc: "PMTU safety threshold for obfuscated frames (bytes)",
-                obfs_auto_title: "🤖 Auto-Detect Settings",
-                obfs_eval_interval_lbl: "Eval Interval",
-                obfs_allow_switch_lbl: "Allow Automatic Mode Switching",
+                obfs_lbl: "Enable Traffic Obfuscation",
+                obfs_enable_desc: "Pad short frames per the rule below to defeat DPI fingerprinting",
+                obfs_rules_lbl: "Padding Rules",
+                obfs_rules_desc: "One band per line: <floor> -> <min>[-<max>]. Payloads below the band target are padded to a random size in the range; at/above it they go natural. Optional: coalesce on|off [max_delay_ms=N] [max_bytes=N] [max_frames=N].",
                 obfs_strict_key_lbl: "Strict Key Negotiation (PFS)",
                 obfs_strict_key_desc: "Forbid falling back to the long-lived node key. Each peer pair must derive its own cipher from a one-shot ECDH ephemeral key; otherwise that peer stays plaintext. Hardens per-pair key isolation.",
                 obfs_auth_key_lbl: "Require Authenticated Key Exchange",
@@ -637,7 +627,6 @@
                 cfg_tls_sni_suffix_desc: "When set, overrides the static SNI: each link presents \"<hash-of-peer-id>.<suffix>\" — a distinct, stable SNI per peer under one base domain, avoiding a shared global constant. Use a domain you control. Requires restart.",
                 section_obfs: "Traffic Obfuscation",
                 section_obfs_desc: "Packet padding to defeat DPI fingerprinting",
-                obfs_mode_desc: "Padding strategy for P2P data frames",
                 section_bootstrap: "Bootstrap Peers",
                 section_bootstrap_desc: "Initial relay nodes for network discovery",
                 bootstrap_placeholder: "One multiaddr per line",
@@ -746,11 +735,6 @@
                 log_level_info: "Standard Info",
                 log_level_warn: "Warnings Only",
                 log_level_error: "Errors Only",
-                obfs_fixed: "Fixed Size Padding",
-                obfs_block: "Block Multiple",
-                obfs_random: "Random Length",
-                obfs_dynamic: "Variable Range",
-                obfs_auto: "Auto-Detect & Switch",
                 acl_no_rules: "No custom ACL rules yet — add one or pick a template.",
                 acl_comment_placeholder: "Comment / Description",
                 close_btn: "Close",
@@ -1143,22 +1127,6 @@
             return (b / 1024 / 1024 / 1024).toFixed(2) + 'G';
         }
 
-        function onObfsModeChange() {
-            const mode = document.getElementById('cfgObfsMode').value;
-            const fieldMap = {
-                'jitter': ['fixed', 'block', 'dynamic', 'random'],
-                'fixed-size': ['fixed', 'random'],
-                'dynamic-range': ['dynamic', 'auto'],
-                'block-size': ['block'],
-                'auto-fields': ['auto'],
-            };
-            document.querySelectorAll('[data-obfs-field]').forEach(el => {
-                const field = el.getAttribute('data-obfs-field');
-                const visible = fieldMap[field] ? fieldMap[field].includes(mode) : false;
-                el.style.display = visible ? '' : 'none';
-            });
-        }
-
         function showToast(msg, isError, isWarn) {
             const tEl = document.getElementById('toast');
             tEl.innerText = msg;
@@ -1214,19 +1182,11 @@
                 document.getElementById('cfgEnableMDNS').checked = !!currentFullConfig.enable_mdns;
 
                 const obfs = currentFullConfig.obfuscation || {};
-                document.getElementById('cfgObfsMode').value = obfs.mode || 'random';
-                document.getElementById('cfgFixedSize').value = obfs.fixed_size || 1500;
-                document.getElementById('cfgFixedSizeBadge').textContent = obfs.fixed_size || 1500;
-                document.getElementById('cfgJitterRange').value = obfs.jitter_range !== undefined ? obfs.jitter_range : 64;
-                document.getElementById('cfgJitterRangeBadge').textContent = '±' + (obfs.jitter_range !== undefined ? obfs.jitter_range : 64);
-                document.getElementById('cfgMinSize').value = obfs.min_size || 512;
-                document.getElementById('cfgMaxSize').value = obfs.max_size || 1500;
-                document.getElementById('cfgBlockSize').value = obfs.block_size || 256;
-                document.getElementById('cfgAutoDetectInterval').value = obfs.auto_detect_interval || 30;
-                document.getElementById('cfgAllowModeSwitch').checked = !!obfs.allow_mode_switch;
+                const obfsEnableEl = document.getElementById('cfgObfEnable');
+                if (obfsEnableEl) obfsEnableEl.checked = !!obfs.enable;
+                document.getElementById('cfgPaddingRules').value = obfs.padding_rules || '0 -> 400-600';
                 document.getElementById('cfgStrictKeyNegotiation').checked = !!obfs.strict_key_negotiation;
                 document.getElementById('cfgRequireAuthKeyExchange').checked = !!obfs.require_auth_key_exchange;
-                onObfsModeChange(); // show/hide mode-specific fields
                 // Paint the filled portion of any range slider (Jitter, Fixed Size)
                 // so the initial state isn't a blank track. updateRangeProgress is
                 // itself no-op when min==max, so calling on every range is safe.
@@ -1802,14 +1762,9 @@
 
                 if (!currentFullConfig.obfuscation) currentFullConfig.obfuscation = {};
                 const ob = currentFullConfig.obfuscation;
-                ob.mode = document.getElementById('cfgObfsMode').value;
-                ob.fixed_size = parseInt(document.getElementById('cfgFixedSize').value, 10) || 1500;
-                ob.block_size = parseInt(document.getElementById('cfgBlockSize').value, 10) || 256;
-                ob.jitter_range = parseInt(document.getElementById('cfgJitterRange').value, 10) || 0;
-                ob.min_size = parseInt(document.getElementById('cfgMinSize').value, 10) || 512;
-                ob.max_size = parseInt(document.getElementById('cfgMaxSize').value, 10) || 1500;
-                ob.auto_detect_interval = parseInt(document.getElementById('cfgAutoDetectInterval').value, 10) || 30;
-                ob.allow_mode_switch = document.getElementById('cfgAllowModeSwitch').checked;
+                const obfsEnableEl = document.getElementById('cfgObfEnable');
+                ob.enable = obfsEnableEl ? obfsEnableEl.checked : true;
+                ob.padding_rules = (document.getElementById('cfgPaddingRules').value || '0 -> 400-600').trim();
                 ob.strict_key_negotiation = document.getElementById('cfgStrictKeyNegotiation').checked;
                 ob.require_auth_key_exchange = document.getElementById('cfgRequireAuthKeyExchange').checked;
 
@@ -9377,8 +9332,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             openSpeedTestModal, closeSpeedTestModal, runSpeedTest,
             inspectRoute, closeRouteInspector,
             openShareModal, closeShareModal, copyConfigJSON, downloadConfigJSON,
-            // Obfuscation / form helpers
-            onObfsModeChange,
+            // Form helpers
             addCfgListItem, delCfgListItem, moveCfgListItem,
             // Stats / logs / topology toolbar
             fetchStats, setLanguage, selectDashboardPage,

@@ -911,6 +911,16 @@ func (n *Node) processTapFrame(payload []byte) bool {
 			return true
 		}
 
+		// Packet coalescing gate: merge short unicast frames to the same peer
+		// into one obfuscate frame so the padding rule has nothing to pad (the
+		// buffer reaches the band target naturally). Frames bound for the active
+		// Exit Node peer (latency-sensitive egress) and any frame when coalescing
+		// is off go out through the normal path below. maybeBuffer returns true
+		// only when it consumed the frame (buffered or flushed immediately).
+		if n.coalescer != nil && n.coalescer.maybeBuffer(targetPeer, dstMAC, payload) {
+			return true
+		}
+
 		seqID := n.Packer.NextSeqID(n.txEpochForPeer(targetPeer))
 		// Pack DIRECTLY into the pooled buffer (same pattern as the broadcast
 		// fan-out): the old Pack-into-shared-outBuf + copy round-trip cost a
@@ -925,97 +935,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 			return true
 		}
 		packedCopy = packedCopy[:totalLen]
-		n.Collector.RecordPacketDir(payload, true)
-		n.Collector.RecordTxSeq(targetPeerStr, seqID)
-		if n.Collector != nil {
-			n.Collector.CaptureFrameWithPeers(observer.DirTx, payload, "self", targetPeerStr)
-		}
-		if log.IsDebug() {
-			log.Debug("Tx Pack: seq=%d origLen=%d packedLen=%d mode=%s dst=%s", seqID, readN, totalLen, n.Packer.Mode, targetPeerStr)
-		}
-
-		if hasRoute && !route.IsDirect && route.NextHop != "" && route.NextHop != targetPeer && route.NextHop != n.Host.ID() && !n.isBootstrapPeer(route.NextHop) {
-			if log.IsDebug() {
-				log.Debug("Tx overlay relay: seq=%d len=%d dst=%s via nextHop=%s (totalRTT=%dms vs directRTT=%dms)",
-
-					seqID, readN, targetPeer.String(), route.NextHop.String(), route.TotalRTTMs, route.DirectRTTMs)
-			}
-			// Direct-path fallback copy MUST remain the PLAINTEXT packed frame.
-			// dispatchWorker's relay onFail handler hands task.data to SendToPeer,
-			// which applies its OWN per-peer seal. Copying an already-sealed frame
-			// here made that fallback double-encrypt it, and the destination — which
-			// opens exactly once — dropped every such frame. Taking the copy BEFORE
-			// any sealing keeps the two paths independent and correct.
-			fallbackCopy := acquireFrameBuf(totalLen)
-			copy(fallbackCopy, packedCopy)
-
-			// END-TO-END seal: the inner payload is encrypted for targetPeer so the
-			// relay cannot read it; only the final destination can open it. The
-			// result goes into `inner`, never back into packedCopy: overwriting the
-			// pooled slice with this heap allocation leaked the pooled buffer and
-			// then fed the unrelated allocation to releaseFrameBuf, corrupting the
-			// frame pool's size assumptions.
-			inner := packedCopy
-			if cipher := n.obfCipherForPeer(targetPeer); cipher != nil {
-				enc, eerr := n.sealPeerFrame(targetPeer, cipher, inner)
-				if eerr != nil {
-					log.Warn("Tx overlay relay: end-to-end seal for %s failed: %v (frame dropped rather than sent in plaintext)",
-						targetPeer.String(), eerr)
-					releaseFrameBuf(packedCopy)
-					releaseFrameBuf(fallbackCopy)
-					return true
-				}
-				inner = enc
-			}
-			// HOP-BY-HOP: wrap the relay envelope in an obfuscate frame and seal it
-			// for the relay hop, so only that hop can read the routing header. The
-			// inner payload stays end-to-end encrypted for targetPeer and is never
-			// readable by the relay.
-			if relayBuf, rerr := n.packRelayFrame(targetPeer, n.Host.ID(), routing.MaxRelayTTL, inner); rerr != nil {
-				log.Warn("Tx overlay relay: pack envelope for %s failed: %v; dispatching plaintext packed fallback", targetPeer.String(), rerr)
-				n.dispatchNonblocking(dispatchTask{
-					kind:    0,
-					target:  targetPeer,
-					dstMAC:  dstMAC,
-					data:    fallbackCopy,
-					origLen: readN,
-					owned:   true,
-				})
-			} else if sealed, serr := n.sealRelayEnvelopeForHop(route.NextHop, relayBuf); serr != nil {
-				log.Warn("Tx overlay relay: hop seal via %s failed: %v; dispatching plaintext packed fallback", route.NextHop.String(), serr)
-				n.dispatchNonblocking(dispatchTask{
-					kind:    0,
-					target:  targetPeer,
-					dstMAC:  dstMAC,
-					data:    fallbackCopy,
-					origLen: readN,
-					owned:   true,
-				})
-			} else {
-				n.dispatchNonblocking(dispatchTask{
-					kind:      2,
-					target:    targetPeer,
-					relayHop:  route.NextHop,
-					data:      fallbackCopy,
-					relayData: sealed,
-					origLen:   readN,
-					owned:     true,
-				})
-			}
-			// packedCopy is still the ORIGINAL pooled slice (the seals above wrote
-			// to `inner`), and its contents now live in fallbackCopy and the relay
-			// envelope. Releasing it here is therefore safe and leak-free.
-			releaseFrameBuf(packedCopy)
-		} else {
-			n.dispatchNonblocking(dispatchTask{
-				kind:    0,
-				target:  targetPeer,
-				dstMAC:  dstMAC,
-				data:    packedCopy,
-				origLen: readN,
-				owned:   true,
-			})
-		}
+		n.dispatchUnicastPacked(targetPeer, targetPeerStr, dstMAC, route, hasRoute, seqID, packedCopy, payload, readN)
 		return true
 	} else if !found {
 		// Unknown unicast / broadcast — fall through to the broadcast handling
@@ -1137,7 +1057,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 		// inside the fan-out.
 		bcastPayload := acquireFrameBuf(len(payload))
 		copy(bcastPayload, payload)
-		log.Debug("Tx broadcast: origLen=%d mode=%s", readN, n.Packer.Mode)
+		log.Debug("Tx broadcast: origLen=%d", readN)
 		n.dispatchNonblocking(dispatchTask{
 			kind:    1,
 			data:    bcastPayload,
@@ -1146,6 +1066,110 @@ func (n *Node) processTapFrame(payload []byte) bool {
 		})
 	}
 	return true
+}
+
+// dispatchUnicastPacked records TX accounting and dispatches an already-packed
+// unicast frame to targetPeer, choosing the direct vs overlay-relay path.
+//
+// packedCopy is owned (pooled) and transferred to the dispatch task, which
+// releases it after transmission. plaintext is the unpadded logical payload
+// (a single frame, or a batch payload) used for packet-direction/capture
+// accounting and consumed synchronously here. readN is the logical payload
+// length used for TX byte accounting. The function does not return an error: a
+// relay-seal failure falls back to the plaintext packed frame rather than
+// dropping (matching the original inline behaviour).
+func (n *Node) dispatchUnicastPacked(targetPeer peer.ID, targetPeerStr string, dstMAC net.HardwareAddr, route routing.RouteInfo, hasRoute bool, seqID uint64, packedCopy, plaintext []byte, readN int) {
+	totalLen := len(packedCopy)
+	n.Collector.RecordPacketDir(plaintext, true)
+	n.Collector.RecordTxSeq(targetPeerStr, seqID)
+	if n.Collector != nil {
+		n.Collector.CaptureFrameWithPeers(observer.DirTx, plaintext, "self", targetPeerStr)
+	}
+	if log.IsDebug() {
+		log.Debug("Tx Pack: seq=%d origLen=%d packedLen=%d dst=%s", seqID, readN, totalLen, targetPeerStr)
+	}
+
+	if hasRoute && !route.IsDirect && route.NextHop != "" && route.NextHop != targetPeer && route.NextHop != n.Host.ID() && !n.isBootstrapPeer(route.NextHop) {
+		if log.IsDebug() {
+			log.Debug("Tx overlay relay: seq=%d len=%d dst=%s via nextHop=%s (totalRTT=%dms vs directRTT=%dms)",
+				seqID, readN, targetPeer.String(), route.NextHop.String(), route.TotalRTTMs, route.DirectRTTMs)
+		}
+		// Direct-path fallback copy MUST remain the PLAINTEXT packed frame.
+		// dispatchWorker's relay onFail handler hands task.data to SendToPeer,
+		// which applies its OWN per-peer seal. Copying an already-sealed frame
+		// here made that fallback double-encrypt it, and the destination — which
+		// opens exactly once — dropped every such frame. Taking the copy BEFORE
+		// any sealing keeps the two paths independent and correct.
+		fallbackCopy := acquireFrameBuf(totalLen)
+		copy(fallbackCopy, packedCopy)
+
+		// END-TO-END seal: the inner payload is encrypted for targetPeer so the
+		// relay cannot read it; only the final destination can open it. The
+		// result goes into `inner`, never back into packedCopy: overwriting the
+		// pooled slice with this heap allocation leaked the pooled buffer and
+		// then fed the unrelated allocation to releaseFrameBuf, corrupting the
+		// frame pool's size assumptions.
+		inner := packedCopy
+		if cipher := n.obfCipherForPeer(targetPeer); cipher != nil {
+			enc, eerr := n.sealPeerFrame(targetPeer, cipher, inner)
+			if eerr != nil {
+				log.Warn("Tx overlay relay: end-to-end seal for %s failed: %v (frame dropped rather than sent in plaintext)",
+					targetPeer.String(), eerr)
+				releaseFrameBuf(packedCopy)
+				releaseFrameBuf(fallbackCopy)
+				return
+			}
+			inner = enc
+		}
+		// HOP-BY-HOP: wrap the relay envelope in an obfuscate frame and seal it
+		// for the relay hop, so only that hop can read the routing header. The
+		// inner payload stays end-to-end encrypted for targetPeer and is never
+		// readable by the relay.
+		if relayBuf, rerr := n.packRelayFrame(targetPeer, n.Host.ID(), routing.MaxRelayTTL, inner); rerr != nil {
+			log.Warn("Tx overlay relay: pack envelope for %s failed: %v; dispatching plaintext packed fallback", targetPeer.String(), rerr)
+			n.dispatchNonblocking(dispatchTask{
+				kind:    0,
+				target:  targetPeer,
+				dstMAC:  dstMAC,
+				data:    fallbackCopy,
+				origLen: readN,
+				owned:   true,
+			})
+		} else if sealed, serr := n.sealRelayEnvelopeForHop(route.NextHop, relayBuf); serr != nil {
+			log.Warn("Tx overlay relay: hop seal via %s failed: %v; dispatching plaintext packed fallback", route.NextHop.String(), serr)
+			n.dispatchNonblocking(dispatchTask{
+				kind:    0,
+				target:  targetPeer,
+				dstMAC:  dstMAC,
+				data:    fallbackCopy,
+				origLen: readN,
+				owned:   true,
+			})
+		} else {
+			n.dispatchNonblocking(dispatchTask{
+				kind:      2,
+				target:    targetPeer,
+				relayHop:  route.NextHop,
+				data:      fallbackCopy,
+				relayData: sealed,
+				origLen:   readN,
+				owned:     true,
+			})
+		}
+		// packedCopy is still the ORIGINAL pooled slice (the seals above wrote
+		// to `inner`), and its contents now live in fallbackCopy and the relay
+		// envelope. Releasing it here is therefore safe and leak-free.
+		releaseFrameBuf(packedCopy)
+		return
+	}
+	n.dispatchNonblocking(dispatchTask{
+		kind:    0,
+		target:  targetPeer,
+		dstMAC:  dstMAC,
+		data:    packedCopy,
+		origLen: readN,
+		owned:   true,
+	})
 }
 
 // isMeshLocalIP reports whether dstIP is addressable inside the overlay: a

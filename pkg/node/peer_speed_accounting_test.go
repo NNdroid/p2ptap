@@ -10,10 +10,8 @@ import (
 
 func TestTapPayloadLenFromPackedFrameExcludesFixedPadding(t *testing.T) {
 	packer := obfuscate.NewFramePackerFull(&config.ObfuscationConfig{
-		Enable:    true,
-		Mode:      "fixed",
-		FixedSize: 1500,
-		BlockSize: 256,
+		Enable:       true,
+		PaddingRules: "0 -> 1500-1500",
 	})
 	packer.SetSourceIdentity("peer-speed-test")
 
@@ -32,8 +30,8 @@ func TestTapPayloadLenFromPackedFrameExcludesFixedPadding(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Pack: %v", err)
 			}
-			if tt.size == 54 && n != 1500 {
-				t.Fatalf("fixed padding precondition: packed ACK length = %d, want 1500", n)
+			if tt.size == 54 && n != obfuscate.HeaderLen+1500 {
+				t.Fatalf("fixed padding precondition: packed ACK length = %d, want %d", n, obfuscate.HeaderLen+1500)
 			}
 			if got := tapPayloadLenFromPackedFrame(out[:n]); got != tt.size {
 				t.Fatalf("TAP payload length = %d, want %d (packed=%d)", got, tt.size, n)

@@ -10,9 +10,9 @@ import (
 
 func BenchmarkPaddingPack(b *testing.B) {
 	for _, size := range []int{64, 512, 1400} {
-		for _, mode := range []string{"none", "fixed", "block", "dynamic"} {
-			b.Run(fmt.Sprintf("%s/%d", mode, size), func(b *testing.B) {
-				fp := NewFramePackerFull(&config.ObfuscationConfig{Enable: mode != "none", Mode: mode, FixedSize: 1500, BlockSize: 256, MaxSize: 1500})
+		for _, rule := range []string{"", "0 -> 400-600", "0 -> 1500-1500"} {
+			b.Run(fmt.Sprintf("%s/%d", rule, size), func(b *testing.B) {
+				fp := NewFramePackerFull(&config.ObfuscationConfig{Enable: rule != "", PaddingRules: rule})
 				payload := make([]byte, size)
 				out := make([]byte, MaxFrameSize)
 				b.SetBytes(int64(size))
@@ -36,7 +36,7 @@ func BenchmarkFrameSeal(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				fp := NewFramePackerFull(&config.ObfuscationConfig{Enable: true, Mode: "fixed", FixedSize: 1500})
+				fp := NewFramePackerFull(&config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 1500-1500"})
 				fp.SetSendAlgo(algo)
 				frame := make([]byte, MaxSealedFrameSize)
 				n, err := fp.Pack(1, make([]byte, 1200), frame)

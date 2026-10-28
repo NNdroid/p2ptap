@@ -61,9 +61,9 @@ func newBudgetPacker(t *testing.T, cfg *config.ObfuscationConfig, mtu int) *Fram
 }
 
 // TestPackHonoursFrameBudget is the regression test for padding inflating a
-// frame past what one transport datagram can carry: the default fixed_size of
-// 1500 sits well above the ~1103-byte budget, so every small frame used to be
-// padded all the way to 1500.
+// frame past what one transport datagram can carry: a rule whose target range
+// sits above the ~1103-byte budget must be clamped to the budget, never sent as
+// a single oversized datagram.
 func TestPackHonoursFrameBudget(t *testing.T) {
 	budget := MaxFrameForPathMTU(1500)
 	if budget <= 0 {
@@ -75,11 +75,12 @@ func TestPackHonoursFrameBudget(t *testing.T) {
 		name string
 		cfg  *config.ObfuscationConfig
 	}{
-		{"fixed over budget", &config.ObfuscationConfig{Enable: true, Mode: "fixed", FixedSize: 1500}},
-		{"fixed at budget", &config.ObfuscationConfig{Enable: true, Mode: "fixed", FixedSize: budget}},
-		{"dynamic over budget", &config.ObfuscationConfig{Enable: true, Mode: "dynamic", MinSize: 512, MaxSize: 1500}},
-		{"random over budget", &config.ObfuscationConfig{Enable: true, Mode: "random", MinSize: 512, FixedSize: 1500}},
-		{"block", &config.ObfuscationConfig{Enable: true, Mode: "block", BlockSize: 256}},
+		// Target range entirely within budget: no clamping, natural padding.
+		{"within budget", &config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 400-600"}},
+		// Target max above the budget: the padded frame must be clamped.
+		{"over budget", &config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 1100-1500"}},
+		// Multi-band: small frames pick the first band.
+		{"multi band", &config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 256-256\n1024 -> 1100-1400"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -105,17 +106,17 @@ func TestPackHonoursFrameBudget(t *testing.T) {
 }
 
 // TestPackNoBudgetIsUnchanged confirms the cap is opt-in: a packer that was
-// never told its MTU keeps the historic behaviour.
+// never told its MTU keeps the rule's target range uncapped.
 func TestPackNoBudgetIsUnchanged(t *testing.T) {
-	fp := NewFramePackerFull(&config.ObfuscationConfig{Enable: true, Mode: "fixed", FixedSize: 1500})
+	fp := NewFramePackerFull(&config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 1500-1500"})
 	payload := make([]byte, 60)
 	out := make([]byte, MaxSealedFrameSize)
 	n, err := fp.Pack(1, payload, out)
 	if err != nil {
 		t.Fatalf("Pack error: %v", err)
 	}
-	if n != 1500 {
-		t.Fatalf("packed frame = %d, want the uncapped 1500", n)
+	if want := HeaderLen + 1500; n != want {
+		t.Fatalf("packed frame = %d, want the uncapped %d (target is payload size, header added)", n, want)
 	}
 }
 
@@ -124,7 +125,7 @@ func TestPackNoBudgetIsUnchanged(t *testing.T) {
 // more fragments, not fewer.
 func TestLargePayloadExceedingBudgetIsLeftAlone(t *testing.T) {
 	fp := newBudgetPacker(t,
-		&config.ObfuscationConfig{Enable: true, Mode: "fixed", FixedSize: 1500}, 1500)
+		&config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 1500-1500"}, 1500)
 	payload := make([]byte, MaxFrameSize-HeaderLen-1)
 	out := make([]byte, MaxSealedFrameSize)
 	n, err := fp.Pack(1, payload, out)
@@ -143,27 +144,28 @@ func TestLargePayloadExceedingBudgetIsLeftAlone(t *testing.T) {
 func TestSetFrameBudgetAppliesToDefaults(t *testing.T) {
 	budget := MaxFrameForPathMTU(1500)
 
-	fp := newBudgetPacker(t, &config.ObfuscationConfig{Enable: true, Mode: "fixed"}, 1500)
-	if fp.FixedSize != budget {
-		t.Fatalf("default FixedSize = %d, want the %d-byte budget", fp.FixedSize, budget)
+	// With the default rule (0 -> 400-600) the budget is irrelevant because the
+	// target range sits below it; with a rule above the budget, the frame is
+	// clamped to the budget.
+	fp := newBudgetPacker(t, &config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 1500-1500"}, 1500)
+	payload := make([]byte, 60)
+	out := make([]byte, MaxSealedFrameSize)
+	n, err := fp.Pack(1, payload, out)
+	if err != nil {
+		t.Fatalf("Pack error: %v", err)
 	}
-	if fp.MaxSize != budget {
-		t.Fatalf("default MaxSize = %d, want the %d-byte budget", fp.MaxSize, budget)
-	}
-	if fp.MinSize != MinFrameSize {
-		t.Fatalf("default MinSize = %d, want %d", fp.MinSize, MinFrameSize)
-	}
-
-	explicit := newBudgetPacker(t,
-		&config.ObfuscationConfig{Enable: true, Mode: "fixed", FixedSize: 1500, MaxSize: 1500}, 1500)
-	if explicit.FixedSize != 1500 || explicit.MaxSize != 1500 {
-		t.Fatalf("explicit sizes were rewritten: FixedSize=%d MaxSize=%d", explicit.FixedSize, explicit.MaxSize)
+	if n != budget {
+		t.Fatalf("packed frame = %d, want the %d-byte budget", n, budget)
 	}
 
-	// An unknown MTU leaves the historic defaults in place.
-	none := newBudgetPacker(t, &config.ObfuscationConfig{Enable: true, Mode: "fixed"}, 0)
-	if none.FixedSize != 1500 {
-		t.Fatalf("FixedSize with unknown MTU = %d, want 1500", none.FixedSize)
+	// An unknown MTU leaves the rule's target range uncapped.
+	none := newBudgetPacker(t, &config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 1500-1500"}, 0)
+	n, err = none.Pack(1, payload, out)
+	if err != nil {
+		t.Fatalf("Pack error: %v", err)
+	}
+	if want := HeaderLen + 1500; n != want {
+		t.Fatalf("packed frame with unknown MTU = %d, want %d", n, want)
 	}
 }
 
@@ -171,7 +173,7 @@ func TestSetFrameBudgetAppliesToDefaults(t *testing.T) {
 // what an MTU-only hot reload relies on.
 func TestSetFrameBudgetHotReload(t *testing.T) {
 	fp := newBudgetPacker(t,
-		&config.ObfuscationConfig{Enable: true, Mode: "dynamic", MinSize: 512, MaxSize: 1500}, 1500)
+		&config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 1100-1500"}, 1500)
 	big := MaxFrameForPathMTU(1500)
 	payload := make([]byte, 60)
 	out := make([]byte, MaxSealedFrameSize)

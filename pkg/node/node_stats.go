@@ -1384,10 +1384,7 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 	if obfsAlgo == "" {
 		obfsAlgo = "auto"
 	}
-	obfsMode := n.Config.Obfuscation.Mode
-	if obfsMode == "" {
-		obfsMode = "fixed"
-	}
+	obfsMode := obfLabel(n.Config.Obfuscation)
 	dataIn := inboundCounts[string(ProtocolID)] + inboundCounts[string(OverlayRelayProtocolID)] + inboundCounts[string(BootRelayProtocolID)]
 	dataOut := outboundCounts[string(ProtocolID)] + outboundCounts[string(OverlayRelayProtocolID)] + outboundCounts[string(BootRelayProtocolID)]
 	dataTotal := dataIn + dataOut

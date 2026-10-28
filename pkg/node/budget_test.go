@@ -32,7 +32,7 @@ func TestMSSAndFragFitTheFrameBudget(t *testing.T) {
 		// Inner IP + inner TCP + MSS is the frame payload, so the frame header
 		// must still fit in the budget around it. The AEAD tag is NOT added here:
 		// the budget is a pre-seal frame cap and already deducts it.
-		mss := computeExitMSS(mtu, "none")
+		mss := computeExitMSS(mtu)
 		if inner := mss + 40 + 20 + obfuscate.HeaderLen; inner > budget {
 			t.Fatalf("MTU %d: MSS %d needs a %d-byte frame, budget is %d", mtu, mss, inner, budget)
 		}

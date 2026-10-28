@@ -30,7 +30,7 @@ func TestSealPeerFrameCountsPerPeer(t *testing.T) {
 	// A minimal Node needs only the per-peer table + a Packer to build a sample
 	// frame to seal. sealPeerFrame never touches the libp2p Host.
 	n := &Node{}
-	fp := obfuscate.NewFramePackerFull(&config.ObfuscationConfig{Enable: true, Mode: "fixed", FixedSize: 512, BlockSize: 128})
+	fp := obfuscate.NewFramePackerFull(&config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 512-512"})
 	fp.SetSourceIdentity("testnode")
 	seqID := fp.NextSeqID(0)
 	buf := make([]byte, 4096)
@@ -85,7 +85,7 @@ func TestSealPeerFrameCountsPerPeer(t *testing.T) {
 // "never ship unsealed" contract.
 func TestSealPeerFrameNilCipher(t *testing.T) {
 	n := &Node{}
-	fp := obfuscate.NewFramePackerFull(&config.ObfuscationConfig{Enable: true, Mode: "fixed", FixedSize: 512, BlockSize: 128})
+	fp := obfuscate.NewFramePackerFull(&config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 512-512"})
 	fp.SetSourceIdentity("testnode")
 	buf := make([]byte, 4096)
 	packedLen, _ := fp.Pack(fp.NextSeqID(0), []byte("x"), buf)

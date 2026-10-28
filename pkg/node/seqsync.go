@@ -267,7 +267,7 @@ func (n *Node) buildSeqSyncMsg(msgType string, p peer.ID, myPub []byte) SeqSyncM
 	// — keeping both sides symmetric instead of one side using a long-lived key
 	// while the other goes plaintext (which would silently mismatch).
 	m.ObfEnabled = n.obfKeyPair != nil && len(myPub) > 0
-	m.ObfMode = n.config().Obfuscation.Mode
+	m.ObfMode = obfLabel(n.config().Obfuscation)
 	// Embed the handshake's ephemeral public key exactly when a fresh key was
 	// minted for this message type (everything except "ready"), and sign it with
 	// the node's identity key so the recipient can bind it to the sender's

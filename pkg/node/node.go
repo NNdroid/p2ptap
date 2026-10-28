@@ -109,6 +109,10 @@ type Node struct {
 	TAP          tap.TAPDevice
 	MACTable     *vswitch.ShardedMACTable
 	Packer       *obfuscate.FramePacker
+	// coalescer merges short unicast TAP frames per destination so the padding
+	// rule has nothing to pad (see coalesce_tx.go). Nil when the node runs
+	// without a packer; started in Start(), drained on shutdown.
+	coalescer *txCoalescer
 	dedupPeers   map[peer.ID]*obfuscate.Deduplicator
 	dedupPeersMu sync.RWMutex
 	// peerLocalEpochs holds the PER-PEER anti-replay epoch this node stamps into
@@ -1838,14 +1842,6 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	packer := obfuscate.NewFramePackerFull(&obfCfg)
 	// Padding is capped at the datagram budget derived from the tunnel MTU, so
 	// a frame is never inflated past what one transport datagram can carry.
-	// Report the cap when it actually bites: the config still says what the user
-	// asked for, the packer just cannot honour it.
-	if budget := obfuscate.MaxFrameForPathMTU(cfg.MTU); budget > 0 && (obfCfg.FixedSize > budget || obfCfg.MaxSize > budget) {
-		log.Warn("Obfuscation frame size exceeds the %d-byte datagram budget for MTU %d "+
-			"(fixed_size=%d, max_size=%d); padding is capped at the budget so frames "+
-			"are not needlessly fragmented. Lower fixed_size/max_size to silence this.",
-			budget, cfg.MTU, obfCfg.FixedSize, obfCfg.MaxSize)
-	}
 	packer.SetFrameBudget(cfg.MTU)
 	packer.SetSourceIdentity(h.ID().String())
 	dispatcher := NewStrategyDispatcher(h, cfg.TransportStrategy)
@@ -1878,7 +1874,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 
 	obfsMode := "Disabled"
 	if cfg.Obfuscation.Enable {
-		obfsMode = fmt.Sprintf("🛡️ Active (%s mode, %dB)", cfg.Obfuscation.Mode, cfg.Obfuscation.FixedSize)
+		obfsMode = fmt.Sprintf("🛡️ Active (rule: %s)", cfg.Obfuscation.PaddingRules)
 	}
 
 	// Effective outgoing-SNI display for the WebUI: per-peer suffix mode wins,
@@ -1936,6 +1932,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		rxReorderWindow:     cfg.RxReorderWindow,
 		rxReorderDelay:      time.Duration(cfg.RxReorderDelayMs) * time.Millisecond,
 	}
+	node.coalescer = newTxCoalescer(node)
 	// Reorder buffer only has effect under "multipath"; best_path pays one atomic
 	// load per inbound frame to skip it.
 	node.rxReorderEnabled.Store(cfg.TransportStrategy == "multipath")
@@ -2895,7 +2892,7 @@ func (n *Node) applyExitNodeNAT(cfg *config.Config) {
 		}
 		return
 	}
-	if err := n.NFTManager.SetupExitNodeNAT(cfg.ExitNode.WANInterface, cfg.TapName, computeExitMSS(cfg.MTU, cfg.Obfuscation.Mode)); err != nil {
+	if err := n.NFTManager.SetupExitNodeNAT(cfg.ExitNode.WANInterface, cfg.TapName, computeExitMSS(cfg.MTU)); err != nil {
 		log.Error("Exit Node NAT setup failed: %v", err)
 	}
 }
@@ -2930,7 +2927,7 @@ func (n *Node) applySubnetRouterNAT(cfg *config.Config) {
 //
 // #3: the value accounts for obfuscation overhead rather than lowering the TAP
 // MTU.
-func computeExitMSS(mtu int, obfMode string) int {
+func computeExitMSS(mtu int) int {
 	if mtu <= 0 {
 		mtu = 1500
 	}
@@ -2951,11 +2948,33 @@ func computeExitMSS(mtu int, obfMode string) int {
 	return mss
 }
 
+// obfLabel describes the active obfuscation strategy for informational display
+// (peer metadata, seqsync handshake, WebUI stats): rule-based padding when
+// enabled, "none" when disabled. The historical mode names (fixed/block/random/
+// dynamic/auto) are gone; this is display-only, never read for logic.
+func obfLabel(cfg config.ObfuscationConfig) string {
+	if cfg.Enable {
+		return "rule"
+	}
+	return "none"
+}
+
 func (n *Node) Start() {
 	// Subscribe before starting connection work so the stateful AutoNAT event is
 	// reflected in WebUI/peer metadata as soon as libp2p has a verdict.
 	n.wg.Add(1)
 	go n.localReachabilityLoop()
+
+	// TX coalescing flusher: drains per-destination buffers on the rule's
+	// max_delay_ms so short unicast frames are merged (avoiding padding) instead
+	// of sitting in the buffer until the next TAP read.
+	if n.coalescer != nil {
+		n.wg.Add(1)
+		go func() {
+			defer n.wg.Done()
+			n.coalescer.run(n.ctx)
+		}()
+	}
 
 	// Discover server-reflexive addresses via STUN for CGNAT hole punching.
 	n.wg.Add(1)

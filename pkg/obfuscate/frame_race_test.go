@@ -15,24 +15,17 @@ import (
 // calling Pack/MaxPackedLen every frame, while a hot reload rewrites the same
 // fields via UpdateConfig/SetSendAlgo.
 
-func mkCfg(mode string) *config.ObfuscationConfig {
+func mkCfg(rule string) *config.ObfuscationConfig {
 	return &config.ObfuscationConfig{
-		Enable:             true,
-		Mode:               mode,
-		FixedSize:          1200,
-		BlockSize:          256,
-		JitterRange:        8,
-		MinSize:            200,
-		MaxSize:            1400,
-		AutoDetectInterval: 1,
-		AllowModeSwitch:    true,
+		Enable:       true,
+		PaddingRules: rule,
 	}
 }
 
 // Pack, MaxPackedLen and SetSendAlgo used to touch shared fields with no
 // synchronisation at all.
 func TestFramePackerConcurrentPackAndAlgoUpdate(t *testing.T) {
-	fp := NewFramePackerFull(mkCfg("random"))
+	fp := NewFramePackerFull(mkCfg("0 -> 400-600"))
 
 	var wg sync.WaitGroup
 	for w := 0; w < 4; w++ {
@@ -71,12 +64,12 @@ func TestFramePackerConcurrentPackAndAlgoUpdate(t *testing.T) {
 }
 
 // The interesting one: UpdateConfig runs from the hot-reload goroutine and
-// rewrites Mode while Pack is reading it. Mode is a string — a torn read here
-// is a bad pointer, not just a wrong value.
+// rewrites the rule (an immutable pointer swap, but the shared snapshot is
+// republished) while Pack is reading it.
 func TestFramePackerConcurrentPackAndHotReload(t *testing.T) {
-	fp := NewFramePackerFull(mkCfg("random"))
+	fp := NewFramePackerFull(mkCfg("0 -> 400-600"))
 
-	modes := []string{"random", "fixed", "block", "dynamic", "auto"}
+	rules := []string{"0 -> 400-600", "0 -> 1500-1500", "0 -> 256-256\n1024 -> 1100-1400", "0 -> 512-800"}
 
 	var wg sync.WaitGroup
 	// hot reload goroutine
@@ -84,7 +77,7 @@ func TestFramePackerConcurrentPackAndHotReload(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 400; i++ {
-			fp.UpdateConfig(mkCfg(modes[i%len(modes)]))
+			fp.UpdateConfig(mkCfg(rules[i%len(rules)]))
 		}
 	}()
 	// data path workers
@@ -108,7 +101,7 @@ func TestFramePackerConcurrentPackAndHotReload(t *testing.T) {
 // Algo()/Pack must observe algo updates atomically, never a partially written
 // byte (it is a single byte, so the point is proving no race is reported).
 func TestFramePackerAlgoVisibleAcrossGoroutines(t *testing.T) {
-	fp := NewFramePackerFull(mkCfg("random"))
+	fp := NewFramePackerFull(mkCfg("0 -> 400-600"))
 	_ = fp // keep constructor result used
 
 	var wg sync.WaitGroup

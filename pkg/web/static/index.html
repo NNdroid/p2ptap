@@ -1057,75 +1057,20 @@
                 </div>
                 <div class="config-row">
                     <div>
-                        <div class="config-row-label" data-i18n="obfs_lbl">Obfuscation Mode</div>
-                        <div class="config-row-desc" data-i18n="obfs_mode_desc">Padding/disguise strategy for P2P frames</div>
+                        <div class="config-row-label" data-i18n="obfs_lbl">Enable Traffic Obfuscation</div>
+                        <div class="config-row-desc" data-i18n="obfs_enable_desc">Pad short frames per the rule below to defeat DPI fingerprinting</div>
                     </div>
-                    <select id="cfgObfsMode" class="form-select ext145" data-onchange="onObfsModeChange()">
-                        <option value="fixed" data-i18n="obfs_fixed">fixed – Fixed Size Padding</option>
-                        <option value="block" data-i18n="obfs_block">block – Block Multiple</option>
-                        <option value="random" data-i18n="obfs_random">random – Random Length</option>
-                        <option value="dynamic" data-i18n="obfs_dynamic">dynamic – Variable Range</option>
-                        <option value="auto" data-i18n="obfs_auto">auto – Auto-Detect & Switch</option>
-                    </select>
-                </div>
-                <!-- Jitter Range -->
-                <div class="config-row" data-obfs-field="jitter">
-                    <div>
-                        <div class="config-row-label" data-i18n="obfs_jitter_lbl">Jitter Range (±bytes)</div>
-                        <div class="config-row-desc" data-i18n="obfs_jitter_desc">Random jitter to break fixed-size patterns (0=off)</div>
-                    </div>
-                    <div class="range-group">
-                        <input type="range" id="cfgJitterRange" class="range-input" min="0" max="512" step="8" value="64" data-oninput="updateRangeProgress(this); document.getElementById('cfgJitterRangeBadge').textContent='±'+this.value">
-                        <span class="range-value-badge" id="cfgJitterRangeBadge">±64</span>
-                    </div>
-                </div>
-                <!-- Fixed Size (fixed mode) -->
-                <div class="config-row" data-obfs-field="fixed-size">
-                    <div>
-                        <div class="config-row-label" data-i18n="obfs_fixed_size_lbl">Fixed Packet Size</div>
-                        <div class="config-row-desc" data-i18n="obfs_fixed_size_desc">Target frame size for fixed/dynamic-max (bytes)</div>
-                    </div>
-                    <div class="range-group">
-                        <input type="range" id="cfgFixedSize" class="range-input" min="256" max="4096" step="64" value="1500" data-oninput="updateRangeProgress(this); document.getElementById('cfgFixedSizeBadge').textContent=this.value">
-                        <span class="range-value-badge" id="cfgFixedSizeBadge">1500</span>
-                    </div>
-                </div>
-                <!-- Dynamic Range (dynamic/auto mode) -->
-                <div class="config-row" data-obfs-field="dynamic-range">
-                    <div>
-                        <div class="config-row-label" data-i18n="obfs_dynamic_lbl">Dynamic Size Range (bytes)</div>
-                        <div class="config-row-desc" data-i18n="obfs_dynamic_desc">Min–Max range for variable-size frames</div>
-                    </div>
-                    <div class="ext152">
-                        <input type="number" id="cfgMinSize" class="form-input small-input ext153" min="128" max="4096" value="512">
-                        <span class="ext154">–</span>
-                        <input type="number" id="cfgMaxSize" class="form-input small-input ext153" min="256" max="65535" value="1500">
-                    </div>
-                </div>
-                <!-- Block Size -->
-                <div class="config-row" data-obfs-field="block-size">
-                    <div>
-                        <div class="config-row-label" data-i18n="obfs_block_size_lbl">Block Alignment Size</div>
-                        <div class="config-row-desc" data-i18n="obfs_block_size_desc">Alignment granularity for block mode (bytes)</div>
-                    </div>
-                    <input type="number" id="cfgBlockSize" class="form-input small-input ext153" min="64" max="4096" value="256">
-                </div>
-                <!-- Auto-Detection Fields -->
-                <div class="config-row ext155" data-obfs-field="auto-fields">
-                    <div>
-                        <div class="config-row-label ext34" data-i18n="obfs_auto_title">🤖 Auto-Detect Settings</div>
-                    </div>
-                </div>
-                <div class="config-row" data-obfs-field="auto-fields">
-                    <div class="config-row-label" data-i18n="obfs_eval_interval_lbl">Eval Interval</div>
-                    <input type="number" id="cfgAutoDetectInterval" class="form-input small-input ext153" min="5" max="600" value="30">
-                    <span class="ext156">seconds</span>
-                </div>
-                <div class="config-row" data-obfs-field="auto-fields">
                     <div class="ext157">
-                        <span class="config-row-label" data-i18n="obfs_allow_switch_lbl">Allow Automatic Mode Switching</span>
-                        <input type="checkbox" id="cfgAllowModeSwitch" class="p2p-switch ext158">
+                        <input type="checkbox" id="cfgObfEnable" class="p2p-switch ext158">
                     </div>
+                </div>
+                <!-- Padding Rules (the single declarative padding mechanism) -->
+                <div class="config-row">
+                    <div>
+                        <div class="config-row-label" data-i18n="obfs_rules_lbl">Padding Rules</div>
+                        <div class="config-row-desc" data-i18n="obfs_rules_desc">One band per line: &lt;floor&gt; -&gt; &lt;min&gt;[-&lt;max&gt;]. Payloads below the band target are padded to a random size in the range; at/above it they go natural. Optional: coalesce on|off [max_delay_ms=N] [max_bytes=N] [max_frames=N].</div>
+                    </div>
+                    <textarea id="cfgPaddingRules" class="form-input ext153" rows="4" spellcheck="false">0 -&gt; 400-600</textarea>
                 </div>
                 <!-- Strict Key Negotiation -->
                 <div class="config-row ext159">

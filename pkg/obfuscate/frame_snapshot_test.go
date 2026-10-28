@@ -9,9 +9,8 @@ import (
 
 func TestFramePackerSnapshotReadDoesNotWaitForConfigMutex(t *testing.T) {
 	fp := NewFramePackerFull(&config.ObfuscationConfig{
-		Enable:    true,
-		Mode:      "fixed",
-		FixedSize: 1500,
+		Enable:       true,
+		PaddingRules: "0 -> 1500-1500",
 	})
 
 	// Simulate a slow config writer. Data-plane readers must use the already
@@ -25,8 +24,8 @@ func TestFramePackerSnapshotReadDoesNotWaitForConfigMutex(t *testing.T) {
 	select {
 	case got := <-done:
 		fp.mu.Unlock()
-		if got != 1500 {
-			t.Fatalf("MaxPackedLen while config mutex held = %d, want 1500", got)
+		if want := HeaderLen + 1500; got != want {
+			t.Fatalf("MaxPackedLen while config mutex held = %d, want %d", got, want)
 		}
 	case <-time.After(500 * time.Millisecond):
 		fp.mu.Unlock()
@@ -36,29 +35,26 @@ func TestFramePackerSnapshotReadDoesNotWaitForConfigMutex(t *testing.T) {
 
 func TestFramePackerUpdateConfigPublishesSnapshot(t *testing.T) {
 	fp := NewFramePackerFull(&config.ObfuscationConfig{
-		Enable:    true,
-		Mode:      "fixed",
-		FixedSize: 1024,
+		Enable:       true,
+		PaddingRules: "0 -> 1024-1024",
 	})
-	if got := fp.MaxPackedLen(100); got != 1024 {
-		t.Fatalf("initial MaxPackedLen = %d, want 1024", got)
+	if got := fp.MaxPackedLen(100); got != HeaderLen+1024 {
+		t.Fatalf("initial MaxPackedLen = %d, want %d", got, HeaderLen+1024)
 	}
 
 	fp.UpdateConfig(&config.ObfuscationConfig{
-		Enable:    true,
-		Mode:      "fixed",
-		FixedSize: 2048,
+		Enable:       true,
+		PaddingRules: "0 -> 2048-2048",
 	})
-	if got := fp.MaxPackedLen(100); got != 2048 {
-		t.Fatalf("MaxPackedLen after hot reload = %d, want 2048", got)
+	if got := fp.MaxPackedLen(100); got != HeaderLen+2048 {
+		t.Fatalf("MaxPackedLen after hot reload = %d, want %d", got, HeaderLen+2048)
 	}
 }
 
 func BenchmarkFramePackerSnapshotParallel(b *testing.B) {
 	fp := NewFramePackerFull(&config.ObfuscationConfig{
-		Enable:    true,
-		Mode:      "fixed",
-		FixedSize: 1500,
+		Enable:       true,
+		PaddingRules: "0 -> 1500-1500",
 	})
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {

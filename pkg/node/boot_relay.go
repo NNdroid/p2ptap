@@ -723,6 +723,28 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 	n.recordPeerDedupDesync(srcPeer, false)
 	n.Collector.RecordRxSeq(n.peerIDString(srcPeer), seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
 
+	// Split coalesced batches before per-frame processing (see
+	// deliverDirectSubFrame for the rationale): all sub-frames share seqID, so
+	// dedup above ran once on the batch and the reorder gate sees one counter.
+	if subs, ok := obfuscate.SplitBatchPayload(tapPayload); ok {
+		jobs := make([]tapWriteJob, 0, len(subs))
+		for _, sub := range subs {
+			n.deliverRelayedSubFrame(srcPeer, viaPeer, seqID, sub, &jobs)
+		}
+		n.reorderTapWriteBatch(srcPeer, seqID, jobs)
+		return
+	}
+	n.deliverRelayedSubFrame(srcPeer, viaPeer, seqID, tapPayload, nil)
+}
+
+// deliverRelayedSubFrame runs the per-frame relay-receive pipeline for one TAP
+// payload already accepted by dedup: ACL (against the true origin), MAC
+// learning, broadcast content dedup, exit-node arbitration, probe hooks, and
+// finally the TAP write. For a coalesced batch, callers pass a non-nil collect
+// pointer and this function appends the prepared job instead of pushing it; the
+// caller then hands the whole batch to reorderTapWriteBatch so all sub-frames
+// share one reorder counter.
+func (n *Node) deliverRelayedSubFrame(srcPeer, viaPeer peer.ID, seqID uint64, tapPayload []byte, collect *[]tapWriteJob) {
 	// ACL check — evaluate against the TRUE origin (srcPeer), not the relay
 	// transport peer. The relay only forwards the frame; the security policy is
 	// about which mesh member may inject traffic into our TAP.
@@ -832,6 +854,14 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 		// per-peer counter space, so both feed the same per-peer reorder queue.
 		// The path key names the hop that actually carried the frame; the
 		// buffered job carries it so per-path RX is attributed on TAP delivery.
+		// In batch mode the caller collects the prepared job and pushes the whole
+		// batch at once, so all sub-frames share this seqID's reorder counter.
+		if collect != nil {
+			if job, err := n.prepareTapWriteJob(tapPayload, false, srcPeer, "relay://"+viaPeer.String()); err == nil {
+				*collect = append(*collect, job)
+			}
+			return
+		}
 		n.reorderTapWrite(srcPeer, seqID, tapPayload, false, srcPeer, "relay://"+viaPeer.String())
 		return
 	}

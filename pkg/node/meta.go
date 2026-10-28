@@ -1296,7 +1296,7 @@ func (n *Node) localPeekMapNodeInfo() PeekMapNodeInfo {
 		// filtering twice would only make single-machine setups untestable.
 		Addrs:    AddrsWithPeerID(n.Host.Addrs(), n.Host.ID()),
 		ObfsAlgo: c.Obfuscation.Algorithm,
-		ObfsMode: c.Obfuscation.Mode,
+		ObfsMode: obfLabel(c.Obfuscation),
 	}
 }
 

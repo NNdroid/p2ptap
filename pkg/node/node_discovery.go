@@ -390,7 +390,7 @@ func PrintBanner(n *Node) {
 	log.Info(" Node Name     : %s", n.nodeName)
 	log.Info(" Local Peer ID : %s", n.Host.ID())
 	log.Info(" TAP Interface : %s (IPv4: %s | IPv6: %s)", n.TAP.Name(), n.Config.TapIP, n.Config.TapIPv6)
-	log.Info(" P2P Strategy  : %s (Obfuscation: %s)", n.Config.TransportStrategy, n.Config.Obfuscation.Mode)
+	log.Info(" P2P Strategy  : %s (Obfuscation: %s)", n.Config.TransportStrategy, obfLabel(n.Config.Obfuscation))
 	log.Info(" Log Level     : %s", n.Config.LogLevel)
 	if n.Config.WebUI.Enable {
 		webIP := n.Config.WebUI.ListenIP

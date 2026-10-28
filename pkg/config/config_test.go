@@ -157,10 +157,10 @@ func TestLoadConfigFromFile(t *testing.T) {
 	} else {
 		t.Logf("[config] ✓ TransportStrategy=%s", cfg.TransportStrategy)
 	}
-	if cfg.Obfuscation.Mode != "block" || cfg.Obfuscation.BlockSize != 128 {
+	if cfg.Obfuscation.PaddingRules != "0 -> 400-600" {
 		t.Errorf("Obfuscation config not parsed correctly: %+v", cfg.Obfuscation)
 	} else {
-		t.Logf("[config] ✓ Obfuscation mode=%s blockSize=%d", cfg.Obfuscation.Mode, cfg.Obfuscation.BlockSize)
+		t.Logf("[config] ✓ Obfuscation padding_rules=%s", cfg.Obfuscation.PaddingRules)
 	}
 }
 
@@ -183,11 +183,11 @@ func TestConfigValidationErrors(t *testing.T) {
 	}
 
 	cfg = DefaultConfig()
-	cfg.Obfuscation.Mode = "invalid_mode"
+	cfg.Obfuscation.PaddingRules = "invalid band line"
 	if err := cfg.Validate(); err == nil {
-		t.Error("Expected error for invalid obfuscation mode, got nil")
+		t.Error("Expected error for invalid obfuscation padding_rules, got nil")
 	} else {
-		t.Logf("[config] ✓ invalid obfuscation mode rejected: %v", err)
+		t.Logf("[config] ✓ invalid obfuscation padding_rules rejected: %v", err)
 	}
 
 	cfg = DefaultConfig()
@@ -213,7 +213,7 @@ func TestLoadConfigIgnoresRemovedAutoThresholdBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a pre-removal config.json must still load: %v", err)
 	}
-	if cfg.Obfuscation.AutoDetectInterval != 60 {
+	if cfg.Obfuscation.Enable != true || cfg.Obfuscation.PaddingRules != "0 -> 400-600" {
 		t.Errorf("an unrelated obfuscation field was disturbed: %+v", cfg.Obfuscation)
 	}
 }
