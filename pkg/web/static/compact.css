@@ -30,7 +30,9 @@ html[data-theme="light"] body { background: #f1f5f9; }
 .header-identity { min-width: 0; }
 .header-logo { width: 36px; height: 36px; flex-shrink: 0; box-shadow: none; font-size: 1rem; }
 .header h1 { font-size: 1.25rem; background: none; color: var(--text-primary); -webkit-text-fill-color: currentColor; overflow-wrap: anywhere; }
-#nodePeerID { max-width: 480px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .7rem; }
+#nodePeerID { font-size: .7rem; }
+.peer-id-chip { font-family: monospace; font-size: .72rem; color: var(--text-secondary); cursor: pointer; border-bottom: 1px dashed var(--glass-border); padding-bottom: 1px; }
+.peer-id-chip:hover { color: var(--accent-cyan); border-bottom-color: var(--accent-cyan); }
 .header-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
 .header-status .status-pill { padding: 3px 0; background: none; border: 0; font-size: .72rem; }
 .header-status .status-dot { width: 6px; height: 6px; box-shadow: none; animation: none; }
@@ -41,12 +43,19 @@ html[data-theme="light"] body { background: #f1f5f9; }
 .header-meta .lang-select { padding: 7px 10px; font-size: .78rem; }
 .dashboard-tabs { position: sticky; top: 8px; z-index: 5; margin-bottom: 16px; gap: 4px; padding: 4px; }
 .dashboard-tabs button { padding: 10px 6px; }
-.dashboard-panel .glass-section { padding: 18px; margin-bottom: 16px; }
-.dashboard-panel .section-header { margin-bottom: 14px; gap: 10px; flex-wrap: wrap; }
+.dashboard-panel .glass-section { padding: 16px; margin-bottom: 14px; }
+.dashboard-panel .section-header { margin-bottom: 12px; gap: 10px; flex-wrap: wrap; }
 .dashboard-panel .section-title { font-size: .95rem; }
-.dashboard-details { margin-bottom: 16px; }
-.dashboard-details > summary { padding: 14px 16px; font-size: .88rem; }
-.dashboard-detail-body { padding: 0 10px 10px; }
+/* Collapsible panels used to be ticket-sized: a 43px row plus a 20px gap
+   meant only six fit on a screen, and each one said no more than a title. */
+.dashboard-details { margin-bottom: 8px; }
+.dashboard-details > summary { padding: 10px 14px; font-size: .85rem; }
+.dashboard-details[open] > summary { border-bottom: 1px solid var(--glass-border); }
+.dashboard-detail-body { padding: 10px 12px 12px; }
+.metrics-fold { margin-top: 8px; }
+.metrics-fold > summary { font-size: .72rem; color: var(--text-secondary); cursor: pointer; padding: 5px 0; }
+.metrics-fold > summary:hover { color: var(--text-primary); }
+.metrics-fold > .ext71 { margin-top: 8px; }
 .dashboard-panel .glass-card:hover, .dashboard-panel .glass-section:hover { transform: none; box-shadow: none; }
 .throughput-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; }
 .throughput-card { padding: 18px; min-width: 0; }
@@ -54,11 +63,15 @@ html[data-theme="light"] body { background: #f1f5f9; }
 .throughput-card .card-value { font-variant-numeric: tabular-nums; }
 .throughput-card #txSpeed, .throughput-card #rxSpeed { font-size: 2rem; line-height: 1.2; font-weight: 700; }
 .traffic-total { display: flex; flex-wrap: wrap; gap: 5px 16px; margin-top: 10px; font-size: .75rem; color: var(--text-secondary); }
-.overview-info { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: 14px; padding: 12px 18px; margin-bottom: 16px; }
-.overview-info dt { color: var(--text-secondary); font-size: .7rem; margin-bottom: 4px; }
+/* Address/strategy facts read as one continuous strip rather than three
+   floating boxes, so they no longer compete with the charts for weight. */
+.overview-info { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: 14px; padding: 0; margin-bottom: 14px; overflow: hidden; }
+.overview-info > div { padding: 10px 14px; border-right: 1px solid var(--glass-border); min-width: 0; }
+.overview-info > div:last-child { border-right: 0; }
+.overview-info dt { color: var(--text-secondary); font-size: .68rem; margin-bottom: 3px; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .overview-info dd { font-size: .8rem; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .overview-info #tapIPv4, .overview-info #tapIPv6 { font-family: monospace; }
-#dashboard-overview .ext11 { height: 230px; }
+#dashboard-overview .ext11 { height: 160px; }
 .peer-list-toolbar .header-actions { flex-wrap: wrap; }
 .compact-peer-table { table-layout: fixed; width: 100%; }
 .compact-peer-table th:nth-child(1) { width: 28%; }
@@ -99,12 +112,27 @@ html[data-theme="light"] body { background: #f1f5f9; }
 .idle-title { font-size: .9rem; }
 .idle-desc { font-size: .78rem; max-width: 580px; }
 .packet-summary-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+
+/* Capture sampling controls — a single quiet row above the frame table so the
+   knobs do not compete with the start/clear actions in the section header. */
+.pcap-params { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: 12px 0 16px; padding: 10px 14px; background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: 10px; }
+.pcap-param { display: flex; align-items: center; gap: 8px; font-size: .74rem; color: var(--text-secondary); min-height: 34px; }
+/* Scoped to .pcap-params so it outranks the generic .form-input padding. The
+   select needs the element selector too: the global glass-select block sets a
+   wide right padding for the arrow and wins on plain class specificity.
+   Both controls get the same height so the row reads as one line. */
+.pcap-params .pcap-param-input { width: 104px; height: 30px; padding: 4px 10px; font-size: .76rem; line-height: 1.2; }
+.pcap-params select.pcap-param-input { padding: 4px 26px 4px 10px; }
+.pcap-param--check { gap: 8px; }
+.pcap-params .p2p-switch--sm { margin: 0; }
+
 @media (max-width: 760px) {
     .header { padding: 14px; }
     .header-title-box { flex-basis: 100%; }
     .header-meta { width: 100%; justify-content: flex-end; }
     .header-meta .lang-select { margin-right: auto; }
     #nodePeerID { max-width: 100%; }
+    .peer-id-chip { font-size: .68rem; }
     .diag-toolbar { grid-template-columns: minmax(0, 1fr); }
     .diag-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .diag-actions .btn-glass { white-space: normal; justify-content: center; padding: 8px 6px; font-size: .72rem; }
@@ -122,10 +150,11 @@ html[data-theme="light"] body { background: #f1f5f9; }
     .throughput-card #txSpeed, .throughput-card #rxSpeed { font-size: 1.4rem; }
     .throughput-card .card-label { font-size: .78rem; }
     .traffic-total { font-size: .7rem; gap: 4px 10px; }
-    .overview-info { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 12px 14px; }
-    .overview-info > :last-child { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 10px; }
+    .overview-info { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .overview-info > div { padding: 9px 12px; }
+    .overview-info > :last-child { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 10px; border-right: 0; border-top: 1px solid var(--glass-border); }
     .overview-info > :last-child dt { margin: 0; }
-    #dashboard-overview .ext11 { height: 190px; }
+    #dashboard-overview .ext11 { height: 140px; }
     .compact-peer-table, .compact-peer-table tbody { display: block; }
     .compact-peer-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
     .compact-peer-table tbody { display: grid; gap: 12px; }
@@ -139,3 +168,8 @@ html[data-theme="light"] body { background: #f1f5f9; }
     .peer-details-modal { padding: 16px; }
     .peer-detail-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; }
 }
+
+/* Route Explorer headers: the 9 columns are wider than the panel, and the
+   container already scrolls horizontally (overflow-x:auto). Keeping each
+   header on one line reads better than wrapping them to two lines. */
+.route-table thead th { white-space: nowrap; }

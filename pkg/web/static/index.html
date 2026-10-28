@@ -149,8 +149,8 @@
                     <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-activity"/></svg><span data-i18n="dashboard_bandwidth">Live Bandwidth Waveform (Tx / Rx)</span>
                 </div>
                 <div class="ext6">
-                    <span class="ext7"><span class="ext8"></span> Tx B/s</span>
-                    <span class="ext9"><span class="ext10"></span> Rx B/s</span>
+                    <span class="ext7"><span class="ext8"></span> Tx</span>
+                    <span class="ext9"><span class="ext10"></span> Rx</span>
                 </div>
             </div>
             <div class="ext11">
@@ -345,7 +345,7 @@
             </div>
 
             <div class="table-responsive">
-                <table>
+                <table class="route-table">
                     <thead>
                         <tr>
                             <th data-i18n="col_dest">Destination Node</th>
@@ -473,8 +473,6 @@
                     </button>
                 <button type="button" class="btn-glass" id="btnRunConnectivity" data-onclick="runConnectivityDiagnosis()"><svg class="ico btn-ico" aria-hidden="true"><use href="#ic-wrench"/></svg><span data-i18n="dashboard_diagnose">Diagnose</span></button></div>
             </div>
-            <!-- Quick Peer Selector Chips -->
-            <div class="diag-quick-chips" id="diagQuickChips"></div>
             <!-- Modern Diagnostic Result Container (Visual View) -->
             <div id="diagVisualContainer" class="diag-visual-container">
                 <div class="diag-idle-state">
@@ -549,6 +547,10 @@
                     <svg class="ico sec-ico" aria-hidden="true"><use href="#ic-cpu"/></svg><strong data-i18n="sys_health_title" class="ext49">System & Runtime Health</strong>
                     <span class="pill-badge role-static ext50" data-i18n="badge_active">Active</span>
                 </div>
+                <!-- Twelve Go runtime numbers are noise for someone running a VPN.
+                     They stay reachable for performance triage, but collapsed. -->
+                <details class="metrics-fold">
+                <summary data-i18n="sys_runtime_toggle">Go runtime metrics — heap, GC, goroutines</summary>
                 <div class="ext71">
                     <!-- Left column -->
                     <div class="ext72"><span data-i18n="lbl_heap" class="ext73">Heap Alloc / Sys:</span><strong id="sysHeap" class="ext33">—</strong></div>
@@ -565,6 +567,7 @@
                     <div class="ext72"><span data-i18n="lbl_cpu_cores" class="ext73">CPU Cores:</span><strong id="sysNumCPU" class="ext35">—</strong></div>
                     <div class="ext72"><span data-i18n="lbl_process_uptime" class="ext73">Process Uptime:</span><strong id="sysUptime" class="ext35">—</strong></div>
                 </div>
+                </details>
             </div>
 
             <!-- Security & Crypto Status -->
@@ -806,6 +809,32 @@
                 <span class="ext33">tx</span> = 本机发出，<span class="ext96">rx</span> = 本机收到。
                 <span class="ext33">点击任意一行</span>可查看完整详情与原始帧十六进制。
             </p>
+            <!-- Capture sampling controls. These drive /api/pcap/set-params,
+                 which the backend has always supported; without them the only
+                 way to change the sampling rate was to edit the config and
+                 restart. 1:1 with no cap is the default and captures every
+                 frame. -->
+            <div class="pcap-params">
+                <label class="pcap-param">
+                    <span data-i18n="pcap_sample_every">采样比</span>
+                    <select id="pcapSampleEvery" class="form-input pcap-param-input" data-onchange="pcapSetParams()">
+                        <option value="1">1:1</option>
+                        <option value="2">1:2</option>
+                        <option value="5">1:5</option>
+                        <option value="10">1:10</option>
+                        <option value="50">1:50</option>
+                        <option value="100">1:100</option>
+                    </select>
+                </label>
+                <label class="pcap-param">
+                    <span data-i18n="pcap_max_rate">限速 (帧/秒, 0=不限)</span>
+                    <input type="number" id="pcapMaxRate" class="form-input pcap-param-input" min="0" max="100000" step="100" data-onchange="pcapSetParams()">
+                </label>
+                <label class="pcap-param pcap-param--check">
+                    <input type="checkbox" id="pcapIdleSkip" class="p2p-switch p2p-switch--sm" data-onchange="pcapSetParams()">
+                    <span data-i18n="pcap_idle_skip">空闲跳过</span>
+                </label>
+            </div>
             <div class="ext123 table-responsive" id="pcapScroll">
                 <table class="pcap-table">
 
@@ -1374,6 +1403,7 @@
     <!-- Toast Banner -->
     <div id="toast" class="toast">Configuration saved successfully!</div>
 
+    <!--P2PTAP_LOCALE_PACK-->
     <script src="app.js"></script>
 </body>
 </html>

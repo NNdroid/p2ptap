@@ -416,6 +416,8 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			// The auth-prompt page must not be cached, otherwise a token
 			// change is invisible until a hard refresh.
 			w.Header().Set("Cache-Control", "no-store")
+			serveLocalizedIndex(w, r, staticSub)
+			return
 		}
 		gzipStatic.ServeHTTP(w, r)
 	})
@@ -2285,6 +2287,100 @@ func (s *Server) hostOrNil() host.Host {
 var gzipWriterPool = sync.Pool{New: func() any { return gzip.NewWriter(nil) }}
 
 // gzipStaticMiddleware wraps a static file handler with transparent gzip.
+// localePlaceholder marks the spot in index.html where the server injects the
+// one locale pack this client needs. It is an HTML comment so a statically
+// served copy (no server, e.g. opened from disk) still works — it just renders
+// English until the user picks a language.
+const localePlaceholder = "<!--P2PTAP_LOCALE_PACK-->"
+
+// supportedLocales are the packs shipped under static/lang/. English is listed
+// but has no pack: it is inlined in app.js because every missing key resolves
+// back to it, so it must always be present.
+var supportedLocales = []string{"en", "zh-CN", "zh-TW", "ja", "de", "es", "fr"}
+
+// negotiateLocale picks a pack from Accept-Language the way the browser would:
+// an exact tag beats a two-letter prefix, and a higher q-value beats a lower
+// one. Falls back to English, which needs no extra download.
+func negotiateLocale(r *http.Request) string {
+	header := r.Header.Get("Accept-Language")
+	if header == "" {
+		return "en"
+	}
+	best, bestQ, bestExact := "en", 0.0, false
+	for _, part := range strings.Split(header, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		tag, q := part, 1.0
+		if i := strings.IndexByte(part, ';'); i >= 0 {
+			tag = strings.TrimSpace(part[:i])
+			rest := strings.TrimSpace(part[i+1:])
+			if v, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(rest, "q=")), 64); err == nil {
+				q = v
+			}
+		}
+		if len(tag) < 2 {
+			continue
+		}
+		for _, s := range supportedLocales {
+			exact := strings.EqualFold(tag, s)
+			prefix := !exact && strings.EqualFold(tag[:2], s[:2])
+			if !exact && !prefix {
+				continue
+			}
+			if q > bestQ || (q == bestQ && exact && !bestExact) {
+				best, bestQ, bestExact = s, q, exact
+			}
+		}
+	}
+	return best
+}
+
+// serveLocalizedIndex renders index.html with only the locale pack this client
+// asked for. All seven languages used to be inlined into app.js — 379KB of its
+// 879KB, and roughly 103KB of its 214KB gzipped — for a reader who can only
+// ever use one of them.
+func serveLocalizedIndex(w http.ResponseWriter, r *http.Request, staticFS fs.FS) {
+	raw, err := fs.ReadFile(staticFS, "index.html")
+	if err != nil {
+		http.Error(w, "dashboard index unavailable", http.StatusInternalServerError)
+		return
+	}
+	pack := ""
+	if lang := negotiateLocale(r); lang != "en" {
+		// Only inject a pack that exists. Referencing a missing file would turn
+		// a cosmetic fallback into a 404 on a secondary request.
+		if _, statErr := fs.Stat(staticFS, "lang/"+lang+".js"); statErr == nil {
+			// The hint lets the UI open in the negotiated language instead of
+			// waiting for the user to pick one from the dropdown.
+			pack = `<script>window.p2ptapLocaleHint="` + lang + `";</script>` +
+				"\n\t" + `<script src="lang/` + lang + `.js"></script>`
+		}
+	}
+	body := strings.Replace(string(raw), localePlaceholder, pack, 1)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// gzipStaticWriter compresses purely on Content-Type — the Accept-Encoding
+	// check lives in gzipStaticMiddleware, which this path does not go through.
+	// Honour the client's advertisement here instead of always compressing.
+	if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+		return
+	}
+	gw := &gzipStaticWriter{ResponseWriter: w, state: gzipDecidePending}
+	defer func() {
+		if gw.gz != nil {
+			_ = gw.gz.Close()
+			gzipWriterPool.Put(gw.gz)
+			gw.gz = nil
+		}
+	}()
+	gw.WriteHeader(http.StatusOK)
+	_, _ = gw.Write([]byte(body))
+}
+
 func gzipStaticMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {

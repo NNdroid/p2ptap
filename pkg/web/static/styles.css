@@ -869,21 +869,6 @@
             box-shadow: 0 0 12px rgba(167, 139, 250, 0.25);
         }
 
-        /* Quick Peer Chips */
-        .diag-quick-chips {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            overflow-x: auto;
-            padding-bottom: 6px;
-            margin-bottom: 16px;
-            scrollbar-width: none;
-        }
-
-        .diag-quick-chips::-webkit-scrollbar {
-            display: none;
-        }
-
         /* Visual Container */
         .diag-visual-container {
             display: flex;
