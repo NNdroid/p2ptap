@@ -240,7 +240,7 @@
                 pcap_dup_repeat: "Repeated frame — identical to the previous row (mDNS / multicast retransmit)",
                 pcap_dup_repeat_row: "Repeated frame — same payload as the row above. This is normal for mDNS / multicast re-emits, not a render duplicate.",
                 pcap_modal_title: "🔬 Packet Details",
-                pcap_modal_raw: "Full hex (raw frame)",
+                pcap_modal_raw: "Frame head hex (first 64 bytes)",
                 pcap_copy_hex: "📋 Copy Hex",
                 pcap_dir_tx: "Sent by host (tx)",
                 pcap_dir_rx: "Received (rx)",
@@ -1091,7 +1091,7 @@
                 pcap_dup_repeat: "重复帧 — 与上一行完全一致 (mDNS / 多播重传)",
                 pcap_dup_repeat_row: "重复帧 — 与上一行 payload 完全相同。这是 mDNS / 多播重传的正常现象，不是渲染重复。",
                 pcap_modal_title: "🔬 数据包详情",
-                pcap_modal_raw: "完整十六进制 (raw frame)",
+                pcap_modal_raw: "帧头十六进制 (前 64 字节)",
                 pcap_copy_hex: "📋 复制 Hex",
                 pcap_dir_tx: "本机发出 (tx)",
                 pcap_dir_rx: "本机收到 (rx)",
@@ -1837,7 +1837,7 @@
                 pcap_dup_repeat: "重複幀 — 與上一行完全相同 (mDNS / 多播重傳)",
                 pcap_dup_repeat_row: "重複幀 — 與上一行 payload 完全相同。這是 mDNS / 多播重傳的正常現象，不是渲染重複。",
                 pcap_modal_title: "🔬 封包詳情",
-                pcap_modal_raw: "完整十六進位 (raw frame)",
+                pcap_modal_raw: "訊框標頭十六進位 (前 64 位元組)",
                 pcap_copy_hex: "📋 複製 Hex",
                 pcap_dir_tx: "本機發出 (tx)",
                 pcap_dir_rx: "本機收到 (rx)",
@@ -2650,7 +2650,7 @@
                 pcap_dup_repeat: "重複フレーム — 直前行と同一 (mDNS / マルチキャスト再送)",
                 pcap_dup_repeat_row: "重複フレーム — 上の行と payload が完全一致。mDNS / マルチキャスト再送の正常動作であり、描画の重複ではありません。",
                 pcap_modal_title: "🔬 パケット詳細",
-                pcap_modal_raw: "完全な16進数 (raw frame)",
+                pcap_modal_raw: "フレーム先頭の16進数 (先頭64バイト)",
                 pcap_copy_hex: "📋 Hex をコピー",
                 pcap_dir_tx: "ホストから送信 (tx)",
                 pcap_dir_rx: "受信 (rx)",
@@ -3462,7 +3462,7 @@
                 pcap_dup_repeat: "Wiederholtes Frame — identisch zur vorherigen Zeile (mDNS / Multicast-Re-Transmit)",
                 pcap_dup_repeat_row: "Wiederholtes Frame — gleicher Payload wie die vorherige Zeile. Das ist normales mDNS-/Multicast-Verhalten, kein Render-Duplikat.",
                 pcap_modal_title: "🔬 Paketdetails",
-                pcap_modal_raw: "Vollständiges Hex (raw frame)",
+                pcap_modal_raw: "Frame-Header-Hex (erste 64 Bytes)",
                 pcap_copy_hex: "📋 Hex kopieren",
                 pcap_dir_tx: "Vom Host gesendet (tx)",
                 pcap_dir_rx: "Empfangen (rx)",
@@ -4274,7 +4274,7 @@
                 pcap_dup_repeat: "Trama repetida — idéntica a la fila anterior (reenvío mDNS / multicast)",
                 pcap_dup_repeat_row: "Trama repetida — mismo payload que la fila de arriba. Comportamiento normal de mDNS / multicast, no duplicado de render.",
                 pcap_modal_title: "🔬 Detalles del Paquete",
-                pcap_modal_raw: "Hex completo (raw frame)",
+                pcap_modal_raw: "Hex de cabecera (primeros 64 bytes)",
                 pcap_copy_hex: "📋 Copiar Hex",
                 pcap_dir_tx: "Enviado por host (tx)",
                 pcap_dir_rx: "Recibido (rx)",
@@ -5086,7 +5086,7 @@
                 pcap_dup_repeat: "Trame répétée — identique à la ligne précédente (réémission mDNS / multicast)",
                 pcap_dup_repeat_row: "Trame répétée — payload identique à la ligne précédente. Comportement normal du mDNS / multicast, pas un doublon de rendu.",
                 pcap_modal_title: "🔬 Détails du Paquet",
-                pcap_modal_raw: "Hex complet (raw frame)",
+                pcap_modal_raw: "Hex d'en-tête (64 premiers octets)",
                 pcap_copy_hex: "📋 Copier Hex",
                 pcap_dir_tx: "Émis par l'hôte (tx)",
                 pcap_dir_rx: "Reçu (rx)",
@@ -13795,12 +13795,20 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             await pcapRefreshState();
         }
 
-        // Format a raw base64 frame into a readable hex+ASCII dump.
-        function pcapHexDump(b64) {
+        // Format a plain hex string (two chars per byte, as the backend puts in
+        // CapturedFrame.Hex) into a readable hex+ASCII dump. The backend ships
+        // only the frame head rather than the whole frame, so this view is
+        // header-only by design.
+        function pcapHexDump(hexStr) {
             try {
-                const bin = atob(b64);
-                const bytes = new Uint8Array(bin.length);
-                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                const s = String(hexStr || '');
+                const n = Math.floor(s.length / 2);
+                const bytes = new Uint8Array(n);
+                for (let i = 0; i < n; i++) {
+                    const v = parseInt(s.substr(i * 2, 2), 16);
+                    if (isNaN(v)) throw new Error('bad hex');
+                    bytes[i] = v;
+                }
                 const lines = [];
                 const row = 16;
                 for (let off = 0; off < bytes.length; off += row) {
@@ -13850,7 +13858,7 @@ window.toggleSubnetRoute = async function(cidr, enable) {
             const tree = buildProtocolTree(f);
 
             document.getElementById('pcapModalBody').innerHTML = metaHtml + tree;
-            document.getElementById('pcapModalHex').value = pcapHexDump(f.raw || '');
+            document.getElementById('pcapModalHex').value = pcapHexDump(f.hex || '');
             document.getElementById('pcapModal').classList.add('active');
         }
 

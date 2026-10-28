@@ -600,8 +600,8 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 		limit := 500
 		if v := r.URL.Query().Get("limit"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				// Clamp: each frame carries a base64 copy of the full payload,
-				// so an unbounded limit lets one request pull tens of MB.
+				// Clamp: every frame serialises its parsed fields plus a hex
+				// dump, so an unbounded limit lets one request pull many MB.
 				if n > maxPcapPageSize {
 					n = maxPcapPageSize
 				}

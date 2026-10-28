@@ -1,7 +1,6 @@
 package web
 
 import (
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"net"
@@ -28,8 +27,9 @@ const (
 )
 
 // maxPcapPageSize caps how many frames a single /api/pcap/packets response may
-// return. Every frame embeds a base64 copy of the full payload, so an
-// unbounded page size would let one request pull tens of megabytes.
+// return. Each frame still serialises its parsed fields, the one-line summary
+// and a hex dump of the head, so an unbounded page size would let one request
+// pull megabytes and stall the panel while it parses the JSON.
 const maxPcapPageSize = 2000
 
 // CapturedFrame is a single raw TAP/Ethernet frame captured by the pcap subsystem.
@@ -61,7 +61,6 @@ type CapturedFrame struct {
 	FromPeer  string     `json:"from_peer,omitempty"` // node that originated this frame (peer short ID, or "self"/"broadcast")
 	ToPeer    string     `json:"to_peer,omitempty"`   // node this frame is destined for (peer short ID, or "self"/"broadcast")
 	Hex       string     `json:"hex"`                 // first 64 bytes as hex (display)
-	RawB64    string     `json:"raw,omitempty"`       // full frame base64 (for reload / deep inspection)
 }
 
 // PeerResolver maps an Ethernet MAC address to a human-readable node label
@@ -265,10 +264,11 @@ func (p *PacketCapture) Toggle() bool {
 func (p *PacketCapture) Clear() {
 	p.mu.Lock()
 	// Zero the live slots as well as resetting the counters: each slot holds a
-	// few hundred bytes of strings (Hex + RawB64 + protocol summary), so merely
-	// forgetting them would keep ~cap*500B of dead strings pinned by the ring
-	// array until the next overwrite sweep. Clear is an admin action, not a hot
-	// path, so the one-time O(count) sweep is worth releasing them immediately.
+	// few hundred bytes of strings (Hex dump + addresses + protocol summary), so
+	// merely forgetting them would keep ~cap*500B of dead strings pinned by the
+	// ring array until the next overwrite sweep. Clear is an admin action, not a
+	// hot path, so the one-time O(count) sweep is worth releasing them
+	// immediately.
 	for i := 0; i < p.count; i++ {
 		idx := p.start + i
 		if idx >= p.cap {
@@ -751,7 +751,6 @@ func parseFrame(seq uint64, dir CaptureDir, frame []byte, maxHex int, resolver P
 		maxHex = len(frame)
 	}
 	cf.Hex = hexDump(frame[:maxHex])
-	cf.RawB64 = base64.StdEncoding.EncodeToString(frame)
 	return cf
 }
 
