@@ -2,7 +2,7 @@
 
 本目录通过 `go.mod` 的 `replace github.com/libp2p/go-libp2p v0.50.0 => ./pkg/go-libp2p`
 以源码形式参与构建。基线为上游 **v0.50.0**（2026-08-12 发布，当前最新版），
-在此之上维护了 **16 处**本地代码补丁（第 1–5、7、8–13、15、17–19 条）。
+在此之上维护了 **17 处**本地代码补丁（第 1–5、7、8–13、15、17–20 条）。
 
 第 **6**、**14**、**16** 条是「已实现但回退」的决策记录：代码已恢复上游原样，
 条目本身保留，说明**为什么不能这样改**——这三处都曾以「抗 DPI」或「提升可达性」
@@ -321,6 +321,26 @@
   `TestParseIPFSGoLogEnv/empty_string_uses_default_level` 把期望值从
   `slog.LevelError` 改为 `slog.LevelWarn`——该用例正是把上游默认级别钉死的断言，
   不跟着改必失败。其余三个子用例都显式传入级别字符串，不受影响。
+
+## 20. `p2p/transport/quicreuse/config.go` — QUIC 流控窗口按 VPN 场景放大
+
+- `InitialStreamReceiveWindow` 512KB（quic-go 默认，上游未设）→ **1MB**；
+  `MaxStreamReceiveWindow` 10MB → **32MB**；
+  `InitialConnectionReceiveWindow` → **4MB**；
+  `MaxConnectionReceiveWindow` 15MB → **64MB**。
+- 原因：流控窗口是单流的**硬性吞吐上限**——在途字节不可能超过窗口，所以单流上限 =
+  窗口 / RTT。上游默认值面向请求/响应流量，6–10MB 的流窗口在 100ms 链路上只允许
+  ~490–800 Mbps，200ms 掉到 250–400 Mbps；初始 512KB 更让每次大流量传输的头几百毫秒
+  都在慢启动窗口里爬。p2ptap 是 VPN，单条流就是一次大文件传输，窗口直接决定用户看到的速度。
+- 不占内存：这些值是**信用额度**而非预分配缓冲，quic-go 只为真实在途的载荷分配内存。
+  32MB/64MB 的取值按「覆盖 200ms RTT 下 1.28 Gbps」留足余量，实际在途量受 BDP 限制，
+  手机上通常只有几百 KB。
+- 生效范围：`quicreuse` 是所有 QUIC 与 WebTransport 连接的公共出口
+  （`ConnManager.clientConfig` 与 `newQuicListener` 都 clone 这份配置），因此 QUIC、
+  WebTransport 两条腿同时受益，无需逐 transport 接线。**对端也要跑这个版本**——
+  接收窗口由连接两端各自声明，只改一端时提升的是对方发给你的方向。
+- 不新增配置项：窗口由链路 BDP 决定，与用户场景无关，做成运行时开关只会制造
+  「调错了更慢」的可能。将来要调就改这里一处。
 
 ## 非代码附加目录
 
