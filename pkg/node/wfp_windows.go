@@ -118,7 +118,10 @@ type FWPM_FILTER0 struct {
 	FilterCondition     *FWPM_FILTER_CONDITION0
 	Action              FWPM_ACTION0
 	Context             uint64 // union { UINT64 rawContext; GUID *providerContextKey; }
-	Reserved            uintptr
+	// Reserved is a fixed UINT64 in the C struct (not a pointer).  Using
+	// uintptr here would shrink the struct by 4 bytes on 32-bit Windows and
+	// misalign FilterID/EffectiveWeight; uint64 keeps the ABI exact on both.
+	Reserved            uint64
 	FilterID            uint64
 	// EffectiveWeight is written back by the WFP engine. It MUST be present:
 	// without it the struct we hand to FwpmFilterAdd0 is 16 bytes shorter than

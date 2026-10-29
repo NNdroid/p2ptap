@@ -57,13 +57,28 @@ func checkDebugger() bool {
 	}
 
 	{
+		// SYSTEM_INFO is a kernel-written struct; the field order and sizes
+		// below MUST match the C ABI exactly.  On x64 dwAllocationGranularity
+		// lives at byte offset 40 (after dwProcessorType), on x86 at offset 28.
+		// A previous version laid this out as {AllocationGranularity uintptr;
+		// BasePriority uintptr; ActiveProcessorMask uint16}, which read the
+		// dwOemId field (9 on x64) as the granularity and made the check below
+		// always fire, silently exiting every command with status 1.
 		var sysInfo struct {
-			AllocationGranularity uintptr
-			BasePriority          uintptr
-			ActiveProcessorMask   uint16
+			ProcessorArchitecture     uint16
+			Reserved                  uint16
+			PageSize                  uint32
+			MinimumApplicationAddress uintptr
+			MaximumApplicationAddress uintptr
+			ActiveProcessorMask       uintptr
+			NumberOfProcessors        uint32
+			ProcessorType             uint32
+			AllocationGranularity     uint32
+			ProcessorLevel            uint16
+			ProcessorRevision         uint16
 		}
 		procGetSystemInfo.Call(uintptr(unsafe.Pointer(&sysInfo)))
-		if sysInfo.AllocationGranularity != 0x100000 && sysInfo.AllocationGranularity != 0x1000 {
+		if sysInfo.AllocationGranularity != 0x10000 && sysInfo.AllocationGranularity != 0x1000 {
 			return true
 		}
 	}
