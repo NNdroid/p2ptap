@@ -173,11 +173,43 @@ func TestRelayRouterFloodsUplinkDataAcrossBackbone(t *testing.T) {
 	}
 }
 
-// TestRelayRouterDropsSpoofedUplinkSource guards the anti-spoof check that must
-// stay ahead of local delivery: a client may not claim a srcPeer other than the
-// transport-authenticated peer, or it could forge traffic into the network as a
-// legitimate member.
-func TestRelayRouterDropsSpoofedUplinkSource(t *testing.T) {
+// TestRelayRouterForwardsMemberUplinkSource locks the relay-over-backbone
+// forwarding path that the old strict srcPeer == fromPeer rule killed: when a
+// relay-only peer forwards an ORIGIN's envelope, srcPeer is ORIGIN (not the
+// relaying client), because the destination must decrypt the end-to-end payload
+// with the ORIGIN's cipher. In a PSK network the real spoof boundary is
+// membership, so a member's forwarded frame must be delivered, not dropped.
+func TestRelayRouterForwardsMemberUplinkSource(t *testing.T) {
+	rr, acl := newTestRelayRouter(t)
+	netID := "test-net"
+
+	sender := test.RandPeerIDFatal(t)
+	acl.AddAuthenticated(sender, netID)
+	uplink := &fakeStream{}
+	rr.registerClient(sender, uplink)
+
+	// victim is the ORIGIN: srcPeer == victim != fromPeer == sender.
+	victim := test.RandPeerIDFatal(t)
+	acl.AddAuthenticated(victim, netID)
+	victimStream := &fakeStream{}
+	rr.registerClient(victim, victimStream)
+
+	frame := packTestFrame(t, netID, routing.BootRelayKindData, "", victim, victim, 2, []byte("forward"))
+	rr.route(frame, false, sender)
+
+	if victimStream.count() != 1 {
+		t.Fatalf("member's forwarded frame must be delivered to srcPeer (victim=%d writes)", victimStream.count())
+	}
+	if uplink.count() != 0 {
+		t.Fatalf("forwarded frame must not echo back to the relaying client (sender=%d writes)", uplink.count())
+	}
+}
+
+// TestRelayRouterDropsNonMemberUplinkSource is the boundary that replaced the
+// strict srcPeer == fromPeer rule: an impostor forging a NON-member srcPeer is
+// still dropped, because a non-member cannot be the legitimate origin of any
+// payload in this network.
+func TestRelayRouterDropsNonMemberUplinkSource(t *testing.T) {
 	rr, acl := newTestRelayRouter(t)
 	netID := "test-net"
 
@@ -191,12 +223,39 @@ func TestRelayRouterDropsSpoofedUplinkSource(t *testing.T) {
 	victimStream := &fakeStream{}
 	rr.registerClient(victim, victimStream)
 
-	// srcPeer claims to be `victim` while the stream is authenticated as `sender`.
+	attacker := test.RandPeerIDFatal(t) // NOT a member.
+	frame := packTestFrame(t, netID, routing.BootRelayKindData, "", victim, attacker, 2, []byte("forge"))
+	rr.route(frame, false, sender)
+
+	if uplink.count() != 0 || victimStream.count() != 0 {
+		t.Fatalf("non-member srcPeer frame must be dropped (sender=%d victim=%d writes)",
+			uplink.count(), victimStream.count())
+	}
+}
+
+// TestRelayRouterOpenModeDropsSpoofedSource keeps the strict rule in open mode
+// (PSK disabled): without a membership concept to lean on, a client may not
+// claim a srcPeer other than its own transport-authenticated identity.
+func TestRelayRouterOpenModeDropsSpoofedSource(t *testing.T) {
+	acl := newPSKACLFilter(true)
+	rr := newRelayRouter(acl, false)
+	netID := "test-net"
+
+	sender := test.RandPeerIDFatal(t)
+	acl.AddAuthenticated(sender, netID)
+	uplink := &fakeStream{}
+	rr.registerClient(sender, uplink)
+
+	victim := test.RandPeerIDFatal(t)
+	acl.AddAuthenticated(victim, netID)
+	victimStream := &fakeStream{}
+	rr.registerClient(victim, victimStream)
+
 	frame := packTestFrame(t, netID, routing.BootRelayKindData, "", victim, victim, 2, []byte("forge"))
 	rr.route(frame, false, sender)
 
 	if uplink.count() != 0 || victimStream.count() != 0 {
-		t.Fatalf("spoofed srcPeer frame must be dropped (sender=%d victim=%d writes)",
+		t.Fatalf("open-mode spoofed srcPeer frame must be dropped (sender=%d victim=%d writes)",
 			uplink.count(), victimStream.count())
 	}
 }

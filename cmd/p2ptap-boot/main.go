@@ -1048,23 +1048,42 @@ func (r *relayRouter) route(data []byte, fromMesh bool, fromPeer peer.ID) {
 		log.Debug("[boot-relay] unpack error: %v", err)
 		return
 	}
-	// Anti-spoofing: a local client uplink must not forge a srcPeer other than its own peer ID.
-	if !fromMesh && srcPeer != fromPeer {
-		log.Warn("[boot-relay] drop spoofed frame: stream peer %s claims src %s", fromPeer.ShortString(), srcPeer.ShortString())
-		unauthTracker.Record(unauthTypeSpoofed, fromPeer.ShortString(),
-			fmt.Sprintf("Spoofed srcPeer: stream peer claims %s", srcPeer.ShortString()))
-		return
-	}
-	// Source isolation: a LOCAL client uplink must come from an authenticated
-	// peer. For a backbone frame the origin is a client of another boot; we
-	// cannot look it up in our ACL, so we trust the in-band netID and enforce
-	// isolation at the destination instead (a frame whose netID does not match
-	// the destination's network is dropped on local delivery).
-	if !fromMesh && r.pskEnabled && r.acl.NetworkOf(srcPeer) == "" {
-		log.Debug("[boot-relay] drop unauthenticated source %s", srcPeer.ShortString())
-		unauthTracker.Record(unauthTypeRelayFrame, srcPeer.ShortString(),
-			"Data frame dropped: unauthenticated source")
-		return
+	// Anti-spoofing / source isolation for a LOCAL client uplink.
+	//
+	// The old rule required srcPeer == fromPeer, which rejected EVERY
+	// legitimately-forwarded relay-over-backbone frame: a relay hop forwards an
+	// origin's envelope with srcPeer = ORIGIN (not the relaying client's own ID),
+	// because the destination must decrypt the end-to-end payload with the
+	// ORIGIN's cipher. That silent drop was the "relay connects but no data"
+	// failure — every frame a relay-only peer forwarded via a boot died here and
+	// the destination never saw a byte.
+	//
+	// The real spoof boundary is network MEMBERSHIP: srcPeer must be an
+	// authenticated member of this PSK network. An impostor forging another
+	// member's srcPeer still cannot deliver anything, because the destination
+	// opens the payload end-to-end with srcPeer's cipher and fails to decrypt.
+	// In open mode (PSK disabled) there is no membership concept, so keep the
+	// strict srcPeer == fromPeer rule there.
+	//
+	// For a backbone frame the origin is a client of another boot; we cannot
+	// look it up in our ACL, so we trust the in-band netID and enforce isolation
+	// at the destination instead (a frame whose netID does not match the
+	// destination's network is dropped on local delivery).
+	if !fromMesh {
+		if r.pskEnabled {
+			if r.acl.NetworkOf(srcPeer) == "" {
+				log.Warn("[boot-relay] drop frame from %s claiming src %s: src not a member of this network",
+					fromPeer.ShortString(), srcPeer.ShortString())
+				unauthTracker.Record(unauthTypeSpoofed, srcPeer.ShortString(),
+					fmt.Sprintf("Non-member src: %s claims %s", fromPeer.ShortString(), srcPeer.ShortString()))
+				return
+			}
+		} else if srcPeer != fromPeer {
+			log.Warn("[boot-relay] drop spoofed frame: stream peer %s claims src %s", fromPeer.ShortString(), srcPeer.ShortString())
+			unauthTracker.Record(unauthTypeSpoofed, fromPeer.ShortString(),
+				fmt.Sprintf("Spoofed srcPeer: stream peer claims %s", srcPeer.ShortString()))
+			return
+		}
 	}
 	// Anti-spoofing (source-network): the in-band netID is set by the sender and
 	// is fully forgeable, so it MUST equal the authenticated sender's real

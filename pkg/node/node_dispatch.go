@@ -810,7 +810,24 @@ func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
 
 	// 2. The same eligible, hop-bounded route used by TAP and relay transit.
 	if route, ok := n.overlayRoute(targetPeer, routing.MaxRelayTTL, ""); ok && route.NextHop != targetPeer {
-		return route.NextHop
+		// A boot next hop is a relay-over-backbone bridge, not an overlay-relay
+		// peer: it is only usable while its uplink is alive. The Peek-Map branch
+		// above checks that, but a route-table hop must be held to the same
+		// standard — canEgressToPeer gates boot hops on hasBootRelayUplink, so
+		// returning a dead boot would just get the frame rejected, and without a
+		// retry nudge the dead uplink would never be re-established (the only
+		// other nudge lives in the last-resort branch below). Fall through to the
+		// fallback scan so a healthy sibling can win instead of a dead boot.
+		if n.isBootstrapPeer(route.NextHop) {
+			if n.hasBootRelayUplink(route.NextHop) && !n.isBootRelayBlacklisted(route.NextHop) {
+				return route.NextHop
+			}
+			if !n.isBootRelayBlacklisted(route.NextHop) {
+				go n.ensureRelayAuth(peer.AddrInfo{ID: route.NextHop})
+			}
+		} else {
+			return route.NextHop
+		}
 	}
 
 	// 3. Fallback when the route table has no entry for the target yet:
@@ -863,10 +880,15 @@ func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
 		return fallbackBoot
 	}
 
-	// Last resort: a connected boot exists but its boot-relay uplink was never opened
+	// Last resort: a connected boot exists but its boot-relay uplink was never
+	// opened. Do NOT return it: canEgressToPeer gates boot hops on
+	// hasBootRelayUplink, so returning a boot without an uplink only rejects the
+	// frame and, worse, sends it down the send path (sendToPeerViaBootRelay)
+	// only to fail at bootRelaySubmit with an uplinkGone error. Nudge the uplink
+	// open and report no usable relay hop; the caller drops and retries once the
+	// uplink comes up.
 	if bootHopNoUplink != "" && !n.isBootRelayBlacklisted(bootHopNoUplink) {
 		go n.ensureRelayAuth(peer.AddrInfo{ID: bootHopNoUplink})
-		return bootHopNoUplink
 	}
 	return ""
 }
