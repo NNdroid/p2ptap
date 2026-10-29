@@ -142,7 +142,7 @@ func rlbpWarmStream(b *testing.B, a, c *Node) {
 	probe := []byte("RLBP_STREAM_WARMUP_PROBE")
 	for i := 0; i < 150; i++ {
 		outBuf := make([]byte, len(probe)+obfuscate.HeaderLen+4096)
-		n, perr := a.Packer.Pack(a.Packer.NextSeqID(a.txEpochForPeer(c.Host.ID())), probe, outBuf)
+		n, perr := a.Packer.Pack(a.nextTxSeqID(c.Host.ID()), probe, outBuf)
 		if perr != nil {
 			b.Fatalf("rlbp: pack stream warm-up probe: %v", perr)
 		}
@@ -465,7 +465,7 @@ func (eb *rlbpEnvelopeBuilder) build(ethFrame []byte) ([]byte, error) {
 	if cipher == nil {
 		return nil, fmt.Errorf("rlbp: no end-to-end cipher %s->%s", n.Host.ID().ShortString(), dstID.ShortString())
 	}
-	seqID := n.Packer.NextSeqID(n.txEpochForPeer(dstID))
+	seqID := n.nextTxSeqID(dstID)
 	total, perr := n.Packer.Pack(seqID, ethFrame, eb.buf)
 	if perr != nil {
 		return nil, perr
@@ -521,7 +521,7 @@ func (eb *rlbpFinalHopBuilder) build(ethFrame []byte) ([]byte, error) {
 	if cipher == nil {
 		return nil, fmt.Errorf("rlbp: no end-to-end cipher %s->%s", n.Host.ID().ShortString(), dstID.ShortString())
 	}
-	seqID := n.Packer.NextSeqID(n.txEpochForPeer(dstID))
+	seqID := n.nextTxSeqID(dstID)
 	total, perr := n.Packer.Pack(seqID, ethFrame, eb.buf)
 	if perr != nil {
 		return nil, perr

@@ -317,7 +317,7 @@ func waitStreamReady(t *testing.T, a, b *Node) {
 		// the frame header, so reusing one seqID across retries would reuse one
 		// nonce under the same key.
 		outBuf := make([]byte, len(probe)+obfuscate.HeaderLen+4096)
-		n, perr := a.Packer.Pack(a.Packer.NextSeqID(a.txEpochForPeer(b.Host.ID())), probe, outBuf)
+		n, perr := a.Packer.Pack(a.nextTxSeqID(b.Host.ID()), probe, outBuf)
 		if perr != nil {
 			t.Fatalf("failed to pack stream warm-up probe: %v", perr)
 		}

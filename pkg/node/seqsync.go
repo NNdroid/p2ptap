@@ -255,9 +255,14 @@ func (n *Node) buildSeqSyncMsg(msgType string, p peer.ID, myPub []byte) SeqSyncM
 	// between the two calls, which would embed two different epochs.
 	epoch := n.ensureLocalEpoch(p)
 	m := SeqSyncMsg{
-		Type:      msgType,
-		NodeID:    n.Host.ID().String(),
-		MySeq:     n.Packer.NextSeqID(epoch),
+		Type:   msgType,
+		NodeID: n.Host.ID().String(),
+		// Advertise the highest counter we have ALREADY USED for this peer. The
+		// receiver's dedup anchors its window here and marks the value as seen,
+		// which is only consistent with a "used up to" value. Consuming a fresh
+		// counter here (the old behaviour) punched a permanent hole in the
+		// per-peer sequence that the multipath reorder buffer then stalled on.
+		MySeq:     n.Packer.MakeSeqID(n.txFrameCounter(p), epoch),
 		ConnEpoch: epoch,
 		Timestamp: time.Now().UnixMilli(),
 	}
@@ -531,7 +536,7 @@ func (n *Node) buildEpochSyncMsg(p peer.ID) SeqSyncMsg {
 	return SeqSyncMsg{
 		Type:      "epochSync",
 		NodeID:    n.Host.ID().String(),
-		MySeq:     n.Packer.NextSeqID(epoch),
+		MySeq:     n.Packer.MakeSeqID(n.txFrameCounter(p), epoch),
 		ConnEpoch: epoch,
 		Timestamp: time.Now().UnixMilli(),
 	}
@@ -1111,7 +1116,10 @@ func (n *Node) negotiateObfWithPeer(p peer.ID, peerPub []byte, peerAlgos []byte,
 		pfsPubKey:  append([]byte(nil), peerPub...),
 		// Snapshot the raw frame counter so the TX path can schedule a key
 		// rotation before the structured 32-bit counter wraps under this key.
-		negotiatedAtSeq: n.Packer.CurrentCounter(),
+		// Anchor the nonce budget at THIS peer's logical-frame counter (see
+		// tx_seq.go); the old anchor was the process-wide counter, which no
+		// longer bounds the per-peer nonce space.
+		negotiatedAtSeq: n.txFrameCounter(p),
 	}
 	// Roll-over tolerance: carry the previous RX cipher forward as a decryption
 	// fallback. If the new rxKey differs from the currently-stored one we are

@@ -25,6 +25,8 @@ func (ps *PeerStreams) recordStreamWrite(s network.Stream, bytes int, elapsed ti
 	if bytes <= 0 || elapsed <= 0 {
 		return
 	}
+	ps.qualityMu.Lock()
+	defer ps.qualityMu.Unlock()
 	if ps.writeQuality == nil {
 		ps.writeQuality = make(map[network.Stream]streamWriteQuality)
 	}
@@ -39,6 +41,15 @@ func (ps *PeerStreams) recordStreamWrite(s network.Stream, bytes int, elapsed ti
 	q.bytes += int64(bytes)
 	q.updated = now
 	ps.writeQuality[s] = q
+}
+
+// qualityFor reads one stream's write-quality sample. It takes qualityMu
+// itself so both writeMu-holding schedulers and the lock-free writer
+// goroutines can call it safely.
+func (ps *PeerStreams) qualityFor(s network.Stream) streamWriteQuality {
+	ps.qualityMu.Lock()
+	defer ps.qualityMu.Unlock()
+	return ps.writeQuality[s]
 }
 
 func (q streamWriteQuality) usable(now time.Time) bool {
@@ -72,6 +83,7 @@ func (ps *PeerStreams) selectStreamIndex(streams []network.Stream, now time.Time
 		return preferred
 	}
 	// Bound retained metrics when topology replaces streams.
+	ps.qualityMu.Lock()
 	for s := range ps.writeQuality {
 		active := false
 		for _, current := range streams {
@@ -84,19 +96,20 @@ func (ps *PeerStreams) selectStreamIndex(streams []network.Stream, now time.Time
 			delete(ps.writeQuality, s)
 		}
 	}
+	ps.qualityMu.Unlock()
 	score := scoreStreamTransport(streams[preferred])
-	incumbent := ps.writeQuality[streams[preferred]]
+	incumbent := ps.qualityFor(streams[preferred])
 	best := preferred
 	for i, s := range streams {
-		q := ps.writeQuality[s]
+		q := ps.qualityFor(s)
 		if scoreStreamTransport(s) != score || !q.usable(now) {
 			continue
 		}
-		if !ps.writeQuality[streams[best]].usable(now) || q.nanosPerByte < ps.writeQuality[streams[best]].nanosPerByte {
+		if !ps.qualityFor(streams[best]).usable(now) || q.nanosPerByte < ps.qualityFor(streams[best]).nanosPerByte {
 			best = i
 		}
 	}
-	if best != preferred && now.Sub(ps.streamSelectedAt) >= streamSelectionHold && (!incumbent.usable(now) || ps.writeQuality[streams[best]].nanosPerByte < incumbent.nanosPerByte*.8) {
+	if best != preferred && now.Sub(ps.streamSelectedAt) >= streamSelectionHold && (!incumbent.usable(now) || ps.qualityFor(streams[best]).nanosPerByte < incumbent.nanosPerByte*.8) {
 		preferred = best
 		ps.preferredStream = streams[best]
 		ps.streamSelectedAt = now

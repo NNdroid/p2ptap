@@ -573,7 +573,7 @@ func benchProtocolPair(b *testing.B, spec transportSpec) *protocolPair {
 	// negotiation so the benchmark measures steady-state throughput only.
 	probe := []byte("BENCH_WARMUP")
 	out := make([]byte, len(probe)+obfuscate.HeaderLen+4096)
-	n, perr := nodeA.Packer.Pack(nodeA.Packer.NextSeqID(nodeA.txEpochForPeer(nodeB.Host.ID())), probe, out)
+	n, perr := nodeA.Packer.Pack(nodeA.nextTxSeqID(nodeB.Host.ID()), probe, out)
 	if perr != nil {
 		b.Fatalf("warm pack: %v", perr)
 	}

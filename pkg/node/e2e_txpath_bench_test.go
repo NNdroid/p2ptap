@@ -332,7 +332,7 @@ func txbpWarmStream(b *testing.B, a, target *Node) {
 	defer cancel()
 	probe := []byte("TXBP_STREAM_WARMUP")
 	out := make([]byte, len(probe)+obfuscate.HeaderLen+4096)
-	n, err := a.Packer.Pack(a.Packer.NextSeqID(a.txEpochForPeer(target.Host.ID())), probe, out)
+	n, err := a.Packer.Pack(a.nextTxSeqID(target.Host.ID()), probe, out)
 	if err != nil {
 		b.Fatalf("txbp: warm pack: %v", err)
 	}

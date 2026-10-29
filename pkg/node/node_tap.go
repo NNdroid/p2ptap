@@ -921,7 +921,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 			return true
 		}
 
-		seqID := n.Packer.NextSeqID(n.txEpochForPeer(targetPeer))
+		seqID := n.nextTxSeqID(targetPeer)
 		// Pack DIRECTLY into the pooled buffer (same pattern as the broadcast
 		// fan-out): the old Pack-into-shared-outBuf + copy round-trip cost a
 		// full-frame memcpy on every unicast TAP frame. `payload` (the read
@@ -953,7 +953,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 			exitPeerID := n.Gateway.ActiveExitPeerID()
 			exitPID := n.Gateway.ActiveExitPeerPID()
 			if exitPeerID != "" && exitPeerID != n.Host.ID().String() {
-				seqID := n.Packer.NextSeqID(n.txEpochForPeer(exitPID))
+				seqID := n.nextTxSeqID(exitPID)
 				packedCopy := acquireFrameBuf(n.Packer.MaxPackedLen(readN))
 				totalLen, perr := n.Packer.Pack(seqID, payload, packedCopy)
 				if perr != nil {
@@ -1001,7 +1001,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 				exitPeerID := n.Gateway.ActiveExitPeerID()
 				exitPID := n.Gateway.ActiveExitPeerPID()
 				if exitPeerID != "" && exitPeerID != n.Host.ID().String() {
-					seqID := n.Packer.NextSeqID(n.txEpochForPeer(exitPID))
+					seqID := n.nextTxSeqID(exitPID)
 					packedCopy := acquireFrameBuf(n.Packer.MaxPackedLen(readN))
 					totalLen, perr := n.Packer.Pack(seqID, payload, packedCopy)
 					if perr != nil {

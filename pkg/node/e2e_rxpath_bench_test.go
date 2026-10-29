@@ -456,7 +456,7 @@ func (h *rxbpHarness) rxbpSealBatch(eth []byte, count int) ([]byte, error) {
 	sealed := make([]byte, 0, sealedCap)
 	var hdr [frameLenSize]byte
 	for i := 0; i < count; i++ {
-		seqID := h.nodeA.Packer.NextSeqID(h.epoch)
+		seqID := h.nodeA.nextTxSeqID(h.peerB)
 		n, err := h.nodeA.Packer.Pack(seqID, eth, packed)
 		if err != nil {
 			return nil, fmt.Errorf("frame %d: Pack: %w", i, err)

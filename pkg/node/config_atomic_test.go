@@ -23,6 +23,61 @@ func newConfigForAtomicTest() *config.Config {
 	}
 }
 
+// TestConfigHotReloadAppliesMultipathSettings is the regression guard for a
+// silent no-op: transport_strategy and the reorder knobs used to be read only
+// from the construction-time snapshot, so saving a new strategy in the WebUI
+// changed what the UI displayed while the node kept running the old behaviour
+// until a restart.
+func TestConfigHotReloadAppliesMultipathSettings(t *testing.T) {
+	n := &Node{}
+	n.SetConfig(&config.Config{
+		TransportStrategy: "multipath",
+		RxReorderWindow:   128,
+		RxReorderDelayMs:  50,
+	})
+	if !n.rxReorderEnabled.Load() {
+		t.Fatal("multipath strategy did not enable the reorder buffer")
+	}
+	window, delay := n.reorderSettings()
+	if window != 128 {
+		t.Fatalf("reorder window = %d, want 128", window)
+	}
+	if delay != 50*time.Millisecond {
+		t.Fatalf("reorder delay = %v, want 50ms", delay)
+	}
+
+	// Switching back must disable the buffer on the next inbound frame.
+	n.SetConfig(&config.Config{TransportStrategy: "best_path"})
+	if n.rxReorderEnabled.Load() {
+		t.Fatal("best_path did not disable the reorder buffer")
+	}
+
+	// Out-of-range values are clamped instead of being taken literally.
+	n.SetConfig(&config.Config{TransportStrategy: "multipath", RxReorderWindow: 99999, RxReorderDelayMs: 99999})
+	window, delay = n.reorderSettings()
+	if window != 1024 || delay != 5*time.Second {
+		t.Fatalf("clamping failed: window=%d delay=%v", window, delay)
+	}
+}
+
+// TestDispatcherModeSwitchesLive covers the other half: the strategy the send
+// path reads must change at runtime, without rebuilding the dispatcher.
+func TestDispatcherModeSwitchesLive(t *testing.T) {
+	sd := NewStrategyDispatcher(nil, "best_path")
+	if got := sd.Mode(); got != "best_path" {
+		t.Fatalf("initial mode = %q", got)
+	}
+	sd.SetMode("multipath")
+	if got := sd.Mode(); got != "multipath" {
+		t.Fatalf("mode after switch = %q, want multipath", got)
+	}
+	// An empty strategy must never leave the dispatcher in an unknown state.
+	sd.SetMode("")
+	if got := sd.Mode(); got != "best_path" {
+		t.Fatalf("mode after empty switch = %q, want best_path", got)
+	}
+}
+
 // TestConfigHotReloadVsDataPlaneReads is the regression test for the atomic
 // refactor: a data-plane reader (checkACL, which is on the per-frame path and
 // now snapshots via config()) must never race with a concurrent hot-reload that

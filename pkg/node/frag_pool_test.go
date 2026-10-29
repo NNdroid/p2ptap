@@ -8,6 +8,10 @@ import (
 	"p2ptap/pkg/obfuscate"
 )
 
+// fragTestPeer is the destination peer for fragment tests: fragment envelopes
+// now take a per-peer sequence (see tx_seq.go), so the call needs a real ID.
+var fragTestPeer = peer.ID("fragment-pool-peer")
+
 func makePackedFragmentTestFrame(t testing.TB, packer *obfuscate.FramePacker, payloadLen int) []byte {
 	t.Helper()
 	payload := bytes.Repeat([]byte{0x5a}, payloadLen)
@@ -25,7 +29,7 @@ func TestFragmentFramePooledRoundTrip(t *testing.T) {
 	tx := newFragReassembler()
 	original := makePackedFragmentTestFrame(t, packer, 1500)
 
-	frags, pooled := n.fragmentFrame(original, tx, 1, 512)
+	frags, pooled := n.fragmentFrame(original, tx, fragTestPeer, 512)
 	if !pooled {
 		t.Fatal("fragmented frame did not report pooled ownership")
 	}
@@ -56,7 +60,7 @@ func TestFragmentFrameNonFragmentedRemainsCallerOwned(t *testing.T) {
 	packer := obfuscate.NewFramePackerFull(nil)
 	n := &Node{Packer: packer}
 	original := makePackedFragmentTestFrame(t, packer, 128)
-	frags, pooled := n.fragmentFrame(original, newFragReassembler(), 1, 512)
+	frags, pooled := n.fragmentFrame(original, newFragReassembler(), fragTestPeer, 512)
 	if pooled {
 		t.Fatal("non-fragmented frame must remain caller-owned")
 	}
@@ -72,13 +76,13 @@ func BenchmarkFragmentFramePooled(b *testing.B) {
 	original := makePackedFragmentTestFrame(b, packer, 1500)
 
 	// Warm the sync.Pool before measuring steady-state allocation pressure.
-	if frags, pooled := n.fragmentFrame(original, tx, 1, 512); pooled {
+	if frags, pooled := n.fragmentFrame(original, tx, fragTestPeer, 512); pooled {
 		releaseFragmentBuffers(frags)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		frags, pooled := n.fragmentFrame(original, tx, 1, 512)
+		frags, pooled := n.fragmentFrame(original, tx, fragTestPeer, 512)
 		if pooled {
 			releaseFragmentBuffers(frags)
 		}

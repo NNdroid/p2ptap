@@ -115,10 +115,17 @@ func (f *fragReassembler) nextOrigSeq() uint32 {
 // zero-overhead common path): the receiver detects the absence of a frag
 // header and passes them through.
 //
+// Each fragment envelope carries its OWN SeqID because it is sealed
+// independently and therefore needs a distinct AEAD nonce. Those numbers are
+// allocated from the top half of the per-peer counter field
+// (txFragSeqBase..2^32-1) so they never interleave with the peer's
+// logical-frame sequence — otherwise every fragmented frame would look like a
+// gap to the receive-side reorder buffer.
+//
 // When maxPayload > 0 it is used as the fragment size limit (allows callers
 // to specify a larger limit for reliable streams). Otherwise the conservative
 // node-default is used.
-func (n *Node) fragmentFrame(packed []byte, frag *fragReassembler, txEpoch uint64, maxPayload int) ([][]byte, bool) {
+func (n *Node) fragmentFrame(packed []byte, frag *fragReassembler, targetPeer peer.ID, maxPayload int) ([][]byte, bool) {
 	if maxPayload <= 0 {
 		maxPayload = n.maxFragPayload()
 	}
@@ -156,7 +163,7 @@ func (n *Node) fragmentFrame(packed []byte, frag *fragReassembler, txEpoch uint6
 		binary.BigEndian.PutUint16(fragPayload[10:12], uint16(len(chunk)))
 		copy(fragPayload[fragHeaderLen:], chunk)
 
-		n2, perr := n.Packer.Pack(n.Packer.NextSeqID(txEpoch), fragPayload, outBuf)
+		n2, perr := n.Packer.Pack(n.nextTxFragSeqID(targetPeer), fragPayload, outBuf)
 		if perr != nil {
 			// Pack failure means this fragment cannot be obfuscated. Emitting a
 			// bare (unobfuscated) fragment envelope — the old "historical
@@ -168,8 +175,8 @@ func (n *Node) fragmentFrame(packed []byte, frag *fragReassembler, txEpoch uint6
 			// frame is safer than leaking plaintext or poisoning rekey state.
 			// Pack failure is effectively a can't-happen programming error
 			// (MaxPackedLen under-sized), so surface it loudly.
-			log.Error("Fragment Pack failed for part %d/%d of %d-byte frame from txEpoch=%d: %v — dropping entire group",
-				i+1, total, len(packed), txEpoch, perr)
+			log.Error("Fragment Pack failed for part %d/%d of %d-byte frame to peer %s: %v — dropping entire group",
+				i+1, total, len(packed), targetPeer, perr)
 			releaseFrameBuf(outBuf)
 			releaseFragmentBuffers(out)
 			return nil, false

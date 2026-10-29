@@ -112,7 +112,7 @@ type Node struct {
 	// coalescer merges short unicast TAP frames per destination so the padding
 	// rule has nothing to pad (see coalesce_tx.go). Nil when the node runs
 	// without a packer; started in Start(), drained on shutdown.
-	coalescer *txCoalescer
+	coalescer    *txCoalescer
 	dedupPeers   map[peer.ID]*obfuscate.Deduplicator
 	dedupPeersMu sync.RWMutex
 	// peerLocalEpochs holds the PER-PEER anti-replay epoch this node stamps into
@@ -123,9 +123,16 @@ type Node struct {
 	// disrupts B or C. The epoch is independent of the negotiated cipher and is
 	// re-anchored on the peer during every SeqSync handshake / lightweight
 	// epochSync.
-	peerLocalEpochs sync.Map       // peer.ID -> uint64 (12-bit epoch)
-	bcastDedup      bcastDedupRing // content-based dedup for bcast/mcast frames from multiple peers
-	Dispatcher      *StrategyDispatcher
+	peerLocalEpochs sync.Map // peer.ID -> uint64 (12-bit epoch)
+	// peerTxSeq holds the PER-PEER outbound frame/fragment sequence ledgers
+	// (peer.ID -> *peerTxLedger). The structured SeqID counter used to be a
+	// single process-wide value, which made every peer observe a sparse
+	// subsequence — and the multipath receive-side reorder buffer cannot tell a
+	// sparse sequence from packet loss, so it delayed every frame by the
+	// force-release timeout. See tx_seq.go.
+	peerTxSeq  sync.Map       // peer.ID -> *peerTxLedger
+	bcastDedup bcastDedupRing // content-based dedup for bcast/mcast frames from multiple peers
+	Dispatcher *StrategyDispatcher
 	// Collector is the WebUI telemetry sink. It is an interface (observer.Collector)
 	// so the domain core never imports the concrete web package.
 	Collector observer.Collector
@@ -547,15 +554,18 @@ type Node struct {
 	peerTxBytes sync.Map // peer.ID → *atomic.Uint64 (total bytes sent TO peer)
 	peerRxBytes sync.Map // peer.ID → *atomic.Uint64 (total bytes received FROM peer)
 
-	// rxReorderEnabled gates the receive-side reorder buffer. It is set once at
-	// construction from transport_strategy=="multipath" (the strategy needs a
-	// restart to change), so best_path pays only one atomic load per frame.
+	// rxReorderEnabled gates the receive-side reorder buffer. It tracks
+	// transport_strategy=="multipath" AND is refreshed on config hot reload, so
+	// switching the strategy takes effect on the next inbound frame instead of
+	// requiring a restart. best_path pays only one atomic load per frame.
 	rxReorderEnabled atomic.Bool
 	// rxReorder is the per-peer reorder buffer (peer.ID → *rxReorderQueue),
 	// created lazily on first inbound frame under multipath.
-	rxReorder     sync.Map
-	rxReorderWindow int
-	rxReorderDelay  time.Duration
+	rxReorder sync.Map
+	// rxReorderWindow and rxReorderDelayNs are atomic because hot reload can
+	// change them while rxReorderFor reads them on the inbound path.
+	rxReorderWindow  atomic.Int32
+	rxReorderDelayNs atomic.Int64
 
 	// pathRx attributes accepted inbound TAP payload to the path it arrived on
 	// (pathKey → *pathRxCounters), for the per-path telemetry breakdown.
@@ -1976,13 +1986,9 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		nodeName:            nodeName,
 		arpIndex:            &arpIndex{v4: make(map[uint32]arpIndexEntry), v6: make(map[[16]byte]arpIndexEntry)},
 		lsaCache:            make(map[peer.ID]*routing.LinkStatePayload),
-		rxReorderWindow:     cfg.RxReorderWindow,
-		rxReorderDelay:      time.Duration(cfg.RxReorderDelayMs) * time.Millisecond,
 	}
+	node.applyReorderConfig(cfg)
 	node.coalescer = newTxCoalescer(node)
-	// Reorder buffer only has effect under "multipath"; best_path pays one atomic
-	// load per inbound frame to skip it.
-	node.rxReorderEnabled.Store(cfg.TransportStrategy == "multipath")
 	// Seed the LSA sequence counter from wall-clock nanoseconds so a RESTARTED
 	// node never re-uses a sequence its peers already recorded (they would
 	// reject every LSA from us as stale until CleanStaleNodes purged us, i.e.

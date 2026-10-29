@@ -94,7 +94,7 @@ func TestLimitedCircuitConvergesAndDeliversBothDirections(t *testing.T) {
 	} {
 		payload := constructICMPv4Packet(pair.src.localMAC, pair.dst.localMAC, net.ParseIP(pair.srcIP), net.ParseIP(pair.dstIP), 42, i+1)
 		packed := make([]byte, pair.src.Packer.MaxPackedLen(len(payload)))
-		seq := pair.src.Packer.NextSeqID(pair.src.txEpochForPeer(pair.dst.Host.ID()))
+		seq := pair.src.nextTxSeqID(pair.dst.Host.ID())
 		n, err := pair.src.Packer.Pack(seq, payload, packed)
 		if err != nil {
 			t.Fatal(err)

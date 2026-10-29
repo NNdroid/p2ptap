@@ -120,7 +120,7 @@ func (c *txCoalescer) flush(targetPeer peer.ID) {
 	// Rebuild the route so dispatch uses current link state.
 	route, hasRoute := c.n.overlayRoute(targetPeer, routing.MaxRelayTTL, "")
 	targetPeerStr := c.n.peerIDString(targetPeer)
-	seqID := c.n.Packer.NextSeqID(c.n.txEpochForPeer(targetPeer))
+	seqID := c.n.nextTxSeqID(targetPeer)
 
 	packedCopy := acquireFrameBuf(c.n.Packer.MaxPackedLen(payloadLen))
 	totalLen, perr := c.n.Packer.Pack(seqID, payload, packedCopy)

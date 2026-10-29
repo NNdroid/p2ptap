@@ -4,6 +4,7 @@ import (
 	"net"
 	"slices"
 	"sync/atomic"
+	"time"
 
 	"p2ptap/pkg/config"
 	"p2ptap/pkg/obfuscate"
@@ -54,6 +55,57 @@ func (n *Node) SetConfig(c *config.Config) {
 		n.configPtr = new(atomic.Pointer[config.Config])
 	}
 	n.configPtr.Store(c)
+	if c == nil {
+		return
+	}
+	// Data-plane knobs are mirrored into atomics the packet path reads, so a
+	// WebUI save actually takes effect. Before this, transport_strategy and the
+	// reorder window only existed in the construction-time snapshot: the UI
+	// reported the new value while the node kept running the old behaviour until
+	// a restart, which reads as "the setting does nothing".
+	n.applyReorderConfig(c)
+	if n.Dispatcher != nil {
+		n.Dispatcher.SetMode(c.TransportStrategy)
+	}
+}
+
+// applyReorderConfig mirrors the multipath receive-side settings into the atomics
+// the inbound path reads. Safe to call on every config reload.
+func (n *Node) applyReorderConfig(c *config.Config) {
+	if c == nil {
+		return
+	}
+	window := c.RxReorderWindow
+	if window <= 0 {
+		window = 256
+	}
+	if window > 1024 {
+		window = 1024
+	}
+	delay := c.RxReorderDelayMs
+	if delay <= 0 {
+		delay = 200
+	}
+	if delay > 5000 {
+		delay = 5000
+	}
+	n.rxReorderWindow.Store(int32(window))
+	n.rxReorderDelayNs.Store(int64(delay) * int64(time.Millisecond))
+	n.rxReorderEnabled.Store(c.TransportStrategy == "multipath")
+}
+
+// reorderSettings returns the current reorder window (frames) and head-of-line
+// delay, for creating a per-peer queue.
+func (n *Node) reorderSettings() (int, time.Duration) {
+	window := int(n.rxReorderWindow.Load())
+	if window <= 0 {
+		window = 256
+	}
+	delay := time.Duration(n.rxReorderDelayNs.Load())
+	if delay <= 0 {
+		delay = 200 * time.Millisecond
+	}
+	return window, delay
 }
 
 // loadNodeConfig reads the live snapshot from a shared config slot. The slot is

@@ -49,8 +49,8 @@ func newReorderHarness(t *testing.T, maxWindow int, releaseDelay time.Duration) 
 	}
 	h.fp.SetSourceIdentity("reorder-peer")
 	h.n.rxReorderEnabled.Store(true)
-	h.n.rxReorderWindow = maxWindow
-	h.n.rxReorderDelay = releaseDelay
+	h.n.rxReorderWindow.Store(int32(maxWindow))
+	h.n.rxReorderDelayNs.Store(int64(releaseDelay))
 	go h.drain()
 	return h
 }
@@ -164,6 +164,58 @@ func TestRxReorderForceReleaseOnDelay(t *testing.T) {
 	// The hole at 11 is treated as lost; 12 and 13 are flushed in counter order.
 	if got[0] != string(frame("f10")) || got[1] != string(frame("f12")) || got[2] != string(frame("f13")) {
 		t.Fatalf("delivery = %v, want [f10 f12 f13]", got)
+	}
+}
+
+// TestRxReorderReleasesTailWithoutFurtherFrames is the regression guard for the
+// "tail frame stuck forever" bug: the head-of-line check used to run exclusively
+// inside push, so once traffic stopped right after a lost frame, everything
+// buffered behind it stayed in the window — and its pooled buffers stayed
+// unreleased — until an unrelated frame happened to arrive.
+func TestRxReorderReleasesTailWithoutFurtherFrames(t *testing.T) {
+	h := newReorderHarness(t, 64, 40*time.Millisecond)
+	p := peer.ID("rx-reorder-tail")
+	h.expect(2)
+
+	// 10 delivers; 11 never arrives; 12 buffers behind it. No further pushes.
+	h.n.rxReorderFor(p).push(h.seqID(1, 10), []tapWriteJob{{data: frame("f10")}})
+	h.n.rxReorderFor(p).push(h.seqID(1, 12), []tapWriteJob{{data: frame("f12")}})
+
+	h.waitDelivered()
+	got := h.gotFrames()
+	if len(got) != 2 || got[1] != string(frame("f12")) {
+		t.Fatalf("delivery = %v, want [f10 f12] released by the timer alone", got)
+	}
+}
+
+// TestRxReorderAdaptiveDelayTracksObservedJitter checks that a peer whose holes
+// are filled almost immediately narrows its release delay to the floor, while a
+// peer with genuinely spread-out paths keeps a wide window.
+func TestRxReorderAdaptiveDelayTracksObservedJitter(t *testing.T) {
+	q := newRxReorderQueue(&Node{}, 64, 200*time.Millisecond)
+
+	// No observations yet: behave exactly like the old fixed delay.
+	if got := q.effectiveDelay(); got != 200*time.Millisecond {
+		t.Fatalf("cold start delay = %v, want the configured 200ms", got)
+	}
+
+	// Feed ~1ms of reordering: the queue should converge towards the floor.
+	for i := 0; i < 40; i++ {
+		q.noteHoleWaitLocked(time.Millisecond)
+	}
+	if got := q.effectiveDelay(); got != rxReorderMinReleaseDelay {
+		t.Fatalf("after low jitter, delay = %v, want the %v floor", got, rxReorderMinReleaseDelay)
+	}
+
+	// A peer with tens of milliseconds of spread must get a wider window again.
+	for i := 0; i < 40; i++ {
+		q.noteHoleWaitLocked(20 * time.Millisecond)
+	}
+	if got := q.effectiveDelay(); got < 40*time.Millisecond {
+		t.Fatalf("after high jitter, delay = %v, want >= 40ms", got)
+	}
+	if got := q.effectiveDelay(); got > q.maxReleaseDelay {
+		t.Fatalf("adaptive delay %v exceeded the configured maximum %v", got, q.maxReleaseDelay)
 	}
 }
 

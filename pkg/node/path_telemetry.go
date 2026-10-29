@@ -122,7 +122,16 @@ func (n *Node) pathTxStats(p peer.ID, path string) (bytes, frames uint64, ok boo
 // for a departed peer. Called from the same sites that purge the peer's streams
 // (Dispatcher.RemovePeer), so a churning peer cannot leak path entries forever.
 func (n *Node) forgetPeerTelemetry(p peer.ID) {
-	n.rxReorder.Delete(p)
+	// Retire the reorder queue BEFORE dropping the reference: a queue that is
+	// simply deleted keeps its buffered frames (and their pooled buffers) alive
+	// and leaves a pending release timer running. stop() also returns those
+	// buffers, which previously leaked until GC and showed up as buffer-pool
+	// churn on peers that flap.
+	if v, ok := n.rxReorder.LoadAndDelete(p); ok {
+		if q, ok := v.(*rxReorderQueue); ok {
+			q.stop()
+		}
+	}
 	n.pathRx.Range(func(k, _ any) bool {
 		if pk, ok := k.(pathKey); ok && pk.peer == p {
 			n.pathRx.Delete(k)
@@ -170,15 +179,18 @@ func (n *Node) buildPathMetrics(pID peer.ID) []observer.PathMetricDTO {
 	var wq map[network.Stream]streamWriteQuality
 	if ps != nil {
 		streams = ps.GetAllStreams()
-		// Snapshot the write-quality map under writeMu (the same lock the writer
-		// holds); the collector ticker is far too slow for the lock to contend.
+		// Snapshot the write-quality map under qualityMu (the same lock the
+		// writer goroutines and schedulers use); the collector ticker is far
+		// too slow for the lock to contend.
 		ps.writeMu.Lock()
+		ps.qualityMu.Lock()
 		if len(ps.writeQuality) > 0 {
 			wq = make(map[network.Stream]streamWriteQuality, len(ps.writeQuality))
 			for s, q := range ps.writeQuality {
 				wq[s] = q
 			}
 		}
+		ps.qualityMu.Unlock()
 		ps.writeMu.Unlock()
 	}
 

@@ -65,8 +65,12 @@ func TestStrategyBlockedReplacementHasDeadlineAndReleasesWriter(t *testing.T) {
 		if err := sd.SendToPeer(context.Background(), pid, []byte("survives a blocked path")); err != nil {
 			t.Fatal(err)
 		}
-		if elapsed := time.Since(start); elapsed != 2500*time.Millisecond {
-			t.Fatalf("blocked write elapsed %v, want its 2.5s deadline", elapsed)
+		// The replacement stream has no write-quality samples yet, so it gets
+		// the COLD-START deadline (writeDeadlineColdStart), not the historical
+		// 2.5s cap: a black-hole path must be detected while the caller still
+		// holds the peer's write lock, or every other path stalls with it.
+		if elapsed := time.Since(start); elapsed != writeDeadlineColdStart {
+			t.Fatalf("blocked write elapsed %v, want the cold-start deadline %v", elapsed, writeDeadlineColdStart)
 		}
 		if streams := ps.GetAllStreams(); len(streams) != 1 || streams[0] != healthy {
 			t.Fatal("timed out stream was not retired")

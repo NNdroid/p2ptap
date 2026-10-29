@@ -674,7 +674,7 @@ func (n *Node) sealRelayEnvelopeForHop(hop peer.ID, envelope []byte) ([]byte, er
 	if n.Packer == nil {
 		return nil, fmt.Errorf("seal relay envelope for hop %s: packer not initialised", hop.String())
 	}
-	seqID := n.Packer.NextSeqID(n.txEpochForPeer(hop))
+	seqID := n.nextTxSeqID(hop)
 	// Size the buffer to the exact upper bound Pack can emit for this envelope
 	// instead of a blanket +4096 slack — eliminates a 4KB heap alloc per relayed
 	// frame on the hot path (MaxPackedLen mirrors Pack's own size guards, so it

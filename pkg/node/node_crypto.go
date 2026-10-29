@@ -65,12 +65,16 @@ func (n *Node) hasNegotiatedCipher(p peer.ID) bool {
 }
 
 // obfRekeyFrameThreshold is the number of frames a single negotiated key may
-// protect before we proactively rotate it. It is kept comfortably below the
-// 2^32 size of the structured nonce counter field so a (key, nonce) pair can
-// never be reused — the one catastrophic failure mode of AES-GCM / ChaCha20.
-// It bounds BOTH the global safety-net delta (negotiatedAtSeq) and the
-// per-peer frame count (framesSinceRekey) — see obfCipherForPeer.
-const obfRekeyFrameThreshold = uint64(0xFFFFFFFF) - (1 << 28)
+// protect before we proactively rotate it. It bounds BOTH the per-peer
+// logical-frame counter and the per-peer fragment counter (framesSinceRekey).
+//
+// It is deliberately kept below txFragSeqBase (2^31): the 32-bit nonce counter
+// is now split into two per-peer halves — logical frames in [1, 2^31) and
+// tunnel fragment envelopes in [2^31, 2^32) — so the *real* per-key nonce space
+// of each half is 2^31 values, not 2^32. Rotating at ~2^30 leaves a wide margin
+// on both halves and keeps a (key, nonce) pair from ever repeating, which is the
+// one catastrophic failure mode of AES-GCM / ChaCha20.
+const obfRekeyFrameThreshold = txFragSeqBase - (1 << 27)
 
 // sealPeerFrame encrypts data with the per-peer cipher AND accounts the frame
 // against that peer's proactive re-key budget. It is the ONE place every
@@ -121,20 +125,19 @@ func (n *Node) obfCipherForPeer(p peer.ID) obfuscate.ObfCipher {
 	// this key. Two independent triggers, each a single atomic load; the actual
 	// re-handshake is fire-and-forget and guarded per-peer so it cannot spam.
 	//
-	//  1. GLOBAL safety net: the AEAD nonce is derived from the frame header's
-	//     32-bit structured-counter field, which is shared node-wide (only the
-	//     12-bit per-peer epoch differs). So even a quiet peer that has sent
-	//     few frames of its own must rotate once THIS node has shipped ~2^32
-	//     frames total — otherwise the global counter recycles and reuses a
-	//     (key, nonce) pair for it. negotiatedAtSeq anchors this delta.
-	//  2. PER-PEER trigger: a chatty peer rotates promptly even when the node as
-	//     a whole is quiet (e.g. one busy peer among many idle ones). It counts
-	//     only frames actually sealed to this peer (framesSinceRekey), which is
-	//     a strictly tighter signal than the global delta for that case.
+	//  1. LOGICAL-FRAME budget: the AEAD nonce is derived from the frame
+	//     header's 32-bit structured counter field, which is now PER-PEER (see
+	//     tx_seq.go) and split into two halves — logical frames in [1, 2^31),
+	//     fragment envelopes in [2^31, 2^32). negotiatedAtSeq anchors this
+	//     delta, so the key rotates before either half could wrap and reuse a
+	//     (key, nonce) pair.
+	//  2. PER-PEER wire-frame count: counts every physical frame sealed to this
+	//     peer (fragments included), which is the exact number of nonces spent
+	//     under this key and therefore the tighter of the two signals.
 	var nonceBudgetDelta uint64
 	if n.Packer != nil {
-		if delta := n.Packer.CurrentCounter() - po.negotiatedAtSeq; delta > obfRekeyFrameThreshold {
-			log.Debug("Tx: proactive re-key (global counter) triggered for %s (counter delta=%d > threshold=%d); re-handshaking in background",
+		if delta := n.txFrameCounter(p) - po.negotiatedAtSeq; delta > obfRekeyFrameThreshold {
+			log.Debug("Tx: proactive re-key (logical-frame counter) triggered for %s (counter delta=%d > threshold=%d); re-handshaking in background",
 				p.String(), delta, obfRekeyFrameThreshold)
 			nonceBudgetDelta = delta
 			n.triggerPeerRekey(p)
@@ -152,12 +155,9 @@ func (n *Node) obfCipherForPeer(p peer.ID) obfuscate.ObfCipher {
 	// current key. The re-key completes asynchronously and the next
 	// frame will be encrypted with a fresh key/nonce.
 	//
-	// The gate must mirror BOTH triggers above. The nonce counter's low 32
-	// bits are shared node-wide (only the 12-bit per-peer epoch differs), so
-	// a quiet peer whose own framesSinceRekey stays low still wraps once the
-	// GLOBAL counter recycles past its negotiatedAtSeq anchor — a per-peer-only
-	// check here would let such a peer keep sealing under an exhausted budget
-	// for as long as its own traffic stayed idle.
+	// The gate must mirror BOTH triggers above: the structured counter field is
+	// per-peer but split into two halves (logical frames / fragments), so each
+	// half can wrap independently of framesSinceRekey.
 	if nonceBudgetDelta > obfRekeyFrameThreshold || perPeerBudget > obfRekeyFrameThreshold {
 		if _, rekeying := n.rekeyPeers.Load(p); rekeying {
 			log.Debug("Tx: nonce budget exhausted for %s; re-key in flight — dropping encryption for this frame", p.String())

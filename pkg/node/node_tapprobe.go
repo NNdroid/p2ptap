@@ -188,7 +188,7 @@ func (n *Node) ProbeTapForward(peerID peer.ID) (TapProbeResult, error) {
 		res.SentBytes = len(reqFrame)
 
 		// Dispatch the REAL request frame to the peer (overlay -> peer TAP).
-		seqID := n.Packer.NextSeqID(n.txEpochForPeer(peerID))
+		seqID := n.nextTxSeqID(peerID)
 		packedBuf := make([]byte, obfuscate.MaxFrameSize)
 		totalLen, perr := n.Packer.Pack(seqID, reqFrame, packedBuf)
 
