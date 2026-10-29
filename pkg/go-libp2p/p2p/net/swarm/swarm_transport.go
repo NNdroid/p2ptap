@@ -77,6 +77,23 @@ func (s *Swarm) TransportForListening(a ma.Multiaddr) transport.Transport {
 }
 
 // AddTransport adds a transport to this swarm.
+// Transports returns a snapshot of every distinct transport registered on this
+// swarm. Transports may cover several protocols, so duplicates are removed.
+func (s *Swarm) Transports() []transport.Transport {
+	s.transports.RLock()
+	defer s.transports.RUnlock()
+	out := make([]transport.Transport, 0, len(s.transports.m))
+	seen := make(map[transport.Transport]struct{}, len(s.transports.m))
+	for _, t := range s.transports.m {
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	return out
+}
+
 //
 // Satisfies the Network interface from go-libp2p-transport.
 func (s *Swarm) AddTransport(t transport.Transport) error {

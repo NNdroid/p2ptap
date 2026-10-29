@@ -72,6 +72,14 @@ type TransportsConfig struct {
 	EnableWebRTC       bool `json:"enable_webrtc"`
 	EnableWebTransport bool `json:"enable_webtransport"`
 	EnableTCPReuse     bool `json:"enable_tcp_reuse"`
+	// EnableWebRTCSignaling turns on the /p2ptap/webrtc-signal/1.0.0 upgrade:
+	// when a relay-only peer cannot be reached directly, the node exchanges real
+	// SDP offer/answer over the control channel and runs a FULL ICE agent (host +
+	// STUN srflx + TURN relay candidates) so WebRTC can traverse one or two NATs.
+	// This is separate from EnableWebRTC, which only toggles the legacy
+	// webrtc-direct transport (no signaling, LITE agent — cannot cross NAT).
+	// Requires restart.
+	EnableWebRTCSignaling bool `json:"enable_webrtc_signaling"`
 	// DisableRelay is the legacy umbrella for both flags below: it still turns OFF
 	// circuit relay AND hole-punching, so existing configs keep working. Prefer the
 	// two specific flags when you only want to disable one. Use as a diagnostic:
@@ -412,13 +420,14 @@ func DefaultConfig() *Config {
 			PcapSampleEvery: 1,
 		},
 		Transports: TransportsConfig{
-			EnableQUICReuse:     true,
-			EnableWebRTC:        true,
-			EnableWebTransport:  true,
-			EnableTCPReuse:      true,
-			DisableRelay:        false,
-			DisableCircuitRelay: false,
-			DisableHolePunching: false,
+			EnableQUICReuse:        true,
+			EnableWebRTC:           true,
+			EnableWebTransport:     true,
+			EnableTCPReuse:         true,
+			EnableWebRTCSignaling:  true,
+			DisableRelay:           false,
+			DisableCircuitRelay:    false,
+			DisableHolePunching:    false,
 		},
 		TransportStrategy: "best_path",
 		// Reorder buffer defaults: 256 frames / 200 ms HOL bound. Only active
@@ -546,13 +555,13 @@ func warnOmittedTransportSwitches(data []byte) {
 	if len(missing) == 0 {
 		return
 	}
-	log.Warn("transports block omits %s, so those switches inherit the DefaultConfig value (true) and are STILL LISTENING — a transports block is not a whitelist, list all four enable_* keys to state intent",
+	log.Warn("transports block omits %s, so those switches inherit the DefaultConfig value (true) and are STILL LISTENING — a transports block is not a whitelist, list all five enable_* keys to state intent",
 		strings.Join(missing, ", "))
 }
 
 // omittedTransportSwitches reports which transport enable_* keys a transports
 // block failed to state. Empty means nothing to warn about: no transports block
-// at all (a deliberate request for defaults), or a block that states all four.
+// at all (a deliberate request for defaults), or a block that states all five.
 func omittedTransportSwitches(data []byte) []string {
 	var raw struct {
 		Transports map[string]json.RawMessage `json:"transports"`
@@ -560,7 +569,7 @@ func omittedTransportSwitches(data []byte) []string {
 	if err := json.Unmarshal(data, &raw); err != nil || raw.Transports == nil {
 		return nil
 	}
-	switches := []string{"enable_quic_reuse", "enable_webrtc", "enable_webtransport", "enable_tcp_reuse"}
+	switches := []string{"enable_quic_reuse", "enable_webrtc", "enable_webtransport", "enable_tcp_reuse", "enable_webrtc_signaling"}
 	var present, missing []string
 	for _, key := range switches {
 		if _, ok := raw.Transports[key]; ok {

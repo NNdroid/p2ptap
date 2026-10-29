@@ -740,6 +740,7 @@ func (n *Node) updateWebCollectorState() {
 			Role:              role,
 			IsRelayed:         isRelayedPeer,
 			RelayOnly:         n.isRelayOnlyPeer(pID),
+			WebRTCSignaling:   n.webRTCSignalStatusFor(pID),
 			IsExitNode:        isExitNode,
 			ExitNAT:           exitNAT,
 			TxSpeed:           peerTxSpd,

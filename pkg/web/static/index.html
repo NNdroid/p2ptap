@@ -1032,6 +1032,15 @@
                 </div>
                 <div class="config-row">
                     <div>
+                        <div class="config-row-label" data-i18n="cfg_webrtc_signaling_lbl">WebRTC NAT traversal (signaled)</div>
+                        <div class="config-row-desc" data-i18n="cfg_webrtc_signaling_desc">When a relay-only peer has no reachable direct address, exchange a real SDP offer/answer over the relay control channel and run a FULL ICE agent (host + STUN + TURN candidates) so the link crosses one or two NATs. Keeps NAT mappings alive via ICE keepalive. Requires restart.</div>
+                    </div>
+                    <div class="ext157">
+                        <input type="checkbox" id="cfgEnableWebRTCSignaling" class="p2p-switch ext158" checked>
+                    </div>
+                </div>
+                <div class="config-row">
+                    <div>
                         <div class="config-row-label" data-i18n="cfg_tls_sni_lbl">TLS/QUIC SNI (outgoing)</div>
                         <div class="config-row-desc" data-i18n="cfg_tls_sni_desc">Static server_name sent on every outbound TLS/QUIC handshake so the mesh resembles ordinary HTTP/3 to a DPI. Empty = no SNI (upstream default). Cosmetic only — peers are authenticated via the signed certificate, never the SNI. Requires restart.</div>
                     </div>

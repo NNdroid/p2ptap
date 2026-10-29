@@ -621,6 +621,11 @@
                 cfg_disable_circuit_relay_desc: "Turns OFF libp2p circuit-relay client/service and AutoRelay, leaving DCUtR hole-punching on. Requires restart. Ignored while Direct-Only Mode above is ON.",
                 cfg_disable_hole_punching_lbl: "Disable hole-punching only",
                 cfg_disable_hole_punching_desc: "Turns OFF DCUtR hole-punching, leaving circuit relay and AutoRelay on. Requires restart. If peers stop connecting after this, the connections were coming from hole punches rather than relays. Ignored while Direct-Only Mode above is ON.",
+                cfg_webrtc_signaling_lbl: "WebRTC NAT traversal (signaled)",
+                cfg_webrtc_signaling_desc: "When a relay-only peer has no reachable direct address, exchange a real SDP offer/answer over the relay control channel and run a FULL ICE agent (host + STUN + TURN candidates) so the link crosses one or two NATs. Keeps NAT mappings alive via ICE keepalive. Requires restart.",
+                webrtc_signaling_up: "WebRTC ICE up",
+                webrtc_signaling_failed: "WebRTC ICE failed",
+                webrtc_signaling_disabled: "WebRTC ICE off",
                 cfg_tls_sni_lbl: "TLS/QUIC SNI (outgoing)",
                 cfg_tls_sni_desc: "Static server_name sent on every outbound TLS/QUIC handshake so the mesh resembles ordinary HTTP/3 to a DPI. Empty = no SNI (upstream default). Cosmetic only — peers are authenticated via the signed certificate, never the SNI. Requires restart.",
                 cfg_tls_sni_suffix_lbl: "TLS SNI suffix (per-peer)",
@@ -1175,6 +1180,8 @@
                 if (disableCircuitRelayEl) disableCircuitRelayEl.checked = !!transports.disable_circuit_relay;
                 const disableHolePunchingEl = document.getElementById('cfgDisableHolePunching');
                 if (disableHolePunchingEl) disableHolePunchingEl.checked = !!transports.disable_hole_punching;
+                const webrtcSignalEl = document.getElementById('cfgEnableWebRTCSignaling');
+                if (webrtcSignalEl) webrtcSignalEl.checked = transports.enable_webrtc_signaling !== false;
                 const sniEl = document.getElementById('cfgTlsServerName');
                 if (sniEl) sniEl.value = transports.tls_server_name || '';
                 const sniSuffixEl = document.getElementById('cfgTlsSniSuffix');
@@ -1755,6 +1762,8 @@
                 if (circuitRelayEl) currentFullConfig.transports.disable_circuit_relay = circuitRelayEl.checked;
                 const holePunchingEl = document.getElementById('cfgDisableHolePunching');
                 if (holePunchingEl) currentFullConfig.transports.disable_hole_punching = holePunchingEl.checked;
+                const webrtcSignalEl = document.getElementById('cfgEnableWebRTCSignaling');
+                if (webrtcSignalEl) currentFullConfig.transports.enable_webrtc_signaling = webrtcSignalEl.checked;
                 const sniEl = document.getElementById('cfgTlsServerName');
                 if (sniEl) currentFullConfig.transports.tls_server_name = sniEl.value.trim();
                 const sniSuffixEl = document.getElementById('cfgTlsSniSuffix');
@@ -5650,6 +5659,20 @@
                             ? `<span class="pill-badge role-relay-only" title="${t('relay_only') || 'Relay-Only'}">🌉 ${t('relay_only') || 'Relay-Only'}</span>`
                             : '';
 
+                        // WebRTC NAT-traversal (signaled full ICE) outcome. Only
+                        // shown when an attempt actually happened (up/failed), so a
+                        // peer that never needed it stays uncluttered. disabled is
+                        // implied by the config toggle and only rendered when the
+                        // peer is relay-only (operator may have forgotten to enable).
+                        let webrtcBadge = '';
+                        if (p.webrtc_signaling === 'up') {
+                            webrtcBadge = `<span class="pill-badge role-bootstrap" style="padding:2px 6px; font-size:0.7rem; background:var(--success-bg,#123); border-color:var(--success,#2e7d32); color:var(--success,#4caf50); margin-top:2px;" title="${t('webrtc_signaling_up') || 'WebRTC full-ICE link live'}">🛰 ${t('webrtc_signaling_up') || 'WebRTC ICE up'}</span>`;
+                        } else if (p.webrtc_signaling === 'failed') {
+                            webrtcBadge = `<span class="pill-badge role-static" style="padding:2px 6px; font-size:0.7rem; background:var(--danger-bg,#3a0d0d); border-color:var(--danger,#c62828); color:var(--danger,#ef5350); margin-top:2px;" title="${t('webrtc_signaling_failed') || 'WebRTC full-ICE attempt failed (backing off)'}">🛰 ${t('webrtc_signaling_failed') || 'WebRTC ICE failed'}</span>`;
+                        } else if (p.webrtc_signaling === 'disabled' && p.relay_only) {
+                            webrtcBadge = `<span class="pill-badge role-static" style="padding:2px 6px; font-size:0.7rem; opacity:0.7; margin-top:2px;" title="${t('webrtc_signaling_disabled') || 'WebRTC NAT traversal is disabled in config'}">🛰 ${t('webrtc_signaling_disabled') || 'WebRTC ICE off'}</span>`;
+                        }
+
                         const peerTotalTxStr = formatBytes(p.total_tx || 0);
                         const peerTotalRxStr = formatBytes(p.total_rx || 0);
 
@@ -5701,7 +5724,7 @@
                             <td class="peer-identity-cell" role="cell">
                                 <strong>${escapeHTML(p.node_name) || t('unnamed_node')}</strong>
                                 <code class="peer-id" title="${escapeHTML(p.peer_id)}">${escapeHTML(p.peer_id)}</code>
-                                <div class="peer-badges">${exitBadgeHtml}${relayOnlyBadge}</div>
+                                <div class="peer-badges">${exitBadgeHtml}${relayOnlyBadge}${webrtcBadge}</div>
                             </td>
                             <td role="cell" data-label="${escapeHTML(t('col_tapip'))}"><div class="tap-ip-cell">${tapIPs}</div></td>
                             <td role="cell" data-label="${escapeHTML(t('dashboard_connection'))}">${connStateBadge(p)}<small class="peer-transport">${escapeHTML(p.transport || '—')}</small></td>

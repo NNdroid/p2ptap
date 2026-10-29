@@ -222,7 +222,13 @@ type PeerInfoDTO struct {
 	// once a direct transport appears. Exposing it lets the WebUI tell the
 	// operator "this peer can never go direct" instead of just "relayed".
 	RelayOnly  bool   `json:"relay_only"`
-	IsExitNode bool   `json:"is_exit_node"`
+	// WebRTCSignaling is the outcome of the full-ICE WebRTC upgrade for this
+	// peer: "" (not attempted / not relay-only), "up" (signaled WebRTC data
+	// path live), "failed" (last attempt failed, backing off), or "disabled"
+	// (EnableWebRTCSignaling is off). It tells the operator whether the NAT
+	// traversal path is working, separate from the legacy webrtc-direct label.
+	WebRTCSignaling string `json:"webrtc_signaling"`
+	IsExitNode      bool   `json:"is_exit_node"`
 	ExitNAT    bool   `json:"exit_nat"`
 	TxSpeed    uint64 `json:"tx_speed"`
 	RxSpeed    uint64 `json:"rx_speed"`

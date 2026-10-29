@@ -195,6 +195,17 @@ type Node struct {
 	// a control-plane sync (SeqSync + Meta) for a relay-only peer, so it can
 	// apply a per-peer cooldown instead of re-triggering every tick.
 	relayCtrlSyncAt sync.Map
+	// webRTCSignalInFlight guards concurrent WebRTC signaling attempts per peer
+	// (one in-flight upgrade per peer, mirroring relayOnlyUpgrade's dedup).
+	webRTCSignalInFlight sync.Map
+	// webRTCSignalFailAt records the earliest time a failed WebRTC signaling
+	// attempt may be retried for that peer (simple backoff, rechecked by the
+	// relay-upgrade loop).
+	webRTCSignalFailAt sync.Map
+	// webRTCSignalStatus is the last WebRTC signaling outcome per peer
+	// ("up" | "failed"), surfaced to the WebUI. Missing means never attempted
+	// (or disabled).
+	webRTCSignalStatus sync.Map
 	// relayControlHealth tracks failed relay-control handshakes per final target.
 	// It separates a candidate route from a verified working path and applies a
 	// target-level cooldown after repeated Circuit Relay ACL denials.
@@ -549,6 +560,11 @@ type Node struct {
 	// pathRx attributes accepted inbound TAP payload to the path it arrived on
 	// (pathKey → *pathRxCounters), for the per-path telemetry breakdown.
 	pathRx sync.Map
+	// pathTx attributes successfully-written outbound TAP payload to the path it
+	// was sent on (pathKey → *pathTxCounters). Symmetric with pathRx and keyed by
+	// the same path string, so a link keeps its cumulative counters across stream
+	// reconnects (a stream object is ephemeral; a path is not).
+	pathTx sync.Map
 
 	// lastPeerSpeedCalc records the timestamp of the previous per-peer speed
 	// snapshot (taken inside updateWebCollectorState, which runs on a 10s ticker).
@@ -954,6 +970,37 @@ func tapPayloadLenFromPackedFrame(packed []byte) int {
 		return 0
 	}
 	return pLen
+}
+
+// tapPayloadStat is the TAP-payload accounting for one logical p2ptap frame
+// (or coalesced batch) as it is about to be written. bytes is the sum of the
+// Ethernet-frame payloads actually carried (batch header excluded) and frames
+// is the number of those payloads. Both are what the receiver attributes per
+// path on the RX side, so a per-path TX/RX comparison is apples-to-apples.
+type tapPayloadStat struct {
+	bytes  int
+	frames int
+}
+
+// framePayloadStats derives the TAP-payload accounting from a packed p2ptap
+// frame. A coalesced batch payload (BuildBatchPayload) counts each sub-frame
+// separately and excludes the batch envelope header, so its totals match the
+// per-sub-frame RX attribution exactly; a plain frame counts as one payload of
+// its own length.
+func framePayloadStats(packed []byte) tapPayloadStat {
+	pLen := tapPayloadLenFromPackedFrame(packed)
+	if pLen <= 0 || obfuscate.HeaderLen+pLen > len(packed) {
+		return tapPayloadStat{}
+	}
+	payload := packed[obfuscate.HeaderLen : obfuscate.HeaderLen+pLen]
+	if subs, ok := obfuscate.SplitBatchPayload(payload); ok {
+		total := 0
+		for _, s := range subs {
+			total += len(s)
+		}
+		return tapPayloadStat{bytes: total, frames: len(subs)}
+	}
+	return tapPayloadStat{bytes: pLen, frames: 1}
 }
 
 // getPeerSpeed returns the locally-computed tx/rx speed (bytes/sec) for a peer.
@@ -2371,6 +2418,14 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// "frame reached peer TAP but OS didn't answer" from "frame never arrived".
 	h.SetStreamHandler(TapProbeAckProtocolID, node.handleTapProbeAck)
 	log.Debug("Stream handler registered for TAP-probe ACK protocol: %s", TapProbeAckProtocolID)
+
+	// WebRTC signaling: the responder half of a full-ICE WebRTC upgrade. When a
+	// peer cannot be reached directly but IS reachable over a relay, the offerer
+	// (higher peer.ID) opens a /p2ptap/webrtc-signal/1.0.0 stream here carrying
+	// a real SDP offer; we answer with a full-ICE answer and register the
+	// resulting data channel as a direct data path.
+	h.SetStreamHandler(WebRTCSignalProtocolID, node.handleWebRTCSignal)
+	log.Debug("Stream handler registered for WebRTC signal protocol: %s", WebRTCSignalProtocolID)
 
 	node.registerSeqSyncHandler()
 	log.Debug("Stream handler registered for SeqSync protocol: %s", SeqSyncProtocolID)

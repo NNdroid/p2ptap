@@ -21,13 +21,13 @@ func TestOmittedTransportSwitches(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "one switch set warns about the three it leaves to defaults",
+			name: "one switch set warns about the four it leaves to defaults",
 			data: `{"transports":{"enable_webtransport":true}}`,
-			want: []string{"enable_quic_reuse", "enable_webrtc", "enable_tcp_reuse"},
+			want: []string{"enable_quic_reuse", "enable_webrtc", "enable_tcp_reuse", "enable_webrtc_signaling"},
 		},
 		{
-			name: "all four stated leaves nothing to warn about",
-			data: `{"transports":{"enable_quic_reuse":false,"enable_webrtc":false,"enable_webtransport":true,"enable_tcp_reuse":false}}`,
+			name: "all five stated leaves nothing to warn about",
+			data: `{"transports":{"enable_quic_reuse":false,"enable_webrtc":false,"enable_webtransport":true,"enable_tcp_reuse":false,"enable_webrtc_signaling":false}}`,
 			want: nil,
 		},
 		{
@@ -52,7 +52,7 @@ func TestOmittedTransportSwitches(t *testing.T) {
 
 // TestLoadConfigFromFileTransportMerge documents the behaviour the warning
 // exists for: a switch absent from the transports block keeps the DefaultConfig
-// value, which is true for all four transports. If the merge ever switches to
+// value, which is true for all five transports. If the merge ever switches to
 // whitelist semantics this test fails and the warning becomes dead code —
 // change both together.
 func TestLoadConfigFromFileTransportMerge(t *testing.T) {
@@ -71,9 +71,10 @@ func TestLoadConfigFromFileTransportMerge(t *testing.T) {
 		t.Error("enable_webtransport should be true")
 	}
 	for name, got := range map[string]bool{
-		"enable_quic_reuse": cfg.Transports.EnableQUICReuse,
-		"enable_webrtc":     cfg.Transports.EnableWebRTC,
-		"enable_tcp_reuse":  cfg.Transports.EnableTCPReuse,
+		"enable_quic_reuse":       cfg.Transports.EnableQUICReuse,
+		"enable_webrtc":           cfg.Transports.EnableWebRTC,
+		"enable_tcp_reuse":        cfg.Transports.EnableTCPReuse,
+		"enable_webrtc_signaling": cfg.Transports.EnableWebRTCSignaling,
 	} {
 		if !got {
 			t.Errorf("%s is absent from the transports block and must keep the DefaultConfig value true", name)

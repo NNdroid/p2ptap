@@ -278,6 +278,10 @@ func (n *Node) attemptDirectUpgrade(pid peer.ID) bool {
 		}
 	}
 	if len(direct) == 0 {
+		// No usable direct address, but the peer may still sit behind a NAT that
+		// full-ICE WebRTC can cross: candidates are exchanged via the signal
+		// stream, so we do not need any direct multiaddr from the peerstore.
+		n.maybeWebRTCSignalUpgrade(pid)
 		return false
 	}
 
@@ -296,6 +300,7 @@ func (n *Node) attemptDirectUpgrade(pid peer.ID) bool {
 	// (which would instantly "win" and report a false direct upgrade).
 	if err := n.Host.Connect(network.WithForceDirectDial(ctx, "p2ptap-relay-upgrade"), peer.AddrInfo{ID: pid, Addrs: direct}); err != nil {
 		log.Debug("Direct upgrade for relay-only peer %s failed this round: %v", pid.ShortString(), err)
+		n.maybeWebRTCSignalUpgrade(pid)
 		return false
 	}
 	if !n.isDirectlyConnected(pid) {
@@ -304,6 +309,21 @@ func (n *Node) attemptDirectUpgrade(pid peer.ID) bool {
 	log.Info("Relay-only peer %s upgraded to DIRECT connection", pid.String())
 	n.clearRelayOnlyPeer(pid)
 	return true
+}
+
+// maybeWebRTCSignalUpgrade kicks off an async WebRTC signaling upgrade for a
+// relay-only peer whose direct dial just failed. The full-ICE candidate exchange
+// runs over the relay control channel, so this works even when the peer has no
+// reachable direct multiaddr at all — the ICE agents discover each other's
+// public/relay candidates via STUN/TURN and punch through the NAT. No-op when
+// signaling is disabled or the peer is not relay-only. webrtcSignalUpgrade
+// re-checks eligibility and the offerer role (higher peer.ID offers), so the
+// goroutine is cheap and self-limiting.
+func (n *Node) maybeWebRTCSignalUpgrade(pid peer.ID) {
+	if !n.config().Transports.EnableWebRTCSignaling || !n.isRelayOnlyPeer(pid) {
+		return
+	}
+	go n.webrtcSignalUpgrade(pid)
 }
 
 // authenticateWithRelay performs PSK challenge-response with a relay/bootstrap server.

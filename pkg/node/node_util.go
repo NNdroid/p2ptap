@@ -1361,4 +1361,13 @@ const (
 	// in-band netID tag (carried by PackBootRelayFrame) is what enforces PSK
 	// isolation at the destination boot.
 	BootRelayProtocolID protocol.ID = "/p2ptap/boot-relay/1.0.0"
+
+	// WebRTCSignalProtocolID is the WebRTC SIGNALING protocol. Two peers that
+	// already have any connection (direct / overlay-relay / boot circuit) use it
+	// to exchange the SDP offer/answer for a full-ICE WebRTC data-channel link,
+	// which can then traverse NAT the webrtc-direct transport cannot (it infers
+	// a single host candidate from a multiaddr and is only reachable when the
+	// LISTENER has a public address). The negotiated connection is registered as
+	// a stream on the peer and carries TAP frames like any other path.
+	WebRTCSignalProtocolID protocol.ID = "/p2ptap/webrtc-signal/1.0.0"
 )
