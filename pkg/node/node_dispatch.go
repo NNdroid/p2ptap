@@ -14,6 +14,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"p2ptap/pkg/maddrutil"
+	"p2ptap/pkg/obfuscate"
 	"p2ptap/pkg/routing"
 )
 
@@ -131,9 +132,13 @@ func (n *Node) dispatchNonblocking(task dispatchTask) {
 		if !n.enqueueDispatchWithin(task, timer.C) {
 			// The task is dropped: return a pooled payload buffer now so it
 			// does not leak. Caller-owned buffers (owned=false) are plain heap
-			// allocations and need no action.
+			// allocations and need no action. A pooled relayData (kind=2) never
+			// reaches a worker here, so release it too.
 			if task.owned {
 				releaseFrameBuf(task.data)
+			}
+			if task.relayRelease != nil {
+				task.relayRelease()
 			}
 			dropped := atomic.AddUint64(&n.dispatchDropCount, 1)
 			// Throttled warning: report only when enough NEW drops have
@@ -346,6 +351,16 @@ func (n *Node) dispatchWorker(id int) {
 					for _, t := range tasks {
 						t := t
 						owned := t.owned
+						// relayData may be a pooled buffer (relayRelease != nil)
+						// that the pool hands out as job.data. Exactly one of
+						// onSent / onFail fires per job, so releasing it in both
+						// (whichever runs) frees the pooled buffer exactly once.
+						releaseRelay := t.relayRelease
+						releaseRelayOnce := func() {
+							if releaseRelay != nil {
+								releaseRelay()
+							}
+						}
 						n.relayPool.Submit(t.relayHop, t.relayData,
 							// onSent: track one logical TAP payload at the origin.
 							// Relay envelope and encryption bytes stay in protocol
@@ -356,12 +371,14 @@ func (n *Node) dispatchWorker(id int) {
 								if owned {
 									releaseFrameBuf(t.data)
 								}
+								releaseRelayOnce()
 							},
 							// onFail: non-blocking fallback to direct unicast,
 							// rate-limited by relayFallbackSem so a single
 							// drainAll (up to 128 jobs) cannot spawn 128
 							// concurrent SendToPeer goroutines.
 							func() {
+								defer releaseRelayOnce()
 								if n.peerStalled(t.target) {
 									if owned {
 										releaseFrameBuf(t.data)
@@ -713,6 +730,57 @@ func (n *Node) sealRelayEnvelopeForHop(hop peer.ID, envelope []byte) ([]byte, er
 		// Unlike before, this is now a hard error: sending the envelope
 		// unencrypted would guarantee a drop at the hop and leak the relay
 		// header, so the caller must handle the failure instead.
+		return nil, fmt.Errorf("seal relay envelope for hop %s: %w", hop.String(), err)
+	}
+	return sealed, nil
+}
+
+// sealRelayEnvelopeMaxLen is a strict upper bound on the sealed envelope size
+// sealRelayEnvelopeForHopInto will emit for an envelope of the given length, so
+// a caller can size a pooled destination buffer exactly. It is Pack's upper
+// bound plus the AEAD tag the seal appends.
+func (n *Node) sealRelayEnvelopeMaxLen(envelopeLen int) int {
+	return n.Packer.MaxPackedLen(envelopeLen) + obfuscate.AEADTagSize
+}
+
+// sealRelayEnvelopeForHopInto is sealRelayEnvelopeForHop with a caller-owned
+// destination for the FINAL sealed output. dst must have
+// cap >= sealRelayEnvelopeMaxLen(len(envelope)); the returned slice aliases dst
+// so the relay hot path allocates nothing beyond the caller's pooled buffer.
+// If dst is too small it falls back to an internal allocation rather than
+// failing, so a mis-sized caller degrades to the old behavior, not a drop.
+func (n *Node) sealRelayEnvelopeForHopInto(hop peer.ID, envelope []byte, dst []byte) ([]byte, error) {
+	if n.Packer == nil {
+		return nil, fmt.Errorf("seal relay envelope for hop %s: packer not initialised", hop.String())
+	}
+	seqID := n.nextTxSeqID(hop)
+	maxPacked := n.Packer.MaxPackedLen(len(envelope))
+
+	cipher := n.obfCipherForPeer(hop)
+	if cipher == nil {
+		// No cipher for this hop yet: the envelope travels as a plaintext
+		// obfuscate frame, which the hop accepts (decryptPeerFrame skips a nil
+		// cipher). Pack writes straight into dst — no allocation.
+		if cap(dst) < maxPacked {
+			dst = make([]byte, maxPacked)
+		}
+		totalLen, err := n.Packer.Pack(seqID, envelope, dst)
+		if err != nil {
+			return nil, fmt.Errorf("pack relay envelope for hop %s: %w", hop.String(), err)
+		}
+		return dst[:totalLen], nil
+	}
+
+	// outBuf is Pack scratch only: EncryptPayloadRegionInto allocates the sealed
+	// result into dst, so outBuf is never handed out and can go back to the pool.
+	outBuf := acquireFrameBuf(maxPacked)
+	defer releaseFrameBuf(outBuf)
+	totalLen, err := n.Packer.Pack(seqID, envelope, outBuf)
+	if err != nil {
+		return nil, fmt.Errorf("pack relay envelope for hop %s: %w", hop.String(), err)
+	}
+	sealed, err := n.sealPeerFrameInto(hop, cipher, outBuf[:totalLen], dst)
+	if err != nil {
 		return nil, fmt.Errorf("seal relay envelope for hop %s: %w", hop.String(), err)
 	}
 	return sealed, nil

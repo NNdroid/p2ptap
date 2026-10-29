@@ -1201,6 +1201,26 @@ func (n *Node) packRelayFrame(finalDst, source peer.ID, ttl uint8, payload []byt
 	return routing.PackRelayFrame(finalDst, source, ttl, payload)
 }
 
+// packRelayFrameInto is packRelayFrame with a caller-owned destination buffer.
+// dst must be sized with relayEnvelopeSize (or larger); the returned slice
+// aliases dst and the call allocates nothing on the v3 path.
+func (n *Node) packRelayFrameInto(dst []byte, finalDst, source peer.ID, ttl uint8, payload []byte) ([]byte, error) {
+	if c := n.config(); c != nil && c.RelayHeaderMultihash {
+		return routing.PackRelayFrameV3Into(dst, finalDst, source, ttl, payload)
+	}
+	return routing.PackRelayFrameInto(dst, finalDst, source, ttl, payload)
+}
+
+// relayEnvelopeSize is the exact packed size packRelayFrameInto will emit for
+// the current relay header version, so a caller can size a pooled buffer.
+func (n *Node) relayEnvelopeSize(finalDst, source peer.ID, payloadLen int) int {
+	v3 := false
+	if c := n.config(); c != nil && c.RelayHeaderMultihash {
+		v3 = true
+	}
+	return routing.RelayFrameSize(finalDst, source, payloadLen, v3)
+}
+
 // handleRelayFrame processes one inbound overlay-relay frame: hop-by-hop
 // envelope decrypt, unwrap the carrying obfuscate frame, fragment reassembly,
 // envelope unpack, origin verification, then deliver or forward. Shared by the
@@ -1534,46 +1554,59 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 		// Keeping the envelope is also not a performance loss: when
 		// nextHop == finalDst the envelope is delivered in a single hop and
 		// unwrapped by handleRelayStream on arrival.
-		repacked, err := n.packRelayFrame(finalDst, srcPeer, ttl-1, innerPayload)
-		if err == nil {
-			// HOP-BY-HOP re-encryption: seal the forwarded envelope for the
-			// NEXT hop, mirroring what the origin did for the first hop. The
-			// relay never touches the inner frame (it stays end-to-end
-			// encrypted for finalDst), only the outer envelope, so each hop
-			// opens exactly the envelope addressed to it.
-			//
-			// This MUST go through sealRelayEnvelopeForHop: a bare relay
-			// envelope is NOT an obfuscate frame, so calling
-			// EncryptPayloadRegion on it directly (as this code used to)
-			// reads the PayloadLen field out of the middle of the base58
-			// destination PeerID and fails with ErrFrameCorrupted every
-			// single time. The old `if eerr == nil` guard then swallowed that
-			// error and forwarded the envelope in PLAINTEXT, which the hop
-			// dropped at its AEAD gate. sealRelayEnvelopeForHop packs the
-			// envelope into a real obfuscate frame first, and is shared with
-			// the two origin-side call sites so the three paths cannot drift.
-			sealed, serr := n.sealRelayEnvelopeForHop(nextHop, repacked)
-			if serr != nil {
-				log.Warn("Relay forward to %s via %s aborted: %v",
-					finalDst.String(), nextHop.String(), serr)
-				n.relayDiag.sealFail()
-				return
-			}
-			// Use persistent relay pool instead of per-frame NewStream.
-			// onSent=nil: forwarding does not double-count RecordSent (origin already counted).
-			// onFail: silently drop; source will retransmit.
-			if !n.relayPool.Submit(nextHop, sealed,
-				nil, // onSent — no double-counting
-				func() {
-					log.Debug("Relay forward to %s via %s permanently failed",
-						finalDst.String(), nextHop.String())
-				},
-			) {
-				n.relayDiag.fwdPoolFull()
-			}
-		} else {
+		repackScratch := acquireFrameBuf(n.relayEnvelopeSize(finalDst, srcPeer, len(innerPayload)))
+		repacked, rerr := n.packRelayFrameInto(repackScratch, finalDst, srcPeer, ttl-1, innerPayload)
+		if rerr != nil {
+			releaseFrameBuf(repackScratch)
 			log.Warn("Relay forward repack failed for dst %s src %s: %v",
-				finalDst.String(), srcPeer.String(), err)
+				finalDst.String(), srcPeer.String(), rerr)
+			return
+		}
+		// HOP-BY-HOP re-encryption: seal the forwarded envelope for the
+		// NEXT hop, mirroring what the origin did for the first hop. The
+		// relay never touches the inner frame (it stays end-to-end
+		// encrypted for finalDst), only the outer envelope, so each hop
+		// opens exactly the envelope addressed to it.
+		//
+		// This MUST go through sealRelayEnvelopeForHop: a bare relay
+		// envelope is NOT an obfuscate frame, so calling
+		// EncryptPayloadRegion on it directly (as this code used to)
+		// reads the PayloadLen field out of the middle of the base58
+		// destination PeerID and fails with ErrFrameCorrupted every
+		// single time. The old `if eerr == nil` guard then swallowed that
+		// error and forwarded the envelope in PLAINTEXT, which the hop
+		// dropped at its AEAD gate. sealRelayEnvelopeForHop packs the
+		// envelope into a real obfuscate frame first, and is shared with
+		// the two origin-side call sites so the three paths cannot drift.
+		//
+		// Pooled like the origin-side paths: repackScratch is released once
+		// the hop seal copies it out; sealedDst is released exactly once by
+		// the pool's onSent/onFail (onSent must be non-nil here so the
+		// success path frees the pooled buffer — forwarding still counts no
+		// TX bytes, that is handled by the absence of RecordSent).
+		sealedDst := acquireFrameBuf(n.sealRelayEnvelopeMaxLen(len(repacked)))
+		sealed, serr := n.sealRelayEnvelopeForHopInto(nextHop, repacked, sealedDst)
+		releaseFrameBuf(repackScratch)
+		if serr != nil {
+			releaseFrameBuf(sealedDst)
+			log.Warn("Relay forward to %s via %s aborted: %v",
+				finalDst.String(), nextHop.String(), serr)
+			n.relayDiag.sealFail()
+			return
+		}
+		// Use persistent relay pool instead of per-frame NewStream.
+		// onSent: only releases the pooled envelope — forwarding must NOT
+		// double-count RecordSent (the origin already counted). onFail drops
+		// silently; the source retransmits.
+		if !n.relayPool.Submit(nextHop, sealed,
+			func() { releaseFrameBuf(sealedDst) },
+			func() {
+				log.Debug("Relay forward to %s via %s permanently failed",
+					finalDst.String(), nextHop.String())
+				releaseFrameBuf(sealedDst)
+			},
+		) {
+			n.relayDiag.fwdPoolFull()
 		}
 		return
 	}

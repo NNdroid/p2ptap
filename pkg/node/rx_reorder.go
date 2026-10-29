@@ -98,6 +98,31 @@ func newRxReorderQueue(n *Node, maxWindow int, releaseDelay time.Duration) *rxRe
 	}
 }
 
+// applyConfig hot-reloads the queue's reorder window and head-of-line delay cap
+// without recreating it, so a live config save takes effect for peers that
+// already have a queue — without this the creation-time snapshot persisted until
+// the peer reconnected and the UI reported a setting the datapath ignored.
+//
+// Shrinking maxWindow below the current buffer depth does not drop anything:
+// the next push trips the existing window-full path (releaseAllLocked), which
+// flushes everything in counter order and re-anchors, and the timer covers the
+// idle case. Caller holds mu.
+func (q *rxReorderQueue) applyConfig(maxWindow int, releaseDelay time.Duration) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if maxWindow < 2 {
+		maxWindow = 2
+	}
+	if releaseDelay <= 0 {
+		releaseDelay = 200 * time.Millisecond
+	}
+	if releaseDelay < rxReorderMinReleaseDelay {
+		releaseDelay = rxReorderMinReleaseDelay
+	}
+	q.maxWindow = maxWindow
+	q.maxReleaseDelay = releaseDelay
+}
+
 // push handles one logical frame (one seqID) already accepted through the dedup
 // layer. jobs are the frame's TAP write jobs: one for a plain frame, several
 // for a coalesced batch whose sub-frames share this seqID. All jobs are
@@ -234,6 +259,15 @@ func (q *rxReorderQueue) releaseAllLocked() (maxC uint64) {
 		keys = append(keys, c)
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	// Feed the oldest frame's actual wait back into the adaptive delay. A
+	// force-release means the hole ahead was never filled: that frame paid the
+	// full head-of-line delay, which is exactly the signal holeWait exists to
+	// measure — and without this the force-released holes (the ones that cost
+	// real latency) never updated the EWMA, so the adaptive delay kept
+	// shrinking toward the floor on a persistently-reordering path. Recording
+	// only the OLDEST frame keeps later-arriving frames (which waited less)
+	// from diluting the signal.
+	q.noteHoleWaitLocked(time.Since(q.window[keys[0]].at))
 	for _, c := range keys {
 		q.enqueueAllLocked(q.window[c].jobs)
 	}

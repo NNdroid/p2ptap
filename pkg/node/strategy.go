@@ -793,18 +793,30 @@ func (sd *StrategyDispatcher) sendToPeerViaOverlayRelay(targetPeer, relayHop pee
 	//    frame, so sealing it in place is structurally valid. The error is NOT
 	//    swallowed: forwarding an unsealed inner payload would be rejected by the
 	//    destination's AEAD gate, losing the frame with no diagnostic.
+	//
+	//    All three buffers are pooled: encScratch and relayScratch are released
+	//    once the next stage copies them out; sealedDst becomes the Submitted
+	//    buffer, released exactly once by the pool's onSent/onFail.
 	inner := packedData
+	var encScratch []byte
 	if cipher := n.obfCipherForPeer(targetPeer); cipher != nil {
-		enc, eerr := n.sealPeerFrame(targetPeer, cipher, inner)
+		encScratch = acquireFrameBuf(len(inner) + cipher.Overhead())
+		enc, eerr := n.sealPeerFrameInto(targetPeer, cipher, inner, encScratch)
 		if eerr != nil {
+			releaseFrameBuf(encScratch)
 			return fmt.Errorf("overlay relay end-to-end seal for %s failed: %w", targetPeer.String(), eerr)
 		}
 		inner = enc
 	}
 
 	// 2. Wrap in an overlay relay frame.
-	relayBuf, err := n.packRelayFrame(targetPeer, n.Host.ID(), routing.MaxRelayTTL, inner)
+	relayScratch := acquireFrameBuf(n.relayEnvelopeSize(targetPeer, n.Host.ID(), len(inner)))
+	relayBuf, err := n.packRelayFrameInto(relayScratch, targetPeer, n.Host.ID(), routing.MaxRelayTTL, inner)
+	if encScratch != nil {
+		releaseFrameBuf(encScratch)
+	}
 	if err != nil {
+		releaseFrameBuf(relayScratch)
 		return fmt.Errorf("overlay relay pack for %s failed: %w", targetPeer.String(), err)
 	}
 
@@ -812,12 +824,18 @@ func (sd *StrategyDispatcher) sendToPeerViaOverlayRelay(targetPeer, relayHop pee
 	//    the hop. The wrap is mandatory — sealing a bare relay envelope always
 	//    failed with ErrFrameCorrupted and shipped it in plaintext, which the hop
 	//    then dropped. See sealRelayEnvelopeForHop for the full analysis.
-	relayBuf, err = n.sealRelayEnvelopeForHop(relayHop, relayBuf)
-	if err != nil {
-		return fmt.Errorf("overlay relay hop seal via %s failed: %w", relayHop.String(), err)
+	sealedDst := acquireFrameBuf(n.sealRelayEnvelopeMaxLen(len(relayBuf)))
+	sealed, serr := n.sealRelayEnvelopeForHopInto(relayHop, relayBuf, sealedDst)
+	releaseFrameBuf(relayScratch)
+	if serr != nil {
+		releaseFrameBuf(sealedDst)
+		return fmt.Errorf("overlay relay hop seal via %s failed: %w", relayHop.String(), serr)
 	}
+	relayBuf = sealed
 
-	// 4. Submit via the persistent relay connection pool.
+	// 4. Submit via the persistent relay connection pool. Exactly one of
+	//    onSent / onFail fires per job, so releaseSealed runs exactly once.
+	releaseSealed := func() { releaseFrameBuf(sealedDst) }
 	if !n.relayPool.Submit(relayHop, relayBuf,
 		func() {
 			n.recordPeerTxBytes(targetPeer, stat.bytes)
@@ -825,10 +843,12 @@ func (sd *StrategyDispatcher) sendToPeerViaOverlayRelay(targetPeer, relayHop pee
 			if n.protoTracker != nil {
 				n.protoTracker.RelayData.RecordTx(1, uint64(len(relayBuf)))
 			}
+			releaseSealed()
 		}, // onSent
 		func() { // onFail
 			log.Debug("Overlay relay send to peer %s via %s permanently failed",
 				targetPeer.String(), relayHop.String())
+			releaseSealed()
 		},
 	) {
 		return fmt.Errorf("overlay relay send to %s via %s: pool queue full",
@@ -1062,6 +1082,8 @@ func (sd *StrategyDispatcher) writeBatchMultipathLocked(targetPeer peer.ID, ps *
 	var firstErr error
 	var retry []batchFrame
 	var sentBytes int
+	var sentFrames []batchFrame
+	var sentWireBytes int
 	for _, b := range order {
 		res, ok := results[b.s]
 		if !ok {
@@ -1084,6 +1106,35 @@ func (sd *StrategyDispatcher) writeBatchMultipathLocked(targetPeer peer.ID, ps *
 		}
 		ps.notePathSuccessUnderLock(b.s)
 		sentBytes += b.stat.bytes
+		sentFrames = append(sentFrames, b.items...)
+		for _, it := range b.items {
+			for _, frag := range it.frags {
+				sentWireBytes += len(frag)
+			}
+		}
+		// Per-path TX attribution, matching writeFragsOnStream: the peer-level
+		// recordPeerTxBytes below covers the aggregate, but without this the
+		// per-path table (pathTx) misses every byte a batch went out on, so a
+		// multipath peer's path rows read zero while its peer row is full.
+		if sd.node != nil {
+			if conn := b.s.Conn(); conn != nil {
+				sd.node.recordPeerTxBytesOnPath(targetPeer, conn.RemoteMultiaddr().String(), b.stat.bytes, b.stat.frames)
+			}
+		}
+	}
+
+	// Record the successes of THIS pass before the retry branch below can return
+	// early. Without this, when some paths failed and their frames were re-queued
+	// on the survivors, the bytes that DID go out on the successful paths were
+	// never counted (the accounting leak): the recursion records only its own
+	// (retry) successes, so the two passes together must cover every sent frame
+	// exactly once. This same block also serves the all-success case (no retry),
+	// where sentFrames == frames and the old post-branch block is now redundant.
+	if sd.node != nil && sentBytes > 0 {
+		sd.node.recordPeerTxBytes(targetPeer, sentBytes)
+		if sd.node.protoTracker != nil {
+			sd.node.protoTracker.Data.RecordTx(uint64(len(sentFrames)), uint64(sentWireBytes))
+		}
 	}
 
 	if len(retry) > 0 && len(streams) > 0 {
@@ -1104,18 +1155,6 @@ func (sd *StrategyDispatcher) writeBatchMultipathLocked(targetPeer peer.ID, ps *
 	if len(retry) > 0 {
 		return firstErr
 	}
-	if sd.node != nil && sentBytes > 0 {
-		sd.node.recordPeerTxBytes(targetPeer, sentBytes)
-		if sd.node.protoTracker != nil {
-			var wireBytes int
-			for _, f := range frames {
-				for _, frag := range f.frags {
-					wireBytes += len(frag)
-				}
-			}
-			sd.node.protoTracker.Data.RecordTx(uint64(len(frames)), uint64(wireBytes))
-		}
-	}
 	return nil
 }
 
@@ -1134,16 +1173,37 @@ const (
 	writeDeadlineColdStart     = 600 * time.Millisecond
 	writeDeadlineMinWindow     = 150 * time.Millisecond
 	writeDeadlineServiceFactor = 8
+	// writeDeadlineColdStartNanosPerByte scales the cold-start window with the
+	// batch size so a genuinely slow link doesn't blow the deadline mid-write.
+	// 20000 ns/byte is ~400kbps, the slowest sustained rate the flat 600ms
+	// window was implicitly sized for: below that, a large batch would take
+	// longer than the window to drain and be falsely flagged as a stall.
+	writeDeadlineColdStartNanosPerByte = 20000
 )
+
+// writeDeadlineColdStartFor returns the un-measured fallback window for writing
+// wireBytes: the flat cold-start, or (for a batch too large to drain within it
+// at a slow link's floor rate) a size-scaled window so the first write on a
+// slow link is given enough time to complete instead of being misjudged.
+func writeDeadlineColdStartFor(wireBytes int) time.Duration {
+	est := time.Duration(wireBytes) * writeDeadlineColdStartNanosPerByte
+	if est < writeDeadlineColdStart {
+		return writeDeadlineColdStart
+	}
+	return est
+}
 
 // writeDeadlineFor returns the deadline window to use for writing wireBytes on
 // this stream. A path with a usable measurement gets a few multiples of the time
 // it is known to need (so a genuine stall is detected quickly), clamped between
-// the minimum window and the historical cap. Caller holds ps.writeMu.
+// the minimum window and the historical cap. No caller lock is required: the
+// only shared state read is the per-stream quality sample, which qualityFor
+// reads under its own mutex (the runMpWriter goroutine and the writeMu-holding
+// batch path both call this).
 func (ps *PeerStreams) writeDeadlineFor(s network.Stream, wireBytes int, now time.Time) time.Duration {
 	q := ps.qualityFor(s)
 	if !q.usable(now) || q.nanosPerByte <= 0 {
-		return writeDeadlineColdStart
+		return writeDeadlineColdStartFor(wireBytes)
 	}
 	est := time.Duration(q.nanosPerByte * float64(wireBytes) * writeDeadlineServiceFactor)
 	if est < writeDeadlineMinWindow {
@@ -1165,7 +1225,7 @@ func (sd *StrategyDispatcher) writeFragsOnStream(ps *PeerStreams, targetPeer pee
 	for _, frag := range frags {
 		wireBytes += len(frag) + 4
 	}
-	window := writeDeadlineColdStart
+	window := writeDeadlineColdStartFor(wireBytes)
 	if ps != nil {
 		// Lazy init: the batch path enters here directly, without the topology
 		// reconciliation preamble in writeFragsToStreams, and a nil map would

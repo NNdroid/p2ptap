@@ -505,11 +505,14 @@ func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, pack
 		// copying the ciphertext into the fallback would double-encrypt the frame
 		// on the relay onFail path and corrupt it.
 		inner := packedCopy
+		var encScratch []byte
 		if cipher := n.obfCipherForPeer(exitPID); cipher != nil {
-			enc, eerr := n.sealPeerFrame(exitPID, cipher, packedCopy)
+			encScratch = acquireFrameBuf(len(inner) + cipher.Overhead())
+			enc, eerr := n.sealPeerFrameInto(exitPID, cipher, inner, encScratch)
 			if eerr != nil {
 				log.Warn("Tx exit-transit: end-to-end seal for %s failed: %v (frame dropped rather than sent in plaintext)",
 					exitPID.String(), eerr)
+				releaseFrameBuf(encScratch)
 				releaseFrameBuf(packedCopy)
 				return
 			}
@@ -522,9 +525,26 @@ func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, pack
 		// to) read frame[11:13] inside the base58 PeerID string, always returned
 		// ErrFrameCorrupted, and — with the old `if eerr==nil` guard — sent the
 		// envelope in plaintext, which the hop silently dropped.
-		if relayBuf, err := n.packRelayFrame(exitPID, n.Host.ID(), routing.MaxRelayTTL, inner); err == nil {
-			sealed, serr := n.sealRelayEnvelopeForHop(route.NextHop, relayBuf)
+		//
+		// Pooled like the dispatch path: encScratch and relayScratch are released
+		// after the next stage copies them out; sealedDst becomes relayData,
+		// released exactly once via dispatchTask.relayRelease.
+		relayScratch := acquireFrameBuf(n.relayEnvelopeSize(exitPID, n.Host.ID(), len(inner)))
+		if relayBuf, rerr := n.packRelayFrameInto(relayScratch, exitPID, n.Host.ID(), routing.MaxRelayTTL, inner); rerr != nil {
+			releaseFrameBuf(relayScratch)
+			if encScratch != nil {
+				releaseFrameBuf(encScratch)
+			}
+			// Fall through to the direct dispatch below (packedCopy stays owned).
+		} else {
+			if encScratch != nil {
+				releaseFrameBuf(encScratch)
+			}
+			sealedDst := acquireFrameBuf(n.sealRelayEnvelopeMaxLen(len(relayBuf)))
+			sealed, serr := n.sealRelayEnvelopeForHopInto(route.NextHop, relayBuf, sealedDst)
+			releaseFrameBuf(relayScratch)
 			if serr != nil {
+				releaseFrameBuf(sealedDst)
 				log.Warn("Tx exit-transit: hop seal via %s failed: %v (frame dropped rather than sent in plaintext)",
 					route.NextHop.String(), serr)
 				releaseFrameBuf(packedCopy)
@@ -542,6 +562,9 @@ func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, pack
 				relayData: sealed,
 				origLen:   readN,
 				owned:     true,
+				relayRelease: func() {
+					releaseFrameBuf(sealedDst)
+				},
 			})
 			releaseFrameBuf(packedCopy)
 			return
@@ -1105,16 +1128,19 @@ func (n *Node) dispatchUnicastPacked(targetPeer peer.ID, targetPeerStr string, d
 
 		// END-TO-END seal: the inner payload is encrypted for targetPeer so the
 		// relay cannot read it; only the final destination can open it. The
-		// result goes into `inner`, never back into packedCopy: overwriting the
-		// pooled slice with this heap allocation leaked the pooled buffer and
-		// then fed the unrelated allocation to releaseFrameBuf, corrupting the
-		// frame pool's size assumptions.
+		// result goes into a pooled scratch (`encScratch`), never back into
+		// packedCopy: overwriting the pooled slice with a heap allocation leaked
+		// the pooled buffer and then fed the unrelated allocation to
+		// releaseFrameBuf, corrupting the frame pool's size assumptions.
 		inner := packedCopy
+		var encScratch []byte
 		if cipher := n.obfCipherForPeer(targetPeer); cipher != nil {
-			enc, eerr := n.sealPeerFrame(targetPeer, cipher, inner)
+			encScratch = acquireFrameBuf(len(inner) + cipher.Overhead())
+			enc, eerr := n.sealPeerFrameInto(targetPeer, cipher, inner, encScratch)
 			if eerr != nil {
 				log.Warn("Tx overlay relay: end-to-end seal for %s failed: %v (frame dropped rather than sent in plaintext)",
 					targetPeer.String(), eerr)
+				releaseFrameBuf(encScratch)
 				releaseFrameBuf(packedCopy)
 				releaseFrameBuf(fallbackCopy)
 				return
@@ -1125,7 +1151,19 @@ func (n *Node) dispatchUnicastPacked(targetPeer peer.ID, targetPeerStr string, d
 		// for the relay hop, so only that hop can read the routing header. The
 		// inner payload stays end-to-end encrypted for targetPeer and is never
 		// readable by the relay.
-		if relayBuf, rerr := n.packRelayFrame(targetPeer, n.Host.ID(), routing.MaxRelayTTL, inner); rerr != nil {
+		//
+		// Every buffer here is pooled: encScratch and relayScratch are released
+		// once the next stage has copied their bytes out, and sealedDst becomes
+		// relayData — released exactly once by the relay pool's onSent/onFail
+		// via dispatchTask.relayRelease. The old path allocated all three per
+		// frame (sealPeerFrame / packRelayFrame / sealRelayEnvelopeForHop).
+		relayScratch := acquireFrameBuf(n.relayEnvelopeSize(targetPeer, n.Host.ID(), len(inner)))
+		relayBuf, rerr := n.packRelayFrameInto(relayScratch, targetPeer, n.Host.ID(), routing.MaxRelayTTL, inner)
+		if encScratch != nil {
+			releaseFrameBuf(encScratch) // contents copied into relayScratch
+		}
+		if rerr != nil {
+			releaseFrameBuf(relayScratch)
 			log.Warn("Tx overlay relay: pack envelope for %s failed: %v; dispatching plaintext packed fallback", targetPeer.String(), rerr)
 			n.dispatchNonblocking(dispatchTask{
 				kind:    0,
@@ -1135,26 +1173,35 @@ func (n *Node) dispatchUnicastPacked(targetPeer peer.ID, targetPeerStr string, d
 				origLen: readN,
 				owned:   true,
 			})
-		} else if sealed, serr := n.sealRelayEnvelopeForHop(route.NextHop, relayBuf); serr != nil {
-			log.Warn("Tx overlay relay: hop seal via %s failed: %v; dispatching plaintext packed fallback", route.NextHop.String(), serr)
-			n.dispatchNonblocking(dispatchTask{
-				kind:    0,
-				target:  targetPeer,
-				dstMAC:  dstMAC,
-				data:    fallbackCopy,
-				origLen: readN,
-				owned:   true,
-			})
 		} else {
-			n.dispatchNonblocking(dispatchTask{
-				kind:      2,
-				target:    targetPeer,
-				relayHop:  route.NextHop,
-				data:      fallbackCopy,
-				relayData: sealed,
-				origLen:   readN,
-				owned:     true,
-			})
+			sealedDst := acquireFrameBuf(n.sealRelayEnvelopeMaxLen(len(relayBuf)))
+			sealed, serr := n.sealRelayEnvelopeForHopInto(route.NextHop, relayBuf, sealedDst)
+			releaseFrameBuf(relayScratch) // contents copied into sealedDst / pack scratch
+			if serr != nil {
+				releaseFrameBuf(sealedDst)
+				log.Warn("Tx overlay relay: hop seal via %s failed: %v; dispatching plaintext packed fallback", route.NextHop.String(), serr)
+				n.dispatchNonblocking(dispatchTask{
+					kind:    0,
+					target:  targetPeer,
+					dstMAC:  dstMAC,
+					data:    fallbackCopy,
+					origLen: readN,
+					owned:   true,
+				})
+			} else {
+				n.dispatchNonblocking(dispatchTask{
+					kind:      2,
+					target:    targetPeer,
+					relayHop:  route.NextHop,
+					data:      fallbackCopy,
+					relayData: sealed,
+					origLen:   readN,
+					owned:     true,
+					relayRelease: func() {
+						releaseFrameBuf(sealedDst)
+					},
+				})
+			}
 		}
 		// packedCopy is still the ORIGINAL pooled slice (the seals above wrote
 		// to `inner`), and its contents now live in fallbackCopy and the relay

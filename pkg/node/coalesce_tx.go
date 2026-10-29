@@ -105,16 +105,55 @@ func (c *txCoalescer) flush(targetPeer peer.ID) {
 	dstMAC := entry.dstMAC
 	c.mu.Unlock()
 
-	// One sub-frame goes out plain (no batch envelope); several are wrapped in
-	// the batch payload. Pack decides padding: the rule pads the BATCH payload
-	// only when it is still below the band target (i.e. genuinely insufficient
-	// data on a timer flush).
-	var payload []byte
+	// A single sub-frame goes out plain (no batch envelope). Several are wrapped
+	// in the batch payload, built directly into the Pack output's payload region
+	// (fragmentFrame pattern) so Pack's payload copy is a no-op — one allocation
+	// and one copy saved per batch. Pack decides padding: the rule pads the
+	// BATCH payload only when it is still below the band target (i.e. genuinely
+	// insufficient data on a timer flush).
 	if len(subFrames) == 1 {
-		payload = subFrames[0]
-	} else {
-		payload = obfuscate.BuildBatchPayload(subFrames)
+		c.flushPayload(targetPeer, dstMAC, subFrames[0])
+		releaseCoalesceSubFrames(subFrames)
+		return
 	}
+
+	batchSize := obfuscate.BatchPayloadSize(subFrames)
+	maxPacked := c.n.Packer.MaxPackedLen(batchSize)
+	packedCopy := acquireFrameBuf(maxPacked)
+	payload := obfuscate.BuildBatchPayloadInto(packedCopy[obfuscate.HeaderLen:], subFrames)
+	if payload == nil {
+		// Defensive: BuildBatchPayloadInto returns nil when the sub-frame count
+		// cannot fit the 16-bit batch header (unreachable via config — MaxFrames
+		// is capped at 64 — but a mis-sized caller must not drop frames). Deliver
+		// each sub-frame individually instead.
+		releaseFrameBuf(packedCopy)
+		for _, sf := range subFrames {
+			c.flushPayload(targetPeer, dstMAC, sf)
+		}
+		releaseCoalesceSubFrames(subFrames)
+		return
+	}
+
+	// Rebuild the route so dispatch uses current link state.
+	route, hasRoute := c.n.overlayRoute(targetPeer, routing.MaxRelayTTL, "")
+	targetPeerStr := c.n.peerIDString(targetPeer)
+	seqID := c.n.nextTxSeqID(targetPeer)
+	totalLen, perr := c.n.Packer.Pack(seqID, payload, packedCopy)
+	if perr != nil {
+		releaseFrameBuf(packedCopy)
+		releaseCoalesceSubFrames(subFrames)
+		return
+	}
+	packedCopy = packedCopy[:totalLen]
+
+	c.n.dispatchUnicastPacked(targetPeer, targetPeerStr, dstMAC, route, hasRoute, seqID, packedCopy, payload, len(payload))
+	releaseCoalesceSubFrames(subFrames)
+}
+
+// flushPayload packs and dispatches one coalesced logical frame (a single
+// sub-frame). Each call gets its own SeqID, so a fallback that splits an
+// unrepresentable batch delivers each sub-frame independently.
+func (c *txCoalescer) flushPayload(targetPeer peer.ID, dstMAC net.HardwareAddr, payload []byte) {
 	payloadLen := len(payload)
 
 	// Rebuild the route so dispatch uses current link state.
@@ -126,13 +165,11 @@ func (c *txCoalescer) flush(targetPeer peer.ID) {
 	totalLen, perr := c.n.Packer.Pack(seqID, payload, packedCopy)
 	if perr != nil {
 		releaseFrameBuf(packedCopy)
-		releaseCoalesceSubFrames(subFrames)
 		return
 	}
 	packedCopy = packedCopy[:totalLen]
 
 	c.n.dispatchUnicastPacked(targetPeer, targetPeerStr, dstMAC, route, hasRoute, seqID, packedCopy, payload, payloadLen)
-	releaseCoalesceSubFrames(subFrames)
 }
 
 // releaseCoalesceSubFrames returns the pooled sub-frame buffers. The batch

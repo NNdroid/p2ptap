@@ -89,6 +89,80 @@ func packRelayFrame(ver byte, dstBytes, srcBytes []byte, ttl uint8, payload []by
 	return buf, nil
 }
 
+// relayIDStrings resolves the wire ID strings for a header version. v3 copies
+// the raw multihash bytes (peer.ID IS a multihash) with zero allocation; v2
+// base58-encodes them (the historical, expensive path).
+func relayIDStrings(ver byte, finalDst, source peer.ID) (dstStr, srcStr string) {
+	if ver == RelayHeaderVersionV3 {
+		return string(finalDst), string(source)
+	}
+	return finalDst.String(), source.String()
+}
+
+// RelayFrameSize returns the exact packed byte count PackRelayFrameInto (v3==false)
+// or PackRelayFrameV3Into (v3==true) will emit for the given peers and payload,
+// so a caller can size a pooled destination buffer exactly instead of
+// over-allocating a fixed slack on the relay hot path.
+func RelayFrameSize(finalDst, source peer.ID, payloadLen int, v3 bool) int {
+	ver := byte(RelayHeaderVersion)
+	if v3 {
+		ver = RelayHeaderVersionV3
+	}
+	dstStr, srcStr := relayIDStrings(ver, finalDst, source)
+	return RelayHeaderSize + len(dstStr) + len(srcStr) + payloadLen
+}
+
+// PackRelayFrameInto is PackRelayFrame with a caller-owned destination buffer.
+// dst must have cap >= RelayFrameSize(finalDst, source, len(payload), false).
+// The returned slice aliases dst; no allocation occurs.
+func PackRelayFrameInto(dst []byte, finalDst, source peer.ID, ttl uint8, payload []byte) ([]byte, error) {
+	return packRelayFrameInto(dst, RelayHeaderVersion, finalDst, source, ttl, payload)
+}
+
+// PackRelayFrameV3Into is PackRelayFrameV3 with a caller-owned destination
+// buffer. dst must have cap >= RelayFrameSize(..., true). The returned slice
+// aliases dst; no allocation occurs (v3 copies the peer.ID bytes directly).
+func PackRelayFrameV3Into(dst []byte, finalDst, source peer.ID, ttl uint8, payload []byte) ([]byte, error) {
+	return packRelayFrameInto(dst, RelayHeaderVersionV3, finalDst, source, ttl, payload)
+}
+
+// packRelayFrameInto is the shared Into layout builder. It copies the peer ID
+// strings directly into dst (copy from a string never allocates), so the v3
+// path is fully allocation-free.
+func packRelayFrameInto(dst []byte, ver byte, finalDst, source peer.ID, ttl uint8, payload []byte) ([]byte, error) {
+	dstStr, srcStr := relayIDStrings(ver, finalDst, source)
+	dstLen, srcLen := len(dstStr), len(srcStr)
+	if dstLen > 65535 {
+		return nil, fmt.Errorf("peer ID too long for relay header: dst=%d", dstLen)
+	}
+	if srcLen > 65535 {
+		return nil, fmt.Errorf("peer ID too long for relay header: src=%d", srcLen)
+	}
+
+	// header: ver(1) + ttl(1) + dstLen(2) + dst(dstLen) + srcLen(2) + src(srcLen)
+	headerLen := RelayHeaderSize + dstLen + srcLen
+	need := headerLen + len(payload)
+	if cap(dst) < need {
+		// A pooled buffer sized via RelayFrameSize can never hit this; it is a
+		// defensive fallback for callers that sized too small.
+		return nil, fmt.Errorf("relay frame dst too small: cap=%d need=%d", cap(dst), need)
+	}
+	buf := dst[:need]
+
+	buf[0] = ver
+	buf[1] = ttl
+	binary.BigEndian.PutUint16(buf[2:4], uint16(dstLen))
+	copy(buf[4:4+dstLen], dstStr)
+
+	off := 4 + dstLen
+	binary.BigEndian.PutUint16(buf[off:off+2], uint16(srcLen))
+	copy(buf[off+2:off+2+srcLen], srcStr)
+
+	copy(buf[headerLen:], payload)
+
+	return buf, nil
+}
+
 // UnpackRelayFrame decapsulates a relay frame header, returning finalDst,
 // source, remaining TTL, and inner payload. Both header versions are accepted;
 // the version byte selects how dst and source are read.

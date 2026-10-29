@@ -110,7 +110,16 @@ func (n *Node) nextTxFragSeqID(p peer.ID) uint64 {
 // describes what has been USED, not what comes next.
 //
 // The value is masked into the logical-frame half, matching what nextTxSeqID
-// actually puts on the wire.
+// actually puts on the wire. The masked value is clamped away from 0 only when
+// frames HAVE been sent: nextHalf skips the all-zero counter (so a fresh peer's
+// 0 correctly means "nothing sent"), but the underlying atomic transiently holds
+// a multiple of 2^31 for an instant during that skip, and a reader landing there
+// would otherwise report 0 and make the receiver think the sender's counter
+// restarted. A raw value of exactly 0 is the untouched ledger, so it stays 0.
 func (n *Node) txFrameCounter(p peer.ID) uint64 {
-	return n.txLedgerFor(p).frame.Load() & txSeqHalfMask
+	raw := n.txLedgerFor(p).frame.Load()
+	if v := raw & txSeqHalfMask; v != 0 || raw == 0 {
+		return v
+	}
+	return txSeqHalfMask
 }

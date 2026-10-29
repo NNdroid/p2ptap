@@ -255,11 +255,13 @@ func (f *fragReassembler) reassemble(remotePeer peer.ID, payload []byte, channel
 	if ok && rb.deadline.Before(time.Now()) {
 		// The group timed out but the sender retransmitted it under the same
 		// origSeq: sendRedundant and retryWithFreshStream re-emit the identical
-		// fragment set, and the send-side write deadline (2500 ms) outlives
-		// reasmTimeout (2 s). Release the stale group BEFORE reusing the key —
-		// overwriting it without decrementing leaks one quota slot per reuse,
-		// and once maxReasmGroupsPerPeer slots are leaked the guard below trips
-		// for good, dropping every fragment from this peer until a restart.
+		// fragment set, and the send-side write deadline is DYNAMIC — 600 ms
+		// cold-start up to a 2500 ms window (writeDeadlineFor), so its upper
+		// bound outlives reasmTimeout (2 s). Release the stale group BEFORE
+		// reusing the key — overwriting it without decrementing leaks one quota
+		// slot per reuse, and once maxReasmGroupsPerPeer slots are leaked the
+		// guard below trips for good, dropping every fragment from this peer
+		// until a restart.
 		delete(f.bufs, key)
 		f.perPeerGroups[remotePeer]--
 		if f.perPeerGroups[remotePeer] == 0 {

@@ -92,6 +92,14 @@ func (n *Node) applyReorderConfig(c *config.Config) {
 	n.rxReorderWindow.Store(int32(window))
 	n.rxReorderDelayNs.Store(int64(delay) * int64(time.Millisecond))
 	n.rxReorderEnabled.Store(c.TransportStrategy == "multipath")
+	// Hot-reload the per-peer queues too: rxReorderFor's LoadOrStore reuses an
+	// existing queue, so without this the window/delay a queue was created with
+	// persisted even after a live config save. Config reload is rare (not the
+	// packet path), so iterating the whole map here is free by comparison.
+	n.rxReorder.Range(func(k, v any) bool {
+		v.(*rxReorderQueue).applyConfig(window, time.Duration(delay)*time.Millisecond)
+		return true
+	})
 }
 
 // reorderSettings returns the current reorder window (frames) and head-of-line

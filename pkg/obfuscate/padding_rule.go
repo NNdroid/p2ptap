@@ -316,12 +316,56 @@ const BatchHeaderLen = batchHeaderLen
 
 // BuildBatchPayload wraps sub-frames into one batch payload (see format above).
 // Callers must ensure each sub-frame is a complete Ethernet frame.
+//
+// Returns nil (never a truncated batch) when the sub-frame count does not fit
+// the 16-bit count field: writing uint16(len(subFrames)) there would silently
+// truncate the count and corrupt SplitBatchPayload's exact byte accounting,
+// making the receiver reject a frame it could otherwise deliver. The caller
+// must fall back to per-frame delivery.
 func BuildBatchPayload(subFrames [][]byte) []byte {
+	if len(subFrames) > 65535 {
+		return nil
+	}
 	total := batchHeaderLen
 	for _, f := range subFrames {
 		total += 2 + len(f)
 	}
 	buf := make([]byte, 0, total)
+	buf = binary.BigEndian.AppendUint32(buf, batchMagic)
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(subFrames)))
+	for _, f := range subFrames {
+		buf = binary.BigEndian.AppendUint16(buf, uint16(len(f)))
+		buf = append(buf, f...)
+	}
+	return buf
+}
+
+// BatchPayloadSize returns the exact byte count BuildBatchPayload (or
+// BuildBatchPayloadInto) will emit for subFrames, so a caller can size a buffer
+// to build the batch in place without a transient allocation.
+func BatchPayloadSize(subFrames [][]byte) int {
+	total := batchHeaderLen
+	for _, f := range subFrames {
+		total += 2 + len(f)
+	}
+	return total
+}
+
+// BuildBatchPayloadInto is BuildBatchPayload with a caller-owned destination
+// sized >= BatchPayloadSize(subFrames). The returned slice aliases dst. When dst
+// is the Pack output buffer's payload region (dst == outBuf[HeaderLen:]), the
+// copy inside Pack becomes a no-op — the fragmentFrame pattern — saving one
+// allocation and one copy per batch. Returns nil (never a truncated batch) when
+// the count does not fit the 16-bit field or dst is too small.
+func BuildBatchPayloadInto(dst []byte, subFrames [][]byte) []byte {
+	if len(subFrames) > 65535 {
+		return nil
+	}
+	need := BatchPayloadSize(subFrames)
+	if cap(dst) < need {
+		return nil
+	}
+	buf := dst[:0]
 	buf = binary.BigEndian.AppendUint32(buf, batchMagic)
 	buf = binary.BigEndian.AppendUint16(buf, uint16(len(subFrames)))
 	for _, f := range subFrames {

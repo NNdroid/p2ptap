@@ -1036,6 +1036,11 @@ type dispatchTask struct {
 	// release it with releaseFrameBuf after transmitting; urgent frames from
 	// callers and relay fallbacks are NOT pooled and stay false.
 	owned bool
+	// relayRelease releases the pooled relayData buffer exactly once. Called by
+	// the relay pool's onSent OR onFail callback (exactly one fires per job), or
+	// by the dispatch drop path when the task never reaches a worker. Nil when
+	// relayData is a heap allocation (historical behavior).
+	relayRelease func()
 }
 
 // bcastDedupRing is a lightweight content-based deduplication ring for
@@ -3159,6 +3164,15 @@ func (n *Node) Start() {
 		n.wg.Add(1)
 		go n.discoveryLoop()
 		log.Info("DHT discovery loop started for PSK network")
+	} else if len(n.Config.StaticPeers) == 0 {
+		// Empty PSK disables the DHT discovery loop entirely (see config.json's
+		// _psk_note): the node can then only find peers via mDNS on the local LAN
+		// or an explicit static_peers entry. With BOTH empty, a peer behind NAT is
+		// simply never discovered, which reads as "peer unreachable" even though
+		// the data plane is healthy. Say it out loud instead of failing silently.
+		log.Warn("No PSK configured AND no static_peers: DHT discovery disabled, peer discovery is limited to mDNS on the local LAN. " +
+			"Peers behind NAT (different networks) will NOT be discoverable. " +
+			"Set a shared psk and add a p2ptap-boot relay node to bootstrap_peers, or list peers explicitly in static_peers.")
 	}
 
 	// Setup Exit Node NAT or Subnet Router NAT if enabled in config.

@@ -98,22 +98,29 @@ func (ps *PeerStreams) selectStreamIndex(streams []network.Stream, now time.Time
 	}
 	ps.qualityMu.Unlock()
 	score := scoreStreamTransport(streams[preferred])
-	incumbent := ps.qualityFor(streams[preferred])
+	// Snapshot every stream's quality under one lock: the loop below otherwise
+	// re-reads the map through qualityFor up to three times per candidate, each
+	// a separate mutex acquisition on a hot scheduling path.
+	ps.qualityMu.Lock()
+	incumbent := ps.writeQuality[streams[preferred]]
 	best := preferred
+	bestQ := incumbent
 	for i, s := range streams {
-		q := ps.qualityFor(s)
+		q := ps.writeQuality[s]
 		if scoreStreamTransport(s) != score || !q.usable(now) {
 			continue
 		}
-		if !ps.qualityFor(streams[best]).usable(now) || q.nanosPerByte < ps.qualityFor(streams[best]).nanosPerByte {
+		if !bestQ.usable(now) || q.nanosPerByte < bestQ.nanosPerByte {
 			best = i
+			bestQ = q
 		}
 	}
-	if best != preferred && now.Sub(ps.streamSelectedAt) >= streamSelectionHold && (!incumbent.usable(now) || ps.qualityFor(streams[best]).nanosPerByte < incumbent.nanosPerByte*.8) {
+	if best != preferred && now.Sub(ps.streamSelectedAt) >= streamSelectionHold && (!incumbent.usable(now) || bestQ.nanosPerByte < incumbent.nanosPerByte*.8) {
 		preferred = best
 		ps.preferredStream = streams[best]
 		ps.streamSelectedAt = now
 	}
+	ps.qualityMu.Unlock()
 	ps.nextStreamSelection = now.Add(streamSelectionInterval)
 	// Rotate the exploratory batch. A failed probe is retired by the normal
 	// deadline/reset/retry path; it does not replace the healthy incumbent.
