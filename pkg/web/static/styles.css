@@ -860,7 +860,7 @@
         .btn-trace-action {
             background: linear-gradient(135deg, rgba(167, 139, 250, 0.18), rgba(236, 72, 153, 0.18)) !important;
             border-color: rgba(167, 139, 250, 0.45) !important;
-            color: var(--accent-purple) !important;
+            color: var(--accent-purple-ink) !important;
             font-weight: 600 !important;
         }
 
@@ -4126,7 +4126,7 @@ html[data-theme="light"] .proto-tab:hover {
 html[data-theme="light"] .proto-tab.active {
     background: #e0f2fe;
     border-color: #0284c7;
-    color: #0284c7;
+    color: #0369a1; /* sky-700: 5.17:1 on the #e0f2fe pill (was #0284c7 = 3.57) */
     box-shadow: 0 0 10px rgba(2, 132, 199, 0.15);
 }
 

@@ -818,6 +818,7 @@ window.p2ptapLocales["es"] = {
   topo_tt_transport: "Transporte:",
   topo_tt_uptime: "Tiempo activo:",
   chart_no_traffic: "Sin trafico todavia",
+  chart_no_traffic_sub: "El rendimiento aparece aquí cuando los pares empiezan a intercambiar datos",
   obfs_state_unknown: "Desconocido",
   enc_peers_lbl: "Pares cifrados",
   seq_hint_fmt: "retransmision {replay} · reset ventana {reset} · uso {util}%",

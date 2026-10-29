@@ -819,6 +819,7 @@ window.p2ptapLocales["zh-TW"] = {
   topo_tt_version: "版本:",
   topo_via: "經由",
   chart_no_traffic: "暫無流量",
+  chart_no_traffic_sub: "一旦節點開始傳輸資料，吞吐量將在此顯示",
   obfs_state_unknown: "未知",
   enc_peers_lbl: "已加密節點",
   seq_hint_fmt: "重播 {replay} · 視窗重置 {reset} · 利用率 {util}%",

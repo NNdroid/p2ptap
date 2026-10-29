@@ -818,6 +818,7 @@ window.p2ptapLocales["de"] = {
   topo_tt_transport: "Transport:",
   topo_tt_uptime: "Laufzeit:",
   chart_no_traffic: "Noch kein Datenverkehr",
+  chart_no_traffic_sub: "Der Durchsatz erscheint hier, sobald Peers Daten austauschen",
   obfs_state_unknown: "Unbekannt",
   enc_peers_lbl: "Verschluesselte Peers",
   seq_hint_fmt: "Replay {replay} · Fenster-Reset {reset} · Auslastung {util}%",

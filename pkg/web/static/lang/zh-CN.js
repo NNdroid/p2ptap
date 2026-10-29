@@ -913,6 +913,7 @@ window.p2ptapLocales["zh-CN"] = {
   topo_tt_transport: "传输层：",
   topo_tt_uptime: "运行时长：",
   chart_no_traffic: "暂无流量",
+  chart_no_traffic_sub: "一旦节点开始传输数据，吞吐量将在此显示",
   obfs_state_unknown: "未知",
   enc_peers_lbl: "已加密节点",
   seq_hint_fmt: "重放 {replay} · 窗口重置 {reset} · 利用率 {util}%",

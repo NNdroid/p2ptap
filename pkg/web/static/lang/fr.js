@@ -818,6 +818,7 @@ window.p2ptapLocales["fr"] = {
   topo_tt_transport: "Transport :",
   topo_tt_uptime: "Temps de fonctionnement :",
   chart_no_traffic: "Pas encore de trafic",
+  chart_no_traffic_sub: "Le débit s'affiche ici dès que les pairs échangent des données",
   obfs_state_unknown: "Inconnu",
   enc_peers_lbl: "Pairs chiffres",
   seq_hint_fmt: "relecture {replay} · reset fenetre {reset} · utilisation {util}%",

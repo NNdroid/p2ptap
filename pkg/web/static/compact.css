@@ -53,7 +53,7 @@ html[data-theme="light"] body { background: #f1f5f9; }
 .dashboard-details[open] > summary { border-bottom: 1px solid var(--glass-border); }
 .dashboard-detail-body { padding: 10px 12px 12px; }
 .metrics-fold { margin-top: 8px; }
-.metrics-fold > summary { font-size: .72rem; color: var(--text-secondary); cursor: pointer; padding: 5px 0; }
+.metrics-fold > summary { font-size: .72rem; color: var(--text-secondary); cursor: pointer; padding: 5px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .metrics-fold > summary:hover { color: var(--text-primary); }
 .metrics-fold > .ext71 { margin-top: 8px; }
 .dashboard-panel .glass-card:hover, .dashboard-panel .glass-section:hover { transform: none; box-shadow: none; }
@@ -173,3 +173,61 @@ html[data-theme="light"] body { background: #f1f5f9; }
    container already scrolls horizontally (overflow-x:auto). Keeping each
    header on one line reads better than wrapping them to two lines. */
 .route-table thead th { white-space: nowrap; }
+
+/* Card headers (.ext48 = [icon + title + badge] + search box).
+   The search box was pinned at 171px (flex-shrink:0) while the title was
+   allowed to shrink, so the localised titles got clipped to 59px — Chinese
+   strings need ~110px more than the English source text they replaced.
+   Let the box give way instead and keep the title on one line. */
+.ext48 > .module-search { flex: 0 1 auto; min-width: 0; }
+.ext49 { flex-shrink: 0; }
+
+/* ── Accessibility: WCAG AA text contrast ──────────────────────────────
+   Ratios below were measured by compositing every semi-transparent layer
+   between each text node and the first opaque ancestor (the glass cards in
+   compact.css are solid, but rows/legends still stack rgba(255,255,255,.06)
+   on top, which lifts the backdrop and drops contrast).
+
+   Dark theme, worst realistic backdrop (a row over a card):
+     --text-secondary #94a3b8 -> 6.74,  --text-muted #64748b -> 3.39 (FAIL)
+     --accent-purple  #a855f7 -> 4.37 (FAIL), --accent-indigo #6366f1 -> 3.87 (FAIL)
+   Light theme:
+     --text-muted #64748b -> 4.55 (borderline), .ext22 #67e8f9 -> 1.45 (FAIL),
+     .ext26 #fda4af -> 1.89 (FAIL)
+
+   The accent hues are NOT brightened globally: they also paint gradients
+   and badge fills where white text sits on top of them, and lightening them
+   there would hurt instead. Text uses dedicated ink variables. */
+:root {
+    --text-secondary: #a3b1c6;    /* 7.42 on the worst dark backdrop */
+    --text-muted: #8494ab;        /* 5.23 */
+    --accent-purple-ink: #c084fc; /* 6.54 on the dark card */
+    --accent-indigo-ink: #818cf8; /* 5.79 */
+    --danger-ink: #f87171;        /* >=5.0 on the dark chip/glass backdrops */
+}
+html[data-theme="light"] {
+    --text-muted: #5b6675;        /* 5.57 on the light glass card */
+    --accent-purple-ink: #6d28d9; /* 6.30 on white (was #7c3aed @ 4.48) */
+    --accent-indigo-ink: #4f46e5;
+    --danger-ink: #b91c1c;        /* 6.4 on the light glass card */
+}
+/* Hard-coded neon chips that only existed for the dark backdrop. */
+html[data-theme="light"] .ext22 { color: #0e7490; } /* Rx Ucast */
+html[data-theme="light"] .ext26 { color: #be123c; } /* Rx Bcast */
+/* Monospace peer ids: keep them on the readable secondary ink in both themes,
+   overriding any co-applied accent/ext* class (.ext22 etc.) that would tint them. */
+.enc-peer-id { color: var(--text-secondary) !important; }
+html[data-theme="light"] .enc-peer-id { color: #3f4a5c !important; }
+
+/* Small accent-coloured text (legends, cipher tags, stat labels). */
+.ext15, .ext76, .topo-legend-boot, .enc-algo-chacha { color: var(--accent-purple-ink); }
+.ext75 { color: var(--accent-indigo-ink); }
+
+/* Empty bandwidth chart: a gentle centred placeholder that reads like the
+   other glass cards instead of a bare one-line canvas label. */
+.ext11 { position: relative; }
+.chart-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 16px; text-align: center; pointer-events: none; }
+.chart-empty[hidden] { display: none; }
+.chart-empty-icon { font-size: 1.9rem; line-height: 1; opacity: .55; }
+.chart-empty-title { font-size: .84rem; font-weight: 600; color: var(--text-secondary); }
+.chart-empty-sub { font-size: .72rem; color: var(--text-muted); max-width: 80%; }

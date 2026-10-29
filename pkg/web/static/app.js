@@ -798,6 +798,7 @@
                 probing_pathways_desc: "Testing stream reachability, RTT, and transport types...",
                 sys_runtime_toggle: "Go runtime metrics — heap, GC, goroutines",
                 chart_no_traffic: "No traffic yet",
+                chart_no_traffic_sub: "Throughput appears here once peers start exchanging data",
                 obfs_state_unknown: "Unknown",
                 enc_peers_lbl: "Encrypted peers",
                 seq_hint_fmt: "replay {replay} · win-reset {reset} · util {util}%",
@@ -3512,6 +3513,8 @@
             for (const h of history) {
                 if ((h.tx_speed || 0) > 0 || (h.rx_speed || 0) > 0) { hasTraffic = true; break; }
             }
+            const bwEmpty = document.getElementById('bwChartEmpty');
+            if (bwEmpty) bwEmpty.hidden = hasTraffic;
             if (!hasTraffic) {
                 ctx.fillStyle = axisClr2;
                 ctx.font = "12px system-ui, sans-serif";
@@ -4128,11 +4131,11 @@
 
         const channelCategoryConfig = {
             sync:         { icon: '🔄', color: 'var(--info)', borderColor: 'var(--accent-cyan-border)' },
-            routing:      { icon: '🗺️', color: 'var(--accent-purple)', borderColor: 'var(--accent-purple-border)' },
+            routing:      { icon: '🗺️', color: 'var(--accent-purple-ink)', borderColor: 'var(--accent-purple-border)' },
             pubsub:       { icon: '📡', color: 'var(--warn)', borderColor: 'var(--accent-yellow-border, #92400e)' },
             data:         { icon: '🚀', color: 'var(--success)', borderColor: 'var(--accent-green-border)' },
-            security:     { icon: '🛡️', color: 'var(--danger)', borderColor: 'var(--danger-border, #7f1d1d)' },
-            transport:    { icon: '🕳️', color: 'var(--accent-purple)', borderColor: 'var(--accent-purple-border)' },
+            security:     { icon: '🛡️', color: 'var(--danger-ink)', borderColor: 'var(--danger-border, #7f1d1d)' },
+            transport:    { icon: '🕳️', color: 'var(--accent-purple-ink)', borderColor: 'var(--accent-purple-border)' },
             diagnostics:  { icon: '🩺', color: 'var(--info)', borderColor: 'var(--border-subtle)' },
             discovery:    { icon: '🔍', color: 'var(--info)', borderColor: 'var(--accent-cyan-border)' },
         };

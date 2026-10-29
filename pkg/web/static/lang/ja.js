@@ -818,6 +818,7 @@ window.p2ptapLocales["ja"] = {
   topo_tt_transport: "トランスポート：",
   topo_tt_uptime: "稼働時間：",
   chart_no_traffic: "トラフィックはまだありません",
+  chart_no_traffic_sub: "ピア間でデータのやり取りが始まると、ここにスループットが表示されます",
   obfs_state_unknown: "不明",
   enc_peers_lbl: "暗号化済みピア",
   seq_hint_fmt: "リプレイ {replay} · 窓リセット {reset} · 使用率 {util}%",
