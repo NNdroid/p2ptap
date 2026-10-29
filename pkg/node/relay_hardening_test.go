@@ -142,6 +142,94 @@ func TestCheckRelayTransitACLMatchesMatchACL(t *testing.T) {
 	}
 }
 
+// TestCheckRelayTransitACLDefersConstrainedRules verifies that a rule which
+// constrains protocol / port / destination CIDR is NOT decided at the transit
+// hop: the relay cannot see the inner frame (it is sealed end-to-end), so it
+// must defer to the final hop, which evaluates the rule with full context
+// (deliverDirectSubFrame runs MatchACL on the real payload). Deciding an
+// allow-ahead-of-deny shape here would under-deny (a blocked protocol bouncing
+// through a third-party relay), so the transit check only decides peer_id+
+// direction rules and defers the rest.
+func TestCheckRelayTransitACLDefersConstrainedRules(t *testing.T) {
+	src := test.RandPeerIDFatal(t)
+
+	cases := []struct {
+		name string
+		acl  *config.ACLConfig
+		want bool
+	}{
+		{
+			name: "constrained deny is deferred, not decided as a deny — the final hop owns protocol rules",
+			acl: &config.ACLConfig{
+				Enable:        true,
+				DefaultAction: "accept",
+				Rules:         []config.ACLRule{{Direction: "both", PeerID: "*", Protocol: "udp", Action: "deny"}},
+			},
+			want: true, // no peer-only rule decides it; default accepts (final hop denies UDP)
+		},
+		{
+			name: "peer-only deny still intercepts transit beside a constrained rule",
+			acl: &config.ACLConfig{
+				Enable:        true,
+				DefaultAction: "accept",
+				Rules: []config.ACLRule{
+					{Direction: "both", PeerID: "*", Protocol: "udp", Action: "deny"},
+					{Direction: "both", PeerID: "*", Action: "deny"},
+				},
+			},
+			want: false, // the peer-only deny decides it
+		},
+		{
+			name: "allow-before-deny protocol shape defers to the default rather than guessing allow",
+			acl: &config.ACLConfig{
+				Enable:        true,
+				DefaultAction: "drop",
+				Rules: []config.ACLRule{
+					{Direction: "both", PeerID: "*", Protocol: "tcp", Action: "accept"},
+					{Direction: "both", PeerID: "*", Protocol: "udp", Action: "deny"},
+				},
+			},
+			want: false, // both constrained: deferred, the default drops
+		},
+		{
+			name: "constrained rule matching this src is deferred",
+			acl: &config.ACLConfig{
+				Enable:        true,
+				DefaultAction: "accept",
+				Rules:         []config.ACLRule{{Direction: "both", PeerID: src.String(), Protocol: "udp", Action: "deny"}},
+			},
+			want: true,
+		},
+		{
+			name: "CIDR-constrained rule is deferred the same way",
+			acl: &config.ACLConfig{
+				Enable:        true,
+				DefaultAction: "accept",
+				Rules:         []config.ACLRule{{Direction: "both", PeerID: "*", IPCIDR: "10.0.0.0/8", Action: "deny"}},
+			},
+			want: true,
+		},
+		{
+			name: "port-constrained rule is deferred the same way",
+			acl: &config.ACLConfig{
+				Enable:        true,
+				DefaultAction: "accept",
+				Rules:         []config.ACLRule{{Direction: "both", PeerID: "*", Port: "80", Action: "deny"}},
+			},
+			want: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := transitNode(tc.acl)
+			if got := n.checkRelayTransitACL(src, test.RandPeerIDFatal(t)); got != tc.want {
+				t.Fatalf("checkRelayTransitACL = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // --- broadcast dedup ring ---------------------------------------------------
 
 func TestBcastDedupRingSuppressesDuplicates(t *testing.T) {

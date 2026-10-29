@@ -26,9 +26,7 @@ import (
 )
 
 func (n *Node) registerMetaStreamHandler() {
-	n.Host.SetStreamHandler(meta.MetaProtocolID, func(s network.Stream) {
-		n.handleMetaStream(s)
-	})
+	n.Host.SetStreamHandler(meta.MetaProtocolID, n.gateStream(n.streamGateMeta, n.handleMetaStream))
 	log.Debug("Stream handler registered for metadata protocol: %s", meta.MetaProtocolID)
 }
 

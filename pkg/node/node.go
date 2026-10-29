@@ -128,6 +128,8 @@ type Node struct {
 	streamGateData  *streamGate
 	streamGateRelay *streamGate
 	streamGateEcho  *streamGate
+	streamGateLSA   *streamGate
+	streamGateMeta  *streamGate
 	// peerLocalEpochs holds the PER-PEER anti-replay epoch this node stamps into
 	// the SeqID of every frame it sends to each remote peer. Unlike the old
 	// single node-wide conn epoch, rotating the epoch for ONE reconnecting peer
@@ -1973,6 +1975,8 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		streamGateData:      newStreamGate(maxStreamsPerPeerData),
 		streamGateRelay:     newStreamGate(maxStreamsPerPeerRelay),
 		streamGateEcho:      newStreamGate(maxStreamsPerPeerEcho),
+		streamGateLSA:       newStreamGate(maxStreamsPerPeerLSA),
+		streamGateMeta:      newStreamGate(maxStreamsPerPeerMeta),
 		relayDiag:           new(RelayDiag),
 		perPeerObf:          *newPeerObfTable(),
 		Dispatcher:          dispatcher,
@@ -2424,7 +2428,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	h.SetStreamHandler(ProtocolID, node.gateStream(node.streamGateData, node.handleStream))
 	log.Debug("Stream handler registered for protocol: %s", ProtocolID)
 
-	h.SetStreamHandler(LSAProtocolID, node.handleLSAStream)
+	h.SetStreamHandler(LSAProtocolID, node.gateStream(node.streamGateLSA, node.handleLSAStream))
 	log.Debug("Stream handler registered for LSA protocol: %s", LSAProtocolID)
 
 	h.SetStreamHandler(OverlayRelayProtocolID, node.gateStream(node.streamGateRelay, node.handleRelayStream))

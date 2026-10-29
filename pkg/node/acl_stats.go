@@ -66,8 +66,11 @@ func (n *Node) checkRelayTransitACL(srcPeer, finalDst peer.ID) bool {
 	}
 	// Direct peer-ID rule evaluation: MatchACL returns early when frame is nil
 	// (before reaching the rule loop that checks peer_id), making the old nil
-	// call a silent no-op. We evaluate peer_id rules directly here; protocol/
-	// port rules only apply at the final hop where the frame is visible.
+	// call a silent no-op. We evaluate peer_id rules directly here. Rules that
+	// ALSO constrain protocol / port / destination CIDR cannot be evaluated at
+	// a transit hop (the payload is sealed end-to-end, so the relay never sees
+	// the inner frame's protocol/ports/IP); they are SKIPPED here and left to
+	// the final hop, which has full context.
 	//
 	// "*" is the catch-all MatchACL applies on the direct path, and it MUST be
 	// honoured here too. Skipping it let a {peer_id:"*", action:"deny"} rule
@@ -79,8 +82,13 @@ func (n *Node) checkRelayTransitACL(srcPeer, finalDst peer.ID) bool {
 	// Rules apply in CONFIGURATION ORDER, matching MatchACL's first-match-wins.
 	// Deliberately not most-specific-wins: that would let a "* deny" the
 	// operator placed ahead of a specific accept be overridden on the relay path
-	// only, i.e. under-deny relative to the direct path. Ignoring protocol/port
-	// here can only over-deny, which is the safe direction.
+	// only, i.e. under-deny relative to the direct path. Deciding a
+	// protocol/port/CIDR-constrained rule here would be guessing a match: an
+	// allow-ahead-of-deny shape makes "guess it matches" UNDER-deny (a blocked
+	// protocol bounces through a third-party relay), while guessing a deny rule
+	// matches OVER-denies legitimate transit — both diverge from the direct
+	// path. Deferring constrained rules to the final hop is the only correct
+	// read, so only peer_id+direction rules are decided here.
 	//
 	// Two MatchACL guards MUST be mirrored here, or the transit check silently
 	// diverges from the direct path it is meant to pre-empt:
@@ -100,6 +108,15 @@ func (n *Node) checkRelayTransitACL(srcPeer, finalDst peer.ID) bool {
 			continue
 		}
 		if rule.PeerID != "" && rule.PeerID != "*" && rule.PeerID != src {
+			continue
+		}
+		// Protocol/port/CIDR-constrained rules are invisible here (end-to-end
+		// seal): skip them so the final hop enforces them with full context.
+		// Deciding on an allow rule here would UNDER-deny (a blocked protocol
+		// bouncing through a third-party relay), which defeats the whole check.
+		if (rule.Protocol != "" && strings.ToLower(rule.Protocol) != "any") ||
+			(rule.Port != "" && rule.Port != "0") ||
+			(rule.IPCIDR != "" && rule.IPCIDR != "*") {
 			continue
 		}
 		allowed := strings.ToLower(rule.Action) == "accept" || strings.ToLower(rule.Action) == "allow"

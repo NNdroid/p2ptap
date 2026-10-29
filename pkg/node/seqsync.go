@@ -442,6 +442,13 @@ func (n *Node) handleSeqSync(s network.Stream) {
 			n.maybeSelfHeal(remotePeer)
 		}
 	case "ack":
+		// Authenticate before re-anchoring the dedup window: an unauthenticated
+		// ack would let any peer that can open a stream reset this peer's window
+		// (a single-side blackhole) or forge a stale sequence. Legacy peers are
+		// accepted for interop (requireSeqSyncMsgAuth returns false for them).
+		if !n.authSeqSyncControl(remotePeer, msg) {
+			return
+		}
 		// An "ack" arriving on a fresh stream means the peer's handshake reply did
 		// not ride the original stream we opened (e.g. it was re-sent out-of-band).
 		// We no longer hold the ephemeral private key from the original "sync", so
@@ -454,6 +461,13 @@ func (n *Node) handleSeqSync(s network.Stream) {
 		n.markPeerReady(remotePeer)
 		n.maybeSelfHeal(remotePeer)
 	case "rekeyReq":
+		// A rekeyReq drives a full ECDH re-key round on the leader, so it must be
+		// authenticated before any state is touched — an unauthenticated nudge
+		// lets any peer that can open a stream force repeated re-negotiations
+		// (CPU DoS) on an arbitrary peer. Legacy peers accepted for interop.
+		if !n.authSeqSyncControl(remotePeer, msg) {
+			return
+		}
 		// A follower that sees sustained decryption failures cannot open its own
 		// re-key stream (that would cross with our leader-initiated round and
 		// produce four divergent ECDH secrets — the permanent decrypt-fail loop).
@@ -468,6 +482,14 @@ func (n *Node) handleSeqSync(s network.Stream) {
 			log.Debug("SeqSync: [RESPONDER] received rekeyReq from %s but we are not the leader; ignoring (the leader owns the round)", remotePeer.String())
 		}
 	case "epochSync":
+		// An epochSync re-anchors the dedup window for this peer, so it must be
+		// authenticated — an unauthenticated epochSync (the most direct window
+		// reset primitive) would let any peer that can open a stream blackhole
+		// another peer's real frames by pointing the anchor at a stale epoch.
+		// Legacy peers accepted for interop.
+		if !n.authSeqSyncControl(remotePeer, msg) {
+			return
+		}
 		// Lightweight RECONNECT sync: refresh the dedup window + expected
 		// anti-replay epoch for this peer WITHOUT re-deriving the cipher. Used
 		// when the peer reconnects but we still hold a valid (retained) in-memory
@@ -484,6 +506,26 @@ func (n *Node) handleSeqSync(s network.Stream) {
 		_ = writeSeqSyncMsg(s, reply)
 		log.Debug("SeqSync: [epochSync] re-anchored dedup for %s at seq=%d epoch=%d (retained key, cipher NOT re-derived)", remotePeer.String(), msg.MySeq, msg.ConnEpoch)
 	}
+}
+
+// authSeqSyncControl authenticates a control SeqSync message (ack / rekeyReq /
+// epochSync) that mutates per-peer state — the dedup anchor or the re-key round.
+// It mirrors the sync/request guard: a message advertising HandshakeVer >= 2
+// must carry a valid identity signature and a fresh timestamp, otherwise it is
+// rejected; legacy peers (no signature, lower version) are accepted for interop.
+func (n *Node) authSeqSyncControl(remotePeer peer.ID, msg SeqSyncMsg) bool {
+	if !n.requireSeqSyncMsgAuth(remotePeer, msg) {
+		return true
+	}
+	if err := n.verifySeqSyncMsg(remotePeer, msg); err != nil {
+		log.Warn("SeqSync: refusing %s from %s — unauthenticated: %v", msg.Type, remotePeer, err)
+		return false
+	}
+	if err := checkSeqSyncTimestamp(msg); err != nil {
+		log.Warn("SeqSync: rejecting stale %s from %s: %v", msg.Type, remotePeer, err)
+		return false
+	}
+	return true
 }
 
 // maybeSelfHeal triggers a passive-side handshake re-sync when a reciprocal
@@ -532,13 +574,23 @@ func (n *Node) anchorDedupForPeer(p peer.ID, remoteSeq uint64, connEpoch uint64)
 // key, so receiving it never triggers a cipher re-negotiation.
 func (n *Node) buildEpochSyncMsg(p peer.ID) SeqSyncMsg {
 	epoch := n.ensureLocalEpoch(p)
-	return SeqSyncMsg{
+	m := SeqSyncMsg{
 		Type:      "epochSync",
 		NodeID:    n.Host.ID().String(),
 		MySeq:     n.Packer.MakeSeqID(n.txFrameCounter(p), epoch),
 		ConnEpoch: epoch,
 		Timestamp: time.Now().UnixMilli(),
 	}
+	// Sign the message (sets HandshakeVer=2 + MsgSig) so the receiver can
+	// authenticate it BEFORE re-anchoring the dedup window — an unsigned
+	// epochSync would leave the receiver accepting a window reset from any
+	// peer that can open a stream. The receiver only demands the signature
+	// when HandshakeVer>=2, so a legacy peer's unsigned epochSync is still
+	// accepted for interop.
+	if err := n.signSeqSyncMsg(&m); err != nil {
+		log.Warn("SeqSync: cannot sign epochSync for %s: %v", p.String(), err)
+	}
+	return m
 }
 
 // SyncSeqToPeer initiates a seqsync exchange with a connected peer: it sends

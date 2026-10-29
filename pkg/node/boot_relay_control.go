@@ -28,6 +28,15 @@ import (
 // (Round 9 MED finding).
 const maxBootRelayCtrlStreams = 256
 
+// maxBootRelayCtrlReadBuf caps the pending read buffer of a single boot-relay
+// control stream. Control frames are signature-verified before enqueue, but the
+// triggering peer is an authenticated member; if the protocol handler stalls
+// (a blocked SeqSync handshake lock, a 30s echo read loop), the peer can keep
+// enqueueing frames while readCh is full and readBuf grows without bound. 1 MiB
+// is far above a legitimate control exchange (a handful of ~66B handshake /
+// ~1KB LSA frames) while stopping one peer from pinning unbounded memory.
+const maxBootRelayCtrlReadBuf = 1 << 20
+
 // errBootRelayCtrlDeadline is returned by Read/Write on a boot-relay control
 // stream once its deadline has elapsed. It is treated by the control handlers
 // (SeqSync/LSA/Meta/Echo) like any other stream read/write error — the caller
@@ -365,8 +374,16 @@ func (s *bootRelayCtrlStream) enqueue(data []byte) {
 	case s.readCh <- data:
 	default:
 		// Channel full: append to the in-flight buffer (byte order is what
-		// matters, and the protocol re-synchronises on its own framing).
+		// matters, and the protocol re-synchronises on its own framing). The
+		// handler's read loop is blocked (or the reader is a slow consumer), so
+		// this is the ONLY unbounded growth path — cap it and kill the stream
+		// rather than let an authenticated peer pin memory.
 		s.readBuf = append(s.readBuf, data...)
+		if len(s.readBuf) > maxBootRelayCtrlReadBuf {
+			s.closed = true
+			close(s.closeCh)
+			log.Warn("boot-relay control stream %s: pending read buffer exceeded %d bytes; closing to bound memory", s.ID(), maxBootRelayCtrlReadBuf)
+		}
 	}
 	s.mu.Unlock()
 }

@@ -478,6 +478,13 @@ func (n *Node) tapWriteUrgentLoop() {
 }
 
 func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, packedCopy []byte, rawPayload []byte, readN int, tag string) {
+	// Outbound ACL: exit-transit is a unicast send to the exit peer and was
+	// the one egress path that skipped checkACL (it bypasses the unicast gate
+	// in the TAP write path). Honour the operator's outbound rules here too.
+	if !n.checkACL(rawPayload, exitPeerID, true) {
+		releaseFrameBuf(packedCopy)
+		return
+	}
 	// PSK-required fail-closed (TX): the exit tunnel was the ONLY data-path
 	// egress that skipped canEgressToPeer, so an exit peer with no negotiated
 	// cipher (PSK mismatch, pre-handshake, or attacker-influenced selection)

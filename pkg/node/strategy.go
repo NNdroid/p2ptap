@@ -1523,6 +1523,13 @@ func (sd *StrategyDispatcher) BroadcastToAllPeers(ctx context.Context, data []by
 		if sd.node != nil && !sd.node.canEgressToPeer(p) {
 			continue
 		}
+		// Outbound ACL must gate broadcast / unknown-unicast floods too, not
+		// just the unicast path (node_tap.go). Without this an operator's
+		// outbound deny rule is dead code for every ARP/mDNS/DHCP discovery
+		// frame, which floods to ALL peers below.
+		if sd.node != nil && !sd.node.checkACL(data, sd.node.peerIDString(p), true) {
+			continue
+		}
 		seqID := sd.node.nextTxSeqID(p)
 		sd.node.Collector.RecordTxSeq(sd.node.peerIDString(p), seqID)
 		maxPacked := sd.node.Packer.MaxPackedLen(len(data))
@@ -1574,6 +1581,12 @@ func (sd *StrategyDispatcher) BroadcastBatchToAllPeers(ctx context.Context, fram
 		}
 		packedList := make([]packedItem, 0, len(frames))
 		for _, frame := range frames {
+			// Outbound ACL is per-frame (the protocol/port are extracted from
+			// the payload); a denied frame is dropped for this peer, the rest
+			// of the batch still flows.
+			if sd.node != nil && !sd.node.checkACL(frame, sd.node.peerIDString(p), true) {
+				continue
+			}
 			// Per-peer counter: a shared one would leave gaps in every peer's
 			// observed sequence (see tx_seq.go).
 			seqID := sd.node.nextTxSeqID(p)

@@ -26,6 +26,12 @@ const (
 	maxStreamsPerPeerData  = 16
 	maxStreamsPerPeerRelay = 16
 	maxStreamsPerPeerEcho  = 8
+	// LSA and meta each keep ONE long-lived persistent stream per peer (the
+	// lsaPool/metaPool reuse path), so a bound of 4 leaves headroom for a
+	// reconnect window while stopping a flood of short-lived streams that
+	// would otherwise pin a 64-65 KiB buffer plus a goroutine each.
+	maxStreamsPerPeerLSA  = 4
+	maxStreamsPerPeerMeta = 4
 )
 
 type streamGate struct {

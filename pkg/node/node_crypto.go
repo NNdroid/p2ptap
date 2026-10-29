@@ -286,7 +286,17 @@ func (n *Node) sendRekeyRequest(p peer.ID) {
 		}
 		defer s.Close()
 		_ = s.SetDeadline(time.Now().Add(5 * time.Second))
-		if err := writeSeqSyncMsg(s, n.buildSeqSyncMsg("rekeyReq", p, nil)); err != nil {
+		// rekeyReq is a control nudge with no ObfPub, so buildSeqSyncMsg leaves
+		// it unsigned (HandshakeVer=0). It drives a full re-key round on the
+		// leader, so sign it here to bind the nudge to the follower's identity —
+		// the leader then rejects a forged nudge from any peer that can open a
+		// stream instead of burning an ECDH round.
+		req := n.buildSeqSyncMsg("rekeyReq", p, nil)
+		if err := n.signSeqSyncMsg(&req); err != nil {
+			log.Warn("SeqSync: cannot sign rekeyReq for %s, not sending: %v", p.String(), err)
+			return
+		}
+		if err := writeSeqSyncMsg(s, req); err != nil {
 			return
 		}
 		_, _ = readSeqSyncMsg(s)
