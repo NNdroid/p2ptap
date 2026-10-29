@@ -31,7 +31,7 @@ func BenchmarkStreamDeadlineWrite(b *testing.B) {
 	defer ps.writeMu.Unlock()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := sd.writeFragsToStreams(ps, pid, streams, 2400, frags, true); err != nil {
+		if err := sd.writeFragsToStreams(ps, pid, streams, tapPayloadStat{bytes: 2400, frames: 1}, frags, true); err != nil {
 			b.Fatal(err)
 		}
 	}

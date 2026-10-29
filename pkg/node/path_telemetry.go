@@ -1,6 +1,8 @@
 package node
 
 import (
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,17 +28,34 @@ type pathKey struct {
 	path string
 }
 
+// relayPathKeyFor returns the synthetic per-path key for a frame carried by
+// viaPeer, distinguishing an overlay relay from a boot (backbone) relay so the
+// per-path table can label and aggregate each kind correctly.
+func (n *Node) relayPathKeyFor(viaPeer peer.ID) string {
+	if n.isBootstrapPeer(viaPeer) {
+		return "boot-relay://" + viaPeer.String()
+	}
+	return "overlay-relay://" + viaPeer.String()
+}
+
 // pathRxCounters is the per-path inbound TAP-payload accounting.
 type pathRxCounters struct {
 	bytes  atomic.Uint64
 	frames atomic.Uint64
 }
 
+// pathTxCounters is the per-path outbound TAP-payload accounting.
+type pathTxCounters struct {
+	bytes  atomic.Uint64
+	frames atomic.Uint64
+}
+
 // recordPeerRxBytesOnPath attributes nBytes of accepted TAP payload to the path
 // it arrived on. path is the transport key (RemoteMultiaddr for direct/circuit
-// paths, a synthetic "relay://<hop>" for relayed frames). It is the receive-side
-// counterpart of the per-path write quality; keep it symmetric with
-// recordPeerRxBytes so the per-path sums can be compared to the per-peer total.
+// paths, a synthetic "overlay-relay://<hop>" / "boot-relay://<hop>" for relayed
+// frames). It is the receive-side counterpart of the per-path write quality;
+// keep it symmetric with recordPeerRxBytes so the per-path sums can be compared
+// to the per-peer total.
 func (n *Node) recordPeerRxBytesOnPath(p peer.ID, path string, nBytes int) {
 	if nBytes <= 0 || path == "" {
 		return
@@ -64,6 +83,41 @@ func (n *Node) pathRxStats(p peer.ID, path string) (bytes, frames uint64, ok boo
 	return c.bytes.Load(), c.frames.Load(), true
 }
 
+// recordPeerTxBytesOnPath attributes a successfully-written outbound TAP payload
+// to the path it was sent on. path MUST use the same key format as the receive
+// side (RemoteMultiaddr for direct/circuit, "overlay-relay://<hop>" /
+// "boot-relay://<hop>" for relayed frames) so the two directions line up.
+// nFrames is the number of TAP payloads carried (sub-frames for a batch).
+func (n *Node) recordPeerTxBytesOnPath(p peer.ID, path string, nBytes, nFrames int) {
+	if nBytes <= 0 || path == "" {
+		return
+	}
+	if nFrames <= 0 {
+		nFrames = 1
+	}
+	k := pathKey{peer: p, path: path}
+	v, ok := n.pathTx.Load(k)
+	if !ok {
+		v, _ = n.pathTx.LoadOrStore(k, &pathTxCounters{})
+	}
+	c := v.(*pathTxCounters)
+	c.bytes.Add(uint64(nBytes))
+	c.frames.Add(uint64(nFrames))
+}
+
+// pathTxStats returns the accumulated (bytes, frames) sent on one path.
+func (n *Node) pathTxStats(p peer.ID, path string) (bytes, frames uint64, ok bool) {
+	if path == "" {
+		return 0, 0, false
+	}
+	v, ok := n.pathTx.Load(pathKey{peer: p, path: path})
+	if !ok {
+		return 0, 0, false
+	}
+	c := v.(*pathTxCounters)
+	return c.bytes.Load(), c.frames.Load(), true
+}
+
 // forgetPeerTelemetry drops all per-path receive counters and the reorder queue
 // for a departed peer. Called from the same sites that purge the peer's streams
 // (Dispatcher.RemovePeer), so a churning peer cannot leak path entries forever.
@@ -72,6 +126,12 @@ func (n *Node) forgetPeerTelemetry(p peer.ID) {
 	n.pathRx.Range(func(k, _ any) bool {
 		if pk, ok := k.(pathKey); ok && pk.peer == p {
 			n.pathRx.Delete(k)
+		}
+		return true
+	})
+	n.pathTx.Range(func(k, _ any) bool {
+		if pk, ok := k.(pathKey); ok && pk.peer == p {
+			n.pathTx.Delete(k)
 		}
 		return true
 	})
@@ -94,77 +154,135 @@ func transportPriorityLabel(score int) string {
 	}
 }
 
-// buildPathMetrics returns the per-path breakdown for one peer. Only the
-// application-stream paths (direct + circuit-relay) are enumerated: those are
-// exactly the paths the multipath scheduler distributes over. Overlay/boot
-// relays are single fallback paths, not multi-path targets, so they are not
-// listed here (the per-peer ReturnTransport already reports which relay carried
-// the last inbound frame).
+// buildPathMetrics returns the per-path breakdown for one peer. Every path is
+// enumerated that either (a) is a currently-registered application stream
+// (direct + circuit-relay — exactly the paths the multipath scheduler
+// distributes over) or (b) has a recorded TX/RX attribution, which covers an
+// overlay/boot relay path and any stream replaced by a reconnect. Active marks
+// the live-stream subset; the cumulative counters are keyed by path, so a path
+// keeps its totals across stream churn on the same link.
 func (n *Node) buildPathMetrics(pID peer.ID) []observer.PathMetricDTO {
 	if n.Dispatcher == nil {
 		return nil
 	}
 	ps := n.Dispatcher.GetPeerStreams(pID)
-	if ps == nil {
-		return nil
+	var streams []network.Stream
+	var wq map[network.Stream]streamWriteQuality
+	if ps != nil {
+		streams = ps.GetAllStreams()
+		// Snapshot the write-quality map under writeMu (the same lock the writer
+		// holds); the collector ticker is far too slow for the lock to contend.
+		ps.writeMu.Lock()
+		if len(ps.writeQuality) > 0 {
+			wq = make(map[network.Stream]streamWriteQuality, len(ps.writeQuality))
+			for s, q := range ps.writeQuality {
+				wq[s] = q
+			}
+		}
+		ps.writeMu.Unlock()
 	}
-	streams := ps.GetAllStreams()
-	if len(streams) == 0 {
-		return nil
-	}
-	// Snapshot the write-quality map under writeMu (the same lock the writer
-	// holds); the collector ticker is far too slow for the lock to contend.
-	ps.writeMu.Lock()
-	wq := make(map[network.Stream]streamWriteQuality, len(ps.writeQuality))
-	for s, q := range ps.writeQuality {
-		wq[s] = q
-	}
-	ps.writeMu.Unlock()
 
-	now := time.Now()
-	out := make([]observer.PathMetricDTO, 0, len(streams))
+	// Union of live-stream paths and every path with recorded attribution.
+	paths := make([]string, 0, len(streams)+2)
+	seen := make(map[string]bool, len(streams)+2)
 	for _, s := range streams {
 		if s == nil || s.Conn() == nil {
 			continue
 		}
-		out = append(out, n.pathDTOFor(pID, s, wq[s], now))
+		path := s.Conn().RemoteMultiaddr().String()
+		if path != "" && !seen[path] {
+			seen[path] = true
+			paths = append(paths, path)
+		}
+	}
+	collectAttributed := func(m *sync.Map) {
+		m.Range(func(k, _ any) bool {
+			pk, ok := k.(pathKey)
+			if !ok || pk.peer != pID || pk.path == "" || seen[pk.path] {
+				return true
+			}
+			seen[pk.path] = true
+			paths = append(paths, pk.path)
+			return true
+		})
+	}
+	collectAttributed(&n.pathRx)
+	collectAttributed(&n.pathTx)
+	if len(paths) == 0 {
+		return nil
+	}
+
+	now := time.Now()
+	out := make([]observer.PathMetricDTO, 0, len(paths))
+	for _, path := range paths {
+		var s network.Stream
+		var q streamWriteQuality
+		for _, cur := range streams {
+			if cur != nil && cur.Conn() != nil && cur.Conn().RemoteMultiaddr().String() == path {
+				s = cur
+				break
+			}
+		}
+		if s != nil && wq != nil {
+			q = wq[s]
+		}
+		out = append(out, n.pathDTOFor(pID, path, s, q, now))
 	}
 	return out
 }
 
-func (n *Node) pathDTOFor(pID peer.ID, s network.Stream, q streamWriteQuality, now time.Time) observer.PathMetricDTO {
+func (n *Node) pathDTOFor(pID peer.ID, path string, s network.Stream, q streamWriteQuality, now time.Time) observer.PathMetricDTO {
 	dto := observer.PathMetricDTO{
-		PathID:    s.Conn().RemoteMultiaddr().String(),
-		PeerID:    n.peerIDString(pID),
-		Transport: transportLabelForConn(s.Conn()),
-		RelayKind: "direct",
-		Active:    true,
+		PathID: path,
+		PeerID: n.peerIDString(pID),
+		Active: s != nil,
 	}
-	if maddrutil.IsCircuitRelay(s.Conn().RemoteMultiaddr()) {
-		dto.RelayKind = "circuit-relay"
-	}
-	dto.Score = scoreStreamTransport(s)
-	dto.Priority = transportPriorityLabel(dto.Score)
-
-	if q.samples > 0 {
-		dto.Usable = q.usable(now)
-		dto.NanosPerByte = q.nanosPerByte
-		if q.nanosPerByte > 0 {
-			dto.EstBps = 1e9 / q.nanosPerByte
-			// Lower-bound per-frame service time for a nominal 1500 B frame; a
-			// latency proxy, NOT a true RTT (see PathMetricDTO comment).
-			dto.ServiceMs = q.nanosPerByte * 1500 / 1e6
+	if s != nil && s.Conn() != nil {
+		dto.Transport = transportLabelForConn(s.Conn())
+		dto.RelayKind = "direct"
+		if maddrutil.IsCircuitRelay(s.Conn().RemoteMultiaddr()) {
+			dto.RelayKind = "circuit-relay"
 		}
-		dto.TxBytes = uint64(q.bytes)
-		dto.TxFrames = uint64(q.samples)
-		dto.Updated = q.updated.UTC().Format(time.RFC3339)
+		dto.Score = scoreStreamTransport(s)
+		dto.Priority = transportPriorityLabel(dto.Score)
+
+		if q.samples > 0 {
+			dto.Usable = q.usable(now)
+			dto.NanosPerByte = q.nanosPerByte
+			if q.nanosPerByte > 0 {
+				dto.EstBps = 1e9 / q.nanosPerByte
+				// Lower-bound per-frame service time for a nominal 1500 B frame; a
+				// latency proxy, NOT a true RTT (see PathMetricDTO comment).
+				dto.ServiceMs = q.nanosPerByte * 1500 / 1e6
+			}
+			dto.Updated = q.updated.UTC().Format(time.RFC3339)
+		}
+		if dto.EstBps <= 0 {
+			// No usable measurement yet: fall back to the topology nominal so the
+			// WebUI still shows a comparable capacity placeholder.
+			dto.EstBps = mpNominalBps(dto.Score)
+		}
+	} else {
+		// Relay / replaced path: no live stream to derive the label from.
+		switch {
+		case strings.HasPrefix(path, "boot-relay://"):
+			dto.Transport, dto.RelayKind = "Boot Relay", "boot-relay"
+		case strings.HasPrefix(path, "overlay-relay://"), strings.HasPrefix(path, "relay://"):
+			dto.Transport, dto.RelayKind = "Overlay Relay", "overlay-relay"
+		default:
+			dto.Transport, dto.RelayKind = "Unknown", "direct"
+		}
+		dto.Score = 999
+		dto.Priority = transportPriorityLabel(999)
+		dto.Usable = false
 	}
-	if dto.EstBps <= 0 {
-		// No usable measurement yet: fall back to the topology nominal so the
-		// WebUI still shows a comparable capacity placeholder.
-		dto.EstBps = mpNominalBps(dto.Score)
+	// Cumulative per-path traffic is keyed by path, not by the (ephemeral) stream
+	// object, so both directions survive a stream reconnect on the same path.
+	if tb, tf, ok := n.pathTxStats(pID, path); ok {
+		dto.TxBytes = tb
+		dto.TxFrames = tf
 	}
-	if rb, rf, ok := n.pathRxStats(pID, dto.PathID); ok {
+	if rb, rf, ok := n.pathRxStats(pID, path); ok {
 		dto.RxBytes = rb
 		dto.RxFrames = rf
 	}

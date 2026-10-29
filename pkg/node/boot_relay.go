@@ -590,8 +590,9 @@ func (sd *StrategyDispatcher) sendToPeerViaBootRelay(target, bootHop peer.ID, pa
 	}
 	// Keep the topology rate in original TAP bytes. The boot-relay envelope,
 	// fixed-size padding, and encryption overhead belong to wire telemetry, not
-	// to the user-facing upload/download rate.
-	txBytes := tapPayloadLenFromPackedFrame(packedData)
+	// to the user-facing upload/download rate. stat also attributes per-path TX
+	// (bytes + logical frame count) to the boot-relay path key.
+	stat := framePayloadStats(packedData)
 
 	// 1. End-to-end seal for the final destination.
 	inner := packedData
@@ -612,7 +613,10 @@ func (sd *StrategyDispatcher) sendToPeerViaBootRelay(target, bootHop peer.ID, pa
 
 	// 3. Submit to the persistent boot-relay uplink.
 	if !n.bootRelaySubmit(bootHop, env,
-		func() { n.recordPeerTxBytes(target, txBytes) },
+		func() {
+			n.recordPeerTxBytes(target, stat.bytes)
+			n.recordPeerTxBytesOnPath(target, "boot-relay://"+bootHop.String(), stat.bytes, stat.frames)
+		},
 		func() {
 			log.Debug("[boot-relay] send to peer %s via %s permanently failed", target.String(), bootHop.String())
 		},
@@ -857,12 +861,12 @@ func (n *Node) deliverRelayedSubFrame(srcPeer, viaPeer peer.ID, seqID uint64, ta
 		// In batch mode the caller collects the prepared job and pushes the whole
 		// batch at once, so all sub-frames share this seqID's reorder counter.
 		if collect != nil {
-			if job, err := n.prepareTapWriteJob(tapPayload, false, srcPeer, "relay://"+viaPeer.String()); err == nil {
+			if job, err := n.prepareTapWriteJob(tapPayload, false, srcPeer, n.relayPathKeyFor(viaPeer)); err == nil {
 				*collect = append(*collect, job)
 			}
 			return
 		}
-		n.reorderTapWrite(srcPeer, seqID, tapPayload, false, srcPeer, "relay://"+viaPeer.String())
+		n.reorderTapWrite(srcPeer, seqID, tapPayload, false, srcPeer, n.relayPathKeyFor(viaPeer))
 		return
 	}
 
@@ -877,6 +881,6 @@ func (n *Node) deliverRelayedSubFrame(srcPeer, viaPeer peer.ID, seqID uint64, ta
 			go n.sendTapProbeAck(d.prober, d.token, d.flag)
 		}
 	}
-	n.recordRelayedTapDelivery(srcPeer, tapPayload, "relay://"+viaPeer.String())
+	n.recordRelayedTapDelivery(srcPeer, tapPayload, n.relayPathKeyFor(viaPeer))
 
 }

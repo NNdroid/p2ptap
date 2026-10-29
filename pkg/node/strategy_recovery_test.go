@@ -177,7 +177,7 @@ func TestStrategyRedundancyCountsLogicalPayloadOnce(t *testing.T) {
 	ps.AddStream("one", &strategyDeadlineStream{})
 	ps.AddStream("two", &strategyDeadlineStream{})
 	ps.writeMu.Lock()
-	err := sd.writeFragsToStreams(ps, pid, ps.GetAllStreams(), 42, [][]byte{[]byte("frag-1"), []byte("frag-2")}, true)
+	err := sd.writeFragsToStreams(ps, pid, ps.GetAllStreams(), tapPayloadStat{bytes: 42, frames: 1}, [][]byte{[]byte("frag-1"), []byte("frag-2")}, true)
 	ps.writeMu.Unlock()
 	if err != nil {
 		t.Fatal(err)
