@@ -73,7 +73,7 @@ func TestStrategyBatchPooledCiphertextRecoversPartialWrite(t *testing.T) {
 			defer dev.Close()
 			defer pipe.Close()
 			rx := &Node{Config: cfg, TAP: dev, Collector: noopCollector{}, Dispatcher: NewStrategyDispatcher(nil, mode), Packer: packer,
-				dedupPeers: make(map[peer.ID]*obfuscate.Deduplicator), MACTable: vswitch.NewMACTable(),
+				MACTable: vswitch.NewMACTable(),
 				IPTracker: NewIPTrafficTracker(), tapWriteCh: make(chan tapWriteJob, 8)}
 			rx.SetConfig(cfg)
 			rx.perPeerObf.Store(&table)
@@ -192,7 +192,6 @@ func TestStrategyBatchPartialWriteRecoversWithoutDuplicateDelivery(t *testing.T)
 			defer pipe.Close()
 			rx := &Node{Config: cfg, TAP: dev, Collector: noopCollector{},
 				Dispatcher: NewStrategyDispatcher(nil, mode), Packer: packer,
-				dedupPeers: make(map[peer.ID]*obfuscate.Deduplicator),
 				MACTable:   vswitch.NewMACTable(), IPTracker: NewIPTrafficTracker(),
 				tapWriteCh: make(chan tapWriteJob, 8)}
 			rx.SetConfig(cfg)

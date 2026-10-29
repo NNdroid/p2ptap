@@ -120,6 +120,10 @@ func (ps *PeerStreams) submitMpWriteLocked(s network.Stream, node *Node, target 
 // to the stream, so per-stream deadline state needs no lock at all.
 func (ps *PeerStreams) runMpWriter(s network.Stream, w *streamWriter) {
 	var nextRenew time.Time
+	// pathKey is cached per stream (this goroutine is the stream's only writer,
+	// and the stream never changes here): rendering the multiaddr for every
+	// batch is a heap alloc + base58 formatting on the packet path.
+	var pathKey string
 	for {
 		select {
 		case t := <-w.q:
@@ -143,7 +147,10 @@ func (ps *PeerStreams) runMpWriter(s network.Stream, w *streamWriter) {
 				completed := time.Now()
 				ps.recordStreamWrite(s, wireBytes, completed.Sub(start), completed)
 				if t.node != nil && s.Conn() != nil {
-					t.node.recordPeerTxBytesOnPath(t.target, s.Conn().RemoteMultiaddr().String(), t.stat.bytes, t.stat.frames)
+					if pathKey == "" {
+						pathKey = s.Conn().RemoteMultiaddr().String()
+					}
+					t.node.recordPeerTxBytesOnPath(t.target, pathKey, t.stat.bytes, t.stat.frames)
 				}
 			}
 			t.result <- mpWriteResult{err: err, wireBytes: wireBytes}

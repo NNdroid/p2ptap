@@ -32,7 +32,6 @@ func TestReceiveEpochCannotResetReplayWindow(t *testing.T) {
 				Config: cfg, TAP: dev, Collector: noopCollector{},
 				Dispatcher: NewStrategyDispatcher(nil, "redundant"),
 				Packer:     obfuscate.NewFramePackerFull(&cfg.Obfuscation),
-				dedupPeers: make(map[peer.ID]*obfuscate.Deduplicator),
 				MACTable:   vswitch.NewMACTable(), IPTracker: NewIPTrafficTracker(),
 				tapWriteCh: make(chan tapWriteJob, 8),
 			}
@@ -62,8 +61,12 @@ func TestReceiveEpochCannotResetReplayWindow(t *testing.T) {
 			if got := len(n.tapWriteCh); got != 2 {
 				t.Fatalf("got %d accepted frames, want only current-epoch counters 1 and 3", got)
 			}
-			if epoch := n.dedupPeers[pid].ConnEpoch(); epoch != 222 {
-				t.Fatalf("data changed negotiated epoch to %d", epoch)
+			if v, ok := n.dedupPeers.Load(pid); ok {
+				if epoch := v.(*obfuscate.Deduplicator).ConnEpoch(); epoch != 222 {
+					t.Fatalf("data changed negotiated epoch to %d", epoch)
+				}
+			} else {
+				t.Fatalf("dedup window not anchored for %s", pid)
 			}
 			for len(n.tapWriteCh) > 0 {
 				job := <-n.tapWriteCh
@@ -71,11 +74,19 @@ func TestReceiveEpochCannotResetReplayWindow(t *testing.T) {
 			}
 			// An actual control-plane epoch change must still allow new traffic.
 			n.anchorDedupForPeer(pid, 0, 333)
-			if n.dedupPeers[pid].IsDuplicate(n.Packer.MakeSeqID(1, 333)) {
-				t.Fatal("control-plane epoch change failed")
+			if v, ok := n.dedupPeers.Load(pid); ok {
+				if v.(*obfuscate.Deduplicator).IsDuplicate(n.Packer.MakeSeqID(1, 333)) {
+					t.Fatal("control-plane epoch change failed")
+				}
+			} else {
+				t.Fatal("control-plane epoch change: dedup window missing")
 			}
-			if !n.dedupPeers[pid].IsDuplicate(n.Packer.MakeSeqID(4, 222)) {
-				t.Fatal("previous epoch accepted after control-plane change")
+			if v, ok := n.dedupPeers.Load(pid); ok {
+				if !v.(*obfuscate.Deduplicator).IsDuplicate(n.Packer.MakeSeqID(4, 222)) {
+					t.Fatal("previous epoch accepted after control-plane change")
+				}
+			} else {
+				t.Fatal("dedup window missing after epoch change")
 			}
 		})
 	}

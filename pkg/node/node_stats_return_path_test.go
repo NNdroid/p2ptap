@@ -6,7 +6,6 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"p2ptap/pkg/config"
-	"p2ptap/pkg/obfuscate"
 	vswitch "p2ptap/pkg/switch"
 )
 
@@ -83,7 +82,6 @@ func TestReturnPathRobustnessAndProvenance(t *testing.T) {
 		Collector:          noopCollector{},
 		bootRelayConns:     make(map[peer.ID]*bootRelayConn),
 		bootRelayBlacklist: make(map[peer.ID]time.Time),
-		dedupPeers:         make(map[peer.ID]*obfuscate.Deduplicator),
 		arpIndex:           &arpIndex{v4: make(map[uint32]arpIndexEntry), v6: make(map[[16]byte]arpIndexEntry)},
 	}
 	n.discoveredBoots.Store(bootA, true)

@@ -37,6 +37,14 @@ const relayCtrlHeaderReadDeadline = 30 * time.Second
 // anti-spoof gate below the header read still applies to every admitted stream).
 const relayCtrlInflightMax = 64
 
+// relayTunnelIdleTimeout is the per-direction idle bound on a transit tunnel's
+// byte copy. A half-open peer (accepts the tunnel but never sends, never closes)
+// would otherwise pin the two streams and two goroutines forever — and, once
+// relayCtrlInflightMax such tunnels accumulate, every new tunnel is refused.
+// Copying with a refreshed read deadline recovers the slot after the idle bound
+// without killing a genuinely active tunnel, whose reads keep resetting it.
+const relayTunnelIdleTimeout = 5 * time.Minute
+
 // RelayCtrlHeader is the self-delimiting (length-prefixed) header carried on
 // every RelayCtrlProtocolID stream. The initiator writes it once; each transit
 // hop re-writes it (bumping Hops) before proxying the inner control bytes.
@@ -298,7 +306,21 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 	if n.protoTracker != nil {
 		ctr = &n.protoTracker.DCUtR
 	}
+	// Shutdown watchdog: on node teardown close both legs so a tunnel parked in
+	// copyStreamWithIdle's read deadline returns promptly instead of pinning the
+	// two streams (and two goroutines) until the transport gives up. The done
+	// channel releases the watchdog as soon as the tunnel itself finishes.
+	tunnelDone := make(chan struct{})
+	go func() {
+		select {
+		case <-n.ctx.Done():
+			_ = s.Close()
+			_ = sub.Close()
+		case <-tunnelDone:
+		}
+	}()
 	proxyStreams(s, sub, ctr)
+	close(tunnelDone)
 }
 
 // openRelayCtrlNextHop resolves the next leg of a transit tunnel and returns an
@@ -405,7 +427,7 @@ func proxyStreams(a, b network.Stream, ctr *ChannelTrafficCounter) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(b, a)
+		n, _ := copyStreamWithIdle(b, a, relayTunnelIdleTimeout)
 		if ctr != nil {
 			ctr.RecordTx(1, uint64(n))
 		}
@@ -413,13 +435,41 @@ func proxyStreams(a, b network.Stream, ctr *ChannelTrafficCounter) {
 	}()
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(a, b)
+		n, _ := copyStreamWithIdle(a, b, relayTunnelIdleTimeout)
 		if ctr != nil {
 			ctr.RecordRx(1, uint64(n))
 		}
 		_ = a.CloseWrite()
 	}()
 	wg.Wait()
+}
+
+// copyStreamWithIdle copies src→dst while refreshing src's read deadline before
+// every chunk. A live tunnel keeps the deadline moving, so idle-bound only
+// fires when no byte has crossed in either direction for the whole bound — the
+// half-open case. The chunk buffer is per tunnel, not per frame, so the copy
+// path stays allocation-light at tunnel rates.
+func copyStreamWithIdle(dst, src network.Stream, idle time.Duration) (int64, error) {
+	buf := make([]byte, 32*1024)
+	var total int64
+	for {
+		if err := src.SetReadDeadline(time.Now().Add(idle)); err != nil {
+			return total, err
+		}
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return total, werr
+			}
+			total += int64(n)
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return total, nil
+			}
+			return total, rerr
+		}
+	}
 }
 
 // logicalPeerStream wraps a network.Stream so that RemotePeer() (and

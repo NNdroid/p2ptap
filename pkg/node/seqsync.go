@@ -510,17 +510,16 @@ func (n *Node) maybeSelfHeal(p peer.ID) {
 // a given remote peer, recording the epoch expected from that peer so stale
 // (cross-session) frames are rejected.
 func (n *Node) anchorDedupForPeer(p peer.ID, remoteSeq uint64, connEpoch uint64) {
-	n.dedupPeersMu.RLock()
-	d, ok := n.dedupPeers[p]
-	n.dedupPeersMu.RUnlock()
-	if !ok {
-		n.dedupPeersMu.Lock()
-		d = n.dedupPeers[p]
-		if d == nil {
-			d = obfuscate.NewDeduplicator()
-			n.dedupPeers[p] = d
+	var d *obfuscate.Deduplicator
+	if v, ok := n.dedupPeers.Load(p); ok {
+		d = v.(*obfuscate.Deduplicator)
+	} else {
+		fresh := obfuscate.NewDeduplicator()
+		if actual, loaded := n.dedupPeers.LoadOrStore(p, fresh); loaded {
+			d = actual.(*obfuscate.Deduplicator)
+		} else {
+			d = fresh
 		}
-		n.dedupPeersMu.Unlock()
 	}
 	d.SyncFrom(remoteSeq)
 	d.SetConnEpoch(connEpoch)

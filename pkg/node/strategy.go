@@ -1265,7 +1265,16 @@ func (sd *StrategyDispatcher) writeFragsOnStream(ps *PeerStreams, targetPeer pee
 		ps.recordStreamWrite(s, wireBytes, completed.Sub(start), completed)
 	}
 	if sd.node != nil && s != nil && s.Conn() != nil {
-		sd.node.recordPeerTxBytesOnPath(targetPeer, s.Conn().RemoteMultiaddr().String(), stat.bytes, stat.frames)
+		// Use the cached path key when we hold ps.writeMu (we do): rendering
+		// the multiaddr on every frame is a heap alloc + base58 formatting on
+		// the packet path. pathKeyForLocked caches it per stream.
+		var pathKey string
+		if ps != nil {
+			pathKey = ps.pathKeyForLocked(s)
+		} else {
+			pathKey = s.Conn().RemoteMultiaddr().String()
+		}
+		sd.node.recordPeerTxBytesOnPath(targetPeer, pathKey, stat.bytes, stat.frames)
 	}
 	return nil
 }

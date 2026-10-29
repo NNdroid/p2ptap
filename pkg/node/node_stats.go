@@ -679,10 +679,8 @@ func (n *Node) updateWebCollectorState() {
 			}
 		}
 
-		n.dedupPeersMu.RLock()
-		d := n.dedupPeers[pID]
-		n.dedupPeersMu.RUnlock()
-		if d != nil {
+		if v, ok := n.dedupPeers.Load(pID); ok {
+			d := v.(*obfuscate.Deduplicator)
 			seqMaxSeen = d.MaxSeq()
 			if seqPeerEpoch == 0 {
 				seqPeerEpoch = d.ConnEpoch()

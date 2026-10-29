@@ -697,17 +697,16 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 	n.recordPeerRxDecrypt(srcPeer, true)
 	n.maybeMarkReadyOnDecrypt(srcPeer, true)
 
-	n.dedupPeersMu.RLock()
-	peerDedup, ok := n.dedupPeers[srcPeer]
-	n.dedupPeersMu.RUnlock()
-	if !ok {
-		n.dedupPeersMu.Lock()
-		peerDedup = n.dedupPeers[srcPeer]
-		if peerDedup == nil {
-			peerDedup = obfuscate.NewDeduplicator()
-			n.dedupPeers[srcPeer] = peerDedup
+	var peerDedup *obfuscate.Deduplicator
+	if v, ok := n.dedupPeers.Load(srcPeer); ok {
+		peerDedup = v.(*obfuscate.Deduplicator)
+	} else {
+		fresh := obfuscate.NewDeduplicator()
+		if actual, loaded := n.dedupPeers.LoadOrStore(srcPeer, fresh); loaded {
+			peerDedup = actual.(*obfuscate.Deduplicator)
+		} else {
+			peerDedup = fresh
 		}
-		n.dedupPeersMu.Unlock()
 	}
 	// Keep the same epoch/replay contract as the direct receive path.
 	if dup, reason := peerDedup.IsDuplicateReason(seqID); dup {

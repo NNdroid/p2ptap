@@ -62,7 +62,16 @@ func releaseMuxDecScratch(b []byte) {
 // handler (handleStream) owns that counter for its own path, and folding the
 // count into handleDirectFrame would double-count a frame once per transport.
 func (n *Node) handleDataMuxVTP(s network.Stream, from peer.ID, payload []byte, inflight *atomic.Int64) {
-	inflight.Add(-1)
+	defer func() {
+		// Return the fan-out slot no matter how the handler exits, and contain
+		// a panic to this one frame: without recover a fault in the RX pipeline
+		// (bad buffer, nil table) would terminate the whole node, and a leaked
+		// slot would eventually starve every data frame on the channel.
+		inflight.Add(-1)
+		if r := recover(); r != nil {
+			log.Warn("mux data VTP: recovered panic from %s: %v", from.ShortString(), r)
+		}
+	}()
 	if n.protoTracker != nil {
 		n.protoTracker.Data.RecordRx(1, uint64(len(payload)))
 	}
@@ -78,7 +87,12 @@ func (n *Node) handleDataMuxVTP(s network.Stream, from peer.ID, payload []byte, 
 // channel (kind 0x01), reusing handleRelayFrame. RecordRx is counted here for
 // the same reason as in handleDataMuxVTP.
 func (n *Node) handleDataMuxRelay(s network.Stream, from peer.ID, payload []byte, inflight *atomic.Int64) {
-	inflight.Add(-1)
+	defer func() {
+		inflight.Add(-1)
+		if r := recover(); r != nil {
+			log.Warn("mux data relay: recovered panic from %s: %v", from.ShortString(), r)
+		}
+	}()
 	if n.protoTracker != nil {
 		n.protoTracker.RelayData.RecordRx(1, uint64(len(payload)))
 	}
@@ -98,6 +112,11 @@ func (n *Node) handleDataMuxRelay(s network.Stream, from peer.ID, payload []byte
 // RecordRx is NOT repeated here: handleBootRelayFrame counts it on entry, so a
 // second count would book every boot-relay byte twice on the Datapath card.
 func (n *Node) handleDataMuxBootRelay(s network.Stream, from peer.ID, payload []byte, inflight *atomic.Int64) {
-	inflight.Add(-1)
+	defer func() {
+		inflight.Add(-1)
+		if r := recover(); r != nil {
+			log.Warn("mux data boot-relay: recovered panic from %s: %v", from.ShortString(), r)
+		}
+	}()
 	n.handleBootRelayFrame(from, payload)
 }

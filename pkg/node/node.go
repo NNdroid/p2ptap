@@ -113,8 +113,21 @@ type Node struct {
 	// rule has nothing to pad (see coalesce_tx.go). Nil when the node runs
 	// without a packer; started in Start(), drained on shutdown.
 	coalescer    *txCoalescer
-	dedupPeers   map[peer.ID]*obfuscate.Deduplicator
-	dedupPeersMu sync.RWMutex
+	// Per-peer anti-replay windows. Every inbound frame (direct, relay, boot-
+	// relay) does a Load on the hot path; the old RWMutex-guarded map made that
+	// a process-wide lock on ALL peers' receive paths. Deduplicator is itself
+	// mutex-protected, so a lock-free sync.Map lookup is safe and drops the
+	// hot-path lock entirely. Values are *obfuscate.Deduplicator.
+	dedupPeers sync.Map
+
+	// Per-peer inbound stream gates for the data-plane / probe handlers a peer
+	// can drive at high rate (see stream_gate.go). Bounding these is what keeps
+	// a stream flood from pinning a 65 KiB buffer + goroutine per stream without
+	// bound; the NullResourceManager must stay for the TAP path, so the cap has
+	// to live here, per peer.
+	streamGateData  *streamGate
+	streamGateRelay *streamGate
+	streamGateEcho  *streamGate
 	// peerLocalEpochs holds the PER-PEER anti-replay epoch this node stamps into
 	// the SeqID of every frame it sends to each remote peer. Unlike the old
 	// single node-wide conn epoch, rotating the epoch for ONE reconnecting peer
@@ -1956,8 +1969,10 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		TAP:                 tapDev,
 		MACTable:            macTable,
 		Packer:              packer,
-		dedupPeers:          make(map[peer.ID]*obfuscate.Deduplicator),
 		fragRX:              newFragReassembler(),
+		streamGateData:      newStreamGate(maxStreamsPerPeerData),
+		streamGateRelay:     newStreamGate(maxStreamsPerPeerRelay),
+		streamGateEcho:      newStreamGate(maxStreamsPerPeerEcho),
 		relayDiag:           new(RelayDiag),
 		perPeerObf:          *newPeerObfTable(),
 		Dispatcher:          dispatcher,
@@ -2404,14 +2419,15 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	}
 	node.Dispatcher.SetOutgoingStreamHandler(node.handleStream)
 
-	// Set libp2p stream handler
-	h.SetStreamHandler(ProtocolID, node.handleStream)
+	// Set libp2p stream handler. The data handler is per-peer bounded so a
+	// stream flood cannot pin a 65 KiB read buffer + goroutine per stream.
+	h.SetStreamHandler(ProtocolID, node.gateStream(node.streamGateData, node.handleStream))
 	log.Debug("Stream handler registered for protocol: %s", ProtocolID)
 
 	h.SetStreamHandler(LSAProtocolID, node.handleLSAStream)
 	log.Debug("Stream handler registered for LSA protocol: %s", LSAProtocolID)
 
-	h.SetStreamHandler(OverlayRelayProtocolID, node.handleRelayStream)
+	h.SetStreamHandler(OverlayRelayProtocolID, node.gateStream(node.streamGateRelay, node.handleRelayStream))
 	log.Debug("Stream handler registered for Overlay Relay protocol: %s", OverlayRelayProtocolID)
 
 	h.SetStreamHandler(RelayCtrlProtocolID, node.handleRelayCtrl)
@@ -2420,7 +2436,7 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	// Echo protocol doubles as the unified liveness/health probe (see
 	// peerPingPongLoop); the old separate HealthCheck protocol was removed to
 	// avoid two independent per-peer NewStream probe storms every 5s+30s.
-	h.SetStreamHandler(EchoProtocolID, node.handleEcho)
+	h.SetStreamHandler(EchoProtocolID, node.gateStream(node.streamGateEcho, node.handleEcho))
 	log.Debug("Stream handler registered for Echo protocol: %s", EchoProtocolID)
 
 	// 方案 B: peer-side TAP-probe ack. When the peer receives our probe request
@@ -3458,9 +3474,7 @@ func (n *Node) removePeerObf(p peer.ID) {
 	// keypairs (which the unauthenticated SeqSync/relay-ctrl ingress lets
 	// anyone create) grew them unboundedly. All are re-anchored/created
 	// lazily on the next handshake, so dropping them here is safe.
-	n.dedupPeersMu.Lock()
-	delete(n.dedupPeers, p)
-	n.dedupPeersMu.Unlock()
+	n.dedupPeers.Delete(p)
 	n.handshakeMu.Delete(p)
 	n.peerLocalEpochs.Delete(p)
 	n.peerRxDecryptRecentErrs.Delete(p)

@@ -126,7 +126,7 @@ func TestReceiveFragmentEpochRecovery(t *testing.T) {
 			pid, local := newTestPeerID(t), newTestPeerID(t)
 			n := &Node{Config: cfg, Host: &fragmentIDHost{pid: local}, TAP: dev, Collector: noopCollector{},
 				Dispatcher: NewStrategyDispatcher(nil, "redundant"), Packer: obfuscate.NewFramePackerFull(nil),
-				fragRX: newFragReassembler(), dedupPeers: make(map[peer.ID]*obfuscate.Deduplicator),
+				fragRX: newFragReassembler(),
 				MACTable: vswitch.NewMACTable(), IPTracker: NewIPTrafficTracker(), tapWriteCh: make(chan tapWriteJob, 8)}
 			n.SetConfig(cfg)
 			n.anchorDedupForPeer(pid, 0, 222)

@@ -26,7 +26,6 @@ func TestRelayPSKFailClosedGate(t *testing.T) {
 			Collector:          noopCollector{},
 			bootRelayConns:     make(map[peer.ID]*bootRelayConn),
 			bootRelayBlacklist: make(map[peer.ID]time.Time),
-			dedupPeers:         make(map[peer.ID]*obfuscate.Deduplicator),
 			arpIndex:           &arpIndex{v4: make(map[uint32]arpIndexEntry), v6: make(map[[16]byte]arpIndexEntry)},
 		}
 		// config() reads the atomic snapshot, not the Config field — publish PSK

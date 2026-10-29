@@ -422,17 +422,16 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 	// so seqIDs from different peers never collide (unlike the
 	// previous global dedup that could falsely discard frames from
 	// peer B whose seqID happened to match peer A's).
-	n.dedupPeersMu.RLock()
-	peerDedup, ok := n.dedupPeers[remotePeer]
-	n.dedupPeersMu.RUnlock()
-	if !ok {
-		n.dedupPeersMu.Lock()
-		peerDedup = n.dedupPeers[remotePeer]
-		if peerDedup == nil {
-			peerDedup = obfuscate.NewDeduplicator()
-			n.dedupPeers[remotePeer] = peerDedup
+	var peerDedup *obfuscate.Deduplicator
+	if v, ok := n.dedupPeers.Load(remotePeer); ok {
+		peerDedup = v.(*obfuscate.Deduplicator)
+	} else {
+		fresh := obfuscate.NewDeduplicator()
+		if actual, loaded := n.dedupPeers.LoadOrStore(remotePeer, fresh); loaded {
+			peerDedup = actual.(*obfuscate.Deduplicator)
+		} else {
+			peerDedup = fresh
 		}
-		n.dedupPeersMu.Unlock()
 	}
 	// Only SeqSync may change an established epoch. A delayed data frame
 	// from an older session must not reset the current replay window.
