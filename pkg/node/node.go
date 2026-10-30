@@ -195,6 +195,11 @@ type Node struct {
 	relayLatency         map[peer.ID]time.Duration // per-relay-peer RTT cache
 	relayAuthMu          sync.Mutex
 	relayAuthInProgress  map[peer.ID]bool // dedup ConnectedF-triggered relay auth per peer
+	// relayAuthTickets caches the session ticket each boot minted for this node
+	// (peer.ID -> *relayTicketCache). A cached, unexpired ticket lets a reconnect
+	// authenticate with a single short round-trip instead of a full
+	// challenge-response. Entries are replaced on every successful auth.
+	relayAuthTickets sync.Map
 
 	// relayOnlyPeers tracks peers whose ONLY working path is a circuit relay
 	// (e.g. mDNS-discovered peers on a private subnet we cannot reach directly).

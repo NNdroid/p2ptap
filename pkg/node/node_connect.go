@@ -326,9 +326,65 @@ func (n *Node) maybeWebRTCSignalUpgrade(pid peer.ID) {
 	go n.webrtcSignalUpgrade(pid)
 }
 
-// authenticateWithRelay performs PSK challenge-response with a relay/bootstrap server.
-// isRefresh=true marks a periodic keep-alive refresh (logs at DEBUG); the initial
-// handshake on (re)connect logs at INFO.
+// relayTicketCache is a cached session ticket minted by one boot. expUnix is the
+// embedded absolute expiry (unix seconds) so a stale entry is dropped without a
+// network round trip.
+type relayTicketCache struct {
+	ticket  []byte
+	expUnix int64
+}
+
+// storeRelayTicket caches the session ticket a boot minted for this node.
+func (n *Node) storeRelayTicket(peerID peer.ID, ticket []byte) {
+	if len(ticket) != routing.RelayTicketLen {
+		return
+	}
+	exp := int64(binary.BigEndian.Uint64(ticket[32:40]))
+	n.relayAuthTickets.Store(peerID, &relayTicketCache{ticket: ticket, expUnix: exp})
+}
+
+// loadRelayTicket returns a cached, unexpired ticket for a boot. Entries past
+// their expiry are dropped.
+func (n *Node) loadRelayTicket(peerID peer.ID) ([]byte, bool) {
+	v, ok := n.relayAuthTickets.Load(peerID)
+	if !ok {
+		return nil, false
+	}
+	c := v.(*relayTicketCache)
+	if time.Now().Unix() > c.expUnix {
+		n.relayAuthTickets.Delete(peerID)
+		return nil, false
+	}
+	return c.ticket, true
+}
+
+// authenticateWithRelay authenticates to a relay/bootstrap server with PSK. The
+// protocol has two modes, selected by the first byte the node sends:
+//
+//   - RelayAuthModeFull (0x00): classic challenge-response. The node sends 0x00,
+//     reads the boot's [0x02][31B] challenge, answers with
+//     HMAC-SHA256(token, challenge) merged with its version record, and the
+//     boot replies 0x01 ‖ newTicket ‖ its version record. A ticket is minted on
+//     success so the next reconnect can take the fast path.
+//   - RelayAuthModeTicket (0x01): the node replays a cached session ticket
+//     (minted within RelayAuthTicketTTL) merged with its version record. The
+//     boot verifies the ticket's HMAC with O(1) work — no per-PSK scan — and
+//     replies 0x01 ‖ freshTicket ‖ its version record. If the ticket is
+//     expired/corrupt the boot replies 0x00 and the node falls back to the full
+//     challenge-response on the same stream using the challenge the boot sent.
+//
+// Both sides send their first packet immediately (full-duplex), so neither path
+// waits on a read before writing: the full path is 1.5 RTT and the ticket path
+// 1 RTT, versus 1.5 RTT for the old always-full handshake. The boot sends the
+// challenge up front in both modes; a ticket-mode node reads and discards it
+// (or keeps it for the 0x00 fallback).
+//
+// The PSK itself never appears on the wire in either mode: only
+// HMAC-SHA256(HKDF(psk), challenge) and the ticket MAC (HMAC of an opaque,
+// PSK-free ticket under a per-PSK HKDF-derived master key).
+//
+// isRefresh=true marks a periodic keep-alive refresh (logs at DEBUG); the
+// initial handshake on (re)connect logs at INFO.
 func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 	// Probe the relay auth stream. Only "protocol not supported" means the
 	// boot is in open mode (PSK disabled). Any other error — peer not
@@ -365,40 +421,115 @@ func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 	// generous: auth completes in milliseconds on a healthy boot.
 	_ = s.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	// Challenge-response auth. The boot sends a fresh 32-byte challenge BEFORE
-	// reading anything; we answer with HMAC-SHA256(token, challenge). The
-	// static token never appears on the wire, so a sniffed handshake leaks no
-	// secret and cannot be replayed against another session.
-	var challenge [routing.RelayAuthChallengeLen]byte
-	if _, err := io.ReadFull(s, challenge[:]); err != nil {
-		log.Warn("Relay auth challenge read failed for peer %s: %v", peerID.String(), err)
+	// Fast path: a cached, unexpired session ticket authenticates with a single
+	// short round trip and O(1) boot-side work.
+	if ticket, ok := n.loadRelayTicket(peerID); ok {
+		return n.relayAuthTicket(s, peerID, token, ticket, isRefresh)
+	}
+	// Slow path: no ticket — announce full mode, answer the challenge.
+	if _, err := s.Write([]byte{routing.RelayAuthModeFull}); err != nil {
+		log.Warn("Relay auth mode write failed for peer %s: %v", peerID.String(), err)
 		return false
 	}
-	authResp := routing.RelayAuthResponse(token, challenge[:])
-	if _, err := s.Write(authResp[:]); err != nil {
+	return n.relayAuthFull(s, peerID, token, isRefresh)
+}
+
+// relayAuthTicket replays a cached session ticket. It sends the ticket merged
+// with the node's version record, reads (and keeps) the challenge the boot sent
+// up front, then:
+//   - 0x01: ticket accepted — read the fresh ticket and the boot's version
+//     record, done.
+//   - 0x00: ticket rejected (expired/corrupt) — fall back to the full
+//     challenge-response using the challenge we just read.
+func (n *Node) relayAuthTicket(s network.Stream, peerID peer.ID, token [32]byte, ticket []byte, isRefresh bool) bool {
+	// Send [0x01] ‖ ticket ‖ nodeRecord in ONE write (merge optimization): the
+	// boot reads mode, then ticket, then the record without a read-timeout gap.
+	var recBuf bytes.Buffer
+	_ = version.CurrentRecord().WriteRecord(&recBuf)
+	buf := make([]byte, 0, 1+routing.RelayTicketLen+recBuf.Len())
+	buf = append(buf, routing.RelayAuthModeTicket)
+	buf = append(buf, ticket...)
+	buf = append(buf, recBuf.Bytes()...)
+	if _, err := s.Write(buf); err != nil {
+		log.Debug("Relay auth ticket write failed for peer %s: %v", peerID.String(), err)
+		return false
+	}
+	if n.protoTracker != nil {
+		n.protoTracker.Auth.RecordTx(1, uint64(len(buf)))
+	}
+
+	challenge, ok := n.relayAuthReadChallenge(s, peerID)
+	if !ok {
+		return false
+	}
+
+	var b [1]byte
+	if _, err := io.ReadFull(s, b[:]); err != nil {
+		log.Debug("Relay auth ticket response read failed for peer %s: %v", peerID.String(), err)
+		return false
+	}
+	switch b[0] {
+	case 0x01:
+		return n.relayAuthSuccess(s, peerID, isRefresh)
+	case 0x00:
+		// Ticket rejected — the boot now expects a full response to the
+		// challenge it sent up front.
+		return n.relayAuthSendFull(s, peerID, token, challenge, isRefresh)
+	default:
+		log.Warn("Relay peer %s sent unexpected auth byte %#x after ticket", peerID.String(), b[0])
+		return false
+	}
+}
+
+// relayAuthFull performs the classic challenge-response: read the boot's
+// challenge (sent up front), answer it, and consume the success reply.
+func (n *Node) relayAuthFull(s network.Stream, peerID peer.ID, token [32]byte, isRefresh bool) bool {
+	challenge, ok := n.relayAuthReadChallenge(s, peerID)
+	if !ok {
+		return false
+	}
+	return n.relayAuthSendFull(s, peerID, token, challenge, isRefresh)
+}
+
+// relayAuthReadChallenge reads the [RelayChallengeByte][31B] challenge the boot
+// sent up front, validating the fixed prefix so a 0x00 failure or 0x01 success
+// byte cannot be mistaken for a challenge.
+func (n *Node) relayAuthReadChallenge(s network.Stream, peerID peer.ID) ([]byte, bool) {
+	challenge := make([]byte, routing.RelayAuthChallengeLen)
+	if _, err := io.ReadFull(s, challenge); err != nil {
+		log.Warn("Relay auth challenge read failed for peer %s: %v", peerID.String(), err)
+		return nil, false
+	}
+	if challenge[0] != routing.RelayChallengeByte {
+		log.Warn("Relay peer %s sent %#x where a challenge was expected", peerID.String(), challenge[0])
+		return nil, false
+	}
+	return challenge, true
+}
+
+// relayAuthSendFull answers a challenge with the full response and consumes the
+// success/ticket reply. The HMAC response is merged with the node's version
+// record into one write so the boot never waits out its record read timeout.
+func (n *Node) relayAuthSendFull(s network.Stream, peerID peer.ID, token [32]byte, challenge []byte, isRefresh bool) bool {
+	authResp := routing.RelayAuthResponse(token, challenge)
+	var recBuf bytes.Buffer
+	_ = version.CurrentRecord().WriteRecord(&recBuf)
+	buf := make([]byte, 0, len(authResp)+recBuf.Len())
+	buf = append(buf, authResp[:]...)
+	buf = append(buf, recBuf.Bytes()...)
+	if _, err := s.Write(buf); err != nil {
 		log.Warn("Relay auth response write failed for peer %s: %v", peerID.String(), err)
 		return false
 	}
-
-	// Send our version/capability record. An OLD boot simply ignores the
-	// trailing record; a NEW boot reads it and replies with its own record so
-	// we can reject envelope/commit mismatches up-front (the historical 0x8000
-	// "proto field len 32768" silent-corruption bug).
-	if err := version.CurrentRecord().WriteRecord(s); err != nil {
-		if !isRefresh {
-			log.Warn("Relay auth version write failed for peer %s: %v", peerID.String(), err)
-		} else {
-			log.Debug("Relay auth version write failed for peer %s (refresh): %v", peerID.String(), err)
-		}
-		return false
-	}
-	// 32-byte token (+ a small version record). Attribute to the Auth channel so
-	// the WebUI "PSK Mesh 身份认证" card reflects the real handshake bytes.
 	if n.protoTracker != nil {
-		n.protoTracker.Auth.RecordTx(1, uint64(len(token)))
+		n.protoTracker.Auth.RecordTx(1, uint64(len(buf)))
 	}
+	return n.relayAuthSuccess(s, peerID, isRefresh)
+}
 
-	// Read 1-byte response
+// relayAuthSuccess reads the boot's 0x01, the freshly minted ticket, and the
+// boot's version record, then runs the envelope-compatibility check.
+func (n *Node) relayAuthSuccess(s network.Stream, peerID peer.ID, isRefresh bool) bool {
 	var resp [1]byte
 	if _, err := io.ReadFull(s, resp[:]); err != nil {
 		// The auth stream was opened, so the boot REQUIRES PSK auth. An EOF
@@ -412,19 +543,28 @@ func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 	if n.protoTracker != nil {
 		n.protoTracker.Auth.RecordRx(1, 1)
 	}
-
 	if resp[0] != 0x01 {
 		log.Warn("Relay auth FAILED with peer %s — PSK mismatch, relay access denied", peerID.String())
 		return false
 	}
 
-	// Auth succeeded: best-effort read the boot's version record. An OLD boot
-	// closed the stream after the 1-byte response, so a short read means
-	// "unknown version" — warn and proceed rather than fail the whole link.
-	// A corrupted record (non-EOF error) means the peer sent a malformed or
-	// truncated JSON — log loudly so an envelope-corruption attack is visible,
-	// but still proceed (the auth already succeeded, and the compatibility
-	// check below will flag any envelope mismatch).
+	// Read the freshly minted session ticket and cache it for the next
+	// reconnect. An old boot sends no ticket (just closes) — that is still a
+	// successful auth, just without a fast path.
+	ticket := make([]byte, routing.RelayTicketLen)
+	if _, err := io.ReadFull(s, ticket); err != nil {
+		log.Debug("Relay peer %s sent no session ticket — next auth will do a full handshake", peerID.String())
+	} else {
+		n.storeRelayTicket(peerID, ticket)
+	}
+
+	// Best-effort read the boot's version record. An OLD boot closed the stream
+	// after the 1-byte response, so a short read means "unknown version" — warn
+	// and proceed rather than fail the whole link. A corrupted record (non-EOF
+	// error) means the peer sent a malformed or truncated JSON — log loudly so
+	// an envelope-corruption attack is visible, but still proceed (the auth
+	// already succeeded, and the compatibility check below will flag any
+	// envelope mismatch).
 	var peerRec version.Record
 	if err := peerRec.ReadRecord(s); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {

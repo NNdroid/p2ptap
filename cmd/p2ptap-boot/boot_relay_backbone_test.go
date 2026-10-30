@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"testing"
@@ -50,8 +51,8 @@ func TestBootRelayOverBackboneIntegration(t *testing.T) {
 	// Two PSKs so the boot accepts BOTH networks; the auth handler binds each
 	// client to the netID of the PSK it presents.
 	entries := []pskEntry{
-		{hash: computePSKHash(psk1), netID: netA},
-		{hash: computePSKHash(psk2), netID: netX},
+		{hash: computePSKHash(psk1), netID: netA, masterKey: routing.RelayTicketMasterKey(psk1)},
+		{hash: computePSKHash(psk2), netID: netX, masterKey: routing.RelayTicketMasterKey(psk2)},
 	}
 
 	bootA := startRelayBoot(t, "bootA", entries)
@@ -92,9 +93,9 @@ func TestBootRelayOverBackboneIntegration(t *testing.T) {
 	t.Log("✓ boot-relay backbone established in both directions")
 
 	// Attach clients: A and B in netA (different boots), X in netX (bootA).
-	nodeA := connectRelayClient(t, bootA.h, psk1)
-	nodeB := connectRelayClient(t, bootB.h, psk1)
-	nodeX := connectRelayClient(t, bootA.h, psk2)
+	nodeA, _ := connectRelayClient(t, bootA.h, psk1)
+	nodeB, _ := connectRelayClient(t, bootB.h, psk1)
+	nodeX, _ := connectRelayClient(t, bootA.h, psk2)
 
 	// Wait for each client's boot-relay uplink to be registered at its boot
 	// (relayRouter.clientStreams), and for nodeB at bootB specifically.
@@ -200,9 +201,11 @@ type relayBoot struct {
 }
 
 // connectRelayClient spins up a libp2p host, authenticates against boot with the
-// given PSK, then opens a persistent /p2ptap/boot-relay/1.0.0 uplink and starts
-// a reader goroutine for downlink frames.
-func connectRelayClient(t *testing.T, boot host.Host, psk string) *relayClient {
+// given PSK via the FULL challenge-response path, then opens a persistent
+// /p2ptap/boot-relay/1.0.0 uplink and starts a reader goroutine for downlink
+// frames. It returns the client and the session ticket the boot minted (so a
+// later test can exercise the fast ticket path).
+func connectRelayClient(t *testing.T, boot host.Host, psk string) (*relayClient, []byte) {
 	t.Helper()
 	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"))
 	if err != nil {
@@ -215,26 +218,32 @@ func connectRelayClient(t *testing.T, boot host.Host, psk string) *relayClient {
 		t.Fatalf("client connect to boot %s: %v", boot.ID().ShortString(), err)
 	}
 
-	// PSK auth handshake (challenge-response): read the boot's 32-byte
-	// challenge, reply with HMAC-SHA256(token, challenge), expect a 1-byte
-	// 0x01. The static token never appears on the wire.
 	as, err := h.NewStream(ctx, boot.ID(), authProtocolID)
 	if err != nil {
 		t.Fatalf("auth stream: %v", err)
 	}
-	tok := computePSKHash(psk)
+	// New full-duplex protocol: send the mode byte FIRST (the boot sends its
+	// challenge at t=0 too), then read the challenge and answer with
+	// HMAC-SHA256(token, challenge) ‖ nodeRecord in one write.
+	if _, err := as.Write([]byte{routing.RelayAuthModeFull}); err != nil {
+		t.Fatalf("auth write mode: %v", err)
+	}
 	challenge := make([]byte, routing.RelayAuthChallengeLen)
 	if _, err := io.ReadFull(as, challenge); err != nil {
 		t.Fatalf("auth read challenge: %v", err)
 	}
-	authResp := routing.RelayAuthResponse(tok, challenge)
-	if _, err := as.Write(authResp[:]); err != nil {
+	if challenge[0] != routing.RelayChallengeByte {
+		t.Fatalf("auth challenge prefix = %#x, want %#x", challenge[0], routing.RelayChallengeByte)
+	}
+	authResp := routing.RelayAuthResponse(computePSKHash(psk), challenge)
+	var recBuf bytes.Buffer
+	_ = version.CurrentRecord().WriteRecord(&recBuf)
+	buf := make([]byte, 0, len(authResp)+recBuf.Len())
+	buf = append(buf, authResp[:]...)
+	buf = append(buf, recBuf.Bytes()...)
+	if _, err := as.Write(buf); err != nil {
 		t.Fatalf("auth write response: %v", err)
 	}
-	// Write version record so the boot doesn't wait for the read timeout.
-	// Without this, the old code would stall for 30 seconds waiting for a
-	// record that was never sent, making the test take 90+ seconds.
-	_ = version.CurrentRecord().WriteRecord(as)
 	resp := make([]byte, 1)
 	if _, err := io.ReadFull(as, resp); err != nil {
 		t.Fatalf("auth read response: %v", err)
@@ -242,10 +251,79 @@ func connectRelayClient(t *testing.T, boot host.Host, psk string) *relayClient {
 	if resp[0] != 0x01 {
 		t.Fatalf("auth rejected for PSK (resp=%#x) — boot and client PSK mismatch", resp[0])
 	}
+	// The boot mints a fresh ticket on success; read it for later reuse.
+	ticket := make([]byte, routing.RelayTicketLen)
+	if _, err := io.ReadFull(as, ticket); err != nil {
+		t.Fatalf("auth read ticket: %v", err)
+	}
 	_ = as.Close()
 
-	// Persistent boot-relay uplink (mirrors node.openBootRelayUplink, but here
-	// we drive it directly to exercise the protocol without the full Node).
+	c := finishRelayClient(t, h, boot, ctx)
+	return c, ticket
+}
+
+// connectRelayClientTicket authenticates by replaying a cached session ticket
+// (the fast path), expecting the boot to accept it without a challenge-response
+// round-trip. It returns the client and the freshly minted replacement ticket.
+func connectRelayClientTicket(t *testing.T, boot host.Host, psk string, ticket []byte) (*relayClient, []byte) {
+	t.Helper()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"))
+	if err != nil {
+		t.Fatalf("create client host: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	ctx := context.Background()
+	if err := h.Connect(ctx, peer.AddrInfo{ID: boot.ID(), Addrs: boot.Addrs()}); err != nil {
+		t.Fatalf("client connect to boot %s: %v", boot.ID().ShortString(), err)
+	}
+
+	as, err := h.NewStream(ctx, boot.ID(), authProtocolID)
+	if err != nil {
+		t.Fatalf("auth stream: %v", err)
+	}
+	// Send [0x01] ‖ ticket ‖ nodeRecord in one write (the boot reads the ticket,
+	// then the record, then decides).
+	var recBuf bytes.Buffer
+	_ = version.CurrentRecord().WriteRecord(&recBuf)
+	buf := make([]byte, 0, 1+routing.RelayTicketLen+recBuf.Len())
+	buf = append(buf, routing.RelayAuthModeTicket)
+	buf = append(buf, ticket...)
+	buf = append(buf, recBuf.Bytes()...)
+	if _, err := as.Write(buf); err != nil {
+		t.Fatalf("auth write ticket: %v", err)
+	}
+	// The boot sent its challenge at t=0; read and discard it (kept only for the
+	// fallback, which we do not exercise here).
+	challenge := make([]byte, routing.RelayAuthChallengeLen)
+	if _, err := io.ReadFull(as, challenge); err != nil {
+		t.Fatalf("auth read challenge: %v", err)
+	}
+	if challenge[0] != routing.RelayChallengeByte {
+		t.Fatalf("auth challenge prefix = %#x, want %#x", challenge[0], routing.RelayChallengeByte)
+	}
+	resp := make([]byte, 1)
+	if _, err := io.ReadFull(as, resp); err != nil {
+		t.Fatalf("auth read response: %v", err)
+	}
+	if resp[0] != 0x01 {
+		t.Fatalf("ticket fast path rejected (resp=%#x) — want 0x01", resp[0])
+	}
+	newTicket := make([]byte, routing.RelayTicketLen)
+	if _, err := io.ReadFull(as, newTicket); err != nil {
+		t.Fatalf("auth read new ticket: %v", err)
+	}
+	_ = as.Close()
+
+	c := finishRelayClient(t, h, boot, ctx)
+	return c, newTicket
+}
+
+// finishRelayClient opens the persistent boot-relay uplink and starts the
+// downlink reader, mirroring node.openBootRelayUplink but driving the protocol
+// directly to exercise it without the full Node.
+func finishRelayClient(t *testing.T, h host.Host, boot host.Host, ctx context.Context) *relayClient {
+	t.Helper()
 	up, err := h.NewStream(ctx, boot.ID(), BootRelayProtocolID)
 	if err != nil {
 		t.Fatalf("boot-relay uplink stream: %v", err)
@@ -253,6 +331,52 @@ func connectRelayClient(t *testing.T, boot host.Host, psk string) *relayClient {
 	c := &relayClient{h: h, bootID: boot.ID(), uplink: up}
 	c.startRx()
 	return c
+}
+
+// TestBootRelayTicketFastPath locks the session-ticket fast path: a full
+// handshake mints a ticket, and replaying that ticket authenticates a new
+// client without a challenge-response round-trip (the boot answers 0x01 on the
+// first response byte, and the new client's uplink works end to end).
+func TestBootRelayTicketFastPath(t *testing.T) {
+	psk := "fast-path-network-secret"
+	netA := routing.NetworkIDFromPSK(psk)
+	entries := []pskEntry{
+		{hash: computePSKHash(psk), netID: netA, masterKey: routing.RelayTicketMasterKey(psk)},
+	}
+	boot := startRelayBoot(t, "bootFast", entries)
+
+	// Full handshake mints a ticket.
+	clientA, ticket := connectRelayClient(t, boot.h, psk)
+	if len(ticket) != routing.RelayTicketLen {
+		t.Fatalf("boot minted ticket of %d bytes, want %d", len(ticket), routing.RelayTicketLen)
+	}
+	t.Log("✓ full handshake minted a session ticket")
+
+	// Replay the ticket on a fresh client: boot must accept it (0x01) and mint a
+	// replacement.
+	clientB, newTicket := connectRelayClientTicket(t, boot.h, psk, ticket)
+	if len(newTicket) != routing.RelayTicketLen {
+		t.Fatalf("boot minted replacement ticket of %d bytes", len(newTicket))
+	}
+	t.Log("✓ ticket fast path authenticated a new client with one round-trip")
+
+	// The replacement ticket must itself verify (it is a fresh, valid ticket).
+	if !routing.VerifyRelayTicket(routing.RelayTicketMasterKey(psk), newTicket, time.Now()) {
+		t.Fatal("replacement ticket must verify under the network's master key")
+	}
+
+	// End-to-end: clientB's uplink must actually carry frames.
+	if err := clientA.send(clientB.h.ID(), netA, []byte("ticket-fast-path")); err != nil {
+		t.Fatalf("clientA send: %v", err)
+	}
+	r, ok := clientB.recv(15 * time.Second)
+	if !ok {
+		t.Fatal("clientB did not receive a frame over its ticket-authenticated uplink")
+	}
+	if string(r.payload) != "ticket-fast-path" {
+		t.Fatalf("payload corrupted (got %q)", r.payload)
+	}
+	t.Log("✓ ticket-authenticated uplink carried a frame end to end")
 }
 
 // relayClient is a minimal node-side counterpart used only to drive the

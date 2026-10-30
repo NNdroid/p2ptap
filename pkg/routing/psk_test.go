@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 )
 
 // productionPSK is the 64-hex-char key deployed on the production bootstrap
@@ -56,24 +57,24 @@ func TestPSKKeyBytesNonHexPassthrough(t *testing.T) {
 // be using (lowercase hex, or plaintext), the derived values must be
 // byte-for-byte identical to the pre-existing formulas.
 func TestPSKDerivationsAreBackwardCompatible(t *testing.T) {
-	for _, psk := range []string{
-		productionPSK,                      // 64 lowercase hex chars
-		"deadbeefdeadbeef",                 // short lowercase hex
-		"s3cret-passphrase1",               // plaintext with mixed classes
-		"2024-01-15 12:00 UTC session key", // non-ASCII-adjacent prose
-	} {
-		// Legacy relay auth token: SHA-256("p2ptap-relay-auth:" + PSK)
-		legacyToken := sha256.Sum256([]byte("p2ptap-relay-auth:" + psk))
-		if got := RelayAuthToken(psk); got != legacyToken {
-			t.Errorf("RelayAuthToken(%q) changed vs legacy formula", psk)
+		for _, psk := range []string{
+			productionPSK,                      // 64 lowercase hex chars
+			"deadbeefdeadbeef",                 // short lowercase hex
+			"2024-01-15 12:00 UTC session key", // non-ASCII-adjacent prose
+		} {
+			// Legacy network ID: hex(SHA-256("p2ptap-net:" + PSK)[:8])
+			sum := sha256.Sum256([]byte("p2ptap-net:" + psk))
+			legacyNetID := hex.EncodeToString(sum[:8])
+			if got := NetworkIDFromPSK(psk); got != legacyNetID {
+				t.Errorf("NetworkIDFromPSK(%q) changed vs legacy formula", psk)
+			}
 		}
-		// Legacy network ID: hex(SHA-256("p2ptap-net:" + PSK)[:8])
-		sum := sha256.Sum256([]byte("p2ptap-net:" + psk))
-		legacyNetID := hex.EncodeToString(sum[:8])
-		if got := NetworkIDFromPSK(psk); got != legacyNetID {
-			t.Errorf("NetworkIDFromPSK(%q) changed vs legacy formula", psk)
+		// The relay-auth token is deliberately NOT legacy-compatible anymore:
+		// it is HKDF-derived (see RelayAuthToken), so the old bare-SHA256 token
+		// is never accepted and vice versa. Node and boot are upgraded together.
+		if legacyToken := sha256.Sum256([]byte("p2ptap-relay-auth:" + productionPSK)); RelayAuthToken(productionPSK) == legacyToken {
+			t.Fatal("RelayAuthToken must no longer derive the legacy bare-SHA256 token")
 		}
-	}
 }
 
 // Uppercase hex is the one case that intentionally changes: those are exactly
@@ -109,5 +110,95 @@ func TestPSKDomainsAreSeparated(t *testing.T) {
 	}
 	if _, err := hex.DecodeString(NetworkIDFromPSK(productionPSK)); err != nil {
 		t.Fatalf("network ID must be hex: %v", err)
+	}
+}
+
+// --- relay session ticket ---------------------------------------------------
+
+func TestRelayTicketMasterKeyDistinctFromAuthToken(t *testing.T) {
+	// Domain separation: the ticket master key must never equal the relay-auth
+	// token, or a ticket MAC key could be replayed as a handshake response.
+	auth := RelayAuthToken(productionPSK)
+	mk := RelayTicketMasterKey(productionPSK)
+	if auth == mk {
+		t.Fatal("relay-auth token and ticket master key must be domain-separated")
+	}
+	if RelayTicketMasterKey(strings.ToUpper(productionPSK)) != mk {
+		t.Fatal("both cases of one key must derive one ticket master key")
+	}
+}
+
+func TestRelayTicketRoundTrip(t *testing.T) {
+	now := time.Now()
+	mk := RelayTicketMasterKey(productionPSK)
+	netID := NetworkIDFromPSK(productionPSK)
+
+	ticket := MintRelayTicket(mk, netID, now)
+	if len(ticket) != RelayTicketLen {
+		t.Fatalf("ticket length = %d, want %d", len(ticket), RelayTicketLen)
+	}
+	if !VerifyRelayTicket(mk, ticket, now) {
+		t.Fatal("freshly minted ticket must verify")
+	}
+	if got := RelayTicketNetID(ticket); got != netID {
+		t.Fatalf("ticket netID = %q, want %q", got, netID)
+	}
+	// A ticket must still verify just inside its TTL.
+	if !VerifyRelayTicket(mk, ticket, now.Add((RelayTicketTTL-1)*time.Second)) {
+		t.Fatal("ticket must verify just before expiry")
+	}
+	// And must NOT verify after its TTL.
+	if VerifyRelayTicket(mk, ticket, now.Add((RelayTicketTTL+1)*time.Second)) {
+		t.Fatal("expired ticket must not verify")
+	}
+}
+
+func TestRelayTicketCorruptMAC(t *testing.T) {
+	mk := RelayTicketMasterKey(productionPSK)
+	ticket := MintRelayTicket(mk, NetworkIDFromPSK(productionPSK), time.Now())
+	// Flip one bit in the MAC region ([40:56]).
+	ticket[40] ^= 0x01
+	if VerifyRelayTicket(mk, ticket, time.Now()) {
+		t.Fatal("ticket with a corrupted MAC must not verify")
+	}
+}
+
+func TestRelayTicketWrongLength(t *testing.T) {
+	mk := RelayTicketMasterKey(productionPSK)
+	netID := NetworkIDFromPSK(productionPSK)
+	ticket := MintRelayTicket(mk, netID, time.Now())
+	// A slice of the ticket cannot exceed its capacity, so the over-long case is
+	// built by appending.
+	over := append(append([]byte{}, ticket...), 0x00)
+	for _, tt := range []struct {
+		name string
+		t    []byte
+	}{
+		{"empty", ticket[:0]},
+		{"one byte", ticket[:1]},
+		{"one short", ticket[:RelayTicketLen-1]},
+		{"one long", over},
+	} {
+		if VerifyRelayTicket(mk, tt.t, time.Now()) {
+			t.Errorf("%s: ticket of length %d must not verify", tt.name, len(tt.t))
+		}
+		if RelayTicketNetID(tt.t) != "" {
+			t.Errorf("%s: netID of length %d ticket must be empty", tt.name, len(tt.t))
+		}
+	}
+}
+
+func TestRelayTicketRejectedUnderDifferentMasterKey(t *testing.T) {
+	// A ticket minted by one network must not verify under another network's
+	// master key: the boot looks up the key by the ticket's embedded netID, so a
+	// ticket from network A can never authenticate a peer of network B.
+	mkA := RelayTicketMasterKey("network-a-secret")
+	mkB := RelayTicketMasterKey("network-b-secret")
+	ticket := MintRelayTicket(mkA, NetworkIDFromPSK("network-a-secret"), time.Now())
+	if VerifyRelayTicket(mkB, ticket, time.Now()) {
+		t.Fatal("ticket minted under one master key must not verify under another")
+	}
+	if RelayTicketNetID(ticket) != NetworkIDFromPSK("network-a-secret") {
+		t.Fatal("netID must be recoverable regardless of the verifying key")
 	}
 }

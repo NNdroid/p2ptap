@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -1990,7 +1991,7 @@ func main() {
 	var pskEntries []pskEntry
 	if pskEnabled {
 		for _, p := range psks {
-			pskEntries = append(pskEntries, pskEntry{hash: computePSKHash(p), netID: networkIDFromPSK(p), psk: p})
+			pskEntries = append(pskEntries, pskEntry{hash: computePSKHash(p), netID: networkIDFromPSK(p), masterKey: routing.RelayTicketMasterKey(p), psk: p})
 		}
 		h.SetStreamHandler(authProtocolID, func(s network.Stream) {
 			handleAuthStream(s, pskEntries, aclFilter, h, hub, nodeNameVal)
@@ -2961,6 +2962,11 @@ func networkIDFromPSK(psk string) string {
 type pskEntry struct {
 	hash  [32]byte
 	netID string
+	// masterKey is the HKDF-derived key that authenticates this network's
+	// session tickets (routing.MintRelayTicket / VerifyRelayTicket). It is
+	// looked up by netID on the ticket path, giving O(1) verification instead
+	// of the per-entry scan the full path performs.
+	masterKey [32]byte
 	// psk keeps the plaintext PSK alongside its opaque network ID so a first
 	// relay can mint the relay-ctrl origin endorsement with the same key bytes
 	// a mesh node derives from its own single config PSK. The ACL map itself
@@ -2989,6 +2995,23 @@ func lookupStampPSK(entries []pskEntry, netID string) []byte {
 // match wins, and the peer is bound to that PSK's network ID. A peer that fails
 // all PSKs is rejected and is left unauthenticated (so it cannot reserve/connect
 // and, in discovery-isolation mode, cannot see or be seen by other networks).
+//
+// The handshake is full-duplex with no read-before-write dependency: the boot
+// sends its challenge as the very first packet (t=0) while the client sends its
+// one-byte mode tag at the same time, so neither side blocks on a read before
+// writing and no probe timeout is needed. Two paths follow from the mode tag:
+//   - RelayAuthModeFull: the client reads the challenge and answers with
+//     HMAC-SHA256(token, challenge) ‖ nodeRecord; the boot verifies the response
+//     against every PSK (constant-time) — the classic path.
+//   - RelayAuthModeTicket: the client replays a session ticket minted by this
+//     boot within RelayTicketTTL; the boot looks up the ticket's embedded netID
+//     and verifies its MAC with O(1) work, saving the full round-trip. A stale or
+//     corrupt ticket is rejected with 0x00 and the client falls back to the full
+//     path using the challenge it kept.
+//
+// On success the boot always replies 0x01 ‖ newTicket(56B) ‖ bootRecord in one
+// write, so the client can verify the boot and cache the fresh ticket for its
+// next reconnect.
 func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h host.Host, hub *peekMapHub, nodeName string) {
 	defer s.Close()
 
@@ -3029,105 +3052,210 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 		return
 	}
 
-	// Challenge-response auth: send a fresh 32-byte challenge BEFORE reading
-	// anything. The client answers with HMAC-SHA256(token, challenge), so the
-	// static token never appears on the wire and a captured handshake cannot be
-	// replayed against another session. An OLD client (which sends its token
-	// first) will read our challenge as its response and fail the read below —
-	// node and boot must be upgraded together.
+	// 2. Send a fresh challenge BEFORE reading anything. The client emits its
+	// mode tag at t=0 too, so by the time we read it the bytes are already
+	// buffered — no probe timeout and no deadlock. The challenge is
+	// [RelayChallengeByte][31B random] so the client can tell a challenge from a
+	// 0x00/0x01 response byte on the same stream. An OLD client (which sends its
+	// token first) reads our challenge as its response and fails the mode read
+	// below; node and boot are upgraded together.
 	var challenge [routing.RelayAuthChallengeLen]byte
-	if _, err := rand.Read(challenge[:]); err != nil {
+	if _, err := rand.Read(challenge[1:]); err != nil {
 		log.Warn("[auth] challenge generation failed: %v", err)
 		_, _ = s.Write([]byte{0x00})
 		return
 	}
+	challenge[0] = routing.RelayChallengeByte
 	if _, err := s.Write(challenge[:]); err != nil {
 		return
 	}
 
-	// Read 32-byte challenge response from peer
-	var resp [32]byte
+	// 3. Read the one-byte mode tag that leads every client auth stream.
+	var mode [1]byte
+	if _, err := io.ReadFull(s, mode[:]); err != nil {
+		log.Debug("[auth] peer %s sent no auth mode byte: %v", remotePeer.String(), err)
+		if gSecurity != nil {
+			gSecurity.Auth.RecordFailure(phyIP, remotePeer)
+		}
+		_, _ = s.Write([]byte{0x00})
+		return
+	}
+
+	switch mode[0] {
+	case routing.RelayAuthModeFull:
+		authFullChallenge(s, entries, acl, h, hub, remotePeer, phyIP, challenge[:], nodeName)
+	case routing.RelayAuthModeTicket:
+		authTicketOrFull(s, entries, acl, h, hub, remotePeer, phyIP, challenge[:], nodeName)
+	default:
+		log.Debug("[auth] peer %s sent unknown auth mode %#x", remotePeer.String(), mode[0])
+		_, _ = s.Write([]byte{0x00})
+	}
+}
+
+// authFullChallenge completes the challenge-response half of the handshake: it
+// reads the client's 32-byte HMAC response, finds the PSK that matched (if any),
+// reads the client's version record, runs the version gate, binds the peer to
+// the matched network in the ACL, and writes the 0x01 ‖ newTicket ‖ bootRecord
+// success reply. It runs both on the pure-full path and after a rejected session
+// ticket (in which case the client sends a fresh resp ‖ record once it sees our
+// 0x00).
+func authFullChallenge(s network.Stream, entries []pskEntry, acl *pskACLFilter, h host.Host, hub *peekMapHub, remotePeer peer.ID, phyIP string, challenge []byte, nodeName string) {
+	// Re-arm a sane deadline: on the ticket-reject fallback the client only sends
+	// its response after seeing our 0x00, a full round-trip later.
+	_ = s.SetReadDeadline(time.Now().Add(30 * time.Second))
+
+	var resp [routing.RelayAuthChallengeLen]byte
 	if _, err := io.ReadFull(s, resp[:]); err != nil {
 		log.Debug("[auth] peer %s sent incomplete auth data: %v", remotePeer.String(), err)
 		if gSecurity != nil {
-			_, delay := gSecurity.Auth.RecordFailure(phyIP, remotePeer)
-			if delay > 0 {
-				time.Sleep(delay)
-			}
+			gSecurity.Auth.RecordFailure(phyIP, remotePeer)
 		}
-		_, _ = s.Write([]byte{0x00}) // Auth failed response
+		_, _ = s.Write([]byte{0x00})
 		return
 	}
 
 	// Verify the HMAC response against each configured PSK with a constant-time
 	// compare so a mismatched PSK does not leak, byte-by-byte via timing, how
 	// much of the 32-byte response matched.
-	for _, e := range entries {
-		expect := routing.RelayAuthResponse(e.hash, challenge[:])
+	var matched *pskEntry
+	for i := range entries {
+		expect := routing.RelayAuthResponse(entries[i].hash, challenge)
 		if subtle.ConstantTimeCompare(resp[:], expect[:]) == 1 {
-			// Success! Clear any failure count for this IP/peer
-			if gSecurity != nil {
-				gSecurity.Auth.RecordSuccess(phyIP, remotePeer)
-			}
-			// Reply auth success FIRST, before reading the optional version
-			// record. The old code read the version record before replying,
-			// which meant a client that sends only the token (no version
-			// record) would block for the full 30-second read deadline before
-			// receiving its 0x01 success reply. This made auth appear to take
-			// 30 seconds and caused relay connection timeouts.
-			// Best-effort read the peer's version/capability record with a
-			// short timeout. An OLD node sends only the 32-byte token and
-			// closes, so a short read means "unknown version" — we then
-			// authenticate without the extra compatibility gate (the node
-			// side does the same, so an old node never gets hard-rejected).
-			_ = s.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-			var nodeRec version.Record
-			_ = nodeRec.ReadRecord(s)
-
-			// PSK matches — assess version/envelope compatibility. A plain build
-			// difference with an identical envelope is safe (Warn, allowed); only
-			// a genuinely incompatible envelope (no common version) is Danger,
-			// and even that is allowed unless StrictVersionCheck is enabled.
-			// This gate runs BEFORE AddAuthenticated so a rejected peer is never
-			// left in the ACL as "authenticated".
-			switch lvl, reason := version.CurrentRecord().CompatibleWith(nodeRec); lvl {
-			case version.CompatOK:
-				// identical build or unknown peer — nothing to gate on
-			case version.CompatWarn:
-				log.Warn("[auth] peer %s version differs but safe to connect: %s (peer commit=%s)",
-					remotePeer.String(), reason, nodeRec.Commit)
-			case version.CompatDanger:
-				log.Error("[auth] peer %s version INCOMPATIBLE — risk of silent relay corruption: %s (local commit=%s, peer commit=%s)",
-					remotePeer.String(), reason, version.ShortCommit(), nodeRec.Commit)
-				if version.StrictVersionCheck {
-					bootAlerts.Add("error", "auth_version_mismatch", remotePeer.ShortString(),
-						fmt.Sprintf("Peer %s rejected: %s (peer commit=%s)", remotePeer.ShortString(), reason, nodeRec.Commit))
-					unauthTracker.Record(unauthTypeAuthFail, remotePeer.ShortString(),
-						fmt.Sprintf("Version mismatch: %s (peer commit=%s)", reason, nodeRec.Commit))
-					_, _ = s.Write([]byte{0x00}) // Auth failed response
-					return
-				}
-				log.Warn("[auth] peer %s version incompatible but StrictVersionCheck=false — allowing: %s (peer commit=%s)",
-					remotePeer.String(), reason, nodeRec.Commit)
-			}
-
-			// Version gate passed (or not enforced) — now authenticate.
-			acl.AddAuthenticated(remotePeer, e.netID)
-			_, _ = s.Write([]byte{0x01}) // Auth success response
-			// Hand our version record back so the node can also verify (and so
-			// an old node harmlessly sees a closed stream after the 0x01).
-			_ = s.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			_ = version.CurrentRecord().WriteRecord(s)
-			log.Debug("[auth] peer %s authenticated for relay (net=%s)", remotePeer.String(), e.netID)
-			bootAlerts.Add("info", "auth_success", remotePeer.ShortString(), fmt.Sprintf("PSK authenticated successfully (network: net=%s)", e.netID))
-			// Announce this boot to the freshly authenticated client so it shows
-			// up in peer discovery instead of as an "Unnamed Node".
-			hub.publishBootInfo(h, nodeName, version.Version)
-			return
+			matched = &entries[i]
+			break
 		}
 	}
+	if matched == nil {
+		authMismatch(s, remotePeer, phyIP)
+		return
+	}
 
-	// Mismatched PSK: record failure and apply progressive backoff / ban
+	// Success! Clear any failure count for this IP/peer.
+	if gSecurity != nil {
+		gSecurity.Auth.RecordSuccess(phyIP, remotePeer)
+	}
+	// Best-effort read the peer's version/capability record with a short
+	// timeout. An OLD node sends only the token and closes, so a short read
+	// means "unknown version" — we then authenticate without the extra gate.
+	_ = s.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	var nodeRec version.Record
+	_ = nodeRec.ReadRecord(s)
+	if !authVersionGate(remotePeer, nodeRec) {
+		_, _ = s.Write([]byte{0x00})
+		return
+	}
+	acl.AddAuthenticated(remotePeer, matched.netID)
+	authSuccessReply(s, matched, h, hub, nodeName, remotePeer)
+}
+
+// authTicketOrFull handles a client that presented a cached session ticket. The
+// client sent ticket ‖ nodeRecord in one write; the record is consumed first so
+// that a reject-then-fallback leaves no stray bytes ahead of the client's fresh
+// resp ‖ record. A valid, unexpired ticket (verified with O(1) work via the
+// ticket's embedded netID) authenticates immediately; anything else is rejected
+// with 0x00 and the handshake falls back to the full challenge-response, for
+// which the challenge we sent at t=0 is still valid.
+func authTicketOrFull(s network.Stream, entries []pskEntry, acl *pskACLFilter, h host.Host, hub *peekMapHub, remotePeer peer.ID, phyIP string, challenge []byte, nodeName string) {
+	ticket := make([]byte, routing.RelayTicketLen)
+	if _, err := io.ReadFull(s, ticket); err != nil {
+		log.Debug("[auth] peer %s sent an incomplete session ticket: %v", remotePeer.String(), err)
+		if gSecurity != nil {
+			gSecurity.Auth.RecordFailure(phyIP, remotePeer)
+		}
+		_, _ = s.Write([]byte{0x00})
+		return
+	}
+
+	_ = s.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	var nodeRec version.Record
+	_ = nodeRec.ReadRecord(s)
+
+	// The ticket names its network; look up that network's master key and
+	// verify. A ticket that names no configured network fails the lookup and is
+	// treated exactly like a bad MAC, so the client cannot probe which networks
+	// exist by timing the reject.
+	netID := routing.RelayTicketNetID(ticket)
+	if e := findPSKByNetID(entries, netID); e != nil && routing.VerifyRelayTicket(e.masterKey, ticket, time.Now()) {
+		if gSecurity != nil {
+			gSecurity.Auth.RecordSuccess(phyIP, remotePeer)
+		}
+		if !authVersionGate(remotePeer, nodeRec) {
+			_, _ = s.Write([]byte{0x00})
+			return
+		}
+		acl.AddAuthenticated(remotePeer, e.netID)
+		authSuccessReply(s, e, h, hub, nodeName, remotePeer)
+		return
+	}
+
+	log.Debug("[auth] peer %s session ticket rejected (net=%q) — falling back to full challenge-response", remotePeer.String(), netID)
+	_, _ = s.Write([]byte{0x00})
+	authFullChallenge(s, entries, acl, h, hub, remotePeer, phyIP, challenge, nodeName)
+}
+
+// findPSKByNetID returns the entry whose network ID matches netID, or nil.
+func findPSKByNetID(entries []pskEntry, netID string) *pskEntry {
+	for i := range entries {
+		if entries[i].netID == netID {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
+// authVersionGate assesses the client's version record against this boot's and
+// returns false only when StrictVersionCheck is enabled AND the relay envelopes
+// are genuinely incompatible. It never rejects on a mere build difference (Warn)
+// or on an unknown/absent record (an old build), matching the node side. The
+// gate runs BEFORE AddAuthenticated so a rejected peer is never left in the ACL
+// as "authenticated".
+func authVersionGate(remotePeer peer.ID, nodeRec version.Record) bool {
+	switch lvl, reason := version.CurrentRecord().CompatibleWith(nodeRec); lvl {
+	case version.CompatOK:
+		return true
+	case version.CompatWarn:
+		log.Warn("[auth] peer %s version differs but safe to connect: %s (peer commit=%s)",
+			remotePeer.String(), reason, nodeRec.Commit)
+		return true
+	case version.CompatDanger:
+		log.Error("[auth] peer %s version INCOMPATIBLE — risk of silent relay corruption: %s (local commit=%s, peer commit=%s)",
+			remotePeer.String(), reason, version.ShortCommit(), nodeRec.Commit)
+		if version.StrictVersionCheck {
+			bootAlerts.Add("error", "auth_version_mismatch", remotePeer.ShortString(),
+				fmt.Sprintf("Peer %s rejected: %s (peer commit=%s)", remotePeer.ShortString(), reason, nodeRec.Commit))
+			unauthTracker.Record(unauthTypeAuthFail, remotePeer.ShortString(),
+				fmt.Sprintf("Version mismatch: %s (peer commit=%s)", reason, nodeRec.Commit))
+			return false
+		}
+		log.Warn("[auth] peer %s version incompatible but StrictVersionCheck=false — allowing: %s (peer commit=%s)",
+			remotePeer.String(), reason, nodeRec.Commit)
+		return true
+	default:
+		return true
+	}
+}
+
+// authSuccessReply writes the single 0x01 ‖ newTicket ‖ bootRecord success reply
+// and mints a fresh ticket for the matched network, so the client can cache it
+// and reconnect within RelayTicketTTL with one round-trip instead of the full
+// challenge-response. The record is appended so the client can verify this boot
+// (an old node harmlessly sees the stream close after the 0x01).
+func authSuccessReply(s network.Stream, e *pskEntry, h host.Host, hub *peekMapHub, nodeName string, remotePeer peer.ID) {
+	var buf bytes.Buffer
+	buf.WriteByte(0x01)
+	buf.Write(routing.MintRelayTicket(e.masterKey, e.netID, time.Now()))
+	_ = version.CurrentRecord().WriteRecord(&buf)
+	_ = s.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_, _ = s.Write(buf.Bytes())
+	log.Debug("[auth] peer %s authenticated for relay (net=%s)", remotePeer.String(), e.netID)
+	bootAlerts.Add("info", "auth_success", remotePeer.ShortString(), fmt.Sprintf("PSK authenticated successfully (network: net=%s)", e.netID))
+	// Announce this boot to the freshly authenticated client so it shows up in
+	// peer discovery instead of as an "Unnamed Node".
+	hub.publishBootInfo(h, nodeName, version.Version)
+}
+
+// authMismatch records a failed PSK attempt and applies progressive backoff / ban.
+func authMismatch(s network.Stream, remotePeer peer.ID, phyIP string) {
 	log.Debug("[auth] peer %s provided an incorrect PSK (no matching network)", remotePeer.String())
 	if gSecurity != nil {
 		banned, delay := gSecurity.Auth.RecordFailure(phyIP, remotePeer)
