@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,6 +108,26 @@ func TestRelayRouterSerializesConcurrentWrites(t *testing.T) {
 		}(j.frame, j.from)
 	}
 	wg.Wait()
+
+	// route() now only ENQUEUES: the destination's writer goroutine drains the
+	// queue asynchronously, so wait for it instead of reading the byte buffer
+	// immediately.
+	wantBytes := 0
+	for _, j := range jobs {
+		wantBytes += 4 + len(j.frame)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if len(stream.bytes()) >= wantBytes {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("writer drained %d of %d bytes within 5s (dropped=%d) — "+
+				"frames vanished instead of being written",
+				len(stream.bytes()), wantBytes, atomic.LoadUint64(&rr.framesDropped))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	raw := stream.bytes()
 	var got int

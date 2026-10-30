@@ -938,42 +938,222 @@ func boolToAllow(b bool) string {
 	return "DENIED"
 }
 
-// relayPeerStream is one registered boot-relay stream plus the write lock it
-// needs to be used safely.
+// Per-destination asynchronous writers for the boot relay data plane.
 //
-// libp2p streams are explicitly NOT safe for concurrent Write, and route() runs
-// on one goroutine per attached client uplink and per backbone boot. Two clients
-// sending to the SAME destination therefore wrote into that destination's stream
-// concurrently, and the 4-byte length prefix of one frame could land in the
-// middle of the other frame's body. The peer's readFrame then reads a garbage
-// length, fails, and the whole uplink is torn down and reopened — with parallel
-// TCP flows (any real page load) that happens within seconds, which presents as
-// "the relay connects but the tunnel is unusable". Every write to a registered
-// stream goes through this wrapper so a frame is one atomic write.
+// Two separate defects lived on this path, and they need two separate fixes.
+//
+//  1. CORRUPTION. route() used to write frames straight into the destination
+//     stream, and it runs on one goroutine per attached client uplink and per
+//     backbone boot. libp2p streams do NOT allow concurrent Write: with two
+//     senders aiming at the same destination the 4-byte length prefix of one
+//     frame landed inside the other frame's body, the peer's readFrame read a
+//     garbage length, failed, and the whole uplink was torn down and reopened —
+//     within seconds, as soon as parallel TCP flows existed.
+//
+//  2. HEAD-OF-LINE BLOCKING. Even serialized, the write still ran on the
+//     CALLER's goroutine, which is always a read loop. One slow destination
+//     therefore stalled every frame that same sender wanted to deliver — to any
+//     other destination — for up to the 5s write deadline, and the sender's
+//     stream window closed behind it.
+//
+// The fix for both is the same shape the node side already uses for multipath
+// (pkg/node/stream_writer.go): every registered stream owns a bounded queue and
+// exactly ONE writer goroutine. route() hands over a private copy of the frame
+// and returns immediately, so a slow or wedged destination can only ever back up
+// its own queue, and frames stay whole without any lock because a single
+// goroutine writes the stream. A full queue means we are more than
+// bootRelayWriterMaxPendingBytes behind live traffic for that destination; the
+// frame is dropped and counted rather than blocking every other flow, which an
+// L2 tunnel recovers from (TCP retransmits) but a stalled uplink does not.
+//
+// Invariants this rests on:
+//   - Frames are COPIED on enqueue. route() is called as route(buf[:n], ...) with
+//     the read loop's reusable buffer; queuing that slice would alias a buffer
+//     the caller overwrites on its next read.
+//   - Only the writer goroutine touches s, so SetWriteDeadline (shared stream
+//     state) cannot interleave with a write, and the length prefix plus payload
+//     go out in ONE Write.
+const (
+	// bootRelayWriterQueueDepth caps queued frames per destination. 512 pointers
+	// is 4 KB of bookkeeping; the byte cap below is what actually binds for
+	// normal 1500-byte frames.
+	bootRelayWriterQueueDepth = 512
+
+	// bootRelayWriterMaxPendingBytes caps queued BYTES per destination. A frame
+	// may be up to maxBootRelayEnvelope (66 KB), so a frame count alone is not a
+	// memory bound: a full queue of those would be 33 MB per destination. 1 MiB
+	// absorbs a gigabit burst without letting one stalled peer pin memory.
+	bootRelayWriterMaxPendingBytes = 1 << 20
+
+	// bootRelayWriteTimeout bounds one frame write. Same budget as the old
+	// synchronous path, but now it only delays frames queued behind it on the
+	// SAME destination, never another flow's.
+	bootRelayWriteTimeout = 5 * time.Second
+)
+
+// relayFrameBuf is one pooled, length-prefixed wire frame: b[0:4] holds the
+// big-endian length and b[4:] the payload, so the writer issues a single Write
+// per frame instead of a header write followed by a body write.
+type relayFrameBuf struct {
+	b []byte
+}
+
+var relayFrameBufPool = sync.Pool{
+	New: func() any { return &relayFrameBuf{b: make([]byte, 4+maxBootRelayEnvelope)} },
+}
+
+func getRelayFrameBuf() *relayFrameBuf {
+	fb := relayFrameBufPool.Get().(*relayFrameBuf)
+	fb.b = fb.b[:cap(fb.b)]
+	return fb
+}
+
+func putRelayFrameBuf(fb *relayFrameBuf) { relayFrameBufPool.Put(fb) }
+
+// relayEnqueueResult reports what happened to a frame handed to a writer queue.
+type relayEnqueueResult int
+
+const (
+	relayEnqueued relayEnqueueResult = iota
+	relayQueueFull
+	relayQueueStopped
+)
+
+// relayPeerStream is one registered stream, its writer queue, and the state the
+// writer goroutine needs to retire the stream if a write fails.
 type relayPeerStream struct {
-	s network.Stream
-	// wmu serializes frames onto s. It also guards SetWriteDeadline, which is
-	// stream state shared with the write and must not interleave with it.
-	wmu sync.Mutex
+	s      network.Stream
+	router *relayRouter
+	dest   peer.ID
+	// local marks a client (downlink) stream. Only local deliveries feed the
+	// frames_to_clients/bytes_to_clients WebUI counters; backbone floods are
+	// intra-boot traffic and would double-count the same frame.
+	local bool
+
+	q    chan *relayFrameBuf
+	done chan struct{}
+	once sync.Once
+
+	// pendingBytes is queued-but-not-yet-written payload, the memory bound.
+	// Approximate by design (reserve before the copy, release after the write).
+	pendingBytes atomic.Int64
+	dropped      atomic.Uint64
 }
 
-// writeFrame writes data length-prefixed as one unit with respect to every other
-// writer on this stream. deadline is applied under the lock for the reason
-// above; a zero deadline leaves the stream's current deadline untouched.
-func (ps *relayPeerStream) writeFrame(data []byte, deadline time.Time) error {
-	ps.wmu.Lock()
-	defer ps.wmu.Unlock()
-	if !deadline.IsZero() {
-		_ = ps.s.SetWriteDeadline(deadline)
+// stop retires the writer goroutine. Idempotent, and safe from the read loop's
+// defer, from a failed write, or from a register() replacing this stream.
+func (ps *relayPeerStream) stop() {
+	ps.once.Do(func() { close(ps.done) })
+}
+
+// enqueue copies data onto this stream's queue without blocking. The caller
+// keeps ownership of data and may reuse it immediately.
+func (ps *relayPeerStream) enqueue(data []byte) relayEnqueueResult {
+	select {
+	case <-ps.done:
+		return relayQueueStopped
+	default:
 	}
-	return writeFrame(ps.s, data)
+	// Reserve the bytes before copying: the copy is the memory cost, so a frame
+	// that will not fit must be rejected before it is duplicated.
+	n := int64(len(data))
+	if ps.pendingBytes.Add(n) > bootRelayWriterMaxPendingBytes {
+		ps.pendingBytes.Add(-n)
+		return relayQueueFull
+	}
+	fb := getRelayFrameBuf()
+	if len(data)+4 > cap(fb.b) {
+		// Cannot happen for frames read through readFrame (bounded by
+		// maxBootRelayEnvelope); dropping beats writing a lying length prefix.
+		putRelayFrameBuf(fb)
+		ps.pendingBytes.Add(-n)
+		return relayQueueFull
+	}
+	binary.BigEndian.PutUint32(fb.b[0:4], uint32(len(data)))
+	copy(fb.b[4:], data)
+	fb.b = fb.b[:4+len(data)]
+	select {
+	case ps.q <- fb:
+		return relayEnqueued
+	case <-ps.done:
+		putRelayFrameBuf(fb)
+		ps.pendingBytes.Add(-n)
+		return relayQueueStopped
+	default:
+		putRelayFrameBuf(fb)
+		ps.pendingBytes.Add(-n)
+		return relayQueueFull
+	}
 }
 
-// close tears the underlying stream down. Safe to call concurrently with
-// writeFrame: libp2p allows Close while a Write is in flight, the write then
-// just fails.
-func (ps *relayPeerStream) close() {
+// runRelayWriter is the only goroutine that ever writes ps.s.
+func (r *relayRouter) runRelayWriter(ps *relayPeerStream) {
+	for {
+		select {
+		case fb := <-ps.q:
+			payload := len(fb.b) - 4
+			_ = ps.s.SetWriteDeadline(time.Now().Add(bootRelayWriteTimeout))
+			written, err := ps.s.Write(fb.b)
+			putRelayFrameBuf(fb)
+			ps.pendingBytes.Add(-int64(payload))
+			if err == nil && written < payload+4 {
+				err = io.ErrShortWrite
+			}
+			if err != nil {
+				r.retireFailedStream(ps, err)
+				return
+			}
+			if ps.local {
+				atomic.AddUint64(&r.framesToClients, 1)
+				atomic.AddUint64(&r.bytesToClients, uint64(payload))
+			}
+		case <-ps.done:
+			r.drainRelayQueue(ps)
+			return
+		}
+	}
+}
+
+// drainRelayQueue returns every still-queued buffer to the pool. Runs on the
+// writer goroutine as it exits; the frames are gone with the stream.
+func (r *relayRouter) drainRelayQueue(ps *relayPeerStream) {
+	for {
+		select {
+		case fb := <-ps.q:
+			ps.pendingBytes.Add(-int64(len(fb.b) - 4))
+			putRelayFrameBuf(fb)
+		default:
+			return
+		}
+	}
+}
+
+// retireFailedStream tears down a destination whose write failed. It runs on
+// that stream's writer goroutine, so it must not hold r.mu on entry.
+func (r *relayRouter) retireFailedStream(ps *relayPeerStream, err error) {
+	kind := "backbone boot"
+	if ps.local {
+		kind = "local client"
+	}
+	log.Debug("[boot-relay] write to %s %s failed: %v; dropping stream",
+		kind, ps.dest.ShortString(), err)
+	// Unregister first (identity-guarded, so a newer stream that already took
+	// this peer's slot is untouched), then close. Closing matters more than
+	// unregistering: the peer's read loop stays parked in readFrame until its
+	// own deadline (60s on a client uplink, 10min on a backbone), so without the
+	// close the far end keeps believing the link is healthy and keeps feeding a
+	// queue nobody drains.
+	r.unregisterPeerStream(ps)
 	_ = ps.s.Close()
+}
+
+// noteRelayBackpressure counts and (rate-limited) reports a dropped frame.
+func (r *relayRouter) noteRelayBackpressure(ps *relayPeerStream, kind string) {
+	atomic.AddUint64(&r.framesDropped, 1)
+	if n := ps.dropped.Add(1); n == 1 || n%1024 == 0 {
+		log.Warn("[boot-relay] %s %s is behind live traffic (queue full, %d frames queued) — dropped %d frame(s) so far",
+			kind, ps.dest.ShortString(), bootRelayWriterQueueDepth, n)
+	}
 }
 
 // relayRouter bridges relay-over-backbone (boot-relay) frames between locally
@@ -1014,6 +1194,10 @@ type relayRouter struct {
 	bytesFromClients  uint64
 	framesToClients   uint64
 	bytesToClients    uint64
+	// framesDropped counts frames rejected because a destination's writer queue
+	// was full (see noteRelayBackpressure). Non-zero over a long window means a
+	// peer is not draining its relay stream as fast as traffic arrives.
+	framesDropped uint64
 }
 
 func newRelayRouter(acl *pskACLFilter, pskEnabled bool) *relayRouter {
@@ -1044,20 +1228,68 @@ const (
 // sender from pinning the read goroutine indefinitely.
 const bootRelayFrameMaxWait = 100 * time.Millisecond
 
-// registerClient publishes s as p's boot-relay uplink. The stream is wrapped in
-// a relayPeerStream so every later write from any goroutine is serialized; the
-// wrapper is created ONCE here, which is what makes the per-stream write lock
-// effective (see relayPeerStream).
-func (r *relayRouter) registerClient(p peer.ID, s network.Stream) {
+// registerStream publishes s as p's stream in m, starts its writer goroutine,
+// and retires the writer of any stream it supersedes.
+func (r *relayRouter) registerStream(m map[peer.ID]*relayPeerStream, p peer.ID, s network.Stream, local bool) {
+	ps := &relayPeerStream{
+		s:      s,
+		router: r,
+		dest:   p,
+		local:  local,
+		q:      make(chan *relayFrameBuf, bootRelayWriterQueueDepth),
+		done:   make(chan struct{}),
+	}
 	r.mu.Lock()
-	r.clientStreams[p] = &relayPeerStream{s: s}
+	old := m[p]
+	m[p] = ps
 	r.mu.Unlock()
+	// A reconnect installs the new stream while the previous one is still
+	// registered. Retire the old writer so its goroutine, queue and pooled
+	// buffers go away now instead of at whatever deadline that stream's read
+	// loop happens to hit.
+	//
+	// The old STREAM is deliberately not closed here: two boots that list each
+	// other in -mesh register an outbound and an inbound stream for the same
+	// peer, so closing on supersede would have each side kill the other's link
+	// in a loop. Its own read loop tears it down when the peer drops it.
+	if old != nil {
+		old.stop()
+	}
+	go r.runRelayWriter(ps)
+}
+
+// unregisterPeerStream removes ps from whichever map holds it — identity-
+// guarded, so a stale reader can never evict the live stream a reconnect
+// installed — and retires its writer.
+func (r *relayRouter) unregisterPeerStream(ps *relayPeerStream) {
+	r.mu.Lock()
+	if ps.local {
+		if r.clientStreams[ps.dest] == ps {
+			delete(r.clientStreams, ps.dest)
+		}
+	} else if r.meshStreams[ps.dest] == ps {
+		delete(r.meshStreams, ps.dest)
+	}
+	r.mu.Unlock()
+	ps.stop()
+}
+
+// registerClient publishes s as p's boot-relay uplink and starts its writer.
+// Every write to it from now on happens on that single writer goroutine, which
+// is what makes both the framing atomic and a slow destination unable to stall
+// any other flow (see the per-destination writer comment above).
+func (r *relayRouter) registerClient(p peer.ID, s network.Stream) {
+	r.registerStream(r.clientStreams, p, s, true)
 }
 
 func (r *relayRouter) unregisterClient(p peer.ID) {
 	r.mu.Lock()
+	ps := r.clientStreams[p]
 	delete(r.clientStreams, p)
 	r.mu.Unlock()
+	if ps != nil {
+		ps.stop()
+	}
 }
 
 // unregisterClientStream removes the client uplink for p ONLY if it is still the
@@ -1065,16 +1297,18 @@ func (r *relayRouter) unregisterClient(p peer.ID) {
 // cannot evict the live one when it finally errors out.
 func (r *relayRouter) unregisterClientStream(p peer.ID, s network.Stream) {
 	r.mu.Lock()
-	if ps := r.clientStreams[p]; ps != nil && ps.s == s {
-		delete(r.clientStreams, p)
+	ps := r.clientStreams[p]
+	if ps == nil || ps.s != s {
+		r.mu.Unlock()
+		return
 	}
+	delete(r.clientStreams, p)
 	r.mu.Unlock()
+	ps.stop()
 }
 
 func (r *relayRouter) registerMesh(p peer.ID, s network.Stream) {
-	r.mu.Lock()
-	r.meshStreams[p] = &relayPeerStream{s: s}
-	r.mu.Unlock()
+	r.registerStream(r.meshStreams, p, s, false)
 }
 
 // unregisterMesh removes the backbone stream for p ONLY if it is still the given
@@ -1090,10 +1324,14 @@ func (r *relayRouter) registerMesh(p peer.ID, s network.Stream) {
 // the stream times out and re-registers.
 func (r *relayRouter) unregisterMesh(p peer.ID, s network.Stream) {
 	r.mu.Lock()
-	if ps := r.meshStreams[p]; ps != nil && ps.s == s {
-		delete(r.meshStreams, p)
+	ps := r.meshStreams[p]
+	if ps == nil || ps.s != s {
+		r.mu.Unlock()
+		return
 	}
+	delete(r.meshStreams, p)
 	r.mu.Unlock()
+	ps.stop()
 }
 
 // route bridges one boot-relay frame. fromMesh distinguishes a frame that
@@ -1172,30 +1410,20 @@ func (r *relayRouter) route(data []byte, fromMesh bool, fromPeer peer.ID) {
 				return
 			}
 		}
-		// Write length-prefixed (NOT raw): the destination node's downlink
-		// reader uses ReadFrame (4-byte big-endian length prefix), so the frame
-		// must be framed exactly like the node's uplink writes it. A raw write
-		// here would make the destination misread the first 4 bytes as a bogus
-		// length and corrupt the downlink.
+		// Hand the frame to the destination's writer, length-prefixed (NOT raw):
+		// the node's downlink reader uses ReadFrame with a 4-byte big-endian
+		// length prefix, so a raw write would make it misinterpret the first 4
+		// payload bytes as a length and desynchronise the downlink.
 		//
-		// The write MUST go through relayPeerStream: several client/backbone
-		// handlers can call route() for this same destination at once, and two
-		// unsynchronized writes on one libp2p stream interleave the length
-		// prefix with the other frame's body, desynchronising the peer's reader
-		// and killing the uplink.
-		if werr := ls.writeFrame(data, time.Now().Add(5*time.Second)); werr != nil {
-			log.Debug("[boot-relay] write to local client %s failed: %v; dropping uplink", finalDst.ShortString(), werr)
-			r.unregisterClientStream(finalDst, ls.s)
-			// Close as well: unregistering alone leaves the client's downlink
-			// reader parked in ReadFrame until its own 60s deadline, so the node
-			// keeps believing the uplink is alive (hasBootRelayUplink reflects
-			// registration, not deliverability) and keeps enqueuing frames that
-			// return success while nothing is read. Closing makes the node's
-			// reader return immediately.
-			ls.close()
-		} else {
-			atomic.AddUint64(&r.framesToClients, 1)
-			atomic.AddUint64(&r.bytesToClients, uint64(len(data)))
+		// enqueue COPIES the frame, so the caller's read buffer is reusable the
+		// moment this returns, and it never blocks: several client and backbone
+		// handlers route to the same destination from their own goroutines, and
+		// one wedged destination must not stall any of them.
+		switch ls.enqueue(data) {
+		case relayQueueFull:
+			r.noteRelayBackpressure(ls, "local client")
+		case relayQueueStopped, relayEnqueued:
+			// Stopped means the stream is being retired; its reader will notice.
 		}
 		return
 	}
@@ -1236,20 +1464,12 @@ func (r *relayRouter) route(data []byte, fromMesh bool, fromPeer peer.ID) {
 		if ms == nil {
 			continue
 		}
-		// Write length-prefixed: the receiving boot's backbone handler reads
-		// with readFrame (4-byte length prefix), so the flood must be framed
-		// the same way (a raw write would desync the remote reader). Serialized
-		// per stream: every client and backbone handler floods to the same
-		// mesh stream from its own goroutine.
-		if werr := ms.writeFrame(data, time.Now().Add(5*time.Second)); werr != nil {
-			log.Debug("[boot-relay] write to backbone boot %s failed: %v; dropping uplink", bp.ShortString(), werr)
-			// Guarded, and close as well: our side of the link is gone, but the
-			// remote boot's handler for this same stream can still be parked in
-			// its read loop (10-minute deadline). unregisterMesh is a no-op if a
-			// newer stream already took the slot; closing is what makes the
-			// remote reader return instead of waiting out that deadline.
-			r.unregisterMesh(bp, ms.s)
-			ms.close()
+		// Same length-prefixed framing as local delivery (the remote boot's
+		// backbone handler reads with readFrame), and the same non-blocking
+		// enqueue: without it a single unreachable backbone boot would stall
+		// this sender for up to one write timeout PER mesh peer, in series.
+		if ms.enqueue(data) == relayQueueFull {
+			r.noteRelayBackpressure(ms, "backbone boot")
 		}
 	}
 }
@@ -2497,6 +2717,7 @@ func (p *bootDataProviderImpl) GetRelayLimits() bootweb.RelayStatsDTO {
 		d.BytesFromClients = atomic.LoadUint64(&p.relayRouter.bytesFromClients)
 		d.FramesToClients = atomic.LoadUint64(&p.relayRouter.framesToClients)
 		d.BytesToClients = atomic.LoadUint64(&p.relayRouter.bytesToClients)
+		d.FramesDropped = atomic.LoadUint64(&p.relayRouter.framesDropped)
 	}
 	return d
 }

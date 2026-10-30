@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
@@ -44,6 +45,56 @@ func packTestFrame(t *testing.T, netID string, kind byte, proto protocol.ID,
 	return frame
 }
 
+// relayIdle reports whether every registered stream's writer has drained its
+// queue. pendingBytes is reserved at enqueue and released only AFTER the write
+// completes, so "all zero" covers both queued and in-flight frames.
+func relayIdle(r *relayRouter) bool {
+	r.mu.RLock()
+	streams := make([]*relayPeerStream, 0, len(r.clientStreams)+len(r.meshStreams))
+	for _, ps := range r.clientStreams {
+		streams = append(streams, ps)
+	}
+	for _, ps := range r.meshStreams {
+		streams = append(streams, ps)
+	}
+	r.mu.RUnlock()
+	for _, ps := range streams {
+		if ps.pendingBytes.Load() != 0 || len(ps.q) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// settleRelay waits for the router's writer goroutines to deliver everything
+// route() enqueued, so a test can assert on the wire.
+//
+// route() is asynchronous by design (a slow destination must not stall the
+// caller), so every positive AND negative assertion on fakeStream counts has to
+// go through this: asserting "0 writes" without settling would pass before the
+// writer had a chance to write anything.
+func settleRelay(t *testing.T, rr *relayRouter) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !relayIdle(rr) {
+		if time.Now().After(deadline) {
+			t.Fatalf("relay writers still had queued frames after 5s")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitRelayCount(t *testing.T, s *fakeStream, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for s.count() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("stream recorded %d writes, want %d", s.count(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestRelayRouterEchoesUplinkHeartbeat locks the second asymmetry: a client's
 // own loopback heartbeat (finalDst == srcPeer == the sender) is handed back to
 // that client's uplink and is NEVER placed on the backbone.
@@ -67,6 +118,7 @@ func TestRelayRouterEchoesUplinkHeartbeat(t *testing.T) {
 
 	frame := packTestFrame(t, netID, routing.BootRelayKindControl, "", client, client, 1, []byte("ping"))
 	rr.route(frame, false, client)
+	settleRelay(t, rr)
 
 	if got := uplink.count(); got != 1 {
 		t.Fatalf("self-addressed heartbeat must be delivered to its own client once, got %d writes", got)
@@ -101,6 +153,7 @@ func TestRelayRouterNeverFloodsSelfAddressedFrames(t *testing.T) {
 
 	frame := packTestFrame(t, netID, routing.BootRelayKindData, "", client, client, 5, []byte("loop"))
 	rr.route(frame, false, client)
+	settleRelay(t, rr)
 
 	if meshX.count() != 0 || meshY.count() != 0 {
 		t.Fatalf("self-addressed frame must not be flooded (X=%d Y=%d writes)",
@@ -130,6 +183,7 @@ func TestRelayRouterBackboneFramesNeverReflooded(t *testing.T) {
 	acl.AddAuthenticated(remoteOrigin, netID)
 	frame := packTestFrame(t, netID, routing.BootRelayKindData, "", client, remoteOrigin, 5, []byte("data"))
 	rr.route(frame, true, remoteOrigin)
+	settleRelay(t, rr)
 
 	if downlink.count() != 1 {
 		t.Fatalf("local client must receive the backbone frame once, got %d writes", downlink.count())
@@ -160,6 +214,7 @@ func TestRelayRouterFloodsUplinkDataAcrossBackbone(t *testing.T) {
 
 	frame := packTestFrame(t, netID, routing.BootRelayKindData, "", dest, sender, 2, []byte("data"))
 	rr.route(frame, false, sender)
+	settleRelay(t, rr)
 
 	if meshX.count() != 1 || meshY.count() != 1 {
 		t.Fatalf("data frame must be flooded to both peer boots (X=%d Y=%d writes)",
@@ -196,6 +251,7 @@ func TestRelayRouterForwardsMemberUplinkSource(t *testing.T) {
 
 	frame := packTestFrame(t, netID, routing.BootRelayKindData, "", victim, victim, 2, []byte("forward"))
 	rr.route(frame, false, sender)
+	settleRelay(t, rr)
 
 	if victimStream.count() != 1 {
 		t.Fatalf("member's forwarded frame must be delivered to srcPeer (victim=%d writes)", victimStream.count())
@@ -226,6 +282,7 @@ func TestRelayRouterDropsNonMemberUplinkSource(t *testing.T) {
 	attacker := test.RandPeerIDFatal(t) // NOT a member.
 	frame := packTestFrame(t, netID, routing.BootRelayKindData, "", victim, attacker, 2, []byte("forge"))
 	rr.route(frame, false, sender)
+	settleRelay(t, rr)
 
 	if uplink.count() != 0 || victimStream.count() != 0 {
 		t.Fatalf("non-member srcPeer frame must be dropped (sender=%d victim=%d writes)",
@@ -253,6 +310,7 @@ func TestRelayRouterOpenModeDropsSpoofedSource(t *testing.T) {
 
 	frame := packTestFrame(t, netID, routing.BootRelayKindData, "", victim, victim, 2, []byte("forge"))
 	rr.route(frame, false, sender)
+	settleRelay(t, rr)
 
 	if uplink.count() != 0 || victimStream.count() != 0 {
 		t.Fatalf("open-mode spoofed srcPeer frame must be dropped (sender=%d victim=%d writes)",

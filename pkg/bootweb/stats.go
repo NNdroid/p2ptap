@@ -134,6 +134,11 @@ type RelayStatsDTO struct {
 	BytesFromClients  uint64 `json:"bytes_from_clients"`
 	FramesToClients   uint64 `json:"frames_to_clients"`
 	BytesToClients    uint64 `json:"bytes_to_clients"`
+	// FramesDropped counts frames discarded because a destination's writer
+	// queue was full (that peer is not draining its relay stream as fast as
+	// traffic arrives). Any sustained growth here means backpressure, not a
+	// framing problem — the relay keeps delivering for everyone else.
+	FramesDropped uint64 `json:"frames_dropped"`
 }
 
 // PeekMapStatsDTO holds pub/sub topology channel status.
@@ -650,6 +655,14 @@ func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 			ReservationTTLSec:  relayLimits.ReservationTTLSec,
 			DurationLimitSec:   relayLimits.DurationLimitSec,
 			DataLimitMB:        relayLimits.DataLimitMB,
+			// Data-plane liveness counters come straight from GetRelayLimits();
+			// the literal above copies only the limit fields, so without these
+			// lines every counter renders 0 even when the relay is moving traffic.
+			FramesFromClients: relayLimits.FramesFromClients,
+			BytesFromClients:  relayLimits.BytesFromClients,
+			FramesToClients:   relayLimits.FramesToClients,
+			BytesToClients:    relayLimits.BytesToClients,
+			FramesDropped:     relayLimits.FramesDropped,
 		},
 		PeekMap: PeekMapStatsDTO{
 			ActiveListeners: p.GetPeekMapListenerCount(),

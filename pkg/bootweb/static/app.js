@@ -177,6 +177,19 @@
 
             document.getElementById('relayCount').innerText = `${peers.length} / ${state.relay.max_circuits || 1024}`;
 
+            // Relay data-plane liveness: counts frames/bytes the relay actually
+            // bridged (↑ from clients, ↓ to clients). A live uplink keeps ↑
+            // advancing via its self-heartbeat, so "↑ 0" means no client has
+            // pushed a frame at all — the relay is idle, not broken.
+            const rdp = document.getElementById('relayDataplaneSub');
+            if (rdp) {
+                const fmtB = (b) => b >= (1<<30) ? (b/(1<<30)).toFixed(1)+'GB' : b >= (1<<20) ? (b/(1<<20)).toFixed(1)+'MB' : b >= (1<<10) ? (b/(1<<10)).toFixed(1)+'KB' : (b||0)+'B';
+                const up = (state.relay.frames_from_clients||0), upB = (state.relay.bytes_from_clients||0);
+                const dn = (state.relay.frames_to_clients||0), dnB = (state.relay.bytes_to_clients||0);
+                const drop = (state.relay.frames_dropped||0);
+                rdp.innerText = `数据面 ↑${up}帧/${fmtB(upB)} · ↓${dn}帧/${fmtB(dnB)}` + (drop > 0 ? ` · ⚠️丢${drop}` : '');
+            }
+
             const subnets = state.subnet_routes || [];
             document.getElementById('subnetCount').innerText = subnets.length;
             document.getElementById('subnetSubText').innerText = `${subnets.length} ${t('subnets_routes_sub')}`;

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/test"
@@ -68,6 +69,7 @@ func TestRelayRouterStaleUnregisterCannotEvictLiveMeshStream(t *testing.T) {
 
 	frame := packTestFrame(t, netID, routing.BootRelayKindData, "", dest, sender, 2, []byte("data"))
 	rr.route(frame, false, sender)
+	settleRelay(t, rr)
 
 	if live.count() != 1 {
 		t.Fatalf("live backbone stream must still receive the flood after a stale unregister, got %d writes",
@@ -99,8 +101,15 @@ func TestRelayRouterMeshWriteFailureClosesAndUnregisters(t *testing.T) {
 	frame := packTestFrame(t, netID, routing.BootRelayKindData, "", dest, sender, 2, []byte("data"))
 	rr.route(frame, false, sender)
 
-	if !broken.closed.Load() {
-		t.Fatal("a failing backbone stream must be closed so the remote boot's reader returns")
+	// The write now happens on the destination's writer goroutine, so the
+	// teardown it triggers is asynchronous: wait for it instead of reading the
+	// flags immediately.
+	deadline := time.Now().Add(5 * time.Second)
+	for !broken.closed.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("a failing backbone stream must be closed so the remote boot's reader returns")
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if got := broken.attempts.Load(); got != 1 {
 		t.Fatalf("the broken stream must have been attempted exactly once, got %d", got)
@@ -109,6 +118,7 @@ func TestRelayRouterMeshWriteFailureClosesAndUnregisters(t *testing.T) {
 	// It must be out of the flood set: a second frame must not be attempted on
 	// the dead stream.
 	rr.route(frame, false, sender)
+	settleRelay(t, rr)
 	if got := broken.attempts.Load(); got != 1 {
 		t.Fatalf("unregistered backbone stream must not receive further floods, got %d attempts", got)
 	}
