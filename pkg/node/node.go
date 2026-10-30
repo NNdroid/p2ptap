@@ -2558,10 +2558,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 					node.muxEngine.Invalidate(pID)
 				}
 
-				// Prime the application-level ProtocolID stream so the first
-				// TAP frame never blocks on a lazy NewStream (100ms-3s). The
-				// stream is opened in the background; if it fails, the first
-				// frame falls back to the lazy openStream path.
+				// Prime the application-level data streams so the first TAP
+				// frame never blocks on a lazy NewStream (100ms-3s). This is no
+				// longer "one stream on whichever connection the swarm prefers":
+				// PrimeStream now pins one stream to EVERY direct connection
+				// (see EnsureStreamsOnAllConns), which is what gives the
+				// multipath strategy more than one path to schedule over on a
+				// peer reachable over both QUIC and TCP.
 				if !node.isBootstrapPeer(pID) {
 					node.Dispatcher.PrimeStream(pID)
 				}

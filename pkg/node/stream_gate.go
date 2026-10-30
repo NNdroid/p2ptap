@@ -18,12 +18,15 @@ import (
 // under multipath), so a per-peer bound far above that is invisible to healthy
 // traffic and only stops a flood. Exceeding the bound resets the stream, which
 // the remote opens and immediately learns about.
-// Per-peer concurrent-stream bounds. Multipath opens one stream per live path
-// (QUIC + TCP + WebRTC, typically <=4) plus the occasional replacement while a
-// dead one is pruned, so 16 leaves ample headroom; echo is an unbuffered probe
-// that should never pile up beyond a couple.
+// Per-peer concurrent-stream bounds. Multipath keeps one stream per live
+// path-direction pair: with QUIC + TCP + WebRTC + a circuit that is up to four
+// connections, and EnsureStreamsOnAllConns opens an OUTBOUND stream on each
+// direct one while the peer does the same toward us — so eight data streams is
+// the expected steady state, not the ceiling. A stream being replaced while its
+// predecessor drains adds a few more. 32 leaves real headroom for that overlap
+// while still stopping a flood, which is all this gate is for.
 const (
-	maxStreamsPerPeerData  = 16
+	maxStreamsPerPeerData  = 32
 	maxStreamsPerPeerRelay = 16
 	maxStreamsPerPeerEcho  = 8
 	// LSA and meta each keep ONE long-lived persistent stream per peer (the

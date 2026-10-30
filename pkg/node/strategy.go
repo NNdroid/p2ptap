@@ -13,6 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	manet "github.com/multiformats/go-multiaddr/net"
+	msmux "github.com/multiformats/go-multistream"
 
 	"p2ptap/pkg/maddrutil"
 	"p2ptap/pkg/obfuscate"
@@ -25,8 +26,12 @@ const ProtocolID protocol.ID = "/p2ptap/application/1.0.0"
 type PeerStreams struct {
 	mu      sync.RWMutex
 	writeMu sync.Mutex // serializes WriteFrame calls to prevent interleaving across concurrent goroutines
-	peerID  peer.ID
-	streams map[string]network.Stream // TransportName -> Stream
+	// ensureMu serializes per-connection stream repair (EnsureStreamsOnAllConns)
+	// for this peer. It is separate from writeMu because opening a stream can
+	// block for seconds and must never hold the packet-path lock.
+	ensureMu sync.Mutex
+	peerID   peer.ID
+	streams  map[string]network.Stream // streamRegistryKey -> Stream
 
 	// sorted is the transport-priority-ordered snapshot of streams, rebuilt
 	// under mu on EVERY streams-map mutation. Readers get the published slice
@@ -114,6 +119,17 @@ func (ps *PeerStreams) rebuildLocked() {
 		if a != b {
 			return a < b
 		}
+		// Same transport tier: prefer OUR outbound stream over the peer's
+		// inbound one. Both reach the same peer over the same connection, but
+		// an outbound stream's lifetime is ours to manage — if the peer stops
+		// reading, resets, or halves it, we are the side that has to notice and
+		// re-open, whereas an inbound stream can be closed by the peer at any
+		// time with no local signal until a write fails. best_path/fallback use
+		// this ordering to pick their single stream.
+		da, db := streamDirectionRank(ps.streams[names[i]]), streamDirectionRank(ps.streams[names[j]])
+		if da != db {
+			return da < db
+		}
 		return names[i] < names[j]
 	})
 	next := make([]network.Stream, 0, len(names))
@@ -124,28 +140,120 @@ func (ps *PeerStreams) rebuildLocked() {
 	ps.snapshot.Store(&peerStreamsSnapshot{streams: next})
 }
 
-func (ps *PeerStreams) AddStream(transportName string, s network.Stream) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	// A concurrent openStream may produce a new stream for the same transport
-	// while the old one is still open (and still has a read goroutine).
-	// Closing the old stream here prevents leaked streams and goroutines that
-	// accumulate during connection churn.
-	if old, ok := ps.streams[transportName]; ok && old != s {
-		old.Close()
+// streamDirection reports the stream's direction, tolerating test doubles that
+// embed a nil network.Stream (see strategyPipeStream): calling the promoted
+// Stat() then panics on the nil interface. Direction is only a registry/ranking
+// hint here, so a failed probe falls back to outbound instead of taking the
+// whole stream table down.
+func streamDirection(s network.Stream) (dir network.Direction) {
+	if s == nil {
+		return network.DirOutbound
 	}
-	ps.streams[transportName] = s
-	ps.rebuildLocked()
-	log.Debug("Stream registered for peer %s via %s (total: %d streams)", ps.peerID.String(), transportName, len(ps.streams))
+	defer func() {
+		if recover() != nil {
+			dir = network.DirOutbound
+		}
+	}()
+	return s.Stat().Direction
 }
 
-func (ps *PeerStreams) RemoveStream(transportName string, stream network.Stream) {
+// streamRegistryKey is the slot a stream occupies in PeerStreams.streams.
+//
+// The key used to be the stream's remote multiaddr, which collapses every
+// stream that shares one connection into a single slot. An inbound stream
+// opened by the peer and an outbound stream we opened ourselves report the SAME
+// RemoteMultiaddr() (it is a property of the connection, not the stream), so
+// the second registration CLOSED the first via AddStream's replacement path.
+// With both sides priming a stream on connect — the normal case — each side
+// tore down the stream the other had just registered, the peer's reader exited,
+// and the data path rebuilt itself from scratch. That is a connect-then-stall
+// cycle on every reconnect, and under the multipath strategy it also pins the
+// peer to a SINGLE path forever, because whichever direction registers last is
+// the only survivor.
+//
+// Keying on (direction, connection ID) gives one inbound and one outbound slot
+// per physical connection and never evicts a healthy stream. Using the
+// connection ID rather than the multiaddr also means a re-dial of the same
+// address cannot collide with a stream still open on the previous connection.
+func streamRegistryKey(s network.Stream) string {
+	if s == nil {
+		return ""
+	}
+	dir := "out"
+	if streamDirection(s) == network.DirInbound {
+		dir = "in"
+	}
+	if c := s.Conn(); c != nil {
+		if id := c.ID(); id != "" {
+			return dir + "|" + id
+		}
+	}
+	// No usable connection identity: fall back to the stream's own address so
+	// distinct streams still occupy distinct slots. Production streams always
+	// have a connection ID; this branch exists for test doubles that implement
+	// network.Stream without a real transport underneath.
+	return fmt.Sprintf("%s|%p", dir, s)
+}
+
+// outboundKeyForConn is streamRegistryKey for an outbound stream we are about to
+// open on c, so EnsureStreamsOnAllConns can test for an existing slot without
+// holding a stream yet.
+func outboundKeyForConn(c network.Conn) string {
+	if c == nil {
+		return ""
+	}
+	return "out|" + c.ID()
+}
+
+// AddStream registers s under key. It is derived from the stream itself by every
+// caller (see streamRegistryKey) so there is exactly one notion of a slot.
+func (ps *PeerStreams) AddStream(key string, s network.Stream) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	if current, ok := ps.streams[transportName]; ok && current == stream {
-		delete(ps.streams, transportName)
+	// A concurrent openStream may produce a new stream for the same slot while
+	// the old one is still open (and still has a read goroutine). Closing the
+	// old stream here prevents leaked streams and goroutines that accumulate
+	// during connection churn. Because the slot is (direction, conn ID), this
+	// can only ever replace OUR stream on the SAME connection in the SAME
+	// direction — never the peer's inbound stream (see streamRegistryKey).
+	if old, ok := ps.streams[key]; ok && old != s {
+		old.Close()
+	}
+	ps.streams[key] = s
+	ps.rebuildLocked()
+	log.Debug("Stream registered for peer %s as %s (total: %d streams)", ps.peerID.String(), key, len(ps.streams))
+}
+
+// RemoveStream drops stream from the table by IDENTITY, not by key. An inbound
+// stream handler unregisters while returning, possibly after its connection was
+// torn down — at which point the key (which embeds the connection ID) can no
+// longer be reproduced. The table holds at most a handful of streams per peer,
+// so matching the value costs nothing.
+func (ps *PeerStreams) RemoveStream(stream network.Stream) {
+	if stream == nil {
+		return
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	removed := false
+	for key, current := range ps.streams {
+		if current == stream {
+			delete(ps.streams, key)
+			removed = true
+		}
+	}
+	if removed {
 		ps.rebuildLocked()
 	}
+}
+
+// HasStreamKey reports whether key currently holds a stream. Used by the
+// per-connection stream repair to stay idempotent.
+func (ps *PeerStreams) HasStreamKey(key string) bool {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	_, ok := ps.streams[key]
+	return ok
 }
 
 // GetAllStreams returns the transport-priority-ordered immutable snapshot.
@@ -166,6 +274,18 @@ func (ps *PeerStreams) GetAllStreams() []network.Stream {
 // 10: Private LAN IP (192.168.x, 10.x, 172.16-31.x, ULA fd00::/8) - LAN direct pass-through
 // 20: Direct Public WAN IP (QUIC / TCP / WebRTC direct)
 // 100: Relayed connection (/p2p-circuit) - slowest, rate-limited
+// streamDirectionRank orders streams within one transport tier: our own
+// outbound stream first (0), a peer-opened inbound stream second (1).
+func streamDirectionRank(s network.Stream) int {
+	if s == nil {
+		return 2
+	}
+	if streamDirection(s) == network.DirInbound {
+		return 1
+	}
+	return 0
+}
+
 func scoreStreamTransport(s network.Stream) int {
 	if s == nil || s.Conn() == nil {
 		return 999
@@ -273,24 +393,26 @@ func (sd *StrategyDispatcher) GetOrCreatePeerStreams(pID peer.ID) *PeerStreams {
 // If a stream is already open, this is a no-op. The stream is read by
 // outgoingStreamHandler (handleStream), which processes inbound frames.
 func (sd *StrategyDispatcher) PrimeStream(pID peer.ID) {
+	// One entry point for "give this peer its data streams". Going through
+	// EnsureStreamsOnAllConns (rather than a bare openStream) means a peer that
+	// is reachable over QUIC AND TCP gets a stream on each path, and the
+	// per-peer ensureMu keeps a concurrent ConnF for the second transport from
+	// opening a duplicate on the same connection (which AddStream would
+	// immediately close).
 	go func() {
-		ctx := context.Background()
-		if sd.node != nil {
-			ctx = sd.node.ctx
+		if opened := sd.EnsureStreamsOnAllConns(pID); opened == 0 {
+			log.Debug("PrimeStream to peer %s left no direct stream (will open lazily on first frame)", pID.ShortString())
 		}
-		ps, s, err := sd.openStream(ctx, pID)
-		if err != nil {
-			log.Debug("PrimeStream to peer %s failed (will open lazily on first frame): %v", pID.ShortString(), err)
-			return
-		}
-		_ = ps // already registered by openStream
-		_ = s  // already handled by outgoingStreamHandler
 	}()
 }
 
-func (sd *StrategyDispatcher) RegisterStream(pID peer.ID, transportName string, s network.Stream) {
+// RegisterStream publishes an inbound stream under its slot key. transportName
+// is accepted for call-site compatibility but no longer identifies the slot:
+// keying by remote multiaddr made an inbound and an outbound stream on the same
+// connection collide and close each other (see streamRegistryKey).
+func (sd *StrategyDispatcher) RegisterStream(pID peer.ID, key string, s network.Stream) {
 	ps := sd.GetOrCreatePeerStreams(pID)
-	ps.AddStream(transportName, s)
+	ps.AddStream(key, s)
 }
 
 func (sd *StrategyDispatcher) UnregisterStream(pID peer.ID, transportName string, s network.Stream) {
@@ -298,7 +420,7 @@ func (sd *StrategyDispatcher) UnregisterStream(pID peer.ID, transportName string
 	ps := sd.peerMap[pID]
 	sd.peersMu.RUnlock()
 	if ps != nil {
-		ps.RemoveStream(transportName, s)
+		ps.RemoveStream(s)
 	}
 }
 
@@ -360,7 +482,7 @@ func (sd *StrategyDispatcher) openStream(parentCtx context.Context, targetPeer p
 
 	transportName := s.Conn().RemoteMultiaddr().String()
 	ps = sd.GetOrCreatePeerStreams(targetPeer)
-	ps.AddStream(transportName, s)
+	ps.AddStream(streamRegistryKey(s), s)
 	log.Debug("Opened new outgoing stream to peer %s via %s", targetPeer.String(), transportName)
 
 	if sd.outgoingStreamHandler != nil {
@@ -368,6 +490,135 @@ func (sd *StrategyDispatcher) openStream(parentCtx context.Context, targetPeer p
 	}
 
 	return ps, s, nil
+}
+
+// openStreamOnConn opens a ProtocolID data stream PINNED to one physical
+// connection.
+//
+// swarm.NewStream always picks the connection it considers best, so no amount of
+// calling it can place a second stream on the second-best path. That is why a
+// peer with both QUIC and TCP up still carried every byte on one of them, and
+// why the multipath strategy only ever had a single path to schedule over.
+//
+// Conn.NewStream returns a bare muxed stream with no protocol negotiation, so we
+// run multistream-select ourselves — exactly what BasicHost.NewStream does right
+// after asking the swarm for a stream. The remote dispatches it to the ordinary
+// ProtocolID handler, so nothing changes on the receiving side.
+func (sd *StrategyDispatcher) openStreamOnConn(ctx context.Context, target peer.ID, c network.Conn) (network.Stream, error) {
+	if c == nil {
+		return nil, fmt.Errorf("open stream to peer %s: nil connection", target.String())
+	}
+	streamCtx := network.WithAllowLimitedConn(ctx, "p2ptap-data")
+	s, err := c.NewStream(streamCtx)
+	if err != nil {
+		return nil, fmt.Errorf("open stream on conn %s: %w", c.ID(), err)
+	}
+	selected, err := msmux.SelectOneOf([]protocol.ID{ProtocolID}, s)
+	if err != nil {
+		_ = s.ResetWithError(network.StreamProtocolNegotiationFailed)
+		return nil, fmt.Errorf("negotiate %s on conn %s: %w", ProtocolID, c.ID(), err)
+	}
+	if err := s.SetProtocol(selected); err != nil {
+		_ = s.Reset()
+		return nil, fmt.Errorf("set protocol on conn %s: %w", c.ID(), err)
+	}
+	if tcpConn, ok := extractUnderlyingTCPConn(s.Conn()); ok {
+		_ = tcpConn.SetNoDelay(true)
+	}
+	return s, nil
+}
+
+// EnsureStreamsOnAllConns opens one data stream on EVERY direct (non-relayed)
+// connection to target, so each physical path carries its own stream.
+//
+// It exists because of two separate problems:
+//
+//  1. No multi-path to schedule. Every other stream is created through
+//     Host.NewStream -> swarm.bestConnToPeer, so a peer with QUIC and TCP up
+//     gets all of its streams on the single connection the swarm likes best.
+//     Multipath then had exactly one path and behaved like best_path.
+//  2. Permanent degradation. When a path's stream is retired (write failure, or
+//     a full writer queue — see writeMultipathLocked), nothing re-opens it:
+//     openStream reuses any surviving stream and only dials when the peer has
+//     NONE left. A peer that lost one of two paths stayed single-path for the
+//     rest of the session, so multipath's benefit decayed to zero after the
+//     first transient failure. Called on connect and, under multipath, on the
+//     health-probe tick, so a lost path returns within one tick.
+//
+// Idempotent (it checks the (direction, conn) slot first) and serialized per
+// peer, because two concurrent opens against the same conn would register two
+// streams on one slot and the second would close the first.
+func (sd *StrategyDispatcher) EnsureStreamsOnAllConns(target peer.ID) (opened int) {
+	if sd.h == nil || target == "" {
+		return 0
+	}
+	conns := sd.h.Network().ConnsToPeer(target)
+	if len(conns) == 0 {
+		// No transport connection at all: nothing to pin a stream to, and
+		// NewStream would just dial. Leave it to the lazy path.
+		return 0
+	}
+	// Skip relayed connections whenever a direct one exists: a circuit stream
+	// scores 100 and would be scheduled as a real "path", quietly shifting
+	// traffic onto the slowest hop.
+	direct := make([]network.Conn, 0, len(conns))
+	for _, c := range conns {
+		if c == nil || c.RemoteMultiaddr() == nil {
+			continue
+		}
+		if maddrutil.IsCircuitRelay(c.RemoteMultiaddr()) {
+			continue
+		}
+		direct = append(direct, c)
+	}
+
+	ps := sd.GetOrCreatePeerStreams(target)
+	ps.ensureMu.Lock()
+	defer ps.ensureMu.Unlock()
+
+	baseCtx := context.Background()
+	if sd.node != nil && sd.node.ctx != nil {
+		baseCtx = sd.node.ctx
+	}
+
+	if len(direct) == 0 {
+		// Relay-only / circuit peer. The lazy path would create exactly one
+		// stream here, so create it now to keep the "first frame never waits on
+		// a NewStream" guarantee that PrimeStream exists for. openStream reuses
+		// any existing stream, so a repeat call is a no-op.
+		if len(ps.GetAllStreams()) > 0 {
+			return 0
+		}
+		openCtx, cancel := context.WithTimeout(baseCtx, 3*time.Second)
+		defer cancel()
+		if _, _, err := sd.openStream(openCtx, target); err != nil {
+			log.Debug("Relay-path prime for peer %s failed (will open lazily): %v", target.ShortString(), err)
+			return 0
+		}
+		return 1
+	}
+
+	for _, c := range direct {
+		key := outboundKeyForConn(c)
+		if key == "" || ps.HasStreamKey(key) {
+			continue
+		}
+		openCtx, cancel := context.WithTimeout(baseCtx, 3*time.Second)
+		s, err := sd.openStreamOnConn(openCtx, target, c)
+		cancel()
+		if err != nil {
+			log.Debug("Per-connection stream to peer %s on conn %s failed: %v", target.ShortString(), c.ID(), err)
+			continue
+		}
+		ps.AddStream(streamRegistryKey(s), s)
+		if sd.outgoingStreamHandler != nil {
+			go sd.outgoingStreamHandler(s)
+		}
+		log.Debug("Per-connection data stream opened to peer %s on conn %s (%s)",
+			target.ShortString(), c.ID(), c.RemoteMultiaddr().String())
+		opened++
+	}
+	return opened
 }
 
 // extractUnderlyingTCPConn unwraps libp2p transport layers to find a *net.TCPConn for NoDelay tuning.

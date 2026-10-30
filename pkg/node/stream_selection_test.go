@@ -89,7 +89,7 @@ func TestStreamSelectionUsesQualityAndBoundsExploration(t *testing.T) {
 		t.Fatal("five percent noise caused transport flap")
 	}
 	// Removing the chosen stream takes effect without waiting for its hold time.
-	ps.RemoveStream("b", fast)
+	ps.RemoveStream(fast)
 	if got := ps.selectStreamIndex(ps.GetAllStreams(), later.Add(4*time.Second+time.Millisecond)); got != 0 || ps.preferredStream != slow {
 		t.Fatal("dead incumbent survived")
 	}

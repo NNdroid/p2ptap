@@ -1103,6 +1103,25 @@ func (n *Node) peerPingPongLoop() {
 			// relay-only peers. Surface that fast instead of via packet captures.
 			n.assertBootRelayUplinkHealth()
 
+			// Under multipath, repair per-connection streams BEFORE probing.
+			// A path whose stream was retired (write failure, or a full writer
+			// queue — see writeMultipathLocked) is never re-opened by the lazy
+			// openStream path: that path reuses any surviving stream and only
+			// dials when the peer has none left. Without this repair a single
+			// transient failure permanently drops the peer to one path and the
+			// strategy silently decays to best_path for the rest of the session.
+			if n.Dispatcher.Mode() == "multipath" {
+				for _, pid := range probePeers {
+					if pid == n.Host.ID() || n.isBootstrapPeer(pid) {
+						continue
+					}
+					if n.Host.Network().Connectedness(pid) == network.NotConnected {
+						continue
+					}
+					go n.Dispatcher.EnsureStreamsOnAllConns(pid)
+				}
+			}
+
 			// Probe all peers concurrently (capped by semaphore)
 			var wg sync.WaitGroup
 			sem := make(chan struct{}, pingPongMaxConcurrent)

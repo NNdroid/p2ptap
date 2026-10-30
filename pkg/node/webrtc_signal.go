@@ -233,7 +233,7 @@ func (n *Node) registerWebRTCSignalConn(pid peer.ID, conn tpt.CapableConn) {
 		transportName = "/webrtc-signal/" + pid.String()
 	}
 	stream := n.wrapWebRTCStream(pid, conn, muxed)
-	n.Dispatcher.RegisterStream(pid, transportName, stream)
+	n.Dispatcher.RegisterStream(pid, streamRegistryKey(stream), stream)
 	go n.handleStream(stream)
 
 	n.setWebRTCSignalStatus(pid, "up")

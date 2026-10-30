@@ -188,7 +188,10 @@ func (n *Node) handleStream(s network.Stream) {
 	transportName := s.Conn().RemoteMultiaddr().String()
 
 	log.Debug("Stream active with peer %s via %s", remotePeer.String(), transportName)
-	n.Dispatcher.RegisterStream(remotePeer, transportName, s)
+	// Key by (direction, connection): the peer opens its own stream toward us on
+	// the SAME connection, and a multiaddr key put both in one slot, so each
+	// registration closed the other direction's stream (see streamRegistryKey).
+	n.Dispatcher.RegisterStream(remotePeer, streamRegistryKey(s), s)
 	defer n.Dispatcher.UnregisterStream(remotePeer, transportName, s)
 
 	buf := make([]byte, obfuscate.MaxSealedFrameSize)

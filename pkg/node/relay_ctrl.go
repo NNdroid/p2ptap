@@ -430,6 +430,17 @@ func (n *Node) dispatchRelayCtrlInner(s network.Stream, origin peer.ID, proto pr
 		// Tunnelled peer-side probe acks (方案 B) so relay-only peers — whose
 		// ack must traverse the relay-ctrl tunnel — still reach the prober.
 		n.handleTapProbeAck(wrapped)
+	case WebRTCSignalProtocolID:
+		// The WebRTC upgrade offerer opens this through openControlStream, i.e.
+		// over the relay-ctrl tunnel whenever the peer is relay-only — which is
+		// exactly the situation the upgrade exists for. Without this case the
+		// final hop fell into default:, warned "no inner handler", and closed the
+		// stream, so a relay-reachable peer could NEVER upgrade to a direct
+		// WebRTC path and stayed on the slow relay leg for the whole session.
+		// handleWebRTCSignal resolves the counterpart through
+		// s.Conn().RemotePeer(), which logicalPeerStream rewrites to the true
+		// origin, so the offer/answer is attributed to the right peer.
+		n.handleWebRTCSignal(wrapped)
 	default:
 		log.Warn("RelayCtrl: no inner handler for proto %s (origin %s); closing", proto, origin)
 	}
