@@ -1644,9 +1644,9 @@ func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer pe
 // The write itself runs on the path's own writer goroutine (stream_writer.go):
 // the lock is released while the frame is in flight, so a slow path delays only
 // its own queue while every other path keeps draining. The receiver's reorder
-// buffer absorbs the cross-path interleaving this produces; multipath is the
-// only strategy that runs with a reorder buffer armed, which is why the
-// synchronous strategies keep the strictly serialized writeFragsOnStream path.
+// buffer absorbs the cross-path interleaving this produces; the synchronous
+// strategies keep the strictly serialized writeFragsOnStream path because they
+// hand a frame to exactly one stream at a time.
 //
 // Failing over inside the loop is the difference between "redundancy" and
 // "redundancy on paper": previously a single broken path aborted the frame,

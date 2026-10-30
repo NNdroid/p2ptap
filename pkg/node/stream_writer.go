@@ -21,8 +21,10 @@ import (
 // picks a path under writeMu, hands the batch to that path's writer, RELEASES
 // writeMu and only then waits for the result. Every other path keeps draining
 // concurrently, and the receiver's reorder buffer absorbs the cross-path
-// interleaving that this concurrency produces (multipath is the only strategy
-// that runs with a reorder buffer armed).
+// interleaving that this concurrency produces (RECEIVER-SIDE detail: the
+// reorder buffer is armed by the local strategy OR by observing out-of-order
+// arrival, so this works even when only THIS node is configured for multipath
+// — see rx_reorder.go).
 //
 // Lock ordering: senders take writeMu and drop it before waiting; writer
 // goroutines never take writeMu. Both take qualityMu briefly to touch

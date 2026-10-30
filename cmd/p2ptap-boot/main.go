@@ -1179,6 +1179,23 @@ type relayRouter struct {
 	acl           *pskACLFilter
 	pskEnabled    bool
 
+	// connecting tracks a local client whose uplink handler is running but whose
+	// stream is not yet registered (clientStreams). The handler sets it the
+	// instant it starts — BEFORE PSK authentication and registerClient — so
+	// route() can tell "a local client is mid-connection" apart from "this peer
+	// is reachable only via the backbone". Without it, a frame for such a client
+	// found no stream and was silently dropped (fromMesh) or wrongly flooded.
+	connectingMu sync.Mutex
+	connecting   map[peer.ID]bool
+
+	// pending holds frames that arrived for a connecting-but-not-yet-registered
+	// local client. They are flushed to the stream the moment registerClient
+	// runs, and dropped after pendingClientTTL if it never does. Only frames for
+	// a peer whose handler is live (connecting) are buffered, so ordinary
+	// backbone/remote traffic is never delayed.
+	pendingMu sync.Mutex
+	pending   map[peer.ID]*pendingClient
+
 	// frameLimiter bounds each client's (and each mesh boot's) boot-relay frame
 	// rate. It is deliberately generous, so a healthy link is never touched.
 	frameLimiter *PeerRateLimiter
@@ -1278,8 +1295,119 @@ func (r *relayRouter) unregisterPeerStream(ps *relayPeerStream) {
 // Every write to it from now on happens on that single writer goroutine, which
 // is what makes both the framing atomic and a slow destination unable to stall
 // any other flow (see the per-destination writer comment above).
+//
+// It then flushes any frames route() buffered while this client's uplink was
+// mid-registration (see bufferPendingClientFrame): a frame that arrived for the
+// client between its stream opening and this registration used to find no
+// stream and be dropped, which looked like "relay connects but the first frames
+// never arrive". Buffering them here closes that race.
 func (r *relayRouter) registerClient(p peer.ID, s network.Stream) {
 	r.registerStream(r.clientStreams, p, s, true)
+	r.mu.RLock()
+	ps := r.clientStreams[p]
+	r.mu.RUnlock()
+	if ps != nil {
+		r.flushPendingClient(p, ps)
+	}
+}
+
+// pendingClientTTL bounds how long a frame for a connecting-but-unregistered
+// client is held before being dropped. It must comfortably exceed the uplink
+// handler's work before registerClient (PSK authentication waits up to 2s), so
+// a client that is merely slow to authenticate still gets its buffered frames;
+// a peer that never registers (rejected, or genuinely not local) frees them.
+// A var so a test can shorten it; production always uses 5s.
+var pendingClientTTL = 5 * time.Second
+
+// pendingClient is the per-peer queue of frames buffered for a local client
+// whose uplink handler is running but whose stream is not yet registered.
+type pendingClient struct {
+	frames [][]byte
+	timer  *time.Timer
+}
+
+// markConnecting records that p's uplink handler has started (set as the first
+// action of makeBootRelayHandler, before authentication). It is cleared when
+// the handler exits, whether it registered the stream or rejected the client.
+func (r *relayRouter) markConnecting(p peer.ID) {
+	r.connectingMu.Lock()
+	if r.connecting == nil {
+		r.connecting = make(map[peer.ID]bool)
+	}
+	r.connecting[p] = true
+	r.connectingMu.Unlock()
+}
+
+func (r *relayRouter) unmarkConnecting(p peer.ID) {
+	r.connectingMu.Lock()
+	delete(r.connecting, p)
+	r.connectingMu.Unlock()
+}
+
+// isConnecting reports whether p's uplink handler is live but registerClient has
+// not necessarily run yet. It is only consulted when clientStreams[p] is empty,
+// so a long-lived registered client never reads it as true for its own traffic.
+func (r *relayRouter) isConnecting(p peer.ID) bool {
+	r.connectingMu.Lock()
+	ok := r.connecting[p]
+	r.connectingMu.Unlock()
+	return ok
+}
+
+// bufferPendingClientFrame queues a frame for a connecting-but-unregistered
+// local client. The frame is copied; the caller keeps ownership. If the client
+// registers within pendingClientTTL it is flushed to its stream, otherwise it
+// is dropped — the pre-fix behaviour, just deferred.
+func (r *relayRouter) bufferPendingClientFrame(p peer.ID, data []byte) {
+	cp := make([]byte, len(data))
+	copy(cp, data)
+
+	r.pendingMu.Lock()
+	if r.pending == nil {
+		r.pending = make(map[peer.ID]*pendingClient)
+	}
+	pc := r.pending[p]
+	if pc == nil {
+		pc = &pendingClient{}
+		pc.timer = time.AfterFunc(pendingClientTTL, func() { r.dropPendingClient(p) })
+		r.pending[p] = pc
+	}
+	pc.frames = append(pc.frames, cp)
+	r.pendingMu.Unlock()
+}
+
+// flushPendingClient delivers every buffered frame for p to its newly
+// registered uplink, then drops the buffer and cancels its TTL timer.
+func (r *relayRouter) flushPendingClient(p peer.ID, ps *relayPeerStream) {
+	r.pendingMu.Lock()
+	pc := r.pending[p]
+	delete(r.pending, p)
+	r.pendingMu.Unlock()
+	if pc == nil {
+		return
+	}
+	if pc.timer != nil {
+		pc.timer.Stop()
+	}
+	for _, f := range pc.frames {
+		switch ps.enqueue(f) {
+		case relayQueueFull:
+			r.noteRelayBackpressure(ps, "pending client")
+		case relayQueueStopped, relayEnqueued:
+		}
+	}
+	pc.frames = nil
+}
+
+// dropPendingClient releases a pending buffer whose client never registered.
+func (r *relayRouter) dropPendingClient(p peer.ID) {
+	r.pendingMu.Lock()
+	pc := r.pending[p]
+	delete(r.pending, p)
+	r.pendingMu.Unlock()
+	if pc != nil {
+		pc.frames = nil
+	}
 }
 
 func (r *relayRouter) unregisterClient(p peer.ID) {
@@ -1432,6 +1560,14 @@ func (r *relayRouter) route(data []byte, fromMesh bool, fromPeer peer.ID) {
 	// local-delivery-only and is never re-flooded: this is what caps every
 	// backbone frame at exactly one hop.
 	if fromMesh {
+		// The destination may still be a local client whose uplink is
+		// mid-registration (its handler started but registerClient has not run):
+		// buffer instead of dropping so the registration race cannot eat the
+		// first frames. A peer that is genuinely reachable only via the backbone
+		// is never marked connecting, so it is dropped here exactly as before.
+		if r.isConnecting(finalDst) {
+			r.bufferPendingClientFrame(finalDst, data)
+		}
 		return
 	}
 	// A self-addressed frame is a client's own uplink heartbeat (finalDst ==
@@ -1442,6 +1578,15 @@ func (r *relayRouter) route(data []byte, fromMesh bool, fromPeer peer.ID) {
 	// destination's downlink reader never saw a byte and its 60s read deadline
 	// (set as 4× the 15s heartbeat) tore the uplink down every minute.
 	if finalDst == srcPeer {
+		return
+	}
+	// The destination may be a local client whose uplink is mid-registration.
+	// Flooding would be wrong (the client is right here, not behind a backbone
+	// boot) and the frame would be dropped at every mesh hop; buffer it instead
+	// so registerClient can deliver it locally. A genuinely remote peer is never
+	// marked connecting and is flooded as before — no added latency.
+	if r.isConnecting(finalDst) {
+		r.bufferPendingClientFrame(finalDst, data)
 		return
 	}
 	// Flood to the backbone (single hop only). The len() read must be under the
@@ -1479,6 +1624,11 @@ func (r *relayRouter) route(data []byte, fromMesh bool, fromPeer peer.ID) {
 func makeBootRelayHandler(rr *relayRouter) func(network.Stream) {
 	return func(s network.Stream) {
 		remotePeer := s.Conn().RemotePeer()
+		// Mark the client as connecting BEFORE any authentication or
+		// registration work, so route() can buffer frames aimed at it during the
+		// registration window instead of dropping them. Cleared on every exit.
+		rr.markConnecting(remotePeer)
+		defer rr.unmarkConnecting(remotePeer)
 		if rr.pskEnabled {
 			if !rr.acl.IsAuthenticated(remotePeer) {
 				rr.acl.waitForAuth(remotePeer, 2*time.Second)

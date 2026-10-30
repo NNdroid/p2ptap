@@ -3,6 +3,7 @@ package node
 import (
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -18,8 +19,7 @@ type rxReorderEntry struct {
 	at   time.Time
 }
 
-// rxReorderQueue is a per-peer bounded reorder buffer for the "multipath"
-// strategy.
+// rxReorderQueue is a per-peer bounded reorder buffer.
 //
 // Multipath distributes logical frames across several paths to a peer. Every
 // frame carries a counter from that peer's OWN outbound sequence (see
@@ -29,6 +29,21 @@ type rxReorderEntry struct {
 // the TUN device never sees a reordered Ethernet stream — the inner TCP/IP stack
 // would otherwise trigger spurious fast-retransmits and undo the throughput
 // multipath is meant to add.
+//
+// Buffering is armed by EITHER of two independent triggers, because
+// transport_strategy is a local setting and only the SENDING side has to be
+// configured for multipath:
+//
+//   - the local strategy is "multipath" (this node also sprays, so reordering
+//     is expected by construction), or
+//   - out-of-order arrival was OBSERVED from this peer (see pushProbe). This is
+//     what makes the receiver work against a multipath sender that is the only
+//     side configured: a peer's strategy is never advertised on the wire, so
+//     the receiver must infer the requirement from the traffic itself.
+//
+// The observation trigger also covers best_path, which picks a path per frame
+// and can therefore reorder two frames onto different streams when a quality
+// measurement flips mid-flow.
 //
 // It only reorders; there is no retransmission, so a frame lost on one path
 // leaves a hole at the head. A hole must never stall the stream indefinitely:
@@ -49,11 +64,24 @@ type rxReorderEntry struct {
 type rxReorderQueue struct {
 	mu   sync.Mutex
 	node *Node
+	peer peer.ID
 
 	epoch     uint64
+	started   bool   // true once a frame has anchored epoch/next
 	next      uint64 // next expected counter
 	window    map[uint64]rxReorderEntry
 	maxWindow int
+
+	// armed latches the observation trigger: once this peer has been seen
+	// delivering frames out of counter order, it keeps being reordered for the
+	// rest of the session (see pushProbe). It survives an epoch change because
+	// the peer's path topology, not the session, is what reorders.
+	armed atomic.Bool
+	// probeEpoch/probeNext are the lock-free arrival-order watermark used while
+	// buffering is NOT armed. probeEpoch is stored biased by one so the zero
+	// value reads as "no frame seen yet" (a real epoch may legitimately be 0).
+	probeEpoch atomic.Uint64
+	probeNext  atomic.Uint64
 	// maxReleaseDelay is the configured upper bound on head-of-line delay.
 	maxReleaseDelay time.Duration
 	// holeWait is the EWMA of how long a buffered frame actually waited before
@@ -137,6 +165,75 @@ func (q *rxReorderQueue) push(seqID uint64, jobs []tapWriteJob) bool {
 	epoch := obfuscate.ConnEpochFromSeq(seqID)
 	counter := obfuscate.CounterFromSeq(seqID)
 
+	// Buffering is armed by the local strategy or by observation. Both checks
+	// are atomic loads and the probe path below takes no lock, so a peer that
+	// arrives in order costs no more than the old pure passthrough.
+	if !q.node.rxReorderEnabled.Load() && !q.armed.Load() {
+		return q.pushProbe(epoch, counter, jobs)
+	}
+	return q.pushBuffered(epoch, counter, jobs)
+}
+
+// pushProbe delivers frames in arrival order while watching for the one signal
+// that means this peer needs the reorder buffer: a counter that arrives after a
+// NEWER one has already been delivered.
+//
+// transport_strategy is a per-node setting and only the SENDING side has to
+// choose multipath — it is the side that sprays frames across the peer's paths.
+// The receiver cannot read the peer's strategy (it is not advertised anywhere
+// on the wire), so it infers the requirement from the interleaving itself.
+// Gating buffering on the receiver's own strategy meant a multipath sender
+// talking to a best_path receiver had its frames injected into TUN in arrival
+// order, i.e. as a reordered IP stream — the inner TCP stack answers that with
+// duplicate ACKs, a spurious fast-retransmit and a halved congestion window on
+// every burst, so the link ran worse than a single path.
+//
+// Cost while nothing reorders: two atomic loads and (on an in-order frame) two
+// atomic stores. No mutex, no map, no allocation.
+func (q *rxReorderQueue) pushProbe(epoch, counter uint64, jobs []tapWriteJob) bool {
+	if q.probeEpoch.Load() == epoch+1 && counter+1 <= q.probeNext.Load() {
+		q.activate(epoch)
+		// The frame that revealed the inversion is already late relative to
+		// what TUN has seen, but it was never delivered — hand it over in
+		// arrival order instead of dropping it. From the NEXT frame on the
+		// buffered path takes over.
+		for i := range jobs {
+			q.node.enqueueTapWritePrepared(jobs[i])
+		}
+		return true
+	}
+	q.probeEpoch.Store(epoch + 1)
+	q.probeNext.Store(counter + 1)
+	for i := range jobs {
+		q.node.enqueueTapWritePrepared(jobs[i])
+	}
+	return true
+}
+
+// activate arms buffering for this peer and adopts the arrival-order watermark
+// as the new anchor. Caller must NOT hold q.mu.
+func (q *rxReorderQueue) activate(epoch uint64) {
+	q.mu.Lock()
+	if q.armed.Load() {
+		q.mu.Unlock()
+		return
+	}
+	next := q.probeNext.Load()
+	q.epoch = epoch
+	q.started = true
+	q.next = next
+	q.armed.Store(true)
+	q.mu.Unlock()
+
+	// Worth a log line: from here on the TAP path buffers and delays frames for
+	// this peer, which is exactly the sort of state change that otherwise only
+	// shows up as "latency went up" in a trace.
+	log.Info("rx reorder buffer armed for peer %s: out-of-order arrival observed (counter arrived behind %d)", q.peer, next)
+}
+
+// pushBuffered is the ordered-delivery path: the active strategy is multipath
+// or this peer has been observed reordering.
+func (q *rxReorderQueue) pushBuffered(epoch, counter uint64, jobs []tapWriteJob) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -150,16 +247,17 @@ func (q *rxReorderQueue) push(seqID uint64, jobs []tapWriteJob) bool {
 	// A new connection epoch marks a fresh session: the peer's counter space
 	// restarts (possibly backward), so any buffered tail belongs to the previous
 	// session and must be flushed before re-anchoring on this frame.
-	if q.epoch != 0 && q.epoch != epoch {
+	if q.started && q.epoch != epoch {
 		q.releaseAllLocked()
 		q.epoch = epoch
 		q.next = counter + 1
 		q.enqueueAllLocked(jobs)
 		return true
 	}
-	if q.epoch == 0 {
+	if !q.started {
 		// First frame ever seen for this peer: anchor and deliver. next advances
 		// past the delivered counter so the following frame arrives in order.
+		q.started = true
 		q.epoch = epoch
 		q.next = counter + 1
 		q.enqueueAllLocked(jobs)
@@ -360,17 +458,13 @@ func (q *rxReorderQueue) stop() {
 }
 
 // reorderTapWrite is the receive-side entry to the TAP write path for a single
-// logical frame. Under the "multipath" strategy it routes the frame through the
-// per-peer reorder buffer so the TUN device sees an in-order Ethernet stream;
-// otherwise it is a zero-overhead passthrough to enqueueTapWrite. seqID is the
-// logical frame's structured SeqID (post-reassembly), already accepted by the
-// dedup layer. pathKey attributes the frame to a path for per-path receive
-// telemetry ("" for direct frames, "relay://<hop>" for relayed frames).
+// logical frame. It routes the frame through the per-peer reorder buffer, which
+// decides for itself whether this peer actually needs reordering (see
+// rxReorderQueue). seqID is the logical frame's structured SeqID
+// (post-reassembly), already accepted by the dedup layer. pathKey attributes
+// the frame to a path for per-path receive telemetry ("" for direct frames,
+// "relay://<hop>" for relayed frames).
 func (n *Node) reorderTapWrite(remotePeer peer.ID, seqID uint64, payload []byte, recordGateway bool, relaySrc peer.ID, pathKey string) {
-	if !n.rxReorderEnabled.Load() {
-		_ = n.enqueueTapWrite(payload, recordGateway, relaySrc)
-		return
-	}
 	job, err := n.prepareTapWriteJob(payload, recordGateway, relaySrc, pathKey)
 	if err != nil {
 		return
@@ -380,16 +474,10 @@ func (n *Node) reorderTapWrite(remotePeer peer.ID, seqID uint64, payload []byte,
 
 // reorderTapWriteBatch is the receive-side entry for a coalesced batch: every
 // sub-frame shares the batch's single seqID, so all jobs are pushed to the
-// reorder buffer as ONE logical frame (or, with reorder disabled, enqueued in
-// order). Jobs are already prepared (owned pooled buffers) by the caller.
+// reorder buffer as ONE logical frame. Jobs are already prepared (owned pooled
+// buffers) by the caller.
 func (n *Node) reorderTapWriteBatch(remotePeer peer.ID, seqID uint64, jobs []tapWriteJob) {
 	if len(jobs) == 0 {
-		return
-	}
-	if !n.rxReorderEnabled.Load() {
-		for i := range jobs {
-			n.enqueueTapWritePrepared(jobs[i])
-		}
 		return
 	}
 	n.rxReorderFor(remotePeer).push(seqID, jobs)
@@ -402,6 +490,7 @@ func (n *Node) rxReorderFor(p peer.ID) *rxReorderQueue {
 	}
 	window, delay := n.reorderSettings()
 	q := newRxReorderQueue(n, window, delay)
+	q.peer = p
 	v, _ := n.rxReorder.LoadOrStore(p, q)
 	return v.(*rxReorderQueue)
 }

@@ -329,6 +329,11 @@ type Node struct {
 	// and diagnostics from concurrently writing to the same native TAP fd.
 	tapWriteMu sync.Mutex
 
+	// tapFragID supplies the IPv6 Fragment header identification when tapWrite
+	// re-fragments an oversized frame to fit the device MTU (see tapWriteOversized).
+	// A monotonic counter keeps the ID unique per source, as RFC 8200 requires.
+	tapFragID atomic.Uint32
+
 	// urgentDispatchCh is the symmetric priority queue for the SEND side:
 	// time-critical P2P frames (e.g. TAP-probe requests) are queued here and
 	// drained ahead of the normal dispatchCh so they reach the overlay first
@@ -574,13 +579,17 @@ type Node struct {
 	peerTxBytes sync.Map // peer.ID → *atomic.Uint64 (total bytes sent TO peer)
 	peerRxBytes sync.Map // peer.ID → *atomic.Uint64 (total bytes received FROM peer)
 
-	// rxReorderEnabled gates the receive-side reorder buffer. It tracks
-	// transport_strategy=="multipath" AND is refreshed on config hot reload, so
-	// switching the strategy takes effect on the next inbound frame instead of
-	// requiring a restart. best_path pays only one atomic load per frame.
+	// rxReorderEnabled forces the receive-side reorder buffer on for every peer.
+	// It tracks transport_strategy=="multipath" AND is refreshed on config hot
+	// reload, so switching the strategy takes effect on the next inbound frame
+	// instead of requiring a restart. It is only a DEFAULT, not a gate: a peer
+	// that is observed delivering frames out of counter order arms its own
+	// queue anyway (see rxReorderQueue.pushProbe), because multipath has to be
+	// configured on the SENDING side only. When it is false and no peer has
+	// reordered yet, the inbound path pays two atomic loads per frame.
 	rxReorderEnabled atomic.Bool
 	// rxReorder is the per-peer reorder buffer (peer.ID → *rxReorderQueue),
-	// created lazily on first inbound frame under multipath.
+	// created lazily on the first inbound frame from a peer.
 	rxReorder sync.Map
 	// rxReorderWindow and rxReorderDelayNs are atomic because hot reload can
 	// change them while rxReorderFor reads them on the inbound path.

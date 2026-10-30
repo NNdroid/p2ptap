@@ -91,6 +91,10 @@ func (n *Node) applyReorderConfig(c *config.Config) {
 	}
 	n.rxReorderWindow.Store(int32(window))
 	n.rxReorderDelayNs.Store(int64(delay) * int64(time.Millisecond))
+	// This is the default for peers that have never reordered. A peer observed
+	// reordering keeps its queue armed regardless (rxReorderQueue.pushProbe):
+	// only the sending side of a multipath session has to be configured, so the
+	// receiver cannot rely on this flag alone.
 	n.rxReorderEnabled.Store(c.TransportStrategy == "multipath")
 	// Hot-reload the per-peer queues too: rxReorderFor's LoadOrStore reuses an
 	// existing queue, so without this the window/delay a queue was created with

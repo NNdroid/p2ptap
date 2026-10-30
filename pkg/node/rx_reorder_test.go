@@ -348,20 +348,70 @@ func TestRxReorderBatchHeldBehindGap(t *testing.T) {
 	}
 }
 
-func TestRxReorderDisabledIsPassthrough(t *testing.T) {
+// TestRxReorderInactivePeerIsPassthrough pins the cost model of the observation
+// trigger: a peer that has never reordered (and a node that is not running
+// multipath) goes straight to TAP in arrival order, with no buffering and no
+// arming.
+func TestRxReorderInactivePeerIsPassthrough(t *testing.T) {
 	h := newReorderHarness(t, 64, 200*time.Millisecond)
 	h.n.rxReorderEnabled.Store(false)
 	p := peer.ID("rx-reorder-bypass")
-	h.expect(2)
+	h.expect(3)
 
-	// With reorder disabled, out-of-order arrival goes straight to TAP in
-	// arrival order (no buffering), matching best_path semantics.
-	h.n.reorderTapWrite(p, h.seqID(1, 20), frame("f20"), false, "", "")
-	h.n.reorderTapWrite(p, h.seqID(1, 19), frame("f19"), false, "", "")
+	for _, c := range []uint64{20, 21, 22} {
+		h.n.reorderTapWrite(p, h.seqID(1, c), frame(fmt.Sprintf("f%d", c)), false, "", "")
+	}
 	h.waitDelivered()
 
 	got := h.gotFrames()
-	if len(got) != 2 || got[0] != string(frame("f20")) || got[1] != string(frame("f19")) {
-		t.Fatalf("passthrough delivery = %v, want [f20 f19] (arrival order)", got)
+	if len(got) != 3 || got[0] != string(frame("f20")) || got[1] != string(frame("f21")) || got[2] != string(frame("f22")) {
+		t.Fatalf("passthrough delivery = %v, want [f20 f21 f22]", got)
+	}
+	if h.n.rxReorderFor(p).armed.Load() {
+		t.Fatal("in-order arrival must not arm the reorder buffer")
+	}
+}
+
+// TestRxReorderArmsOnObservedReordering is the regression test for ONE-SIDED
+// multipath: transport_strategy is a local setting, and only the SENDING side
+// has to be set to multipath — it is the side that sprays frames across the
+// peer's paths. The receiver never sees the peer's strategy, so before this fix
+// it gated its reorder buffer on its OWN strategy and injected a spraying
+// peer's frames into TUN in arrival order, i.e. as a reordered IP stream.
+func TestRxReorderArmsOnObservedReordering(t *testing.T) {
+	h := newReorderHarness(t, 64, 200*time.Millisecond)
+	h.n.rxReorderEnabled.Store(false) // this node runs best_path
+	p := peer.ID("rx-reorder-onesided")
+	h.expect(7)
+
+	n := h.n
+	// Path A carries 10, 12, 14, 16; path B (slower) carries 11, 15. Frames are
+	// pushed in ARRIVAL order, which is what the receiver sees.
+	n.reorderTapWrite(p, h.seqID(1, 10), frame("f10"), false, "", "")
+	n.reorderTapWrite(p, h.seqID(1, 12), frame("f12"), false, "", "")
+	n.reorderTapWrite(p, h.seqID(1, 11), frame("f11"), false, "", "")
+	n.reorderTapWrite(p, h.seqID(1, 13), frame("f13"), false, "", "")
+	n.reorderTapWrite(p, h.seqID(1, 14), frame("f14"), false, "", "")
+	n.reorderTapWrite(p, h.seqID(1, 16), frame("f16"), false, "", "")
+	n.reorderTapWrite(p, h.seqID(1, 15), frame("f15"), false, "", "")
+	h.waitDelivered()
+
+	q := n.rxReorderFor(p)
+	if !q.armed.Load() {
+		t.Fatal("out-of-order arrival did not arm the reorder buffer")
+	}
+
+	// f10 and f12 are delivered as they arrive (the inversion is only visible
+	// once f12 passes f10), f11 lands late, and from f13 on everything is
+	// re-sequenced: the buffered f16 must come out AFTER f15, not before it.
+	got := h.gotFrames()
+	want := []string{"f10", "f12", "f11", "f13", "f14", "f15", "f16"}
+	if len(got) != len(want) {
+		t.Fatalf("delivered %d frames, want %d: %v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != string(frame(w)) {
+			t.Fatalf("delivery[%d] = %q, want %q (got %v)", i, got[i], frame(w), got)
+		}
 	}
 }

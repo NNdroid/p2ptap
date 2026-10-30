@@ -734,7 +734,7 @@
                 strategy_redundant: "Duplicate over existing streams",
                 strategy_fallback: "Failover Fallback",
                 strategy_multipath: "Multi-Path Load Balance",
-                strategy_multipath_hint: "Splits traffic across all live paths (direct + circuit relay) by measured capacity; requires the peer to also run multipath for the receive-side reorder to engage.",
+                strategy_multipath_hint: "Splits traffic across all live paths (direct + circuit relay) by measured capacity. Only this node needs multipath: the peer re-sequences the frames automatically once it observes out-of-order arrival.",
                 strategy_best_path_hint: "Uses the single highest-priority live path (default).",
                 log_level_debug: "Verbose Debug",
                 log_level_info: "Standard Info",

@@ -227,6 +227,12 @@ type tapWriteJob struct {
 	pathKey string
 }
 
+// errTapOversized marks a frame that exceeds the device MTU but is otherwise a
+// valid Ethernet frame carrying one IP packet. tapWrite intercepts this error
+// and re-fragments the packet to the device MTU instead of dropping it, so a
+// peer whose TAP MTU is larger than ours still reaches us (see tapWriteOversized).
+var errTapOversized = errors.New("tap write: frame exceeds device MTU")
+
 func (n *Node) validateTapWrite(payload []byte) error {
 	if len(payload) < ethernetHeaderLen {
 		return fmt.Errorf("tap write: dropping runt frame (len=%d < %d)", len(payload), ethernetHeaderLen)
@@ -240,7 +246,7 @@ func (n *Node) validateTapWrite(payload []byte) error {
 		}
 	}
 	if len(payload) > maxFrameLen {
-		return fmt.Errorf("tap write: dropping oversized frame (len=%d > limit=%d)", len(payload), maxFrameLen)
+		return fmt.Errorf("%w: len=%d > limit=%d", errTapOversized, len(payload), maxFrameLen)
 	}
 	if n.TAP == nil {
 		return errors.New("tap write: no TAP device")
@@ -250,6 +256,12 @@ func (n *Node) validateTapWrite(payload []byte) error {
 
 func (n *Node) tapWrite(payload []byte) (int, error) {
 	if err := n.validateTapWrite(payload); err != nil {
+		// An oversized-but-valid IP frame is re-fragmented to the device MTU
+		// rather than dropped: the sender's TAP MTU may legitimately exceed
+		// ours, and the local IP stack reassembles the fragments transparently.
+		if errors.Is(err, errTapOversized) {
+			return n.tapWriteOversized(payload)
+		}
 		return 0, err
 	}
 
@@ -270,13 +282,70 @@ func (n *Node) tapWrite(payload []byte) (int, error) {
 	return nn, nil
 }
 
+// tapWriteOversized splits an Ethernet frame whose IP packet exceeds the device
+// MTU into MTU-sized fragments and writes each to the TAP device. The caller
+// holds no lock; the whole group is written under tapWriteMu so it cannot
+// interleave with other injections (which would corrupt the fragment sequence).
+//
+// It reports the LOGICAL frame as fully written (len(payload)) so callers see
+// one delivered packet — the fragment overhead is an internal detail. On any
+// fragment write failure it returns an error so callers skip accounting
+// (consistent with a dropped frame), keeping the already-written fragments.
+func (n *Node) tapWriteOversized(payload []byte) (int, error) {
+	if n.TAP == nil {
+		return 0, errors.New("tap write: no TAP device")
+	}
+	if n.Config == nil || n.Config.MTU <= 0 {
+		// No bounded MTU: the only overflow is obfuscate.MaxFrameSize, which is
+		// not reachable for a real TAP frame. Fail closed rather than guess.
+		log.Warn("TAP: cannot re-fragment %d-byte frame without a configured MTU", len(payload))
+		return 0, errTapOversized
+	}
+	mtu := n.Config.MTU
+	frames := packet.Refragment(payload, mtu, n.tapFragID.Add(1))
+	if len(frames) == 0 {
+		// Not re-fragmentable (non-IP, already fragmented, malformed, IPv6 with
+		// extension headers). Drop with a log — the previous behaviour.
+		log.Warn("TAP: dropping %d-byte frame exceeding device MTU %d (not re-fragmentable)",
+			len(payload), mtu)
+		return 0, errTapOversized
+	}
+
+	n.tapWriteMu.Lock()
+	defer n.tapWriteMu.Unlock()
+	for i, f := range frames {
+		nn, err := n.TAP.Write(f)
+		if err != nil {
+			log.Warn("TAP re-fragment inject failed on %s: frag=%d/%d len=%d wrote=%d err=%v",
+				n.TAP.Name(), i+1, len(frames), len(f), nn, err)
+			return 0, err
+		}
+		if nn != len(f) {
+			log.Warn("TAP re-fragment short write on %s: frag=%d/%d len=%d wrote=%d",
+				n.TAP.Name(), i+1, len(frames), len(f), nn)
+			return 0, io.ErrShortWrite
+		}
+	}
+	if log.IsDebug() {
+		log.Debug("TAP: re-fragmented %d-byte frame into %d fragments of <=%d bytes (MTU %d)",
+			len(payload), len(frames), mtu, mtu)
+	}
+	return len(payload), nil
+}
+
 // prepareTapWriteJob validates payload and pools an owned copy of it into a
 // TAP write job. The caller owns job.data and MUST hand it to
 // enqueueTapWritePrepared (which releases it after writing) or release it with
-// releaseFrameBuf(job.data) on a drop path. On validation error (runt,
-// oversized, no device) it returns err and a zero job.
+// releaseFrameBuf(job.data) on a drop path. On validation error (runt, no
+// device) it returns err and a zero job.
+//
+// An oversized frame is deliberately NOT rejected here: it is pooled and
+// handed to tapWrite, which re-fragments it to the device MTU instead of
+// dropping it (a peer's TAP MTU may legitimately exceed ours). Rejecting it
+// here would drop it before tapWrite ever saw it — the silent blackhole this
+// path exists to close.
 func (n *Node) prepareTapWriteJob(payload []byte, recordGateway bool, relaySrc peer.ID, pathKey string) (tapWriteJob, error) {
-	if err := n.validateTapWrite(payload); err != nil {
+	if err := n.validateTapWrite(payload); err != nil && !errors.Is(err, errTapOversized) {
 		return tapWriteJob{}, err
 	}
 	frame := acquireFrameBuf(len(payload))
@@ -300,10 +369,14 @@ func (n *Node) enqueueTapWritePrepared(job tapWriteJob) {
 }
 
 // enqueueTapWrite transfers an owned copy of payload to the dedicated normal
-// TAP writer. The receive-side stream scratch is reused on the next ReadFrame,
-// so copying is mandatory; acquireFrameBuf keeps the common <=2K case off the
-// heap. A full queue falls back to the synchronous boundary, providing
-// backpressure instead of dropping a valid Ethernet frame.
+// TAP writer: prepareTapWriteJob + enqueueTapWritePrepared in one call. The
+// receive path does NOT use it — it prepares the job itself so the reorder
+// buffer can hold it — but it remains the natural entry for any caller that
+// just has a payload and no ordering to maintain. The receive-side stream
+// scratch is reused on the next ReadFrame, so copying is mandatory;
+// acquireFrameBuf keeps the common <=2K case off the heap. A full queue falls
+// back to the synchronous boundary, providing backpressure instead of dropping
+// a valid Ethernet frame.
 func (n *Node) enqueueTapWrite(payload []byte, recordGateway bool, relaySrc peer.ID) error {
 	job, err := n.prepareTapWriteJob(payload, recordGateway, relaySrc, "")
 	if err != nil {

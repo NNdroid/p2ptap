@@ -100,19 +100,7 @@ func TestBootRelayOverBackboneIntegration(t *testing.T) {
 	// Wait for each client's boot-relay uplink to be registered at its boot
 	// (relayRouter.clientStreams), and for nodeB at bootB specifically.
 	waitClientUplink := func(rr *relayRouter, p peer.ID, label string) {
-		deadline := time.Now().Add(20 * time.Second)
-		for {
-			rr.mu.RLock()
-			_, ok := rr.clientStreams[p]
-			rr.mu.RUnlock()
-			if ok {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("%s: client %s uplink never registered at boot", label, p.ShortString())
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
+		waitRelayClientUplink(t, rr, p, label)
 	}
 	waitClientUplink(bootA.rr, nodeA.h.ID(), "bootA<-A")
 	waitClientUplink(bootA.rr, nodeX.h.ID(), "bootA<-X")
@@ -198,6 +186,34 @@ type relayBoot struct {
 	h   host.Host
 	rr  *relayRouter
 	hub *peekMapHub
+}
+
+// waitRelayClientUplink blocks until the boot has REGISTERED a boot-relay uplink
+// for p.
+//
+// Opening the uplink and the boot's handler registering it are not synchronous:
+// finishRelayClient returns as soon as protocol negotiation completes, while the
+// handler reaches rr.registerClient a moment later. A frame sent inside that gap
+// finds no stream in clientStreams, so route() drops it silently and the sender
+// still gets a nil error — the test then waits out its whole receive deadline.
+// That made TestBootRelayTicketFastPath fail roughly one run in three at HEAD,
+// which is both a flaky suite and a misleading signal (it looks like the ticket
+// path is broken). Every test that sends a frame after attaching clients must
+// wait here first; the assertion itself is unchanged, the frame must still
+// arrive end to end.
+func waitRelayClientUplink(t *testing.T, rr *relayRouter, p peer.ID, label string) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		rr.mu.RLock()
+		_, ok := rr.clientStreams[p]
+		rr.mu.RUnlock()
+		if ok {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%s: client %s uplink never registered at boot", label, p.ShortString())
 }
 
 // connectRelayClient spins up a libp2p host, authenticates against boot with the
@@ -365,7 +381,11 @@ func TestBootRelayTicketFastPath(t *testing.T) {
 		t.Fatal("replacement ticket must verify under the network's master key")
 	}
 
-	// End-to-end: clientB's uplink must actually carry frames.
+	// End-to-end: clientB's uplink must actually carry frames. Wait for the boot
+	// to register that uplink first — route() drops frames for a destination it
+	// has no stream for, and the registration lands a few instructions after
+	// clientB's stream opens (see waitRelayClientUplink).
+	waitRelayClientUplink(t, boot.rr, clientB.h.ID(), "boot<-B")
 	if err := clientA.send(clientB.h.ID(), netA, []byte("ticket-fast-path")); err != nil {
 		t.Fatalf("clientA send: %v", err)
 	}

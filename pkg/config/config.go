@@ -255,11 +255,16 @@ type Config struct {
 	WebUI                   WebUIConfig       `json:"web_ui"`
 	Transports              TransportsConfig  `json:"transports"`
 	TransportStrategy       string            `json:"transport_strategy"` // "best_path", "multipath", "redundant", "fallback"
-	// RxReorderWindow bounds the receive-side reorder buffer (in frames) for the
-	// "multipath" strategy. Cross-path reordering is re-assembled in counter
-	// order before the TAP write; a frame stuck at the head longer than
-	// RxReorderDelayMs is force-released so a lost frame cannot stall the stream.
-	// Ignored (zero overhead) unless transport_strategy is "multipath".
+	// RxReorderWindow bounds the receive-side reorder buffer (in frames).
+	// Cross-path reordering is re-assembled in counter order before the TAP
+	// write; a frame stuck at the head longer than RxReorderDelayMs is
+	// force-released so a lost frame cannot stall the stream.
+	//
+	// Buffering is armed by transport_strategy=="multipath" OR by observing
+	// out-of-order arrival from a peer: only the SENDING side of a session has
+	// to be configured for multipath, and the receiver infers the requirement
+	// from the traffic. So these knobs are never "ignored" on a best_path node
+	// that happens to be talking to a spraying peer.
 	RxReorderWindow int `json:"rx_reorder_window"`
 	// RxReorderDelayMs is the head-of-line force-release timeout for the reorder
 	// buffer, in milliseconds. Bounds the extra latency multipath adds.
