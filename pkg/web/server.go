@@ -230,9 +230,13 @@ func generateToken() string {
 	return hex.EncodeToString(b)
 }
 
-// extractToken pulls the bearer token from the Authorization header or the
-// ?token= query parameter (the latter is used by the static dashboard which
-// keeps the token in localStorage).
+// extractToken pulls the bearer token from the Authorization header. A
+// WebSocket upgrade cannot carry an Authorization header (the browser WS API
+// has no header option), so for ws/wss upgrades only the token is additionally
+// accepted from the ?token= query parameter. Ordinary HTTP requests never fall
+// back to the query: a token in the query leaks into browser history, Referer
+// headers and reverse-proxy access logs, and the fetch/XHR path has a safe
+// header alternative.
 func extractToken(r *http.Request) string {
 	if h := r.Header.Get("Authorization"); h != "" {
 		const prefix = "Bearer "
@@ -241,7 +245,10 @@ func extractToken(r *http.Request) string {
 		}
 		return strings.TrimSpace(h)
 	}
-	return r.URL.Query().Get("token")
+	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return r.URL.Query().Get("token")
+	}
+	return ""
 }
 
 // tokenValid reports whether r carries the live bearer token, in constant
@@ -1588,6 +1595,19 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	}
 	if len(listeners) == 0 {
 		return nil, fmt.Errorf("no valid listeners created for WebUI (check listen_ip/listen_ipv6 or port %d usage)", port)
+	}
+
+	// Warn loudly when bound off-loopback: the dashboard, the /api/auth/verify
+	// token oracle and (via WS) the packet feed become reachable from the
+	// network. The default is loopback-only; an explicit non-loopback bind
+	// demands a TLS reverse proxy in front.
+	for _, ip := range []string{listenIP, listenIPv6} {
+		if ip == "" {
+			continue
+		}
+		if p := net.ParseIP(ip); p != nil && !p.IsLoopback() {
+			webLog.Warn("WebUI bound to non-loopback address %s: the dashboard and API are reachable from the network — put a TLS reverse proxy in front and keep the token secret", ip)
+		}
 	}
 
 	s.httpServer = &http.Server{

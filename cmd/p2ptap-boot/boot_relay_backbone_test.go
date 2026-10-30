@@ -215,14 +215,21 @@ func connectRelayClient(t *testing.T, boot host.Host, psk string) *relayClient {
 		t.Fatalf("client connect to boot %s: %v", boot.ID().ShortString(), err)
 	}
 
-	// PSK auth handshake: send the 32-byte hash token, expect a 1-byte 0x01.
+	// PSK auth handshake (challenge-response): read the boot's 32-byte
+	// challenge, reply with HMAC-SHA256(token, challenge), expect a 1-byte
+	// 0x01. The static token never appears on the wire.
 	as, err := h.NewStream(ctx, boot.ID(), authProtocolID)
 	if err != nil {
 		t.Fatalf("auth stream: %v", err)
 	}
 	tok := computePSKHash(psk)
-	if _, err := as.Write(tok[:]); err != nil {
-		t.Fatalf("auth write token: %v", err)
+	challenge := make([]byte, routing.RelayAuthChallengeLen)
+	if _, err := io.ReadFull(as, challenge); err != nil {
+		t.Fatalf("auth read challenge: %v", err)
+	}
+	authResp := routing.RelayAuthResponse(tok, challenge)
+	if _, err := as.Write(authResp[:]); err != nil {
+		t.Fatalf("auth write response: %v", err)
 	}
 	// Write version record so the boot doesn't wait for the read timeout.
 	// Without this, the old code would stall for 30 seconds waiting for a

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -34,11 +33,7 @@ func TestWebServerEndpoints(t *testing.T) {
 	}
 	t.Logf("[web] ✓ auth token issued (len=%d)", len(token))
 	apiURL := func(path string) string {
-		sep := "?"
-		if strings.Contains(path, "?") {
-			sep = "&"
-		}
-		return "http://" + host + path + sep + "token=" + token
+		return "http://" + host + path
 	}
 
 	// Test GET /
@@ -59,7 +54,7 @@ func TestWebServerEndpoints(t *testing.T) {
 	}
 
 	// Test GET /api/stats (must NOT require token)
-	respAPI, err := http.Get(apiURL("/api/stats"))
+	respAPI, err := authedGet(token, apiURL("/api/stats"))
 	if err != nil {
 		t.Fatalf("GET /api/stats failed: %v", err)
 	}
@@ -112,7 +107,7 @@ func TestWebServerEndpoints(t *testing.T) {
 	}
 
 	url1 := apiURL("/api/peer/echo?peer_id=12D3KooWTestPeer&multiaddr=%2Fip4%2F172.16.219.2%2Ftcp%2F4001")
-	respEcho1, err := http.Get(url1)
+	respEcho1, err := authedGet(token, url1)
 	if err != nil {
 		t.Fatalf("GET %s failed: %v", url1, err)
 	}
@@ -145,7 +140,7 @@ func TestWebServerEndpoints(t *testing.T) {
 	}
 	fwdURL := apiURL("/api/tap/forward-test")
 	fwdBody, _ := json.Marshal(map[string]string{"peer_id": "12D3KooWTestPeer"})
-	fwdResp, err := http.Post(fwdURL, "application/json", bytes.NewReader(fwdBody))
+	fwdResp, err := authedPost(token, fwdURL, bytes.NewReader(fwdBody))
 	if err != nil {
 		t.Fatalf("POST %s failed: %v", fwdURL, err)
 	}
@@ -167,7 +162,7 @@ func TestWebServerEndpoints(t *testing.T) {
 
 	// Negative check: missing peer_id must be rejected with 400.
 	badBody, _ := json.Marshal(map[string]string{})
-	badResp, err := http.Post(fwdURL, "application/json", bytes.NewReader(badBody))
+	badResp, err := authedPost(token, fwdURL, bytes.NewReader(badBody))
 	if err != nil {
 		t.Fatalf("POST %s (bad) failed: %v", fwdURL, err)
 	}
@@ -312,8 +307,8 @@ func TestPcapWebSocketStream(t *testing.T) {
 
 	// 5. The HTTP fallback /api/pcap/packets must still work for clients
 	//    that haven't switched to the WebSocket yet.
-	fbURL := "http://" + host + "/api/pcap/packets?limit=10&token=" + token
-	fbResp, err := http.Get(fbURL)
+	fbURL := "http://" + host + "/api/pcap/packets?limit=10"
+	fbResp, err := authedGet(token, fbURL)
 	if err != nil {
 		t.Fatalf("fallback GET failed: %v", err)
 	}
@@ -470,8 +465,8 @@ func TestLogWebSocketStream(t *testing.T) {
 	}
 
 	// 4. HTTP fallback /api/logs still returns the recent ring (empty after clear).
-	fbURL := "http://" + host + "/api/logs?token=" + token
-	fbResp, err := http.Get(fbURL)
+	fbURL := "http://" + host + "/api/logs"
+	fbResp, err := authedGet(token, fbURL)
 	if err != nil {
 		t.Fatalf("fallback GET failed: %v", err)
 	}
@@ -516,4 +511,27 @@ func TestLogPubSubNoBlock(t *testing.T) {
 	} else {
 		t.Logf("[ws-log] ✓ 200 log lines written; subscriber dropped %d (non-blocking)", sub.Dropped.Load())
 	}
+}
+
+// authedGet performs an authenticated GET with the bearer token in the
+// Authorization header, matching the dashboard. The ?token= query is no longer
+// accepted for plain HTTP (it is kept only for WebSocket upgrades, which cannot
+// set a header).
+func authedGet(token, url string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return http.DefaultClient.Do(req)
+}
+
+// authedPost is authedGet for POST bodies.
+func authedPost(token, url string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return http.DefaultClient.Do(req)
 }

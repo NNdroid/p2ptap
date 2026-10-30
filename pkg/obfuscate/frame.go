@@ -550,7 +550,7 @@ func UnpackWith(frame []byte, cipher ObfCipher) (seqID uint64, payload []byte, e
 			log.Debug("UnpackWith: DECRYPT branch seqID=%d obfType=%s algo=%s nonce=%s ctLen=%d",
 				seqID, AlgoName(obfType), AlgoName(cipher.Algo()), NonceHex(frame), len(raw))
 		}
-		opened, oerr := cipher.OpenTo(make([]byte, 0, len(raw)), nonce[:], raw)
+		opened, oerr := cipher.OpenTo(make([]byte, 0, len(raw)), nonce[:], obfAADFromFrame(frame, pLen), raw)
 		if oerr != nil {
 			// AEAD authentication failed under the supplied key. We deliberately
 			// do NOT log the raw stdlib "message authentication failed" string:
@@ -632,6 +632,40 @@ func NonceHex(frame []byte) string {
 	return hex.EncodeToString(n12[:])
 }
 
+// obfAADFromFrame builds the AEAD additional-authenticated-data binding for a
+// frame. It covers the IMMUTABLE header bytes — Magic(2)+SeqID(8)+ObfType(1)+
+// PaddingLen(2), i.e. frame[0:11] and frame[13:HeaderLen], EXCLUDING the
+// PayloadLen field [11:13], which is rewritten between Seal (plaintext length)
+// and Open (ciphertext length) and so cannot be bound — plus the trailing
+// padding. Binding the padding and the immutable header fields makes a
+// man-in-the-middle unable to re-route, re-trim, re-pad or swap the header of a
+// valid ciphertext without breaking AEAD authentication.
+//
+// The SAME helper serves both directions because the two ends compute the
+// padding segment from their own frame: the sender passes the pre-Seal frame
+// with the plaintext payload length (padding = frame[HeaderLen+ptLen:]), the
+// receiver passes the on-wire frame with the ciphertext length (padding =
+// frame[HeaderLen+ctLen:]) — both refer to the identical padding bytes and the
+// identical immutable header, so the derived AAD strings match.
+func obfAADFromFrame(frame []byte, payloadLen int) []byte {
+	if len(frame) < HeaderLen {
+		return nil
+	}
+	padStart := HeaderLen + payloadLen
+	if padStart > len(frame) {
+		padStart = len(frame)
+	}
+	aadLen := 11 + (HeaderLen - 13) + (len(frame) - padStart)
+	if aadLen <= 0 {
+		return nil
+	}
+	aad := make([]byte, 0, aadLen)
+	aad = append(aad, frame[0:11]...)
+	aad = append(aad, frame[13:HeaderLen]...)
+	aad = append(aad, frame[padStart:]...)
+	return aad
+}
+
 // EncryptPayloadRegion encrypts the payload portion of an already-Packed frame
 // using the given cipher, returning a NEW frame slice whose PayloadLen field is
 // updated to the ciphertext length (which includes the AEAD tag). The trailing
@@ -673,7 +707,7 @@ func EncryptPayloadRegionInto(dst, frame []byte, cipher ObfCipher) ([]byte, erro
 		dst = make([]byte, 0, len(frame)+cipher.Overhead())
 	}
 	out := append(dst[:0], frame[:hLen]...)
-	out = cipher.SealTo(out, nonce[:], frame[hLen:hLen+pLen])
+	out = cipher.SealTo(out, nonce[:], obfAADFromFrame(frame, pLen), frame[hLen:hLen+pLen])
 	ctLen := len(out) - hLen
 	if ctLen > math.MaxUint16 {
 		return nil, ErrFrameCorrupted
@@ -741,7 +775,7 @@ func DecryptPayloadRegionInto(dst, frame []byte, cipher ObfCipher) ([]byte, erro
 	}
 	out := append(dst[:0], frame[:hLen]...)
 	var err error
-	out, err = cipher.OpenTo(out, nonce[:], frame[hLen:hLen+pLen])
+	out, err = cipher.OpenTo(out, nonce[:], obfAADFromFrame(frame, pLen), frame[hLen:hLen+pLen])
 	if err != nil {
 		// AEAD authentication failed under the CURRENT rx key. This is EXPECTED
 		// during a key rotation or when a straggler from a prior connection

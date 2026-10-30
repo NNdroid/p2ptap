@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 
+	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 
@@ -123,4 +124,127 @@ func StampRelayCtrlOrigin(psk []byte, origin, target peer.ID, proto protocol.ID)
 // drifted derivation.
 func VerifyRelayCtrlStamp(psk []byte, origin, target peer.ID, proto protocol.ID, stamp string) bool {
 	return checkRelayCtrlStamp(psk, origin, target, proto, stamp)
+}
+
+// relayCtrlOriginSigDomain separates the origin signature from any other
+// signature the identity key may produce (SeqSync, etc.), so a signature minted
+// for one protocol cannot be replayed as another.
+const relayCtrlOriginSigDomain = "p2ptap-relay-ctrl-origin-v1"
+
+// relayCtrlOriginSigInput builds the exact byte string signed over. It binds
+// the claim to (Origin, Target, Proto) — the same fields the stamp covers —
+// and NOT to Hops, which is rewritten per hop. peer.ID and protocol IDs are
+// base58 / ASCII so the 0x00 separators cannot collide with the fields.
+func relayCtrlOriginSigInput(origin, target peer.ID, proto protocol.ID) []byte {
+	buf := make([]byte, 0, 32+len(origin.String())+len(target.String())+len(proto))
+	buf = append(buf, relayCtrlOriginSigDomain...)
+	buf = append(buf, 0)
+	buf = append(buf, origin.String()...)
+	buf = append(buf, 0)
+	buf = append(buf, target.String()...)
+	buf = append(buf, 0)
+	buf = append(buf, proto...)
+	return buf
+}
+
+// signRelayCtrlOriginSig signs an origin claim with this node's identity key.
+// Returns "" when origin is not self (only the true origin may sign its own
+// claim) or when the identity key is unavailable — callers then simply leave
+// the header unsigned, which the PSK-stamp fallback covers in PSK meshes and
+// which is rejected outright in PSK-less meshes.
+func (n *Node) signRelayCtrlOriginSig(origin, target peer.ID, proto protocol.ID) string {
+	if origin != n.Host.ID() {
+		return ""
+	}
+	key := n.Host.Peerstore().PrivKey(origin)
+	if key == nil {
+		return ""
+	}
+	sig, err := key.Sign(relayCtrlOriginSigInput(origin, target, proto))
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(sig)
+}
+
+// verifyRelayCtrlOriginSig validates an origin signature received in a tunnel
+// header against the origin's public key from the peerstore. A missing or
+// malformed signature, or an unknown origin key, fails closed — the caller
+// must not bind per-peer state to an unauthenticated origin.
+func (n *Node) verifyRelayCtrlOriginSig(hdr RelayCtrlHeader) bool {
+	if hdr.OriginSig == "" {
+		return false
+	}
+	pub := n.Host.Peerstore().PubKey(peer.ID(hdr.Origin))
+	if pub == nil {
+		return false
+	}
+	sig, err := hex.DecodeString(hdr.OriginSig)
+	if err != nil {
+		return false
+	}
+	ok, err := pub.Verify(relayCtrlOriginSigInput(peer.ID(hdr.Origin), hdr.Target, protocol.ID(hdr.Proto)), sig)
+	return err == nil && ok
+}
+
+// originClaimTrusted decides whether a tunnel header's Origin claim is
+// authenticated at this hop:
+//
+//   - a self-origin claim (Origin == transport peer) is always trusted — the
+//     libp2p transport already authenticated the dialer;
+//   - a valid origin identity signature is always trusted (the strongest
+//     credential: the origin key is unique and non-shareable);
+//   - otherwise, in a PSK mesh, a valid PSK stamp is accepted as the legacy
+//     pre-signature fallback (old nodes sign nothing but carry a stamp);
+//   - in a PSK-less mesh nothing else can vouch for a foreign origin, so the
+//     claim is rejected — this closes the hole where any relay could forge an
+//     arbitrary Origin against a downstream victim.
+func (n *Node) originClaimTrusted(hdr RelayCtrlHeader, remotePeer peer.ID) bool {
+	if hdr.Origin == remotePeer {
+		return true
+	}
+	if n.verifyRelayCtrlOriginSig(hdr) {
+		return true
+	}
+	if len(pskSaltBytes(n)) > 0 {
+		return n.verifyRelayCtrlStamp(peer.ID(hdr.Origin), hdr.Target, protocol.ID(hdr.Proto), hdr.Stamp)
+	}
+	return false
+}
+
+// RelayCtrlOriginSigInput is the exported domain-separated byte string signed
+// by an origin identity key. Exported for the custom boot node, which verifies
+// origin signatures on backbone-transited tunnels and must agree byte-for-byte
+// with the mesh node's signing input.
+func RelayCtrlOriginSigInput(origin, target peer.ID, proto protocol.ID) []byte {
+	return relayCtrlOriginSigInput(origin, target, proto)
+}
+
+// SignRelayCtrlOriginSig signs an origin claim with an explicit identity key.
+// Exported for the boot node (and any external first relay) so a signature
+// minted by a mesh node's signRelayCtrlOriginSig verifies here.
+func SignRelayCtrlOriginSig(key crypto.PrivKey, origin, target peer.ID, proto protocol.ID) string {
+	if key == nil {
+		return ""
+	}
+	sig, err := key.Sign(relayCtrlOriginSigInput(origin, target, proto))
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(sig)
+}
+
+// VerifyRelayCtrlOriginSig verifies an origin signature against an explicit
+// public key. Exported for the boot node, which holds origin keys in its own
+// peerstore and must verify a tunnel it did not originate before forwarding.
+func VerifyRelayCtrlOriginSig(pub crypto.PubKey, origin, target peer.ID, proto protocol.ID, sigHex string) bool {
+	if pub == nil || sigHex == "" {
+		return false
+	}
+	sig, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return false
+	}
+	ok, err := pub.Verify(relayCtrlOriginSigInput(origin, target, proto), sig)
+	return err == nil && ok
 }

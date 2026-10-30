@@ -44,7 +44,7 @@ func TestTAPInterceptorMetricsUseProbeResultsWithoutFabrication(t *testing.T) {
 	cfg.WebUI.AuthToken = "testtoken12345678901234567890123456789012345678901234567890123456789012"
 	it := NewTAPInterceptor("10.0.0.254", "", 80, collector, cfg, "")
 
-	speedResp := it.processHTTP([]byte("GET /api/speedtest?peer_id=peer-a&token=testtoken12345678901234567890123456789012345678901234567890123456789012 HTTP/1.1\r\nHost: tap\r\n\r\n"))
+	speedResp := it.processHTTP([]byte("GET /api/speedtest?peer_id=peer-a HTTP/1.1\r\nHost: tap\r\nAuthorization: Bearer testtoken12345678901234567890123456789012345678901234567890123456789012\r\n\r\n"))
 	if !bytes.Contains(speedResp, []byte("HTTP/1.1 200 OK")) {
 		t.Fatalf("speedtest status: %q", speedResp)
 	}
@@ -56,7 +56,7 @@ func TestTAPInterceptorMetricsUseProbeResultsWithoutFabrication(t *testing.T) {
 		t.Fatalf("speedtest result was altered/fabricated: %+v", speed)
 	}
 
-	pingResp := it.processHTTP([]byte("GET /api/ping?peer_id=peer-a&token=testtoken12345678901234567890123456789012345678901234567890123456789012 HTTP/1.1\r\nHost: tap\r\n\r\n"))
+	pingResp := it.processHTTP([]byte("GET /api/ping?peer_id=peer-a HTTP/1.1\r\nHost: tap\r\nAuthorization: Bearer testtoken12345678901234567890123456789012345678901234567890123456789012\r\n\r\n"))
 	var ping PingResultDTO
 	if err := json.Unmarshal(tapHTTPBody(t, pingResp), &ping); err != nil {
 		t.Fatal(err)
@@ -68,7 +68,7 @@ func TestTAPInterceptorMetricsUseProbeResultsWithoutFabrication(t *testing.T) {
 		t.Fatalf("unexpected live ping timing: %+v", ping)
 	}
 
-	tapResp := it.processHTTP([]byte("POST /api/tap/forward-test?token=testtoken12345678901234567890123456789012345678901234567890123456789012 HTTP/1.1\r\nContent-Length: 20\r\n\r\n{\"peer_id\":\"peer-a\"}"))
+	tapResp := it.processHTTP([]byte("POST /api/tap/forward-test HTTP/1.1\r\nAuthorization: Bearer testtoken12345678901234567890123456789012345678901234567890123456789012\r\nContent-Length: 20\r\n\r\n{\"peer_id\":\"peer-a\"}"))
 	var tapResult TapProbeResultDTO
 	if err := json.Unmarshal(tapHTTPBody(t, tapResp), &tapResult); err != nil {
 		t.Fatal(err)
@@ -77,7 +77,7 @@ func TestTAPInterceptorMetricsUseProbeResultsWithoutFabrication(t *testing.T) {
 		t.Fatalf("TAP probe result was altered: %+v", tapResult)
 	}
 
-	notFound := it.processHTTP([]byte("GET /api/not-real?token=testtoken12345678901234567890123456789012345678901234567890123456789012 HTTP/1.1\r\nHost: tap\r\n\r\n"))
+	notFound := it.processHTTP([]byte("GET /api/not-real HTTP/1.1\r\nHost: tap\r\nAuthorization: Bearer testtoken12345678901234567890123456789012345678901234567890123456789012\r\n\r\n"))
 	if !bytes.Contains(notFound, []byte("HTTP/1.1 404 Not Found")) || bytes.Contains(notFound, []byte("<!DOCTYPE html>")) {
 		t.Fatalf("unsupported API must be a JSON 404, got %q", notFound)
 	}

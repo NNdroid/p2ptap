@@ -3104,7 +3104,7 @@
                             // Layer-3 tunnel: no loopback. Write OK + readable = PASS,
                             // but clearly labelled that loopback is not applicable.
                             tapSelfStatus = "PASS";
-                            tapSelfDetails = (t('troubleshoot_step8_device') || "Device") + ': <code>' + (tapRes.name || 'n/a') + '</code> (Wintun, L3 tunnel)<br>'
+                            tapSelfDetails = (t('troubleshoot_step8_device') || "Device") + ': <code>' + escapeHTML(tapRes.name || 'n/a') + '</code> (Wintun, L3 tunnel)<br>'
                                 + (t('common_write') || "Write") + ': ' + okTag(true) + ' (' + writeMs + ' ms)<br>'
                                 + (t('common_read') || "Read") + ': ' + (readOK ? okTag(true) : idleTag) + ' (' + (t('troubleshoot_step8_wintun_noloop') || "no loopback — Wintun is an L3 tunnel, expected") + ')<br>'
                                 + '<span style="color:var(--text-muted);">' + (tapRes.detail || '') + '</span>';
@@ -3112,13 +3112,13 @@
                             // Layer-2 TAP device: a true loopback read is REQUIRED for PASS.
                             if (readOK) {
                                 tapSelfStatus = "PASS";
-                                tapSelfDetails = (t('troubleshoot_step8_device') || "Device") + ': <code>' + (tapRes.name || 'n/a') + '</code> (TAP, L2)<br>'
+                                tapSelfDetails = (t('troubleshoot_step8_device') || "Device") + ': <code>' + escapeHTML(tapRes.name || 'n/a') + '</code> (TAP, L2)<br>'
                                     + (t('common_write') || "Write") + ': ' + okTag(true) + ' (' + writeMs + ' ms)<br>'
                                     + (t('common_read') || "Read") + ': ' + okTag(true) + ' (' + (t('troubleshoot_step8_loopback_ok') || "loopback verified") + ')<br>'
                                     + '<span style="color:var(--text-muted);">' + (tapRes.detail || '') + '</span>';
                             } else {
                                 tapSelfStatus = "FAIL";
-                                tapSelfDetails = (t('troubleshoot_step8_device') || "Device") + ': <code>' + (tapRes.name || 'n/a') + '</code> (TAP, L2)<br>'
+                                tapSelfDetails = (t('troubleshoot_step8_device') || "Device") + ': <code>' + escapeHTML(tapRes.name || 'n/a') + '</code> (TAP, L2)<br>'
                                     + (t('common_write') || "Write") + ': ' + okTag(true) + ' (' + writeMs + ' ms)<br>'
                                     + (t('common_read') || "Read") + ': ' + okTag(false) + ' (' + (t('troubleshoot_step8_loopback_fail') || "expected TAP loopback, but no frame read back") + ')<br>'
                                     + '<span style="color:var(--danger);">' + (tapRes.detail || '') + '</span>';
@@ -3167,14 +3167,14 @@
                     }
                 } catch (e) {
                     tapFwdStatus = "FAIL";
-                    tapFwdDetails = (t('troubleshoot_step9_request_fail') || "TAP forwarding test request failed") + ': ' + e.message;
+                    tapFwdDetails = (t('troubleshoot_step9_request_fail') || "TAP forwarding test request failed") + ': ' + escapeHTML(e.message);
                 }
                 resultsHTML += renderCard(t('troubleshoot_step9') || 'End-to-End TAP Data-Path Forwarding Test', tapFwdStatus, tapFwdDetails);
 
                 resContainer.innerHTML = resultsHTML;
 
             } catch (err) {
-                resContainer.innerHTML = `<div style="color: var(--danger);">Fatal Error during diagnosis: ${err.message}</div>`;
+                resContainer.innerHTML = `<div style="color: var(--danger);">Fatal Error during diagnosis: ${escapeHTML(err.message)}</div>`;
             }
         }
 

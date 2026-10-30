@@ -102,7 +102,7 @@ func DefaultBootConfig() *BootConfig {
 		GeoIPPath: "GeoLite2-City.mmdb",
 		WebUI: WebUIConfig{
 			Enable:    true,
-			Listen:    "0.0.0.0:8080",
+			Listen:    "127.0.0.1:8080",
 			AuthToken: "",
 		},
 		// Boot relays usually sit on stable infrastructure, so STUN needs only a

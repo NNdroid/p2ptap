@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -65,6 +66,25 @@ func isHexEncoded(s string) bool {
 // an independent implementation on either side would silently break relay auth.
 func RelayAuthToken(psk string) [32]byte {
 	return pskHash(pskDomainRelayAuth, psk)
+}
+
+// RelayAuthChallengeLen is the challenge length for the PSK relay auth
+// handshake. 32 bytes of crypto/rand is a 256-bit nonce, immune to replay and
+// to offline dictionary attack on the HMAC response.
+const RelayAuthChallengeLen = 32
+
+// RelayAuthResponse derives the response to a fresh relay-auth challenge. The
+// static RelayAuthToken never travels on the wire: only
+// HMAC-SHA256(token, challenge) does, so a sniffed handshake leaks nothing
+// about the token and cannot be replayed against another session. Both ends
+// must call this (the boot with its configured PSK hash, the node with its
+// derived token) so the derivation cannot drift.
+func RelayAuthResponse(token [32]byte, challenge []byte) [32]byte {
+	mac := hmac.New(sha256.New, token[:])
+	mac.Write(challenge)
+	var out [32]byte
+	copy(out[:], mac.Sum(nil))
+	return out
 }
 
 // NetworkIDFromPSK derives the opaque network ID for a PSK: the first 8 bytes

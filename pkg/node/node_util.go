@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -540,6 +541,13 @@ func generateNodeKeyFile(keyPath string) (crypto.PrivKey, error) {
 	}
 	tmp.Close()
 	os.Chmod(tmpName, 0600)
+	// Windows does not enforce POSIX mode bits (os.Stat reports 0666 for every
+	// regular file), so the chmod above is a no-op there. Tighten the ACL
+	// instead so only the current user (plus SYSTEM/Administrators) can read
+	// the key — otherwise every local user could steal the mesh identity.
+	if runtime.GOOS == "windows" {
+		tightenWindowsKeyACL(tmpName)
+	}
 	if err := os.Rename(tmpName, keyPath); err != nil {
 		os.Remove(tmpName)
 		log.Warn("Failed to save key file to %s: %v", keyPath, err)
@@ -548,6 +556,33 @@ func generateNodeKeyFile(keyPath string) (crypto.PrivKey, error) {
 	}
 
 	return priv, nil
+}
+
+// tightenWindowsKeyACL restricts a key file so only the current user, SYSTEM
+// and Administrators can access it. Windows ignores POSIX mode bits, so
+// os.Chmod(0600) leaves the file readable by every local user through the
+// inherited directory ACL; icacls replaces the inherited entries with an
+// explicit allow list. Failures are logged, not fatal: a key left on the
+// inherited ACL is still better than refusing to start.
+func tightenWindowsKeyACL(path string) {
+	user := os.Getenv("USERNAME")
+	if user == "" {
+		user = os.Getenv("USER")
+	}
+	if user == "" {
+		log.Warn("cannot tighten ACL on %s: no current user name available", path)
+		return
+	}
+	args := []string{
+		path,
+		"/inheritance:r",
+		"/grant:r", user + ":F",
+		"/grant:r", "SYSTEM:F",
+		"/grant:r", "Administrators:F",
+	}
+	if out, err := exec.Command("icacls", args...).CombinedOutput(); err != nil {
+		log.Warn("icacls failed to tighten ACL on %s: %v (%s)", path, err, strings.TrimSpace(string(out)))
+	}
 }
 
 func computeKeyFingerprint(keyPath string) string {

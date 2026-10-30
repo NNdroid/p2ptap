@@ -34,7 +34,7 @@ func TestConfigSavePersistsBeforePublishAndKeepsPendingRestart(t *testing.T) {
 	post := func(cfg *config.Config, wantStatus int, restart bool) {
 		t.Helper()
 		body, _ := json.Marshal(cfg)
-		resp, err := http.Post("http://"+host+"/api/config?token="+srv.AuthToken(), "application/json", bytes.NewReader(body))
+		resp, err := authedPost(srv.AuthToken(), "http://"+host+"/api/config", bytes.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -131,7 +131,7 @@ func TestAddStaticPeerPersistsAndRejectsInvalidOrFailedSaves(t *testing.T) {
 	post := func(address string, status int) {
 		t.Helper()
 		body, _ := json.Marshal(map[string]string{"multiaddr": address})
-		resp, err := http.Post("http://"+host+"/api/peer/add_static?token="+srv.AuthToken(), "application/json", bytes.NewReader(body))
+		resp, err := authedPost(srv.AuthToken(), "http://"+host+"/api/peer/add_static", bytes.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -169,7 +169,7 @@ func TestPendingConfigKeepsActiveTokenUntilRestart(t *testing.T) {
 	next := *cfg
 	next.WebUI.AuthToken = "pending-test-token"
 	body, _ := json.Marshal(&next)
-	resp, err := http.Post("http://"+host+"/api/config?token="+srv.AuthToken(), "application/json", bytes.NewReader(body))
+	resp, err := authedPost(srv.AuthToken(), "http://"+host+"/api/config", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestConfigSavePartialRequestCannotDowngradeSecurityFields(t *testing.T) {
 
 	// A partial client: it changes the node name and MTU and says nothing else.
 	body := []byte(`{"node_name":"node-b","mtu":1300}`)
-	resp, err := http.Post("http://"+host+"/api/config?token="+srv.AuthToken(), "application/json", bytes.NewReader(body))
+	resp, err := authedPost(srv.AuthToken(), "http://"+host+"/api/config", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +291,7 @@ func TestConfigSaveExplicitEmptyListStillClears(t *testing.T) {
 	defer srv.Close()
 
 	body := []byte(`{"acl":{"enable":false},"advertised_subnets":[]}`)
-	resp, err := http.Post("http://"+host+"/api/config?token="+srv.AuthToken(), "application/json", bytes.NewReader(body))
+	resp, err := authedPost(srv.AuthToken(), "http://"+host+"/api/config", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestConfigSaveValidationErrorDoesNotRepeatPrefix(t *testing.T) {
 	next := *baseline
 	next.PSK = "s3cret" // below the 16-character minimum
 	body, _ := json.Marshal(&next)
-	resp, err := http.Post("http://"+host+"/api/config?token="+srv.AuthToken(), "application/json", bytes.NewReader(body))
+	resp, err := authedPost(srv.AuthToken(), "http://"+host+"/api/config", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -976,13 +976,15 @@ func newRelayRouter(acl *pskACLFilter, pskEnabled bool) *relayRouter {
 }
 
 // bootRelayFrameRate / bootRelayFrameBurst bound how many boot-relay frames a
-// single client (or mesh boot) may push per second. A gigabit L2 link carries
-// at most ~84k 1500-byte frames per second, so 50k/s never caps a real link;
-// it only bites on pathological tiny-frame floods, which would otherwise burn
-// the boot's CPU and amplify into backbone bandwidth at every mesh peer.
+// single client (or mesh boot) may push per second. 50k/s was never a real cap:
+// it only bit on pathological tiny-frame floods, but each frame still costs the
+// boot a Unpack + route (cross-network / anti-spoof checks) + Pack + write, so a
+// hostile authenticated member could burn the boot's CPU at 50k/s. 5k/s with a
+// 10k burst still allows a saturated gigabit L2 path (multi-frame bursts) while
+// capping a flood at a fraction of the CPU an attacker could otherwise consume.
 const (
-	bootRelayFrameRate  = 50000.0
-	bootRelayFrameBurst = 100000.0
+	bootRelayFrameRate  = 5000.0
+	bootRelayFrameBurst = 10000.0
 )
 
 // bootRelayFrameMaxWait is how long a frame may wait for a token before it is
@@ -1339,11 +1341,12 @@ var relayTunnelsInflight atomic.Int64
 // mesh members, and this handler dials hdr.Target directly rather than choosing
 // a peer boot as the next hop), so no live peer boot sends the old dialect.
 type RelayCtrlHeader struct {
-	Origin peer.ID `json:"o"`
-	Target peer.ID `json:"t"`
-	Proto  string  `json:"p"`
-	Hops   uint8   `json:"h"`
-	Stamp  string  `json:"s,omitempty"`
+	Origin    peer.ID `json:"o"`
+	Target    peer.ID `json:"t"`
+	Proto     string  `json:"p"`
+	Hops      uint8   `json:"h"`
+	Stamp     string  `json:"s,omitempty"`
+	OriginSig string  `json:"os,omitempty"`
 }
 
 // makeRelayCtrlHandler handles /p2ptap/relay-ctrl/1.0.0 control streams on the boot node.
@@ -1398,14 +1401,21 @@ func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter, hub *peekMapHub, entri
 			log.Debug("[relay-ctrl] endorsed tunnel %s -> %s relayed via %s (hops=%d)",
 				hdr.Origin.ShortString(), hdr.Target.ShortString(), remotePeer.ShortString(), hdr.Hops)
 		case hub != nil && hub.isMesh(remotePeer):
-			// A backbone boot relayed a claim it did not itself verify, and no
-			// valid endorsement came with it. Refusing here is what keeps the boot
-			// from being an open relay for origin forgery against the targets it
-			// dials directly; it also makes the boot consistent with the mesh
-			// node's transit gate (pkg/node/relay_ctrl.go).
-			log.Warn("[relay-ctrl] refused: peer %s claims origin %s with no valid endorsement",
-				remotePeer.ShortString(), hdr.Origin.ShortString())
-			return
+			// A backbone boot relayed a claim it did not itself verify, so no
+			// PSK stamp of ours can vouch for it (the tunnel may cross
+			// networks). Accept it only when the origin's identity signature
+			// validates against the origin's public key; otherwise refuse —
+			// this keeps the boot from being an open relay for origin forgery
+			// against the targets it dials directly, and makes the boot
+			// consistent with the mesh node's transit gate.
+			originPub := h.Peerstore().PubKey(hdr.Origin)
+			if originPub == nil || !node.VerifyRelayCtrlOriginSig(originPub, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), hdr.OriginSig) {
+				log.Warn("[relay-ctrl] refused: peer %s claims origin %s with no valid origin signature",
+					remotePeer.ShortString(), hdr.Origin.ShortString())
+				return
+			}
+			log.Debug("[relay-ctrl] transit tunnel %s -> %s relayed via %s (origin-signed, hops=%d)",
+				hdr.Origin.ShortString(), hdr.Target.ShortString(), remotePeer.ShortString(), hdr.Hops)
 		default:
 			log.Warn("[relay-ctrl] spoofing attempt: direct client %s claims origin %s; dropping",
 				remotePeer.ShortString(), hdr.Origin.ShortString())
@@ -1466,11 +1476,12 @@ func makeRelayCtrlHandler(h host.Host, acl *pskACLFilter, hub *peekMapHub, entri
 			}
 		} else {
 			final := RelayCtrlHeader{
-				Origin: hdr.Origin,
-				Target: hdr.Target,
-				Proto:  hdr.Proto,
-				Hops:   hdr.Hops + 1,
-				Stamp:  hdr.Stamp,
+				Origin:    hdr.Origin,
+				Target:    hdr.Target,
+				Proto:     hdr.Proto,
+				Hops:      hdr.Hops + 1,
+				Stamp:     hdr.Stamp,
+				OriginSig: hdr.OriginSig,
 			}
 			fb, _ := json.Marshal(final)
 			if err := writeFrame(sub, fb); err != nil {
@@ -3018,9 +3029,25 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 		return
 	}
 
-	// Read 32-byte auth token from peer
-	var token [32]byte
-	if _, err := io.ReadFull(s, token[:]); err != nil {
+	// Challenge-response auth: send a fresh 32-byte challenge BEFORE reading
+	// anything. The client answers with HMAC-SHA256(token, challenge), so the
+	// static token never appears on the wire and a captured handshake cannot be
+	// replayed against another session. An OLD client (which sends its token
+	// first) will read our challenge as its response and fail the read below —
+	// node and boot must be upgraded together.
+	var challenge [routing.RelayAuthChallengeLen]byte
+	if _, err := rand.Read(challenge[:]); err != nil {
+		log.Warn("[auth] challenge generation failed: %v", err)
+		_, _ = s.Write([]byte{0x00})
+		return
+	}
+	if _, err := s.Write(challenge[:]); err != nil {
+		return
+	}
+
+	// Read 32-byte challenge response from peer
+	var resp [32]byte
+	if _, err := io.ReadFull(s, resp[:]); err != nil {
 		log.Debug("[auth] peer %s sent incomplete auth data: %v", remotePeer.String(), err)
 		if gSecurity != nil {
 			_, delay := gSecurity.Auth.RecordFailure(phyIP, remotePeer)
@@ -3032,11 +3059,12 @@ func handleAuthStream(s network.Stream, entries []pskEntry, acl *pskACLFilter, h
 		return
 	}
 
-	// Verify the token against each configured PSK with a constant-time compare
-	// so a mismatched PSK does not leak, byte-by-byte via timing, how much of the
-	// 32-byte hash matched.
+	// Verify the HMAC response against each configured PSK with a constant-time
+	// compare so a mismatched PSK does not leak, byte-by-byte via timing, how
+	// much of the 32-byte response matched.
 	for _, e := range entries {
-		if subtle.ConstantTimeCompare(token[:], e.hash[:]) == 1 {
+		expect := routing.RelayAuthResponse(e.hash, challenge[:])
+		if subtle.ConstantTimeCompare(resp[:], expect[:]) == 1 {
 			// Success! Clear any failure count for this IP/peer
 			if gSecurity != nil {
 				gSecurity.Auth.RecordSuccess(phyIP, remotePeer)

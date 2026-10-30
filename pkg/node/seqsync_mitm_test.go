@@ -218,7 +218,11 @@ func TestSeqSyncLegacyPeerStillAcceptedWithAuthRequiredOff(t *testing.T) {
 
 	tapA, _ := tap.NewMemTAPPair("tapA", "pipeA")
 	cfgA := createTestNodeConfig("10.0.0.1/24", "fd00::1/64", "best_path")
-	// RequireAuthKeyExchange stays false (the default).
+	// Pin the flag OFF explicitly: this test pins the flag-off path (a legacy
+	// peer is accepted only when the operator has not enabled the requirement).
+	// The production default is now true (M3); this test exercises the escape
+	// hatch, not the default.
+	cfgA.Obfuscation.RequireAuthKeyExchange = false
 	aNode, err := NewNodeWithTAP(cfgA, tapA, nil)
 	if err != nil {
 		t.Fatalf("create node: %v", err)

@@ -365,14 +365,25 @@ func (n *Node) authenticateWithRelay(peerID peer.ID, isRefresh bool) bool {
 	// generous: auth completes in milliseconds on a healthy boot.
 	_ = s.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	// Send 32-byte auth token, then our version/capability record. An OLD boot
-	// simply ignores the trailing record; a NEW boot reads it and replies with
-	// its own record so we can reject envelope/commit mismatches up-front
-	// (the historical 0x8000 "proto field len 32768" silent-corruption bug).
-	if _, err := s.Write(token[:]); err != nil {
-		log.Warn("Relay auth write failed for peer %s: %v", peerID.String(), err)
+	// Challenge-response auth. The boot sends a fresh 32-byte challenge BEFORE
+	// reading anything; we answer with HMAC-SHA256(token, challenge). The
+	// static token never appears on the wire, so a sniffed handshake leaks no
+	// secret and cannot be replayed against another session.
+	var challenge [routing.RelayAuthChallengeLen]byte
+	if _, err := io.ReadFull(s, challenge[:]); err != nil {
+		log.Warn("Relay auth challenge read failed for peer %s: %v", peerID.String(), err)
 		return false
 	}
+	authResp := routing.RelayAuthResponse(token, challenge[:])
+	if _, err := s.Write(authResp[:]); err != nil {
+		log.Warn("Relay auth response write failed for peer %s: %v", peerID.String(), err)
+		return false
+	}
+
+	// Send our version/capability record. An OLD boot simply ignores the
+	// trailing record; a NEW boot reads it and replies with its own record so
+	// we can reject envelope/commit mismatches up-front (the historical 0x8000
+	// "proto field len 32768" silent-corruption bug).
 	if err := version.CurrentRecord().WriteRecord(s); err != nil {
 		if !isRefresh {
 			log.Warn("Relay auth version write failed for peer %s: %v", peerID.String(), err)

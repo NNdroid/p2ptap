@@ -140,8 +140,8 @@ func TestRestartRequiredFieldsWebUI(t *testing.T) {
 		mutate func(*WebUIConfig)
 	}{
 		{"enable", func(w *WebUIConfig) { w.Enable = !w.Enable }},
-		{"listen_ip", func(w *WebUIConfig) { w.ListenIP = "127.0.0.1" }},
-		{"listen_ipv6", func(w *WebUIConfig) { w.ListenIPv6 = "::1" }},
+		{"listen_ip", func(w *WebUIConfig) { w.ListenIP = "0.0.0.0" }},
+		{"listen_ipv6", func(w *WebUIConfig) { w.ListenIPv6 = "::" }},
 		{"port", func(w *WebUIConfig) { w.Port = w.Port + 1 }},
 		{"auth_token", func(w *WebUIConfig) { w.AuthToken = "rotated-token" }},
 	}

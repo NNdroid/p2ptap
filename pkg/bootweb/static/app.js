@@ -68,7 +68,7 @@
 
         async function fetchStats() {
             try {
-                const res = await fetch('/api/stats?token=' + encodeURIComponent(authToken), {
+                const res = await fetch('/api/stats', {
                     headers: getAuthHeaders()
                 });
                 if (res.status === 401) {
@@ -2284,7 +2284,7 @@
         async function fetchLogs() {
             if (isLogPaused) return;
             try {
-                const res = await fetch('/api/logs?token=' + encodeURIComponent(authToken), {
+                const res = await fetch('/api/logs', {
                     headers: getAuthHeaders()
                 });
                 if (res.status === 401) return;

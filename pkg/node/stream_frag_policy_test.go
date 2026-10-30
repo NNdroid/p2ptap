@@ -15,9 +15,9 @@ type sealCountingCipher struct {
 	seals int
 }
 
-func (c *sealCountingCipher) SealTo(dst, nonce, plaintext []byte) []byte {
+func (c *sealCountingCipher) SealTo(dst, nonce, aad, plaintext []byte) []byte {
 	c.seals++
-	return c.ObfCipher.SealTo(dst, nonce, plaintext)
+	return c.ObfCipher.SealTo(dst, nonce, aad, plaintext)
 }
 
 func BenchmarkEncryptStreamFrame(b *testing.B) {

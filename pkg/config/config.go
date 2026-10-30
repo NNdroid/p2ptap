@@ -196,7 +196,7 @@ type ObfuscationConfig struct {
 	// key isolation; disable (default) for smoother interop with re-syncs.
 	StrictKeyNegotiation bool `json:"strict_key_negotiation"`
 
-	// RequireAuthKeyExchange (default false) makes an identity-signed key
+	// RequireAuthKeyExchange (default true) makes an identity-signed key
 	// exchange MANDATORY for every peer, instead of only for peers that
 	// advertise HandshakeVer >= 1 or that have previously signed successfully.
 	//
@@ -414,8 +414,8 @@ func DefaultConfig() *Config {
 		EnableMDNS:       true,
 		WebUI: WebUIConfig{
 			Enable:          true,
-			ListenIP:        "0.0.0.0",
-			ListenIPv6:      "::",
+			ListenIP:        "127.0.0.1",
+			ListenIPv6:      "::1",
 			Port:            80,
 			PcapSampleEvery: 1,
 		},
@@ -487,11 +487,13 @@ func DefaultConfig() *Config {
 			MaxFragSize:  0,
 			Algorithm:   "auto",
 			StrictKeyNegotiation: true,
-			// RequireAuthKeyExchange stays off by default: requiring a signature
-			// from a peer that predates the feature would refuse the handshake
-			// and drop encrypted connectivity across a mixed fleet. See the
-			// field doc for when to enable it.
-			RequireAuthKeyExchange: false,
+			// RequireAuthKeyExchange is ON by default: an identity-signed key
+			// exchange is mandatory, closing the downgrade window where a
+			// transit hop could strip HandshakeVer/ObfPubSig and make a v1 peer
+			// look legacy (an unsigned handshake is never committed). This
+			// refuses peers that predate the signature feature — accepted, we
+			// no longer carry a legacy-accepting path.
+			RequireAuthKeyExchange: true,
 		},
 		ExitNode: ExitNodeConfig{
 			Enable:        false,

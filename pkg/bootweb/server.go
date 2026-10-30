@@ -135,6 +135,16 @@ func (s *Server) Start() error {
 		bindAddr = ":" + strings.TrimPrefix(bindAddr, "0.0.0.0:")
 	}
 
+	// Warn loudly when bound off-loopback: the dashboard and the /api/auth/verify
+	// token oracle become reachable from the network, letting LAN clients probe
+	// the token and observe relay topology. The default is loopback-only; an
+	// explicit non-loopback bind demands a TLS reverse proxy in front.
+	if host, _, err := net.SplitHostPort(bindAddr); err == nil {
+		if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
+			log.Warn("Boot WebUI bound to non-loopback address %s: the dashboard and token oracle are reachable from the network — put a TLS reverse proxy in front and keep the token secret", bindAddr)
+		}
+	}
+
 	ln, err := net.Listen("tcp", bindAddr)
 	if err != nil {
 		return fmt.Errorf("boot webui listen %s failed: %w", s.listenAddr, err)
@@ -253,10 +263,15 @@ func (s *Server) checkAuth(r *http.Request) bool {
 		return true
 	}
 	tokenBytes := []byte(s.authToken)
-	// 1. Query param
-	if token := r.URL.Query().Get("token"); token != "" {
-		if subtle.ConstantTimeCompare([]byte(token), tokenBytes) == 1 {
-			return true
+	// 1. Query param — accepted ONLY for a WebSocket upgrade, which the browser
+	// WS API cannot carry as an Authorization header. Ordinary HTTP requests
+	// must use a header so the token never lands in browser history, Referer or
+	// reverse-proxy access logs.
+	if r.Header.Get("Upgrade") != "" && strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		if token := r.URL.Query().Get("token"); token != "" {
+			if subtle.ConstantTimeCompare([]byte(token), tokenBytes) == 1 {
+				return true
+			}
 		}
 	}
 	// 2. Authorization header: Bearer <token> (scheme is case-insensitive per RFC 6750)
