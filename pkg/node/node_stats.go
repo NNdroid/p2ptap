@@ -363,25 +363,28 @@ func (n *Node) updateWebCollectorState() {
 		if sig.connCount > 0 {
 			// Iterate ALL connections to detect mixed direct+relay scenarios.
 			// A peer could have a direct TCP connection AND a relay fallback simultaneously.
+			var directTransports []string
 			for _, c := range n.Host.Network().ConnsToPeer(pID) {
 				ma := c.RemoteMultiaddr()
 				if maddrutil.IsCircuitRelay(ma) {
 					if addr == "unknown" {
 						addr = ma.String()
 					}
-				} else {
-					addr = ma.String() // prefer direct address for display
-					switch TransportOfConn(c) {
-					case "quic":
-						transport = "QUIC"
-					case "webtransport":
-						transport = "WebTransport"
-					case "webrtc":
-						transport = "WebRTC"
-					case "tcp":
-						transport = "TCP"
-					}
+					continue
 				}
+				addr = ma.String() // prefer direct address for display
+				// Collect EVERY distinct direct transport, not just the last one
+				// seen. ConnsToPeer is ordered oldest->newest, so the old
+				// "last wins" assignment named whichever transport had connected
+				// most recently: with QUIC and TCP both up — the normal case for
+				// a multipath peer — the column showed one of the two while the
+				// scheduler was spreading frames over both, and the label merely
+				// tracked connection age rather than what carries traffic.
+				name := TransportDisplayName(c)
+				directTransports = appendUniqueTransport(directTransports, name)
+			}
+			if len(directTransports) > 0 {
+				transport = strings.Join(directTransports, "+")
 			}
 
 			if hasRelayConn && !hasDirectConn {
@@ -1247,21 +1250,11 @@ func (n *Node) collectProtocolChannelsAndStreams() ([]observer.ProtocolChannelDT
 		remotePeer := conn.RemotePeer()
 		ma := conn.RemoteMultiaddr()
 		remoteAddr := ma.String()
-		transport := "P2P"
-		if maddrutil.IsCircuitRelay(ma) {
-			transport = "Circuit Relay"
-		} else {
-			switch TransportOfConn(conn) {
-			case "quic":
-				transport = "QUIC"
-			case "webtransport":
-				transport = "WebTransport"
-			case "webrtc":
-				transport = "WebRTC"
-			case "tcp":
-				transport = "TCP"
-			}
-		}
+		// Single source for the transport label (TransportDisplayName). This
+		// block used to carry its own switch and had already drifted from the
+		// peer table's: it lacked a webtransport arm until that was fixed, and a
+		// second copy is exactly how the two views diverge again.
+		transport := TransportDisplayName(conn)
 
 		peerName := n.relayHopLabel(remotePeer)
 

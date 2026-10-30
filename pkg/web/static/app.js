@@ -1063,7 +1063,10 @@
         }
 
         function formatSpeed(bytesPerSec) {
-            if (!bytesPerSec || bytesPerSec <= 0) return '⚡ 0 KB/s';
+            // Idle must read "0 B/s", not "0 KB/s": the zero case used a different
+            // unit from every non-zero case, so a link that had just gone quiet
+            // looked like it was reporting a different quantity.
+            if (!bytesPerSec || bytesPerSec <= 0) return '⚡ 0 B/s';
             if (bytesPerSec < 1024) {
                 return '⚡ ' + bytesPerSec.toFixed(1) + ' B/s';
             }
@@ -4014,24 +4017,49 @@
                 const tx = path.tx_bytes || 0;
                 const rx = path.rx_bytes || 0;
                 const bps = path.est_bps || 0;
-                const bpsStr = bps > 0 ? formatBytes(bps) + '/s' : '—';
+                // A path only has a measured capacity once the writer recorded at
+                // least one sample (nanos_per_byte > 0). Without that, the backend
+                // substitutes a topology-nominal value (mpNominalBps) so the column
+                // stays comparable — but presenting that as a measurement invents
+                // a number. Mark it with "~" and explain it in the tooltip.
+                const measuredCap = Number(path.nanos_per_byte) > 0;
+                const bpsStr = bps > 0 ? (measuredCap ? formatBytes(bps) + '/s' : '~' + formatBytes(bps) + '/s') : '—';
+                const bpsTitle = measuredCap ? '' : 'Nominal capacity for this transport tier — no write sample yet';
                 const svc = path.service_ms ? (path.service_ms.toFixed(1) + ' ms') : '—';
-                const usable = path.usable ? '<span style="color:var(--success)">●</span>' : '<span style="color:var(--text-muted)">○</span>';
+                // Three states, not two: "usable" only says the write samples are
+                // fresh, and it is false for a path that no longer exists at all.
+                // Without the active check a replaced path kept rendering as a
+                // live (green, "Direct") row for the rest of the session, because
+                // the backend keeps its cumulative counters after the stream is
+                // gone (see buildPathMetrics).
+                const isLive = path.active === true;
+                const usable = !isLive
+                    ? '<span style="color:var(--text-muted)" title="No live stream on this path — counters are historical">○</span>'
+                    : (path.usable
+                        ? '<span style="color:var(--success)" title="Live and trusted for scheduling">●</span>'
+                        : '<span style="color:var(--warn)" title="Live but not trusted yet (no fresh write samples)">◐</span>');
                 const updated = path.updated ? escapeHTML(path.updated.replace('T', ' ').replace('Z', '')) : '—';
-                return `<tr>
-                    <td><span class="pill-badge" style="padding:1px 6px;font-size:0.68rem;color:${kindColor};border-color:${kindColor};" title="${escapeHTML(path.transport || '')}">${kindLabel}</span></td>
+                const rowStyle = isLive ? '' : 'opacity:0.55;';
+                return `<tr style="${rowStyle}">
+                    <td><span class="pill-badge" style="padding:1px 6px;font-size:0.68rem;color:${kindColor};border-color:${kindColor};">${kindLabel}</span></td>
                     <td title="${escapeHTML(path.path_id || '')}"><code style="font-size:0.68rem;">${escapeHTML(shortMultiaddr(path.path_id))}</code></td>
-                    <td>${escapeHTML(path.priority || '')}</td>
+                    <td title="${escapeHTML(path.priority || '')}">${escapeHTML(path.transport || '—')}</td>
                     <td>${usable}</td>
                     <td>${escapeHTML(formatBytes(tx))}</td>
                     <td>${escapeHTML(formatBytes(rx))}</td>
-                    <td>${escapeHTML(bpsStr)}</td>
+                    <td title="${escapeHTML(bpsTitle)}">${escapeHTML(bpsStr)}</td>
                     <td>${escapeHTML(svc)}</td>
                     <td title="${escapeHTML(path.updated || '')}" style="font-size:0.68rem;color:var(--text-muted);">${updated}</td>
                 </tr>`;
             }).join('');
+            // Count only live paths as the headline number: the table also lists
+            // paths whose stream is gone but whose counters are still interesting,
+            // and reporting "3" for one live path plus two historical ones is the
+            // kind of number an operator reads as "multipath has three paths".
+            const livePaths = paths.filter(p => p && p.active === true).length;
+            const pathCount = livePaths === paths.length ? `${paths.length}` : `${livePaths}/${paths.length}`;
             return `<div style="margin-top:10px;">
-                <div style="font-size:0.75rem;font-weight:600;color:var(--text-dim);margin-bottom:4px;">${escapeHTML(t('path_metrics_title') || 'Per-Path Link Metrics')} (${paths.length})</div>
+                <div style="font-size:0.75rem;font-weight:600;color:var(--text-dim);margin-bottom:4px;">${escapeHTML(t('path_metrics_title') || 'Per-Path Link Metrics')} (${pathCount})</div>
                 <table class="mini-table" style="width:100%;border-collapse:collapse;font-size:0.72rem;">
                     <thead><tr style="color:var(--text-muted);text-align:left;">
                         <th style="padding:2px 4px;">${escapeHTML(t('path_metrics_kind') || 'Kind')}</th>

@@ -84,6 +84,58 @@ func TransportOfConn(c network.Conn) string {
 	return ""
 }
 
+// TransportDisplayName renders TransportOfConn for display: the capitalised
+// transport name the WebUI shows in the peer and per-path tables.
+//
+// It is the single source for that label. Three call sites used to carry their
+// own switch and had already drifted: collectProtocolChannelsAndStreams had no
+// webtransport arm, and the per-path table filled its "Transport" field with
+// pathDTOFor's direct/circuit classification instead of the transport, so the
+// multipath view could not distinguish a QUIC path from a TCP one — exactly the
+// distinction that view exists for.
+func TransportDisplayName(c network.Conn) string {
+	if name := transportDisplayName(TransportOfConn(c)); name != "" {
+		return name
+	}
+	return "P2P"
+}
+
+// TransportDisplayNameOfMultiaddr is TransportDisplayName for an address with no
+// live connection behind it — a path whose stream was replaced but whose
+// cumulative counters are still shown. Returns "" when the address names no
+// recognisable transport, letting the caller keep its own fallback label.
+func TransportDisplayNameOfMultiaddr(ma multiaddr.Multiaddr) string {
+	return transportDisplayName(TransportOf(ma))
+}
+
+func transportDisplayName(t string) string {
+	switch t {
+	case "quic":
+		return "QUIC"
+	case "webtransport":
+		return "WebTransport"
+	case "webrtc":
+		return "WebRTC"
+	case "tcp":
+		return "TCP"
+	case "circuit":
+		return "Circuit Relay"
+	}
+	return ""
+}
+
+// appendUniqueTransport adds name to list unless it is already there, keeping
+// discovery order (ConnsToPeer is ordered oldest connection first, so a stable
+// label order means the column does not reshuffle between polls).
+func appendUniqueTransport(list []string, name string) []string {
+	for _, t := range list {
+		if t == name {
+			return list
+		}
+	}
+	return append(list, name)
+}
+
 // StripP2P removes the trailing /p2p/<peerID> component (if present).
 // Iterates backwards so multi-hop circuit paths keep their intermediate hops.
 func StripP2P(ma multiaddr.Multiaddr) multiaddr.Multiaddr {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/multiformats/go-multiaddr"
 
 	"p2ptap/pkg/maddrutil"
 	"p2ptap/pkg/observer"
@@ -229,14 +230,27 @@ func (n *Node) buildPathMetrics(pID peer.ID) []observer.PathMetricDTO {
 	for _, path := range paths {
 		var s network.Stream
 		var q streamWriteQuality
+		// A connection carries one inbound and one outbound data stream, and both
+		// report the SAME RemoteMultiaddr (it identifies the connection). Only the
+		// outbound one is written by us, so only it accumulates write samples.
+		// Taking the first match blindly meant a path could be shown with the
+		// nominal capacity estimate and "not usable" while the sibling stream held
+		// a real measurement — so prefer whichever stream actually has samples.
+		var fallback network.Stream
 		for _, cur := range streams {
-			if cur != nil && cur.Conn() != nil && cur.Conn().RemoteMultiaddr().String() == path {
-				s = cur
+			if cur == nil || cur.Conn() == nil || cur.Conn().RemoteMultiaddr().String() != path {
+				continue
+			}
+			if fallback == nil {
+				fallback = cur
+			}
+			if cand := wq[cur]; cand.samples > 0 {
+				s, q = cur, cand
 				break
 			}
 		}
-		if s != nil && wq != nil {
-			q = wq[s]
+		if s == nil {
+			s = fallback
 		}
 		out = append(out, n.pathDTOFor(pID, path, s, q, now))
 	}
@@ -250,7 +264,7 @@ func (n *Node) pathDTOFor(pID peer.ID, path string, s network.Stream, q streamWr
 		Active: s != nil,
 	}
 	if s != nil && s.Conn() != nil {
-		dto.Transport = transportLabelForConn(s.Conn())
+		dto.Transport = TransportDisplayName(s.Conn())
 		dto.RelayKind = "direct"
 		if maddrutil.IsCircuitRelay(s.Conn().RemoteMultiaddr()) {
 			dto.RelayKind = "circuit-relay"
@@ -283,6 +297,20 @@ func (n *Node) pathDTOFor(pID peer.ID, path string, s network.Stream, q streamWr
 			dto.Transport, dto.RelayKind = "Overlay Relay", "overlay-relay"
 		default:
 			dto.Transport, dto.RelayKind = "Unknown", "direct"
+			// A path with no live stream can still be a plain direct link whose
+			// stream was replaced (e.g. the QUIC path after a switch to TCP).
+			// Name the transport from the address so the row stays identifiable
+			// instead of collapsing to "Unknown" for both ends of a multipath
+			// peer. Circuit addresses must be classified FIRST: they also carry
+			// a /tcp or /quic-v1 component, and TransportOf would name the
+			// relay's own listener transport instead of the hop.
+			if ma, err := multiaddr.NewMultiaddr(path); err == nil {
+				if maddrutil.IsCircuitRelay(ma) {
+					dto.Transport, dto.RelayKind = "Circuit Relay", "circuit-relay"
+				} else if name := TransportDisplayNameOfMultiaddr(ma); name != "" {
+					dto.Transport = name
+				}
+			}
 		}
 		dto.Score = 999
 		dto.Priority = transportPriorityLabel(999)
