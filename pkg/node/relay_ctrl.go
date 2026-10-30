@@ -382,11 +382,18 @@ func (n *Node) openRelayCtrlNextHop(hdr RelayCtrlHeader, fromPeer peer.ID) (netw
 
 	// Boot circuit relay fall-back: dial Target through the circuit on the
 	// relay-ctrl protocol; the far end dispatches it as a final hop.
+	//
+	// OriginSig travels with the header exactly like Stamp does: on this leg
+	// Origin != the transport peer (we dialed Target directly through the
+	// circuit), so the far end can only trust a foreign origin claim via the
+	// signature. Dropping it here made every relayed-through-a-circuit control
+	// tunnel fail the anti-spoof gate at the final hop — SeqSync/LSA/Meta could
+	// not converge for peers reachable only that way.
 	sub, err := n.openStreamViaRelay(hdr.Target, RelayCtrlProtocolID)
 	if err != nil {
 		return nil, err
 	}
-	final := RelayCtrlHeader{Origin: hdr.Origin, Target: hdr.Target, Proto: hdr.Proto, Hops: nextHops, Stamp: hdr.Stamp}
+	final := RelayCtrlHeader{Origin: hdr.Origin, Target: hdr.Target, Proto: hdr.Proto, Hops: nextHops, Stamp: hdr.Stamp, OriginSig: hdr.OriginSig}
 	fb, err := json.Marshal(final)
 	if err != nil {
 		sub.Close()

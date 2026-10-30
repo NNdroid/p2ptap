@@ -125,6 +125,15 @@ type RelayStatsDTO struct {
 	ReservationTTLSec  int  `json:"reservation_ttl_sec"`
 	DurationLimitSec   int  `json:"duration_limit_sec"`
 	DataLimitMB        int  `json:"data_limit_mb"`
+
+	// Data-plane liveness counters (cumulative since boot start). FramesFromClients
+	// advances on every frame a local client uplink pushes (including periodic
+	// self-heartbeats), so it is the authoritative "is the relay bridging data"
+	// signal; the session tracker ages out after 10 minutes and cannot show that.
+	FramesFromClients uint64 `json:"frames_from_clients"`
+	BytesFromClients  uint64 `json:"bytes_from_clients"`
+	FramesToClients   uint64 `json:"frames_to_clients"`
+	BytesToClients    uint64 `json:"bytes_to_clients"`
 }
 
 // PeekMapStatsDTO holds pub/sub topology channel status.
