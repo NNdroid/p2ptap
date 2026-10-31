@@ -62,11 +62,19 @@ func resolveDaemonBaseURL(cfg *config.Config, configPath string) string {
 		fallbackPort = cfg.WebUI.Port
 	}
 	fallbackIP := "127.0.0.1"
-	if cfg != nil && cfg.WebUI.ListenIP != "" && cfg.WebUI.ListenIP != "0.0.0.0" {
+	v6Bind := ""
+	if cfg != nil && cfg.WebUI.ListenIPv6 != "" && cfg.WebUI.ListenIPv6 != "::" {
+		v6Bind = strings.Trim(cfg.WebUI.ListenIPv6, "[]")
+	}
+	// Same precedence as resolveWebuiURL: a configured v4 address wins, then a
+	// specific v6 one. A v6 bind is only used as the fallback host when nothing
+	// is listening on v4 at all — ::1 is no better a target than 127.0.0.1.
+	switch {
+	case cfg != nil && cfg.WebUI.ListenIP != "" && cfg.WebUI.ListenIP != "0.0.0.0":
 		fallbackIP = cfg.WebUI.ListenIP
-	} else if cfg != nil && cfg.WebUI.ListenIPv6 != "" && cfg.WebUI.ListenIPv6 != "::" {
-		fallbackIP = "[" + strings.Trim(cfg.WebUI.ListenIPv6, "[]") + "]"
-	} else if cfg != nil && cfg.WebUI.ListenIPv6 == "::" && (cfg.WebUI.ListenIP == "" || cfg.WebUI.ListenIP == "0.0.0.0") {
+	case v6Bind != "" && !isLoopbackHost(v6Bind):
+		fallbackIP = "[" + v6Bind + "]"
+	case cfg != nil && cfg.WebUI.ListenIP == "":
 		fallbackIP = "[::1]"
 	}
 	fallback := fmt.Sprintf("http://%s:%d", fallbackIP, fallbackPort)
@@ -75,9 +83,11 @@ func resolveDaemonBaseURL(cfg *config.Config, configPath string) string {
 		sidecarPath := filepath.Join(filepath.Dir(configPath), ".p2ptap_webui_url")
 		if data, err := os.ReadFile(sidecarPath); err == nil {
 			var configuredV4, configuredV6, loopbackV4, loopbackV6, first string
-			cleanV6 := ""
-			if cfg != nil && cfg.WebUI.ListenIPv6 != "" && cfg.WebUI.ListenIPv6 != "::" {
-				cleanV6 = strings.Trim(cfg.WebUI.ListenIPv6, "[]")
+			// A ::1 bind must not shadow the v4 loopback the sidecar advertises:
+			// both name this same machine, and v4 is what browsers prefer.
+			cleanV6 := v6Bind
+			if isLoopbackHost(cleanV6) {
+				cleanV6 = ""
 			}
 			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 				line = strings.TrimSpace(line)

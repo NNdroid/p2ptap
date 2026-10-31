@@ -6,6 +6,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -1264,9 +1265,19 @@ func resolveWebuiURL() string {
 
 	targetHostV6 := ""
 	cleanV6 := ""
+	// v6LoopbackBind records a bind to ::1 alone. That address is reachable, but
+	// it names no host better than the 127.0.0.1 fallback, and counting it as a
+	// configured address let a synthesised http://[::1]:port outrank the v4
+	// loopback URL the daemon actually advertised in the sidecar.
+	v6LoopbackBind := false
 	if cfg != nil && cfg.WebUI.ListenIPv6 != "" && cfg.WebUI.ListenIPv6 != "::" {
 		cleanV6 = strings.Trim(cfg.WebUI.ListenIPv6, "[]")
-		targetHostV6 = "[" + cleanV6 + "]"
+		if isLoopbackHost(cleanV6) {
+			v6LoopbackBind = true
+			cleanV6 = ""
+		} else {
+			targetHostV6 = "[" + cleanV6 + "]"
+		}
 	}
 
 	targetPort := 5857
@@ -1335,6 +1346,9 @@ func resolveWebuiURL() string {
 			host = targetHostV4
 		} else if targetHostV6 != "" {
 			host = targetHostV6
+		} else if v6LoopbackBind && cfg != nil && cfg.WebUI.ListenIP == "" {
+			// Nothing is bound on v4, so 127.0.0.1 would be a dead end.
+			host = "[::1]"
 		} else if cfg != nil && cfg.WebUI.ListenIPv6 == "::" && (cfg.WebUI.ListenIP == "" || cfg.WebUI.ListenIP == "0.0.0.0") {
 			host = "[::1]"
 		}
@@ -1364,6 +1378,17 @@ func resolveWebuiURL() string {
 // webuiURLSidecar mirrors the server-side sidecar filename; the server writes
 // the actual bound WebUI URLs here (one per line) on every (re)bind.
 const webuiURLSidecar = ".p2ptap_webui_url"
+
+// isLoopbackHost reports whether host names the loopback interface, tolerating
+// IPv6 brackets and a zone suffix (e.g. "[::1]", "::1%lo0", "127.0.0.1").
+func isLoopbackHost(host string) bool {
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
 
 func formatSpeed(bytesPerSec uint64) string {
 	b := float64(bytesPerSec)

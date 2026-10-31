@@ -195,3 +195,45 @@ func TestResolveWebuiURL_DualStackWildcard(t *testing.T) {
 		t.Errorf("resolveWebuiURL() = %q, want %q", u, expected)
 	}
 }
+
+// No sidecar: the tray has to derive the target from config alone. A ::1 bind
+// must not outrank the v4 loopback while v4 is still listening.
+func TestResolveWebuiURL_NoSidecarPrefersLoopbackV4(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.WebUI.Enable = true
+	cfg.WebUI.ListenIP = "0.0.0.0"
+	cfg.WebUI.ListenIPv6 = "::1"
+	cfg.WebUI.Port = 5857
+	cfg.WebUI.AuthToken = "secret"
+
+	globalConfig = cfg
+	globalConfigPath = filepath.Join(tmpDir, "config.json")
+
+	u := resolveWebuiURL()
+	expected := "http://127.0.0.1:5857/?token=secret"
+	if u != expected {
+		t.Errorf("resolveWebuiURL() = %q, want %q", u, expected)
+	}
+}
+
+// No sidecar and no v4 bind at all: 127.0.0.1 is a dead end, so the ::1 bind
+// has to be used.
+func TestResolveWebuiURL_NoSidecarV6LoopbackOnly(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.WebUI.Enable = true
+	cfg.WebUI.ListenIP = ""
+	cfg.WebUI.ListenIPv6 = "::1"
+	cfg.WebUI.Port = 5857
+	cfg.WebUI.AuthToken = "secret"
+
+	globalConfig = cfg
+	globalConfigPath = filepath.Join(tmpDir, "config.json")
+
+	u := resolveWebuiURL()
+	expected := "http://[::1]:5857/?token=secret"
+	if u != expected {
+		t.Errorf("resolveWebuiURL() = %q, want %q", u, expected)
+	}
+}
