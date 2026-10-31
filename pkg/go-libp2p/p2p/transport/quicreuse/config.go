@@ -30,8 +30,20 @@ var quicConfig = &quic.Config{
 	MaxStreamReceiveWindow:         32 * (1 << 20), // 32 MB (upstream libp2p: 10 MB)
 	InitialConnectionReceiveWindow: 4 * (1 << 20),  // 4 MB
 	MaxConnectionReceiveWindow:     64 * (1 << 20), // 64 MB (upstream libp2p: 15 MB)
-	KeepAlivePeriod:                15 * time.Second,
-	Versions:                       []quic.Version{quic.Version1},
+	// KeepAlivePeriod + MaxIdleTimeout together bound how long a path may be
+	// silently dead before the transport itself notices. Under "multipath" a
+	// path whose QUIC write still "succeeds" (the peer stops ACKing but the
+	// connection has not timed out) otherwise stalls its frames for up to the
+	// 30s upstream idle timeout — the scheduler thinks it delivered and never
+	// fails over. With a 5s keepalive below a 10s idle timeout, QUIC sends a
+	// PING every 5s on an idle connection, and a peer that does not answer is
+	// disconnected in ~10s: the stream write then fails and the existing
+	// writeMultipathLocked failover + per-path breaker + EnsureStreamsOnAllConns
+	// repair take over. A healthy idle peer ACKs the keepalive, so it is never
+	// dropped — the 10s window only closes genuinely dead links.
+	KeepAlivePeriod: 5 * time.Second,
+	MaxIdleTimeout:  10 * time.Second,
+	Versions:        []quic.Version{quic.Version1},
 	// We don't use datagrams (yet), but this is necessary for WebTransport
 	EnableDatagrams: true,
 	// Required for WebTransport

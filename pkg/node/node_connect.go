@@ -326,6 +326,78 @@ func (n *Node) maybeWebRTCSignalUpgrade(pid peer.ID) {
 	go n.webrtcSignalUpgrade(pid)
 }
 
+// Multipath path-repair cadences: a failed fill dial retries soon, a healthy
+// peer (or one with no missing path) is re-checked far less often.
+const (
+	mpRepairRetryInterval   = 30 * time.Second
+	mpRepairHealthyInterval = 2 * time.Minute
+)
+
+// repairMultipathPaths re-dials the direct multiaddrs of a peer that still has a
+// direct connection but lost one of its paths. This is the only recovery for a
+// path whose connection was closed — a QUIC idle timeout after a silent death,
+// or a write failure that retired the stream. EnsureStreamsOnAllConns walks only
+// EXISTING connections, so a closed connection is never re-opened by it, and the
+// relay-only upgrade loop only targets peers with NO direct link. Without this a
+// multipath session silently decays to fewer paths for the rest of the
+// connection. It is a no-op (early return) when every known direct addr already
+// has a connection, so a healthy peer costs one map lookup plus a conn count.
+//
+// Gated per peer: a failed dial re-arms in mpRepairRetryInterval, a healthy or
+// fully-repaired peer in mpRepairHealthyInterval, so a persistently unreachable
+// stale address cannot become a dial storm on the 10s health tick.
+func (n *Node) repairMultipathPaths(pid peer.ID) {
+	if pid == "" || pid == n.Host.ID() {
+		return
+	}
+	n.mpRepairMu.Lock()
+	if n.mpRepairNext != nil && time.Now().Before(n.mpRepairNext[pid]) {
+		n.mpRepairMu.Unlock()
+		return
+	}
+	n.mpRepairMu.Unlock()
+
+	direct := directCandidates(filterUndialableAddrs(n.Host.Peerstore().Addrs(pid)))
+	if len(direct) == 0 {
+		return
+	}
+	// Count existing non-relay connections. Counting connections against distinct
+	// addresses is a conservative under-count of missing paths (multiple conns to
+	// one addr are not expected), which is exactly the safe direction.
+	directConns := 0
+	for _, c := range n.Host.Network().ConnsToPeer(pid) {
+		if c == nil || c.RemoteMultiaddr() == nil || maddrutil.IsCircuitRelay(c.RemoteMultiaddr()) {
+			continue
+		}
+		directConns++
+	}
+	if len(direct) <= directConns {
+		// Every known direct addr has a connection (or there are spare conns).
+		n.setMpRepairNext(pid, time.Now().Add(mpRepairHealthyInterval))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(n.ctx, 5*time.Second)
+	defer cancel()
+	err := n.Host.Connect(network.WithForceDirectDial(ctx, "p2ptap-path-repair"), peer.AddrInfo{ID: pid, Addrs: prioritizeMultiaddrs(direct)})
+	if err != nil {
+		log.Debug("Multipath path repair: re-dial of direct addrs for %s failed this round: %v", pid.ShortString(), err)
+		n.setMpRepairNext(pid, time.Now().Add(mpRepairRetryInterval))
+		return
+	}
+	n.setMpRepairNext(pid, time.Now().Add(mpRepairHealthyInterval))
+}
+
+// setMpRepairNext records the next allowed repair attempt for pid.
+func (n *Node) setMpRepairNext(pid peer.ID, next time.Time) {
+	n.mpRepairMu.Lock()
+	defer n.mpRepairMu.Unlock()
+	if n.mpRepairNext == nil {
+		n.mpRepairNext = make(map[peer.ID]time.Time, 8)
+	}
+	n.mpRepairNext[pid] = next
+}
+
 // relayTicketCache is a cached session ticket minted by one boot. expUnix is the
 // embedded absolute expiry (unix seconds) so a stale entry is dropped without a
 // network round trip.
@@ -1119,6 +1191,11 @@ func (n *Node) peerPingPongLoop() {
 						continue
 					}
 					go n.Dispatcher.EnsureStreamsOnAllConns(pid)
+					// Re-dial a direct path whose connection was closed (silent
+					// death / idle timeout / write failure): EnsureStreamsOnAllConns
+					// cannot open it because the connection no longer exists.
+					// Per-peer backoff keeps this from becoming a dial storm.
+					go n.repairMultipathPaths(pid)
 				}
 			}
 

@@ -55,6 +55,7 @@ func (m *mockStream) Scope() network.StreamScope                     { return &n
 // mockConn is a minimal network.Conn for testing.
 type mockConn struct {
 	remote peer.ID
+	addr   ma.Multiaddr // RemoteMultiaddr; nil unless set by a test
 }
 
 func (c *mockConn) Close() error                                      { return nil }
@@ -63,7 +64,7 @@ func (c *mockConn) RemotePeer() peer.ID                               { return c
 func (c *mockConn) RemotePublicKey() ic.PubKey                        { return nil }
 func (c *mockConn) ConnState() network.ConnectionState                { return network.ConnectionState{} }
 func (c *mockConn) LocalMultiaddr() ma.Multiaddr                      { return nil }
-func (c *mockConn) RemoteMultiaddr() ma.Multiaddr                     { return nil }
+func (c *mockConn) RemoteMultiaddr() ma.Multiaddr                     { return c.addr }
 func (c *mockConn) Stat() network.ConnStats                           { return network.ConnStats{} }
 func (c *mockConn) Scope() network.ConnScope                          { return &network.NullScope{} }
 func (c *mockConn) CloseWithError(_ network.ConnErrorCode) error      { return nil }

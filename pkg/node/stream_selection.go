@@ -6,7 +6,15 @@ import (
 )
 
 const (
-	streamQualityFreshFor   = 30 * time.Second
+	// streamQualityFreshFor is how long a per-path write-quality sample stays
+	// usable for the DWRR weight (and best_path selection) after its last write.
+	// Under low traffic a path can go a long time between its min-share frames;
+	// expiring the measurement after 30 s made it fall back to the coarse
+	// topology-score nominal on every sparse burst, so the weight saw-toothed
+	// and multipath assigned the wrong share of the budget. 5 minutes keeps the
+	// measured weight stable across low-traffic gaps while still decaying a
+	// sample whose path was genuinely replaced.
+	streamQualityFreshFor   = 300 * time.Second
 	streamSelectionInterval = time.Second
 	streamSelectionHold     = 3 * time.Second
 )

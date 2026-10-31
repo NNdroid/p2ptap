@@ -28,7 +28,16 @@ import (
 const (
 	fragMagic     uint16 = 0xF5A1
 	fragHeaderLen        = 12 // 2+4+2+2+2
-	reasmTimeout         = 2 * time.Second
+	// reasmTimeout bounds how long a fragment group may wait for its remaining
+	// parts before it is dropped. Fragments of one frame always ride a single
+	// path (see writeMultipathLocked), so reassembly only has to cover that
+	// path's delivery latency, not a cross-path spread. 5 s leaves headroom over
+	// a satellite/high-latency RTT (a 2 s budget could expire on a >2 s RTT path
+	// and force a retransmit that the path's own reliable transport would have
+	// delivered); the real safety net against a genuinely lost fragment is the
+	// inner TCP retransmit, so a longer timeout only delays that fallback in a
+	// pathological case.
+	reasmTimeout = 5 * time.Second
 
 	// Reassembly hardening. The FragTotal and OrigSeq fields travel in
 	// cleartext frag headers, so a peer (or anyone who can inject a frame into

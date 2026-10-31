@@ -75,6 +75,16 @@ type relayConn struct {
 	stream  network.Stream
 	writeCh chan relayJob
 
+	// everStreamed latches true once this conn's writeLoop has established its
+	// stream at least once. It distinguishes a brand-new conn whose first
+	// stream is still being opened (queueing frames is fine — they will be
+	// written once the open completes) from a conn that HAD a healthy stream
+	// and is now stuck in reconnect backoff (queueing is futile: the frames
+	// would rot in the queue for the whole backoff). streamLive() uses it so
+	// Submit and route selection fail fast only on the doomed-reconnect case,
+	// not on the first-open window.
+	everStreamed atomic.Bool
+
 	// unsupported latches true once the hop is proven to not speak
 	// OverlayRelayProtocolID, making Submit reject immediately instead of
 	// queueing frames that can never be delivered.
@@ -223,6 +233,12 @@ func (p *relayStreamPool) reapOrphaned() {
 	now := time.Now()
 	var toReap []*relayConn
 
+	// The same scan bounds the relayHopRx liveness map, which is otherwise
+	// never evicted and grows one entry per distinct hop ever seen.
+	if p.node != nil {
+		p.node.reapRelayHopRx()
+	}
+
 	p.mu.Lock()
 	for hop, rc := range p.conns {
 		orphaned := p.node != nil && !p.relayHopConnected(hop)
@@ -267,6 +283,36 @@ func (p *relayStreamPool) relayHopConnected(hop peer.ID) bool {
 	return p.host.Network().Connectedness(hop) != network.NotConnected
 }
 
+// streamLive reports whether THIS conn can carry a relay frame right now. It is
+// false only when the conn is being torn down, or when it previously had a
+// stream and has lost it (writeLoop stuck in reconnect backoff). A brand-new
+// conn whose first stream is still being opened reports true, because queueing
+// there is productive — the frames are written as soon as the open completes.
+func (rc *relayConn) streamLive() bool {
+	if rc.ctx.Err() != nil {
+		return false
+	}
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.stream != nil || !rc.everStreamed.Load()
+}
+
+// hopStreamLive reports whether hop can accept a relay frame right now. It
+// gates route selection: a hop that is libp2p-Connected but whose pool stream is
+// in reconnect backoff (streamLive()==false) would only queue frames into a dead
+// conn — the multi-second blackhole — so the route must pick a different hop
+// until the stream is re-established. A hop with no pool conn yet is live (a
+// fresh Submit opens it).
+func (p *relayStreamPool) hopStreamLive(hop peer.ID) bool {
+	p.mu.Lock()
+	rc, ok := p.conns[hop]
+	p.mu.Unlock()
+	if !ok {
+		return true
+	}
+	return rc.streamLive()
+}
+
 // teardownConn stops a relayConn's background writeLoop and releases its
 // resources. It is safe to call on a conn that is no longer in p.conns (the map
 // entry is removed by the caller first). Idempotent via the conn's cancel.
@@ -281,13 +327,37 @@ func (p *relayStreamPool) teardownConn(rc *relayConn) {
 	rc.closeStream() // best-effort final stream close (idempotent)
 }
 
-// Submit queues a relay frame for delivery via the persistent relay stream to hop.
-// onSent is called when the frame is successfully written (may be nil for
+// relaySubmitFail is the reason a relayPool.SubmitReason call rejected a frame.
+type relaySubmitFail int
+
+const (
+	relaySubmitOK relaySubmitFail = iota
+	relaySubmitNoConn             // boot peer (no overlay-relay conn) or pool shutting down
+	relaySubmitUnsupported        // hop proven not to speak OverlayRelayProtocolID
+	relaySubmitBlacklisted        // hop circuit-broken by the overlay-relay health monitor
+	relaySubmitStreamDead         // conn exists but its stream is stuck in reconnect backoff
+	relaySubmitQueueFull          // writeCh full
+	relaySubmitTeardown           // conn torn down concurrently with the enqueue
+)
+
+// Submit queues a relay frame for delivery via the persistent relay stream to
+// hop. onSent is called when the frame is successfully written (may be nil for
 // relay forwarding where the origin already counted the send).
 // onFail is called exactly once if this frame cannot be delivered after reconnect
 // attempts (or if the queue is full).
-// Returns false if the internal queue is full, meaning onFail has already been called.
+// Returns true if the job was queued (and may yet be delivered), false if it
+// failed fast and onFail was already called. Use SubmitReason when the cause
+// matters for diagnostics.
 func (p *relayStreamPool) Submit(hop peer.ID, data []byte, onSent, onFail func()) bool {
+	return p.SubmitReason(hop, data, onSent, onFail) == relaySubmitOK
+}
+
+// SubmitReason is Submit with the failure CAUSE returned instead of a bool, so
+// the transit path can attribute a drop to queue saturation vs an
+// unsupported/blacklisted/boot hop vs a conn stuck in reconnect backoff — the
+// "which stage is dropping" signal the relay-diag card exists to answer. The
+// onFail/onSent contract is identical to Submit.
+func (p *relayStreamPool) SubmitReason(hop peer.ID, data []byte, onSent, onFail func()) relaySubmitFail {
 	rc := p.getOrCreate(hop)
 	if rc == nil {
 		// Either the peer is a known p2ptap-boot (we deliberately do not
@@ -296,14 +366,14 @@ func (p *relayStreamPool) Submit(hop peer.ID, data []byte, onSent, onFail func()
 		// down. The caller should fall back to the dedicated boot-relay path
 		// (or circuit path) rather than re-queueing here.
 		onFail()
-		return false
+		return relaySubmitNoConn
 	}
 
 	// Hop already proven to lack OverlayRelayProtocolID — reject without
 	// queueing so the caller can immediately use the circuit fallback.
 	if rc.unsupported.Load() {
 		onFail()
-		return false
+		return relaySubmitUnsupported
 	}
 
 	// Hop circuit-broken by the overlay-relay health monitor (its relay stream
@@ -312,7 +382,19 @@ func (p *relayStreamPool) Submit(hop peer.ID, data []byte, onSent, onFail func()
 	// otherwise pin full and drop every frame routed through this hop.
 	if p.node != nil && p.node.isOverlayRelayBlacklisted(hop) {
 		onFail()
-		return false
+		return relaySubmitBlacklisted
+	}
+
+	// Conn exists but its stream is stuck in reconnect backoff (it previously
+	// had a stream that was lost). Queueing here would hold the frame for the
+	// whole 200ms→5s backoff (plus 3s NewStream each attempt) and then either
+	// deliver it stale or drain it on blacklist — a multi-second blackhole the
+	// caller cannot distinguish from a dropped frame. Fail fast so the caller
+	// routes to a different hop instead. A brand-new conn whose first stream is
+	// still opening is NOT failed: queueing there is productive.
+	if !rc.streamLive() {
+		onFail()
+		return relaySubmitStreamDead
 	}
 
 	job := relayJob{
@@ -332,22 +414,22 @@ func (p *relayStreamPool) Submit(hop peer.ID, data []byte, onSent, onFail func()
 		// queued, including ours) and report failure so the caller falls back.
 		if rc.ctx.Err() != nil {
 			rc.drainAll()
-			return false
+			return relaySubmitTeardown
 		}
-		return true
+		return relaySubmitOK
 	case <-rc.ctx.Done():
 		// The conn is being torn down (reaper or shutdown). The write goroutine
 		// has already exited or is about to, so nothing will drain this job.
 		// Fail fast so the caller falls back to another path.
 		onFail()
-		return false
+		return relaySubmitTeardown
 	default:
 		// Queue full: drop the frame (onFail already called) but throttle the
 		// WARN — a stalled hop otherwise floods hundreds of identical lines per
 		// second and buries the real signal. One WARN per interval per hop.
 		rc.throttledDropWarn(hop)
 		onFail()
-		return false
+		return relaySubmitQueueFull
 	}
 }
 
@@ -512,6 +594,7 @@ func (rc *relayConn) ensureStream(backoff *time.Duration) bool {
 			rc.mu.Lock()
 			rc.stream = s
 			rc.mu.Unlock()
+			rc.everStreamed.Store(true)
 			*backoff = relayPoolReconnectBackoff // reset backoff on success
 			rc.unsupported.Store(false)
 			// NOTE: do NOT reset failCount here. A *successful open* only means

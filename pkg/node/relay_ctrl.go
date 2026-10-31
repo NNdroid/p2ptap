@@ -299,12 +299,15 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 		forward.Stamp = n.stampRelayCtrlOrigin(forward.Origin, forward.Target, protocol.ID(forward.Proto))
 	}
 
-	sub, ferr := n.openRelayCtrlNextHop(forward, remotePeer)
+	sub, ferr := n.openRelayCtrlNextHop(forward, remotePeer, "")
 	if ferr != nil || sub == nil {
 		// Do NOT record this against hdr.Target: openRelayCtrlNextHop can
 		// fail because the relay hop is unreachable (not the target).
 		// Recording it against the target poisons its circuit-breaker state
 		// and can cascade into auth refresh / rediscovery for a healthy peer.
+		// openRelayCtrlNextHop already retried once with the failed hop
+		// excluded (falling through to the boot-circuit alternate), so by the
+		// time we are here every resolution path is genuinely exhausted.
 		log.Warn("RelayCtrl: cannot forward tunnel to %s (origin %s): %v",
 			hdr.Target, hdr.Origin, ferr)
 		return
@@ -342,10 +345,15 @@ func (n *Node) handleRelayCtrl(s network.Stream) {
 //  1. directly connected to Target → open a relay-ctrl stream and write the
 //     FINAL header (Target == self on the far end dispatches locally);
 //  2. an overlay-relay hop exists for Target → recurse (openRelayCtrlStream
-//     re-writes the header with Hops+1);
+//     re-writes the header with Hops+1). If that hop's stream cannot be opened,
+//     retry once with the failed hop EXCLUDED, so a dead hop does not tear the
+//     whole tunnel down: the retry falls through to the boot-circuit fall-back
+//     (or a different hop) and the inner protocol keeps its handshake alive;
 //  3. boot circuit relay fall-back → circuit-dial Target on relay-ctrl and
 //     write the final header.
-func (n *Node) openRelayCtrlNextHop(hdr RelayCtrlHeader, fromPeer peer.ID) (network.Stream, error) {
+//
+// exclude is "" on the initial call and the failed hop on the retry.
+func (n *Node) openRelayCtrlNextHop(hdr RelayCtrlHeader, fromPeer, exclude peer.ID) (network.Stream, error) {
 	nextHops := hdr.Hops + 1
 
 	if n.isDirectlyConnected(hdr.Target) {
@@ -368,7 +376,7 @@ func (n *Node) openRelayCtrlNextHop(hdr RelayCtrlHeader, fromPeer peer.ID) (netw
 		return sub, nil
 	}
 
-	if hop := n.relayHopForTarget(hdr.Target); hop != "" && hop != fromPeer {
+	if hop := n.relayHopForTarget(hdr.Target); hop != "" && hop != fromPeer && hop != exclude {
 		ctx, cancel := context.WithTimeout(n.ctx, 15*time.Second)
 		defer cancel()
 		if n.isBootstrapPeer(hop) {
@@ -377,7 +385,22 @@ func (n *Node) openRelayCtrlNextHop(hdr RelayCtrlHeader, fromPeer peer.ID) (netw
 			}
 			return n.openBootRelayControlStream(hop, hdr.Target, protocol.ID(hdr.Proto))
 		}
-		return n.openRelayCtrlStream(ctx, hop, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), nextHops, hdr.Stamp, hdr.OriginSig)
+		if sub, err := n.openRelayCtrlStream(ctx, hop, hdr.Origin, hdr.Target, protocol.ID(hdr.Proto), nextHops, hdr.Stamp, hdr.OriginSig); err == nil {
+			return sub, nil
+		} else {
+			// The chosen relay hop is unreachable (dead stream / reconnecting).
+			// Retry once with it excluded: relayHopForTarget is deterministic,
+			// so the retry either picks a different hop or (as it will here for
+			// a single-route target) falls through to the boot-circuit
+			// fall-back below, keeping the tunnel alive instead of forcing the
+			// inner protocol to restart from scratch.
+			if exclude == "" {
+				if sub2, err2 := n.openRelayCtrlNextHop(hdr, fromPeer, hop); err2 == nil {
+					return sub2, nil
+				}
+			}
+			return nil, fmt.Errorf("relay hop %s unreachable: %w", hop, err)
+		}
 	}
 
 	// Boot circuit relay fall-back: dial Target through the circuit on the

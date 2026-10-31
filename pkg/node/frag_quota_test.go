@@ -29,10 +29,11 @@ func buildFragEnvelope(t *testing.T, origSeq uint32, index, total uint16, chunk 
 
 // A write-deadline retry re-sends the identical fragment set under the same
 // origSeq, and the send-side write deadline is DYNAMIC — 600 ms cold-start up
-// to a 2500 ms window (writeDeadlineFor), so its upper bound outlives
-// reasmTimeout (2 s). Reusing a key whose group has expired therefore happens
-// in normal operation — and the stale group's quota slot has to be released
-// before the replacement is counted.
+// to a 2500 ms window (writeDeadlineFor). reasmTimeout (5 s) now EXCEEDS that
+// upper bound, so a write-deadline retry normally lands inside the still-live
+// group rather than reusing an expired key; the expired-reuse path still occurs
+// when the path stalls past the reassembly window (a dead/silent path), and it
+// is exactly that path which must not leak a per-peer quota slot.
 //
 // The old code overwrote f.bufs[key] and incremented perPeerGroups without
 // ever decrementing, so one such reuse leaked a slot permanently. After 64

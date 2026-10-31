@@ -357,7 +357,7 @@ func TestMultipathStrategyConfig(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("clamped reorder knobs rejected: %v", err)
 	}
-	if cfg.RxReorderWindow != 256 || cfg.RxReorderDelayMs != 200 {
+	if cfg.RxReorderWindow != 1024 || cfg.RxReorderDelayMs != 300 {
 		t.Fatalf("reorder knobs not clamped to defaults: window=%d delay=%d", cfg.RxReorderWindow, cfg.RxReorderDelayMs)
 	}
 }

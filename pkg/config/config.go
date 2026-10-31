@@ -267,7 +267,10 @@ type Config struct {
 	// that happens to be talking to a spraying peer.
 	RxReorderWindow int `json:"rx_reorder_window"`
 	// RxReorderDelayMs is the head-of-line force-release timeout for the reorder
-	// buffer, in milliseconds. Bounds the extra latency multipath adds.
+	// buffer, in milliseconds. Bounds the extra latency multipath adds. The
+	// default 300 ms absorbs the latency spread of a LAN + WAN direct path pair;
+	// raise it (up to 5000) if a session mixes paths whose RTTs differ by more
+	// than that, at the cost of head-of-line delay when a frame is genuinely lost.
 	RxReorderDelayMs int `json:"rx_reorder_delay_ms"`
 	NodeName                string            `json:"node_name"`          // e.g. "my-node" or empty for os.Hostname()
 	TapName                 string            `json:"tap_name"`
@@ -435,10 +438,18 @@ func DefaultConfig() *Config {
 			DisableHolePunching:    false,
 		},
 		TransportStrategy: "best_path",
-		// Reorder buffer defaults: 256 frames / 200 ms HOL bound. Only active
-		// under "multipath" (see RxReorderWindow/RxReorderDelayMs).
-		RxReorderWindow: 256,
-		RxReorderDelayMs: 200,
+		// Reorder buffer defaults: 1024 frames / 300 ms HOL bound. Only active
+		// under "multipath" (see RxReorderWindow/RxReorderDelayMs). 1024 matches
+		// the dedup far-behind tolerance (maxBehindTolerance), so the reorder
+		// buffer never gives up on a frame the dedup layer has already accepted:
+		// a smaller window made a multipath session with a large cross-path
+		// latency spread flush the stale tail and re-anchor, dropping late frames
+		// into the inner TCP retransmit path. 300 ms HOL covers the latency
+		// spread of a LAN + WAN direct path pair (relay paths are excluded from
+		// scheduling — see nonRelayStreams), which is the realistic worst case
+		// under multipath.
+		RxReorderWindow: 1024,
+		RxReorderDelayMs: 300,
 		NodeName:          hostName,
 		TapName:           "p2ptap0",
 		TapIP:             "10.0.0.1/24",
@@ -690,13 +701,13 @@ func (c *Config) Validate() error {
 
 	// --- Receive reorder buffer (multipath only) ---
 	if c.RxReorderWindow <= 0 {
-		c.RxReorderWindow = 256
+		c.RxReorderWindow = 1024 // matches the dedup far-behind tolerance
 	}
 	if c.RxReorderWindow > 1024 {
 		c.RxReorderWindow = 1024 // bounded by the dedup tolerance
 	}
 	if c.RxReorderDelayMs <= 0 {
-		c.RxReorderDelayMs = 200
+		c.RxReorderDelayMs = 300
 	}
 	if c.RxReorderDelayMs > 5000 {
 		c.RxReorderDelayMs = 5000

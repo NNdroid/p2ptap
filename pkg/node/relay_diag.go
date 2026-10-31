@@ -42,7 +42,15 @@ type RelayDiag struct {
 	LoopGuardDrop atomic.Uint64 // nextHop == carrier; would form a cycle
 	TtlExpired    atomic.Uint64 // ttl<=1 with destination not us
 	SealFail      atomic.Uint64 // hop seal for the next leg failed
-	ForwardDrop   atomic.Uint64 // relayPool refused the forward (queue full)
+	ForwardDrop   atomic.Uint64 // relayPool refused the forward: write queue full
+	// ForwardStreamDead / ForwardUnusable split the OTHER relayPool refusal
+	// causes out of ForwardDrop, so "which stage is dropping" is answerable: a
+	// rise in ForwardStreamDead means route selection handed the frame to a hop
+	// whose stream is stuck in reconnect backoff (the F3 fast-fail — the frame
+	// would otherwise rot in the queue for seconds), while ForwardUnusable is a
+	// boot/unsupported/blacklisted/teardown hop the caller mis-routed.
+	ForwardStreamDead atomic.Uint64 // relayPool refused: hop stream in reconnect backoff
+	ForwardUnusable   atomic.Uint64 // relayPool refused: boot/unsupported/blacklisted/teardown
 	// boot relay-over-backbone
 	UplinkGone atomic.Uint64 // boot uplink Submit failed (no live uplink)
 	// volume context so the drop ratios are readable
@@ -62,6 +70,8 @@ type RelayDiagSnapshot struct {
 	TtlExpired       uint64 `json:"ttl_expired_drops"`
 	SealFail         uint64 `json:"hop_seal_fail_drops"`
 	ForwardDrop      uint64 `json:"forward_pool_full_drops"`
+	ForwardStreamDead uint64 `json:"forward_stream_dead_drops"`
+	ForwardUnusable  uint64 `json:"forward_unusable_drops"`
 	UplinkGone       uint64 `json:"boot_uplink_gone_drops"`
 	ForwardedIn      uint64 `json:"relay_envelopes_in"`
 	DeliveredToTap   uint64 `json:"delivered_to_tap"`
@@ -119,6 +129,22 @@ func (d *RelayDiag) fwdPoolFull() {
 		d.ForwardDrop.Add(1)
 	}
 }
+
+// recordRelaySubmitFail attributes a rejected relayPool.SubmitReason to the
+// right drop counter (see the ForwardStreamDead/ForwardUnusable field docs).
+func (d *RelayDiag) recordRelaySubmitFail(r relaySubmitFail) {
+	if d == nil {
+		return
+	}
+	switch r {
+	case relaySubmitQueueFull:
+		d.ForwardDrop.Add(1)
+	case relaySubmitStreamDead:
+		d.ForwardStreamDead.Add(1)
+	default:
+		d.ForwardUnusable.Add(1)
+	}
+}
 func (d *RelayDiag) uplinkGone() {
 	if d != nil {
 		d.UplinkGone.Add(1)
@@ -150,6 +176,8 @@ func (d *RelayDiag) snapshot() RelayDiagSnapshot {
 		TtlExpired:       d.TtlExpired.Load(),
 		SealFail:         d.SealFail.Load(),
 		ForwardDrop:      d.ForwardDrop.Load(),
+		ForwardStreamDead: d.ForwardStreamDead.Load(),
+		ForwardUnusable:  d.ForwardUnusable.Load(),
 		UplinkGone:       d.UplinkGone.Load(),
 		ForwardedIn:      d.FwdIn.Load(),
 		DeliveredToTap:   d.Deliv.Load(),
@@ -179,6 +207,8 @@ func (d *RelayDiag) summary() string {
 	add("ttlExpired", s.TtlExpired)
 	add("sealFail", s.SealFail)
 	add("fwdPoolFull", s.ForwardDrop)
+	add("fwdStreamDead", s.ForwardStreamDead)
+	add("fwdUnusable", s.ForwardUnusable)
 	add("uplinkGone", s.UplinkGone)
 	if b.Len() == 0 {
 		return ""

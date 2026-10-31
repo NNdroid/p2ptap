@@ -77,3 +77,47 @@ func (n *Node) relayHopRxWithin(hop peer.ID, d time.Duration) bool {
 	}
 	return time.Since(time.Unix(0, ns)) <= d
 }
+
+// relayHopRxStale is how long a hop's inbound-relay liveness stamp may go
+// untouched before its entry is evicted. A hop that has not carried a frame in
+// this long is either gone or has fallen back to another path; keeping its
+// entry forever makes relayHopRx grow without bound over a churning node's
+// lifetime (one map copy + one atomic.Int64 per distinct hop ever seen).
+const relayHopRxStale = 5 * time.Minute
+
+// reapRelayHopRx evicts relayHopRx entries that have not carried an inbound
+// relay frame for relayHopRxStale. It is driven by the relay pool's reaper
+// (every 30s) so the map stays bounded by the number of hops that are
+// genuinely delivering. Copy-on-write, mirroring noteRelayHopRx: a fresh map is
+// published under relayHopRxMu, and hops still carrying frames keep their
+// counters (same atomic pointers, so no liveness data is lost).
+func (n *Node) reapRelayHopRx() {
+	m := n.relayHopRx.Load()
+	if m == nil {
+		return
+	}
+	cutoff := time.Now().Add(-relayHopRxStale).UnixNano()
+	kept := 0
+	for _, v := range *m {
+		if v.Load() >= cutoff {
+			kept++
+		}
+	}
+	if kept == len(*m) {
+		return // nothing stale — skip the pointless map copy
+	}
+
+	n.relayHopRxMu.Lock()
+	defer n.relayHopRxMu.Unlock()
+	// Re-check under the lock: noteRelayHopRx may have published a newer map
+	// (new hop) or refreshed a counter (same pointer) since the initial load.
+	// A just-inserted hop has stamp=now, so it is always >= cutoff and kept.
+	cur := n.relayHopRx.Load()
+	next := make(map[peer.ID]*atomic.Int64, kept)
+	for k, v := range *cur {
+		if v.Load() >= cutoff {
+			next[k] = v
+		}
+	}
+	n.relayHopRx.Store(&next)
+}

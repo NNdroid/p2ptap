@@ -37,6 +37,14 @@ func (n *Node) routeHopUsable(hop, target peer.ID) bool {
 		return false
 	}
 	if hop == target {
+		// A directly-connected target is delivered directly. The overlay
+		// blacklist must still apply so the selection gate matches the
+		// submission gate (relayPool.Submit rejects a blacklisted hop): without
+		// it, a directly-connected target that got circuit-broken as a relay hop
+		// would be selected here and then silently dropped at Submit.
+		if n.isOverlayRelayBlacklisted(hop) {
+			return false
+		}
 		state := n.Host.Network().Connectedness(hop)
 		return state == network.Connected || state == network.Limited
 	}
@@ -44,7 +52,13 @@ func (n *Node) routeHopUsable(hop, target peer.ID) bool {
 		return n.hasBootRelayUplink(hop) && !n.isBootRelayBlacklisted(hop)
 	}
 	state := n.Host.Network().Connectedness(hop)
-	return (state == network.Connected || state == network.Limited) && n.supportsOverlayRelay(hop) && !n.isOverlayRelayBlacklisted(hop)
+	// hopStreamLive closes the selection/submission gap for a hop that is
+	// libp2p-Connected but whose pool stream is stuck in reconnect backoff:
+	// without it the hop is selected and frames queue into a dead conn (the
+	// multi-second blackhole). A hop with no pool conn yet is live.
+	return (state == network.Connected || state == network.Limited) &&
+		n.supportsOverlayRelay(hop) && !n.isOverlayRelayBlacklisted(hop) &&
+		(n.relayPool == nil || n.relayPool.hopStreamLive(hop))
 }
 
 func (n *Node) canEgressWithRoute(target peer.ID, route routing.RouteInfo, hasRoute bool) bool {

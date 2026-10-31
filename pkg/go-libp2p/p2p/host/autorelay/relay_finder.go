@@ -18,6 +18,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/host/eventbus"
 	circuitv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
+	pbv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/pb"
 	circuitv2_proto "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/proto"
 	"github.com/libp2p/go-libp2p/p2p/protocol/identify"
 
@@ -37,6 +38,13 @@ const protoIDv2 = circuitv2_proto.ProtoIDv2Hop
 const (
 	rsvpRefreshInterval = time.Minute
 	rsvpExpirationSlack = 2 * time.Minute
+
+	// refreshRetries bounds how many times a single reservation refresh is
+	// retried before the relay is dropped. A transient Reserve error (relay
+	// restart, a busy hop, a timeout) must not permanently drop a healthy relay
+	// and force the full rediscover→connect→identify→reserve chain again.
+	refreshRetries       = 3
+	refreshRetryInterval = 10 * time.Second
 
 	autorelayTag  = "autorelay"
 	maxRelayAddrs = 100
@@ -66,6 +74,20 @@ type relayFinder struct {
 	candidateMx                sync.Mutex
 	candidates                 map[peer.ID]*candidate
 	backoff                    map[peer.ID]time.Time
+	// reserveFails tracks CONSECUTIVE reservation failures per relay, across
+	// candidate remove/re-add cycles. A failure backs off UNLESS it is the very
+	// first failure for a relay that has NEVER held a reservation AND the relay
+	// refused the reservation with Status_PERMISSION_DENIED: that case is the
+	// startup race where the boot's ACL denies RESERVE while the mesh node's PSK
+	// handshake is still in flight, and punishing it would leave the node without
+	// a reservation (invisible to inbound circuit dials) for minutes on every
+	// boot. Every other first failure (relay down, stream closed, refusal by
+	// policy rather than ACL) still backs off immediately.
+	reserveFails map[peer.ID]int
+	// everReserved latches true once a relay has held a reservation at all, and
+	// is never reset: a relay that previously worked and now fails is degrading,
+	// so it must back off on the FIRST failure, not just consecutive ones.
+	everReserved map[peer.ID]bool
 	maybeConnectToRelayTrigger chan struct{} // cap: 1
 	// Any time _something_ happens that might cause us to need new candidates.
 	// This could be
@@ -107,6 +129,8 @@ func newRelayFinder(host host.Host, conf *config) (*relayFinder, error) {
 		peerSource:                 conf.peerSource,
 		candidates:                 make(map[peer.ID]*candidate),
 		backoff:                    make(map[peer.ID]time.Time),
+		reserveFails:               make(map[peer.ID]int),
+		everReserved:               make(map[peer.ID]bool),
 		candidateFound:             make(chan struct{}, 1),
 		maybeConnectToRelayTrigger: make(chan struct{}, 1),
 		maybeRequestNewCandidates:  make(chan struct{}, 1),
@@ -623,6 +647,14 @@ func (rf *relayFinder) maybeConnectToRelay(ctx context.Context) {
 			continue
 		}
 		log.Debug("adding new relay", "relay_peer", id)
+		// A successful reservation proves the relay accepts us. It ends any
+		// consecutive-failure streak and marks the relay as ever-reserved, so a
+		// LATER failure backs off immediately (degrading relay) rather than
+		// being forgiven as a would-be first failure.
+		rf.candidateMx.Lock()
+		rf.reserveFails[id] = 0
+		rf.everReserved[id] = true
+		rf.candidateMx.Unlock()
 		rf.relayMx.Lock()
 		rf.relays[id] = rsvp
 		numRelays := len(rf.relays)
@@ -664,7 +696,22 @@ func (rf *relayFinder) connectToRelay(ctx context.Context, cand *candidate) (*ci
 		rsvp, err = circuitv2.Reserve(ctx, rf.host, cand.ai)
 		if err != nil {
 			rf.candidateMx.Lock()
-			rf.backoff[id] = rf.conf.clock.Now()
+			rf.reserveFails[id]++
+			// Back off unless this is the FIRST-ever failure of a relay that
+			// has never held a reservation AND the relay refused the
+			// reservation with Status_PERMISSION_DENIED. That is the startup
+			// auth race: the boot's pskACLFilter waits only 200ms for the PSK
+			// handshake before denying, so a member that dials a split second
+			// too early can be refused even though it is legitimate. The denial
+			// resolves the moment the peer authenticates, so retry it at the
+			// next candidate re-discovery instead of blackholing the node for a
+			// whole backoff. Every other failure — the relay being down, the
+			// reservation stream closing, or the relay degrading — backs off
+			// immediately, and a relay that ever held a reservation always backs
+			// off on the first failure.
+			if rf.reserveFails[id] >= 2 || rf.everReserved[id] || !isPermissionDenied(err) {
+				rf.backoff[id] = rf.conf.clock.Now()
+			}
 			rf.candidateMx.Unlock()
 			err = fmt.Errorf("failed to reserve slot: %w", err)
 		}
@@ -673,6 +720,27 @@ func (rf *relayFinder) connectToRelay(ctx context.Context, cand *candidate) (*ci
 	rf.removeCandidate(id)
 	rf.candidateMx.Unlock()
 	return rsvp, err
+}
+
+// isPermissionDenied reports whether err is a reservation refusal caused by the
+// relay's access control (Status_PERMISSION_DENIED) rather than a transport or
+// protocol failure. The boot's pskACLFilter denies a reservation when the
+// peer's PSK authentication has not yet completed, so a legitimate member can
+// hit exactly this once at startup — that is the race the backoff exemption in
+// connectToRelay targets. A refused-but-not-ACL reservation (e.g. a policy
+// limit) is NOT exempted and still backs off.
+func isPermissionDenied(err error) bool {
+	// ReservationError is a value type with value receivers; match both the
+	// value and pointer forms in case a future caller wraps or re-returns it.
+	var re circuitv2.ReservationError
+	if errors.As(err, &re) {
+		return re.Status == pbv2.Status_PERMISSION_DENIED
+	}
+	var rep *circuitv2.ReservationError
+	if errors.As(err, &rep) {
+		return rep.Status == pbv2.Status_PERMISSION_DENIED
+	}
+	return false
 }
 
 func (rf *relayFinder) refreshReservations(ctx context.Context, now time.Time) bool {
@@ -699,11 +767,31 @@ func (rf *relayFinder) refreshReservations(ctx context.Context, now time.Time) b
 }
 
 func (rf *relayFinder) refreshRelayReservation(ctx context.Context, p peer.ID) error {
-	rsvp, err := circuitv2.Reserve(ctx, rf.host, peer.AddrInfo{ID: p})
+	// A refresh is a renewal of an EXISTING, working reservation. A transient
+	// Reserve error (relay restart, busy hop, timeout) must not permanently
+	// drop a healthy relay: retry a bounded number of times before giving up,
+	// so the relay survives one-off blips and the node is not forced through
+	// the full rediscover→connect→identify→reserve chain (and a fresh backoff)
+	// for a hiccup that a retry would have fixed.
+	var rsvp *circuitv2.Reservation
+	var err error
+	for attempt := 0; attempt < refreshRetries; attempt++ {
+		rsvp, err = circuitv2.Reserve(ctx, rf.host, peer.AddrInfo{ID: p})
+		if err == nil {
+			break
+		}
+		log.Debug("failed to refresh relay slot reservation", "relay_peer", p, "attempt", attempt+1, "err", err)
+		if attempt < refreshRetries-1 {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("refresh aborted: %w", ctx.Err())
+			case <-time.After(refreshRetryInterval):
+			}
+		}
+	}
 
 	rf.relayMx.Lock()
 	if err != nil {
-		log.Debug("failed to refresh relay slot reservation", "relay_peer", p, "err", err)
 		_, exists := rf.relays[p]
 		delete(rf.relays, p)
 		// unprotect the connection

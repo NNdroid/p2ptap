@@ -47,9 +47,7 @@
   "_psk_note": "psk 为空串则 DHT Discovery Loop 不启动，节点无法通过 DHT 发现其他 peer。Peer 发现只依赖 mDNS (局域网) 和 static_peers。如需跨 NAT 组网，请设置相同 psk 并部署 p2ptap-boot 中继节点。",
   "obfuscation": {
     "enable": true,
-    "mode": "random",
-    "fixed_size": 1500,
-    "block_size": 256,
+    "padding_rules": "0 -> 400-600",
     "max_frag_size": 0,
     "algorithm": "auto"
   }

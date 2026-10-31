@@ -1600,15 +1600,18 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 		// onSent: only releases the pooled envelope — forwarding must NOT
 		// double-count RecordSent (the origin already counted). onFail drops
 		// silently; the source retransmits.
-		if !n.relayPool.Submit(nextHop, sealed,
+		if reason := n.relayPool.SubmitReason(nextHop, sealed,
 			func() { releaseFrameBuf(sealedDst) },
 			func() {
 				log.Debug("Relay forward to %s via %s permanently failed",
 					finalDst.String(), nextHop.String())
 				releaseFrameBuf(sealedDst)
 			},
-		) {
-			n.relayDiag.fwdPoolFull()
+		); reason != relaySubmitOK {
+			// Attribute to the correct drop counter: queue saturation vs a
+			// dead-stream fast-fail vs a hop that is simply unusable as an
+			// overlay relay (boot/unsupported/blacklisted/teardown).
+			n.relayDiag.recordRelaySubmitFail(reason)
 		}
 		return
 	}

@@ -306,6 +306,50 @@ func scoreStreamTransport(s network.Stream) int {
 	return 20 // Public WAN direct: medium priority
 }
 
+// isRelayStream reports whether s rides a circuit-relay connection.
+func isRelayStream(s network.Stream) bool {
+	if s == nil || s.Conn() == nil || s.Conn().RemoteMultiaddr() == nil {
+		return false
+	}
+	return maddrutil.IsCircuitRelay(s.Conn().RemoteMultiaddr())
+}
+
+// nonRelayStreams drops circuit-relay streams from the candidate set while at
+// least one direct (non-relay) stream exists. A relay path is rate-limited and
+// adds a slow high-latency hop, so scheduling it alongside a direct path taxes
+// every frame it carries — under multipath the DWRR min-share gives it ~5% of
+// the budget, and under redundant it would carry a full duplicate of EVERY
+// frame. The relay stream is left REGISTERED (not closed) so the post-failure
+// fallbacks (sendFramesViaSendToPeer / relayFallbackIfPossible) can still use it
+// once every direct path drops; this filter only stops it being scheduled while
+// a direct path is healthy.
+//
+// The caller's slice is the published PeerStreams snapshot and is shared by
+// every reader, so a filtered result is always a fresh slice, never a
+// zero-length view into the shared backing array.
+func nonRelayStreams(streams []network.Stream) []network.Stream {
+	if len(streams) <= 1 {
+		return streams
+	}
+	hasDirect := false
+	for _, s := range streams {
+		if !isRelayStream(s) {
+			hasDirect = true
+			break
+		}
+	}
+	if !hasDirect {
+		return streams // relay-only peer: the relay path IS the only path
+	}
+	out := make([]network.Stream, 0, len(streams))
+	for _, s := range streams {
+		if !isRelayStream(s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // StrategyDispatcher implements 'best_path', 'multipath', 'redundant', and 'fallback' transport strategies
 type StrategyDispatcher struct {
 	h    host.Host
@@ -1222,7 +1266,7 @@ type batchFrame struct {
 // packed frames, which may be retried after a partial transport write.
 // Callers hold ps.writeMu and pass at most 32 logical frames.
 func (sd *StrategyDispatcher) writePackedBatchLocked(targetPeer peer.ID, ps *PeerStreams, cipher obfuscate.ObfCipher, packedFrames [][]byte) error {
-	streams := ps.GetAllStreams()
+	streams := nonRelayStreams(ps.GetAllStreams())
 	if len(streams) == 0 {
 		return fmt.Errorf("no direct streams for peer %s", targetPeer)
 	}
@@ -1536,6 +1580,10 @@ func (sd *StrategyDispatcher) writeFragsOnStream(ps *PeerStreams, targetPeer pee
 //
 // ps must not be nil. Callers must hold ps.writeMu.
 func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer peer.ID, streams []network.Stream, stat tapPayloadStat, frags [][]byte, recordPeerPayload bool) error {
+	// Never schedule a circuit-relay path alongside a healthy direct path (see
+	// nonRelayStreams). This is the fallback/best_path/redundant entry; the
+	// multipath batch entry filters in writePackedBatchLocked.
+	streams = nonRelayStreams(streams)
 	if ps != nil {
 		snapshot := ps.snapshot.Load()
 		if snapshot != ps.writeDeadlineSnapshot {

@@ -297,6 +297,16 @@ type Node struct {
 	pingPongFailCount atomic.Pointer[map[peer.ID]*atomic.Int32]
 	pingPongFailMu    sync.Mutex // structural (CoW) changes only; never taken per frame
 
+	// mpRepairNext is the per-peer gate for re-dialing a direct path that was
+	// dropped (silent death / QUIC idle timeout / write failure). Once the path's
+	// connection is closed it leaves ConnsToPeer and is never re-opened by
+	// EnsureStreamsOnAllConns (which only walks EXISTING connections), so without
+	// this the multipath path count decays until the peer happens to reconnect.
+	// Keyed by peer.ID; protected by mpRepairMu. A successful repair or a peer
+	// with no missing path is re-armed far in the future, a failed dial soon.
+	mpRepairMu   sync.Mutex
+	mpRepairNext map[peer.ID]time.Time
+
 	// peerRTT keeps bounded, source-labelled REAL probe outcomes for WebUI
 	// telemetry.  Routing may still need an internal cost before the first
 	// measurement, but that estimate is never stored here or exposed as RTT.
@@ -1570,7 +1580,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				autorelay.WithMinCandidates(1),
 				autorelay.WithMaxCandidates(len(bootstrapRelays)),
 				autorelay.WithNumRelays(wantRelays),
-				autorelay.WithBackoff(5*time.Minute),
+				// Backoff applies only AFTER the first reserve failure (see
+				// relay_finder.go connectToRelay): a first failure is usually the
+				// startup race where the boot's PSK ACL denies RESERVE while
+				// ensureRelayAuth is still in flight. 1m keeps a genuinely failing
+				// relay out of the rotation without making the node invisible to
+				// inbound circuit dials for the old 5m on every boot.
+				autorelay.WithBackoff(1*time.Minute),
 			))
 			log.Info("AutoRelay enabled with %d static relay servers (targeting %d reservation(s), no boot delay)", len(bootstrapRelays), wantRelays)
 		} else {

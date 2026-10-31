@@ -77,14 +77,14 @@ func (n *Node) applyReorderConfig(c *config.Config) {
 	}
 	window := c.RxReorderWindow
 	if window <= 0 {
-		window = 256
+		window = 1024 // matches the dedup far-behind tolerance
 	}
 	if window > 1024 {
 		window = 1024
 	}
 	delay := c.RxReorderDelayMs
 	if delay <= 0 {
-		delay = 200
+		delay = 300
 	}
 	if delay > 5000 {
 		delay = 5000
@@ -111,11 +111,11 @@ func (n *Node) applyReorderConfig(c *config.Config) {
 func (n *Node) reorderSettings() (int, time.Duration) {
 	window := int(n.rxReorderWindow.Load())
 	if window <= 0 {
-		window = 256
+		window = 1024
 	}
 	delay := time.Duration(n.rxReorderDelayNs.Load())
 	if delay <= 0 {
-		delay = 200 * time.Millisecond
+		delay = 300 * time.Millisecond
 	}
 	return window, delay
 }
