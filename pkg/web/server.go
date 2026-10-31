@@ -374,12 +374,22 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 	if err != nil {
 		return nil, err
 	}
-	fileSrv := http.FileServer(http.FS(staticSub))
+	// Serve the dashboard assets minified (see minify.go). The readable sources
+	// stay the source of truth; the minified copy is rebuilt once per start. On
+	// a minification failure we keep the raw assets rather than refuse to serve.
+	staticSrvFS := staticSub
+	if minSub, minErr := buildMinifiedFS(staticSub); minErr == nil {
+		staticSrvFS = minSub
+	} else {
+		webLog.Warn("static asset minification failed, serving raw: %v", minErr)
+	}
+	fileSrv := http.FileServer(http.FS(staticSrvFS))
 
 	// Gzip-compress embeddable static assets when the browser advertises
-	// support. The dashboard ships ~1.2MB (873KB app.js + 206KB css + 107KB
-	// html); the WebUI is frequently reached OVER the VPN tunnel itself, so an
-	// ~4-5x transfer reduction is the single biggest dashboard load-time win.
+	// support. The dashboard ships ~1.1MB raw, ~722KB after buildMinifiedFS
+	// strips whitespace and comments (see minify.go); the WebUI is frequently
+	// reached OVER the VPN tunnel itself, so minification plus an ~4-5x gzip
+	// transfer reduction is the single biggest dashboard load-time win.
 	// Only compressible static content is wrapped — /api/* JSON responses and
 	// WebSocket endpoints are untouched (polling payloads are small, and
 	// per-poll gzip would cost CPU on every tick).
@@ -423,7 +433,7 @@ func StartServer(collector *StatsCollector, listenIP string, listenIPv6 string, 
 			// The auth-prompt page must not be cached, otherwise a token
 			// change is invisible until a hard refresh.
 			w.Header().Set("Cache-Control", "no-store")
-			serveLocalizedIndex(w, r, staticSub)
+			serveLocalizedIndex(w, r, staticSrvFS)
 			return
 		}
 		gzipStatic.ServeHTTP(w, r)

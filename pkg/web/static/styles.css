@@ -99,13 +99,45 @@
             -webkit-font-smoothing: antialiased;
         }
 
+        html {
+            /* The page gradient lives on the root element so it paints the
+               whole canvas regardless of content height, and so the dark
+               theme's --bg-gradient is actually visible (it was defined but
+               never applied — body painted a flat #090c15). */
+            background: var(--bg-gradient);
+            background-attachment: fixed;
+        }
+
         body {
-            background: #090c15;
+            background: transparent;
             color: var(--text-primary);
             min-height: 100vh;
             padding: 28px 24px;
             position: relative;
             overflow-x: hidden;
+        }
+
+        /* Ambient aurora glow behind the dashboard. Soft radial glows drift
+           slowly to give the flat gradient depth; the whole layer is
+           pointer-transparent and sits below the cards. */
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            z-index: -1;
+            pointer-events: none;
+            background:
+                radial-gradient(60rem 42rem at 12% -8%, rgba(6, 182, 212, 0.28), transparent 55%),
+                radial-gradient(72rem 52rem at 106% 10%, rgba(99, 102, 241, 0.32), transparent 55%),
+                radial-gradient(56rem 46rem at 86% 108%, rgba(168, 85, 247, 0.26), transparent 55%),
+                radial-gradient(46rem 36rem at 6% 92%, rgba(59, 130, 246, 0.20), transparent 55%);
+            animation: auroraDrift 26s ease-in-out infinite alternate;
+        }
+
+        @keyframes auroraDrift {
+            0%   { transform: translate3d(0, 0, 0) scale(1); }
+            50%  { transform: translate3d(2%, -2%, 0) scale(1.05); }
+            100% { transform: translate3d(-2%, 2%, 0) scale(1.02); }
         }
 
         .container {
@@ -2332,7 +2364,7 @@ html { scroll-behavior: smooth; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .glass-card, .header, .blob { animation: none !important; transition: none !important; }
+    .glass-card, .header, .blob, body::before { animation: none !important; transition: none !important; }
 }
 
 /* Keyboard-focus visibility (accessibility) on interactive controls */
@@ -2440,7 +2472,15 @@ html[data-theme="light"] {
     --tooltip-bg: rgba(255, 255, 255, 0.98);
     --badge-ink: #4338ca;
 }
-html[data-theme="light"] body { background: var(--bg-gradient); min-height: 100vh; }
+/* Light theme keeps body transparent (the gradient lives on html) so the
+   ambient aurora behind it stays visible; the glows are softer and pastel. */
+html[data-theme="light"] body::before {
+    background:
+        radial-gradient(60rem 42rem at 12% -8%, rgba(14, 165, 233, 0.16), transparent 55%),
+        radial-gradient(72rem 52rem at 106% 10%, rgba(99, 102, 241, 0.20), transparent 55%),
+        radial-gradient(56rem 46rem at 86% 108%, rgba(168, 85, 247, 0.14), transparent 55%),
+        radial-gradient(46rem 36rem at 6% 92%, rgba(59, 130, 246, 0.12), transparent 55%);
+}
 html[data-theme="light"] .blob { opacity: 0.09; }
 
 html[data-theme="light"] .header,

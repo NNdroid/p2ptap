@@ -15,10 +15,11 @@ require (
 	github.com/pion/transport/v3 v3.1.1
 	github.com/pion/turn/v4 v4.0.2
 	github.com/quic-go/quic-go v0.63.0
+	github.com/tdewolff/minify/v2 v2.24.24
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
-	golang.org/x/sys v0.48.0
+	golang.org/x/sys v0.49.0
 	golang.zx2c4.com/wireguard/windows v1.1.1
 )
 
@@ -103,6 +104,7 @@ require (
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/webtransport-go v0.13.0 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
+	github.com/tdewolff/parse/v2 v2.8.20 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/whyrusleeping/go-keyspace v0.0.0-20160322163242-5b898ac5add1 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
