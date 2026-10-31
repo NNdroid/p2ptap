@@ -30,6 +30,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT_DIR"
 
+# pkg/go-libp2p is not versioned (see patches/go-libp2p/README.md): it is
+# materialised from a pinned upstream tag plus the local patch. go.mod wires it
+# in with `replace github.com/libp2p/go-libp2p => ./pkg/go-libp2p`, so gomobile
+# cannot resolve ./pkg/android until the tree exists. Same guard as
+# scripts/build.sh — a fresh clone should not have to remember this step. When
+# the tree is already there the script returns immediately.
+if [ ! -d "$ROOT_DIR/pkg/go-libp2p" ]; then
+  bash "$SCRIPT_DIR/fetch-libp2p.sh"
+fi
+
 # ---- Locate Android SDK (best-effort auto-detect & fix misconfigurations) ----
 # If ANDROID_HOME mistakenly points to an NDK subfolder, strip /ndk/...
 if [[ "${ANDROID_HOME:-}" == *"/ndk"* ]] || [[ "${ANDROID_HOME:-}" == *"\\ndk"* ]]; then
@@ -59,7 +69,14 @@ if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "${ANDROID_NDK_HOME:-}" ]; then
   elif [ -n "${ANDROID_NDK_LATEST_HOME:-}" ] && [ -d "$ANDROID_NDK_LATEST_HOME" ]; then
     ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
   elif [ -d "$ANDROID_HOME/ndk" ]; then
-    ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME/ndk"/*/ 2>/dev/null | sort -V | tail -1)"
+    # Only version-shaped directories are NDKs. $SDK/ndk also collects other
+    # payloads (one host here has an ndk/magisk), and `sort -V` ranks any
+    # non-numeric name above every version number, so an unfiltered `tail -1`
+    # returns ndk/magisk — a real directory, which means the -d check below
+    # passes and the failure surfaces much later inside gomobile instead.
+    ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME/ndk"/*/ 2>/dev/null \
+      | grep -E '/[0-9]+(\.[0-9]+)+/$' \
+      | sort -V | tail -1)"
     ANDROID_NDK_HOME="${ANDROID_NDK_HOME%/}"
   elif [ -d "$ANDROID_HOME/ndk-bundle" ]; then
     ANDROID_NDK_HOME="$ANDROID_HOME/ndk-bundle"
