@@ -63,6 +63,9 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Materialise patched go-libp2p
+        uses: ./.github/actions/setup-libp2p
+
       - name: Build Linux Binaries
         env:
           GOOS: linux
@@ -114,6 +117,9 @@ jobs:
       # Pinned to the same upstream release the local scripts use, with a
       # SHA-256 check so a compromised/behind-the-network response cannot
       # inject a DLL into every published Windows artifact.
+      - name: Materialise patched go-libp2p
+        uses: ./.github/actions/setup-libp2p
+
       - name: Fetch wintun.dll (pinned, SHA-256 verified)
         env:
           GOARCH: ${{ matrix.goarch }}
@@ -197,6 +203,9 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Materialise patched go-libp2p
+        uses: ./.github/actions/setup-libp2p
+
       - name: Build macOS Binaries
         env:
           GOOS: darwin
@@ -261,6 +270,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+
+      - name: Materialise patched go-libp2p
+        uses: ./.github/actions/setup-libp2p
 
       - name: Set up Java (JDK 21 LTS)
         uses: actions/setup-java@v4

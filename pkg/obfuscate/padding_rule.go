@@ -310,17 +310,12 @@ func (r *PaddingRule) FlushThreshold(size int) int {
 //     unicast-looking byte could collide with a real frame's destination MAC.
 //   - byte 0 must not be 0xFF, so a broadcast frame (ff:ff:...:) can never match.
 //
-// The pre-existing 0xB07C prefix had its I/G bit CLEAR and could therefore
-// collide with the unicast destination MAC b0:7c:b0:7c:xx:xx. It is still
-// ACCEPTED on receive (batchMagicLegacy) so that a rolling upgrade, where the
-// peer still emits the old value, keeps working; only the new value is emitted.
 // batchMagic[0:2] also differs from the fragmentation envelope magic (0xF5A1)
 // so a batch is never mistaken for a fragment envelope.
 
 const (
-	batchMagic       uint32 = 0xB17CB17C // emits: I/G bit set, not 0xFF
-	batchMagicLegacy uint32 = 0xB07CB07C // accepts only: pre-multicast-safe value
-	batchHeaderLen          = 6          // magic(4) + count(2)
+	batchMagic     uint32 = 0xB17CB17C // I/G bit set, not 0xFF
+	batchHeaderLen        = 6          // magic(4) + count(2)
 	// minSubFrameLen is the smallest legal sub-frame (an Ethernet header).
 	// Shorter payloads are not a batch.
 	minSubFrameLen = 14
@@ -399,7 +394,7 @@ func SplitBatchPayload(payload []byte) ([][]byte, bool) {
 	if len(payload) < batchHeaderLen+2+minSubFrameLen {
 		return nil, false
 	}
-	if magic := binary.BigEndian.Uint32(payload[0:4]); magic != batchMagic && magic != batchMagicLegacy {
+	if binary.BigEndian.Uint32(payload[0:4]) != batchMagic {
 		return nil, false
 	}
 	count := int(binary.BigEndian.Uint16(payload[4:6]))

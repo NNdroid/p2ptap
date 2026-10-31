@@ -1,0 +1,13 @@
+name: Setup patched go-libp2p
+description: |
+  Materialise pkg/go-libp2p from the pinned upstream release plus the local
+  patch (see patches/go-libp2p/README.md). The tree is intentionally NOT
+  versioned, so every job that compiles or tests this module must run this
+  step first; without it `go build` fails on the missing `replace` target.
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch upstream go-libp2p and apply the local patch
+      shell: bash
+      run: ./scripts/fetch-libp2p.sh

@@ -134,6 +134,12 @@ require (
 // published v0.50.0. The fork adds tcp.WithListenControl so P2P TCP listen
 // sockets can be pinned to a physical interface (SO_BINDTODEVICE / IP_BOUND_IF),
 // keeping inbound connections off the TAP tunnel under Exit Node.
+//
+// pkg/go-libp2p is NOT versioned. It is materialised from the pin in
+// patches/go-libp2p/UPSTREAM plus patches/go-libp2p/p2ptap-v0.50.0.patch by
+//   scripts/fetch-libp2p.sh   /   scripts/fetch-libp2p.ps1
+// (scripts/build.sh and scripts/build.ps1 run it automatically when the
+// directory is missing). See patches/go-libp2p/README.md.
 replace github.com/libp2p/go-libp2p v0.50.0 => ./pkg/go-libp2p
 
 tool golang.org/x/mobile/cmd/gobind

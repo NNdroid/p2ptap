@@ -35,6 +35,13 @@ fi
 # 构建中断时给出可读提示, 并保持原退出码 (set -e 的语义不变)。
 trap 'rc=$?; printf "\n%s❌ 构建中断%s (退出码 %d)\n" "$RED$BOLD" "$RESET" "$rc" >&2; exit "$rc"' ERR
 
+# pkg/go-libp2p 不入库: 由 patches/go-libp2p 的 pin + 补丁现场生成。缺失时补一步,
+# 这样全新 clone 不必先手动执行 fetch-libp2p.sh; 已存在时是无操作的快速返回。
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -d "$_SCRIPT_DIR/../pkg/go-libp2p" ]; then
+  "$_SCRIPT_DIR/fetch-libp2p.sh"
+fi
+
 # ── 展示辅助 (纯输出, 不参与构建逻辑) ──────────────────────────────────
 rule() { printf '%s%s%s\n' "$DIM" "──────────────────────────────────────────────────────────────" "$RESET"; }
 

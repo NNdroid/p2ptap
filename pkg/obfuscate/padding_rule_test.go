@@ -228,7 +228,7 @@ func TestSplitBatchPayloadRejectsBad(t *testing.T) {
 		t.Fatal("frag-magic payload accepted as batch")
 	}
 	// Count = 0.
-	zero := []byte{0xB0, 0x7C, 0xB0, 0x7C, 0x00, 0x00}
+	zero := []byte{0xB1, 0x7C, 0xB1, 0x7C, 0x00, 0x00}
 	if _, ok := SplitBatchPayload(append(zero, make([]byte, 40)...)); ok {
 		t.Fatal("zero-count payload accepted as batch")
 	}
@@ -249,27 +249,6 @@ func TestSplitBatchPayloadRejectsBad(t *testing.T) {
 	plain := bytes.Repeat([]byte{0xEE}, 100)
 	if subs, ok := SplitBatchPayload(plain); ok || len(subs) != 0 {
 		t.Fatalf("plain payload misdetected: ok=%v subs=%d", ok, len(subs))
-	}
-}
-
-// TestSplitBatchPayloadLegacyMagicAccepted keeps a rolling upgrade working: a
-// peer that still emits the old (unicast-looking) magic must still be split.
-func TestSplitBatchPayloadLegacyMagicAccepted(t *testing.T) {
-	subs := [][]byte{bytes.Repeat([]byte{0x01}, 60), bytes.Repeat([]byte{0x02}, 100)}
-	payload := BuildBatchPayload(subs)
-	binary.BigEndian.PutUint32(payload[0:4], batchMagicLegacy)
-
-	got, ok := SplitBatchPayload(payload)
-	if !ok {
-		t.Fatal("legacy batch magic was not accepted")
-	}
-	if len(got) != len(subs) {
-		t.Fatalf("split %d sub-frames, want %d", len(got), len(subs))
-	}
-	for i := range subs {
-		if !bytes.Equal(got[i], subs[i]) {
-			t.Fatalf("sub-frame %d mismatch", i)
-		}
 	}
 }
 

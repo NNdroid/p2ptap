@@ -26,6 +26,9 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Materialise patched go-libp2p
+        uses: ./.github/actions/setup-libp2p
+
       - name: Probe /dev/net/tun and attach four TAP queues
         shell: bash
         run: |

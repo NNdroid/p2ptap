@@ -29,3 +29,10 @@ mockup/
 docs/
 .workbuddy/
 .zcode/
+
+# Local go-libp2p source tree. It is NOT vendored into git: the pin lives in
+# patches/go-libp2p/UPSTREAM and the delta in patches/go-libp2p/*.patch, which
+# scripts/fetch-libp2p.{sh,ps1} materialise into pkg/go-libp2p.
+# Keeping the 760-file upstream copy out of history avoids re-uploading the whole
+# library on every one-line patch bump.
+/pkg/go-libp2p/

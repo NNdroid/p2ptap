@@ -1,0 +1,17 @@
+# Upstream pin for the local go-libp2p patches
+#
+# pkg/go-libp2p is NOT tracked in this repository. It is materialised by
+#   scripts/fetch-libp2p.sh   (POSIX)   or   scripts/fetch-libp2p.ps1 (Windows)
+# from the exact upstream release recorded here, after which the patch below is
+# applied. Update this file ONLY together with a regenerated patch.
+#
+# module  : github.com/libp2p/go-libp2p
+# version : v0.50.0
+# commit  : 3c2c902122cb6fae3897f729a3dbb9d4665ae90d
+# date    : 2026-08-12
+# source  : https://github.com/libp2p/go-libp2p (detached at refs/tags/v0.50.0)
+#
+# go.mod carries:  replace github.com/libp2p/go-libp2p v0.50.0 => ./pkg/go-libp2p
+#
+# modules  : v0.50.0
+github.com/libp2p/go-libp2p v0.50.0 3c2c902122cb6fae3897f729a3dbb9d4665ae90d

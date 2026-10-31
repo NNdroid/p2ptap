@@ -1,0 +1,2631 @@
+diff -ruN lp2p-base/gologshim/gologshim.go lp2p-fork3/gologshim/gologshim.go
+--- lp2p-base/gologshim/gologshim.go	2026-11-01 05:15:56.604894400 +0800
++++ lp2p-fork3/gologshim/gologshim.go	2026-10-16 08:38:06.009442500 +0800
+@@ -217,7 +217,14 @@
+ })
+ 
+ func parseIPFSGoLogEnv(loggingLevelEnvStr string) (slog.Level, map[string]slog.Level, error) {
+-	fallbackLvl := slog.LevelError
++	// Upstream defaults to slog.LevelError, which silently filters out every
++	// Warn libp2p emits — including swarm.Listen's "listening failed", the only
++	// signal that a transport is registered but can never bind. A boot server
++	// that lost its /tcp/ and /quic-v1/webtransport/ listeners emitted no such
++	// line for its whole lifetime. Warn surfaces these without adding noise: a
++	// healthy mesh emits almost none. GOLOG_LOG_LEVEL still overrides, including
++	// per-system values like "swarm2=debug".
++	fallbackLvl := slog.LevelWarn
+ 	var systemToLevel map[string]slog.Level
+ 	if loggingLevelEnvStr != "" {
+ 		for kvs := range strings.SplitSeq(loggingLevelEnvStr, ",") {
+diff -ruN lp2p-base/gologshim/gologshim_test.go lp2p-fork3/gologshim/gologshim_test.go
+--- lp2p-base/gologshim/gologshim_test.go	2026-11-01 05:15:56.604894400 +0800
++++ lp2p-fork3/gologshim/gologshim_test.go	2026-10-16 08:57:25.960904900 +0800
+@@ -184,9 +184,11 @@
+ 		wantErr        bool
+ 	}{
+ 		{
++			// Local patch #19: upstream pins slog.LevelError here, which silently
++			// drops every Warn libp2p emits (see LOCAL_PATCHES.md).
+ 			name:           "empty string uses default level",
+ 			input:          "",
+-			wantFallback:   slog.LevelError,
++			wantFallback:   slog.LevelWarn,
+ 			wantSubsystems: nil,
+ 			wantErr:        false,
+ 		},
+diff -ruN lp2p-base/p2p/host/autorelay/relay_finder.go lp2p-fork3/p2p/host/autorelay/relay_finder.go
+--- lp2p-base/p2p/host/autorelay/relay_finder.go	2026-11-01 05:15:56.612580200 +0800
++++ lp2p-fork3/p2p/host/autorelay/relay_finder.go	2026-10-31 08:20:45.231230600 +0800
+@@ -18,6 +18,7 @@
+ 	"github.com/libp2p/go-libp2p/core/peer"
+ 	"github.com/libp2p/go-libp2p/p2p/host/eventbus"
+ 	circuitv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
++	pbv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/pb"
+ 	circuitv2_proto "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/proto"
+ 	"github.com/libp2p/go-libp2p/p2p/protocol/identify"
+ 
+@@ -38,6 +39,13 @@
+ 	rsvpRefreshInterval = time.Minute
+ 	rsvpExpirationSlack = 2 * time.Minute
+ 
++	// refreshRetries bounds how many times a single reservation refresh is
++	// retried before the relay is dropped. A transient Reserve error (relay
++	// restart, a busy hop, a timeout) must not permanently drop a healthy relay
++	// and force the full rediscover→connect→identify→reserve chain again.
++	refreshRetries       = 3
++	refreshRetryInterval = 10 * time.Second
++
+ 	autorelayTag  = "autorelay"
+ 	maxRelayAddrs = 100
+ )
+@@ -66,6 +74,20 @@
+ 	candidateMx                sync.Mutex
+ 	candidates                 map[peer.ID]*candidate
+ 	backoff                    map[peer.ID]time.Time
++	// reserveFails tracks CONSECUTIVE reservation failures per relay, across
++	// candidate remove/re-add cycles. A failure backs off UNLESS it is the very
++	// first failure for a relay that has NEVER held a reservation AND the relay
++	// refused the reservation with Status_PERMISSION_DENIED: that case is the
++	// startup race where the boot's ACL denies RESERVE while the mesh node's PSK
++	// handshake is still in flight, and punishing it would leave the node without
++	// a reservation (invisible to inbound circuit dials) for minutes on every
++	// boot. Every other first failure (relay down, stream closed, refusal by
++	// policy rather than ACL) still backs off immediately.
++	reserveFails map[peer.ID]int
++	// everReserved latches true once a relay has held a reservation at all, and
++	// is never reset: a relay that previously worked and now fails is degrading,
++	// so it must back off on the FIRST failure, not just consecutive ones.
++	everReserved map[peer.ID]bool
+ 	maybeConnectToRelayTrigger chan struct{} // cap: 1
+ 	// Any time _something_ happens that might cause us to need new candidates.
+ 	// This could be
+@@ -107,6 +129,8 @@
+ 		peerSource:                 conf.peerSource,
+ 		candidates:                 make(map[peer.ID]*candidate),
+ 		backoff:                    make(map[peer.ID]time.Time),
++		reserveFails:               make(map[peer.ID]int),
++		everReserved:               make(map[peer.ID]bool),
+ 		candidateFound:             make(chan struct{}, 1),
+ 		maybeConnectToRelayTrigger: make(chan struct{}, 1),
+ 		maybeRequestNewCandidates:  make(chan struct{}, 1),
+@@ -623,6 +647,14 @@
+ 			continue
+ 		}
+ 		log.Debug("adding new relay", "relay_peer", id)
++		// A successful reservation proves the relay accepts us. It ends any
++		// consecutive-failure streak and marks the relay as ever-reserved, so a
++		// LATER failure backs off immediately (degrading relay) rather than
++		// being forgiven as a would-be first failure.
++		rf.candidateMx.Lock()
++		rf.reserveFails[id] = 0
++		rf.everReserved[id] = true
++		rf.candidateMx.Unlock()
+ 		rf.relayMx.Lock()
+ 		rf.relays[id] = rsvp
+ 		numRelays := len(rf.relays)
+@@ -664,7 +696,22 @@
+ 		rsvp, err = circuitv2.Reserve(ctx, rf.host, cand.ai)
+ 		if err != nil {
+ 			rf.candidateMx.Lock()
+-			rf.backoff[id] = rf.conf.clock.Now()
++			rf.reserveFails[id]++
++			// Back off unless this is the FIRST-ever failure of a relay that
++			// has never held a reservation AND the relay refused the
++			// reservation with Status_PERMISSION_DENIED. That is the startup
++			// auth race: the boot's pskACLFilter waits only 200ms for the PSK
++			// handshake before denying, so a member that dials a split second
++			// too early can be refused even though it is legitimate. The denial
++			// resolves the moment the peer authenticates, so retry it at the
++			// next candidate re-discovery instead of blackholing the node for a
++			// whole backoff. Every other failure — the relay being down, the
++			// reservation stream closing, or the relay degrading — backs off
++			// immediately, and a relay that ever held a reservation always backs
++			// off on the first failure.
++			if rf.reserveFails[id] >= 2 || rf.everReserved[id] || !isPermissionDenied(err) {
++				rf.backoff[id] = rf.conf.clock.Now()
++			}
+ 			rf.candidateMx.Unlock()
+ 			err = fmt.Errorf("failed to reserve slot: %w", err)
+ 		}
+@@ -675,6 +722,27 @@
+ 	return rsvp, err
+ }
+ 
++// isPermissionDenied reports whether err is a reservation refusal caused by the
++// relay's access control (Status_PERMISSION_DENIED) rather than a transport or
++// protocol failure. The boot's pskACLFilter denies a reservation when the
++// peer's PSK authentication has not yet completed, so a legitimate member can
++// hit exactly this once at startup — that is the race the backoff exemption in
++// connectToRelay targets. A refused-but-not-ACL reservation (e.g. a policy
++// limit) is NOT exempted and still backs off.
++func isPermissionDenied(err error) bool {
++	// ReservationError is a value type with value receivers; match both the
++	// value and pointer forms in case a future caller wraps or re-returns it.
++	var re circuitv2.ReservationError
++	if errors.As(err, &re) {
++		return re.Status == pbv2.Status_PERMISSION_DENIED
++	}
++	var rep *circuitv2.ReservationError
++	if errors.As(err, &rep) {
++		return rep.Status == pbv2.Status_PERMISSION_DENIED
++	}
++	return false
++}
++
+ func (rf *relayFinder) refreshReservations(ctx context.Context, now time.Time) bool {
+ 	rf.relayMx.Lock()
+ 
+@@ -699,11 +767,31 @@
+ }
+ 
+ func (rf *relayFinder) refreshRelayReservation(ctx context.Context, p peer.ID) error {
+-	rsvp, err := circuitv2.Reserve(ctx, rf.host, peer.AddrInfo{ID: p})
++	// A refresh is a renewal of an EXISTING, working reservation. A transient
++	// Reserve error (relay restart, busy hop, timeout) must not permanently
++	// drop a healthy relay: retry a bounded number of times before giving up,
++	// so the relay survives one-off blips and the node is not forced through
++	// the full rediscover→connect→identify→reserve chain (and a fresh backoff)
++	// for a hiccup that a retry would have fixed.
++	var rsvp *circuitv2.Reservation
++	var err error
++	for attempt := 0; attempt < refreshRetries; attempt++ {
++		rsvp, err = circuitv2.Reserve(ctx, rf.host, peer.AddrInfo{ID: p})
++		if err == nil {
++			break
++		}
++		log.Debug("failed to refresh relay slot reservation", "relay_peer", p, "attempt", attempt+1, "err", err)
++		if attempt < refreshRetries-1 {
++			select {
++			case <-ctx.Done():
++				return fmt.Errorf("refresh aborted: %w", ctx.Err())
++			case <-time.After(refreshRetryInterval):
++			}
++		}
++	}
+ 
+ 	rf.relayMx.Lock()
+ 	if err != nil {
+-		log.Debug("failed to refresh relay slot reservation", "relay_peer", p, "err", err)
+ 		_, exists := rf.relays[p]
+ 		delete(rf.relays, p)
+ 		// unprotect the connection
+diff -ruN lp2p-base/p2p/host/basic/addrs_manager.go lp2p-fork3/p2p/host/basic/addrs_manager.go
+--- lp2p-base/p2p/host/basic/addrs_manager.go	2026-11-01 05:15:56.612580200 +0800
++++ lp2p-fork3/p2p/host/basic/addrs_manager.go	2026-10-15 07:32:14.373071900 +0800
+@@ -487,7 +487,17 @@
+ // suitable for hole punching.
+ func (a *addrsManager) HolePunchAddrs() []ma.Multiaddr {
+ 	addrs := a.DirectAddrs()
+-	addrs = slices.Clone(a.addrsFactory(addrs))
++	// applyAddrsFactory, NOT the raw addrsFactory: the factory's output is the
++	// only part of this list that bypasses getLocalAddrs, where certhashes get
++	// attached. DirectAddrs() and the observed addrs below are already hashed,
++	// but an address the factory invents (a NAT-mapped or relay endpoint) is
++	// not. webRTCTransport.CanDial and IsWebtransportMultiaddr both reject an
++	// address carrying zero certhashes, so a bare /webrtc-direct/ or
++	// /webtransport/ address handed to the peer over /libp2p/dcutr can never be
++	// dialed back and the punch silently loses that leg. Route the factory's
++	// output through the same factory→certhash pipeline the rest of the address
++	// book uses, so everything here is dialable as-is.
++	addrs = a.applyAddrsFactory(addrs)
+ 	// AllAddrs may ignore observed addresses in favour of NAT mappings.
+ 	// Use both for hole punching.
+ 	if a.observedAddrsManager != nil {
+@@ -818,10 +828,24 @@
+ 	return i.all
+ }
+ 
++// CustomInterfaceAddrsProvider allows mobile platforms (Android) where netlink is restricted
++// to provide the active network interface addresses from the host OS API.
++var CustomInterfaceAddrsProvider func() ([]ma.Multiaddr, error)
++
+ func (i *interfaceAddrsCache) updateUnlocked() {
+ 	i.all = nil
+ 
+-	ifaceAddrs, err := manet.InterfaceMultiaddrs()
++	var ifaceAddrs []ma.Multiaddr
++	var err error
++
++	if CustomInterfaceAddrsProvider != nil {
++		ifaceAddrs, err = CustomInterfaceAddrsProvider()
++	}
++
++	if len(ifaceAddrs) == 0 || err != nil {
++		ifaceAddrs, err = manet.InterfaceMultiaddrs()
++	}
++
+ 	if err != nil {
+ 		// This usually shouldn't happen, but we could be in some kind
+ 		// of funky restricted environment.
+diff -ruN lp2p-base/p2p/host/basic/addrs_manager_test.go lp2p-fork3/p2p/host/basic/addrs_manager_test.go
+--- lp2p-base/p2p/host/basic/addrs_manager_test.go	2026-11-01 05:15:56.612580200 +0800
++++ lp2p-fork3/p2p/host/basic/addrs_manager_test.go	2026-10-15 07:32:14.373071900 +0800
+@@ -906,3 +906,73 @@
+ 		t.Fatalf("failed addrs check for combination: %d", combination)
+ 	}
+ }
++
++// TestHolePunchAddrsCarryCertHashes pins the invariant that every address in
++// HolePunchAddrs is dialable as-is. The puncher exchanges these addresses with its peer
++// over /libp2p/dcutr, and each side then dials whatever it received — so an address must
++// carry whatever its transport requires. webRTCTransport.CanDial and
++// IsWebtransportMultiaddr both reject an address with zero certhashes.
++//
++// DirectAddrs() and the observed addrs are already hashed by getLocalAddrs, so the only
++// unhashed input is what the AddrsFactory invents. That is the case this test exercises:
++// a NAT-mapped WebRTC endpoint that exists ONLY in the factory. A raw addrsFactory call
++// passes it through bare and the WebRTC leg of the punch becomes undialable;
++// applyAddrsFactory routes it through the same factory->certhash pipeline the rest of the
++// address book uses.
++func TestHolePunchAddrsCarryCertHashes(t *testing.T) {
++	const certHash = "uEiAsGPzpiPGQzSlVHRXrUCT5EkTV7YFrV4VZ3hpEKTd_zg"
++	listenWrtc := ma.StringCast("/ip4/2.2.2.2/udp/8080/webrtc-direct")
++	// A bare WebRTC endpoint only the factory knows about — the case that matters,
++	// because nothing else in the address book has seen it.
++	factoryWrtc := ma.StringCast("/ip4/2.2.2.2/udp/9090/webrtc-direct")
++	privateAddr := ma.StringCast("/ip4/100.100.100.101/udp/8080/quic-v1")
++
++	am := newAddrsManagerTestCase(t, addrsManagerArgs{
++		ListenAddrs: func() []ma.Multiaddr {
++			return []ma.Multiaddr{
++				ma.StringCast("/ip4/2.2.2.2/udp/8080/quic-v1"),
++				listenWrtc,
++				privateAddr,
++			}
++		},
++		AddrsFactory: func(addrs []ma.Multiaddr) []ma.Multiaddr {
++			return append(addrs, factoryWrtc)
++		},
++		// Stands in for swarm.AddCertHashes: attach a hash to the addresses a
++		// cert-using transport serves, leave the rest alone.
++		AddCertHashes: func(addrs []ma.Multiaddr) []ma.Multiaddr {
++			for i, addr := range addrs {
++				s := addr.String()
++				if strings.Contains(s, "webrtc-direct") || strings.Contains(s, "webtransport") {
++					addrs[i] = ma.StringCast(s + "/certhash/" + certHash)
++				}
++			}
++			return addrs
++		},
++	})
++	am.updateAddrsSync()
++
++	addrs := am.HolePunchAddrs()
++	require.NotEmpty(t, addrs, "no public addresses returned")
++
++	var bareWrtc, privateLeaked, factoryHashed bool
++	for _, addr := range addrs {
++		s := addr.String()
++		if strings.Contains(s, "webrtc-direct") && !strings.Contains(s, "/certhash/") {
++			bareWrtc = true
++		}
++		if strings.HasPrefix(s, factoryWrtc.String()) && strings.Contains(s, "/certhash/") {
++			factoryHashed = true
++		}
++		if manet.IsPrivateAddr(addr) {
++			privateLeaked = true
++		}
++	}
++	require.False(t, privateLeaked,
++		"a private address leaked into the hole-punch exchange: %v", addrs)
++	require.False(t, bareWrtc,
++		"a /webrtc-direct/ hole-punch address was exchanged without a /certhash/, so the "+
++			"peer cannot dial it back (webRTCTransport.CanDial requires at least one): %v", addrs)
++	require.True(t, factoryHashed,
++		"the factory-provided WebRTC endpoint was dropped or left unhashed: %v", addrs)
++}
+diff -ruN lp2p-base/p2p/net/swarm/black_hole_p2ptap_test.go lp2p-fork3/p2p/net/swarm/black_hole_p2ptap_test.go
+--- lp2p-base/p2p/net/swarm/black_hole_p2ptap_test.go	1970-01-01 08:00:00.000000000 +0800
++++ lp2p-fork3/p2p/net/swarm/black_hole_p2ptap_test.go	2026-10-13 17:26:04.362883500 +0800
+@@ -0,0 +1,60 @@
++package swarm
++
++import "testing"
++
++// p2ptap installs a UDP counter with MinSuccesses = 0, i.e. the filter can
++// never block. See the SwarmOpts wiring in pkg/node for why: blocking public
++// UDP would strip every direct address from every peer, while hole punching
++// and DCUtR are the only way to reach a symmetric-NAT peer at all — and
++// p2ptap always has a relay fallback, so the cost of a genuinely blocked UDP
++// path is wasted dial time, not lost connectivity.
++func TestBlackHoleSuccessCounterZeroMinNeverBlocks(t *testing.T) {
++	c := &BlackHoleSuccessCounter{N: 100, MinSuccesses: 0, Name: "UDP"}
++	for i := 0; i < c.N*3; i++ {
++		c.RecordResult(false)
++	}
++	if st := c.State(); st != blackHoleStateAllowed {
++		t.Fatalf("state = %v, want Allowed", st)
++	}
++	if st := c.HandleRequest(); st != blackHoleStateAllowed {
++		t.Fatalf("HandleRequest = %v, want Allowed", st)
++	}
++}
++
++// The stock threshold does block, which is the hazard behind the p2ptap
++// override. Combined with NoDelayDialRanker — which fires every address of a
++// peer at delay 0, so one peer round yields six results instead of one — a
++// fleet containing a handful of relay-only peers sinks the success ratio below
++// 5% and the filter strips public UDP for every peer on the node for 99 of
++// every 100 dial attempts.
++func TestBlackHoleSuccessCounterStockThresholdBlocksOnFailures(t *testing.T) {
++	c := &BlackHoleSuccessCounter{N: 100, MinSuccesses: 5, Name: "UDP"}
++	for i := 0; i < c.N*2; i++ {
++		c.RecordResult(false)
++	}
++	if st := c.State(); st != blackHoleStateBlocked {
++		t.Fatalf("state = %v, want Blocked", st)
++	}
++
++	// Blocked must be reported to callers: this is what wastes the dial
++	// budget, 99 of every 100 requests refused before a single dial starts.
++	if st := c.HandleRequest(); st != blackHoleStateBlocked {
++		t.Fatalf("HandleRequest = %v, want Blocked", st)
++	}
++
++	// A single success does NOT restore Allowed: reset() empties the sample
++	// window — and the triggering success is consumed by the reset rather than
++	// recorded — so an under-sized window is Probing. FilterAddrs still allows
++	// public addresses while probing, so the probe runs and rebuilds a full
++	// window before the state can clear.
++	c.RecordResult(true)
++	if st := c.State(); st != blackHoleStateProbing {
++		t.Fatalf("state after one success = %v, want Probing", st)
++	}
++	for i := 0; i < c.N; i++ {
++		c.RecordResult(true)
++	}
++	if st := c.State(); st != blackHoleStateAllowed {
++		t.Fatalf("state after a full window of successes = %v, want Allowed", st)
++	}
++}
+diff -ruN lp2p-base/p2p/net/swarm/swarm_dial.go lp2p-fork3/p2p/net/swarm/swarm_dial.go
+--- lp2p-base/p2p/net/swarm/swarm_dial.go	2026-11-01 05:15:56.642763700 +0800
++++ lp2p-fork3/p2p/net/swarm/swarm_dial.go	2026-10-31 11:45:07.166793400 +0800
+@@ -600,10 +600,33 @@
+ 		connC, err = tpt.Dial(ctx, addr, p)
+ 	}
+ 
+-	// We're recording any error as a failure here.
+-	// Notably, this also applies to cancellations (i.e. if another dial attempt was faster).
+-	// This is ok since the black hole detector uses a very low threshold (5%).
+-	s.bhd.RecordResult(addr, err == nil)
++	// Record the outcome as a network result, but never let a *swarm-initiated
++	// cancellation* count as a failure. Every address of a peer is dialed with
++	// the same peer-dial ctx, so when one of them succeeds the dial worker
++	// returns, the peer-dial ctx is cancelled, and every sibling still in
++	// flight surfaces an "operation was canceled" error. That says nothing
++	// about whether the address is reachable. The stock ranker makes this
++	// harmless (the losers never start because the first dial already won),
++	// but a NoDelay ranker fires every address of a peer at delay 0, so one
++	// peer round would yield N-1 cancellations against a single success and
++	// silently poison the counter for every peer on the node.
++	//
++	// Only context.Cause is consulted, never err. When the peer-dial budget
++	// expires the OS also reports the interrupted connect as "operation was
++	// canceled", so matching on err would swallow genuine timeouts — the exact
++	// signal this detector exists to collect, and dropping it would leave the
++	// sample window empty forever, so the state could never leave Probing for
++	// an unreachable address. With cause == deadline exceeded the dial is a
++	// real attempt that failed, and it is recorded as one.
++	if err != nil {
++		if errors.Is(context.Cause(ctx), context.Canceled) {
++			// Lost the race, or the caller gave up: not a network result.
++		} else {
++			s.bhd.RecordResult(addr, false)
++		}
++	} else {
++		s.bhd.RecordResult(addr, true)
++	}
+ 
+ 	if err != nil {
+ 		if s.metricsTracer != nil {
+@@ -630,6 +653,58 @@
+ 	return connC, nil
+ }
+ 
++// DialPeerToAddr forces a new outbound connection to peer p over the specific
++// multiaddr addr, even if an acceptable connection to p already exists. It is
++// used by higher layers (e.g. p2ptap's multipath path-repair) to establish
++// additional parallel paths to the same peer — over a different IP family
++// (IPv4 vs IPv6) or transport (TCP vs QUIC) — which the standard Host.Connect
++// short-circuits on: Host.Connect returns the existing connection as soon as
++// the peer is "Connected", and swarm.dialPeer likewise returns the best
++// existing connection via bestAcceptableConnToPeer.
++//
++// The returned connection is fully upgraded (security handshake + peer
++// verification) and registered with the swarm, so it appears in
++// ConnsToPeer(p) alongside any pre-existing connection. It does NOT go through
++// the dial-rate limiter or the per-peer dialSync dedup; callers are responsible
++// for throttling their own attempts (p2ptap does this via mpRepair* intervals).
++func (s *Swarm) DialPeerToAddr(ctx context.Context, p peer.ID, addr ma.Multiaddr) (network.Conn, error) {
++	if err := p.Validate(); err != nil {
++		return nil, err
++	}
++	if p == s.local {
++		return nil, ErrDialToSelf
++	}
++	if s.gater != nil {
++		if !s.gater.InterceptPeerDial(p) {
++			return nil, &DialError{Peer: p, Cause: ErrGaterDisallowedConnection}
++		}
++		if !s.gater.InterceptAddrDial(p, addr) {
++			return nil, &DialError{Peer: p, Cause: ErrGaterDisallowedConnection}
++		}
++	}
++
++	// Drain DialUpdate events from transports that emit them (e.g. QUIC). We do
++	// not need the updates, but the channel must be consumed to avoid blocking
++	// the dial.
++	updCh := make(chan transport.DialUpdate, 8)
++	go func() {
++		for range updCh {
++		}
++	}()
++	defer close(updCh)
++
++	connC, err := s.dialAddr(ctx, p, addr, updCh)
++	if err != nil {
++		return nil, err
++	}
++	conn, err := s.addConn(connC, network.DirOutbound)
++	if err != nil {
++		connC.Close()
++		return nil, err
++	}
++	return conn, nil
++}
++
+ // TODO We should have a `IsFdConsuming() bool` method on the `Transport` interface in go-libp2p/core/transport.
+ // This function checks if any of the transport protocols in the address requires a file descriptor.
+ // For now:
+diff -ruN lp2p-base/p2p/net/swarm/swarm_transport.go lp2p-fork3/p2p/net/swarm/swarm_transport.go
+--- lp2p-base/p2p/net/swarm/swarm_transport.go	2026-11-01 05:15:56.643893500 +0800
++++ lp2p-fork3/p2p/net/swarm/swarm_transport.go	2026-10-29 10:55:35.126239400 +0800
+@@ -77,6 +77,23 @@
+ }
+ 
+ // AddTransport adds a transport to this swarm.
++// Transports returns a snapshot of every distinct transport registered on this
++// swarm. Transports may cover several protocols, so duplicates are removed.
++func (s *Swarm) Transports() []transport.Transport {
++	s.transports.RLock()
++	defer s.transports.RUnlock()
++	out := make([]transport.Transport, 0, len(s.transports.m))
++	seen := make(map[transport.Transport]struct{}, len(s.transports.m))
++	for _, t := range s.transports.m {
++		if _, ok := seen[t]; ok {
++			continue
++		}
++		seen[t] = struct{}{}
++		out = append(out, t)
++	}
++	return out
++}
++
+ //
+ // Satisfies the Network interface from go-libp2p-transport.
+ func (s *Swarm) AddTransport(t transport.Transport) error {
+diff -ruN lp2p-base/p2p/protocol/circuitv2/client/transport.go lp2p-fork3/p2p/protocol/circuitv2/client/transport.go
+--- lp2p-base/p2p/protocol/circuitv2/client/transport.go	2026-11-01 05:15:56.649371500 +0800
++++ lp2p-fork3/p2p/protocol/circuitv2/client/transport.go	2026-10-25 18:56:08.008000200 +0800
+@@ -85,6 +85,12 @@
+ 	conn.tagHop()
+ 	cc, err := c.upgrader.Upgrade(ctx, c, conn, network.DirOutbound, p, connScope)
+ 	if err != nil {
++		// On upgrade failure the hop stream and its tag would leak: the conn
++		// stays tagged "relay-hop-stream" at weight 5, shielding it from
++		// ConnManager pruning, and hopCount grows without bound. Close the
++		// conn and drop the tag.
++		conn.untagHop()
++		conn.Close()
+ 		return nil, err
+ 	}
+ 	return capableConn{cc.(capableConnWithStat)}, nil
+diff -ruN lp2p-base/p2p/protocol/circuitv2/relay/constraints.go lp2p-fork3/p2p/protocol/circuitv2/relay/constraints.go
+--- lp2p-base/p2p/protocol/circuitv2/relay/constraints.go	2026-11-01 05:15:56.651380300 +0800
++++ lp2p-fork3/p2p/protocol/circuitv2/relay/constraints.go	2026-10-25 18:56:01.347454000 +0800
+@@ -47,16 +47,33 @@
+ 
+ // Reserve adds a reservation for a given peer with a given multiaddr.
+ // If adding this reservation violates IP, ASN, or total reservation constraints, an error is returned.
++//
++// Validation order matters: cleanupPeer (which drops the peer's previous
++// reservation from total/ips/asns) MUST run only after every cap check has
++// passed. Removing it before the checks means a refresh that violates a cap
++// (peer's IP/ASN/total reservation is over quota) desyncs the peer's
++// reservation state — the peer loses its existing constraint footprint while
++// r.rsvp still considers it eligible to CONNECT, so the peer becomes
++// reservation-eligible without a constraints entry. Reorder the cleanupPeer
++// call to AFTER the caps pass and the desync cannot happen: a rejected
++// refresh leaves the peer's previous reservation intact.
+ func (c *constraints) Reserve(p peer.ID, a ma.Multiaddr, expiry time.Time) error {
+ 	c.mutex.Lock()
+ 	defer c.mutex.Unlock()
+ 
+ 	now := time.Now()
+ 	c.cleanup(now)
+-	// To handle refreshes correctly, remove the existing reservation for the peer.
+-	c.cleanupPeer(p)
+ 
+-	if len(c.total) >= c.rc.MaxReservations {
++	// Check caps WITHOUT dropping the peer's existing reservation yet. This
++	// means a refresh that would go over quota sees the pre-refresh total,
++	// which is the intended semantics (the caller is only allowed to add one
++	// fresh reservation at a time; the previous one is replaced at the end of
++	// this function, not dropped mid-way).
++	//
++	// Use countExcluding for the total cap too — a peer refreshing an existing
++	// reservation must not be denied just because the pool is at capacity,
++	// since the refresh replaces the old entry and adds no net new slot.
++	if c.countExcluding(c.total, p) >= c.rc.MaxReservations {
+ 		return errTooManyReservations
+ 	}
+ 
+@@ -65,8 +82,11 @@
+ 		return errors.New("no IP address associated with peer")
+ 	}
+ 
++	// Subtract the peer's existing reservation from the effective count for
++	// this IP/ASN before comparing: a refresh must not be denied just because
++	// the peer already holds one slot against the same cap.
+ 	ipReservations := c.ips[ip.String()]
+-	if len(ipReservations) >= c.rc.MaxReservationsPerIP {
++	if c.countExcluding(ipReservations, p) >= c.rc.MaxReservationsPerIP {
+ 		return errTooManyReservationsForIP
+ 	}
+ 
+@@ -76,24 +96,43 @@
+ 		asn = asnutil.AsnForIPv6(ip)
+ 		if asn != 0 {
+ 			asnReservations = c.asns[asn]
+-			if len(asnReservations) >= c.rc.MaxReservationsPerASN {
++			if c.countExcluding(asnReservations, p) >= c.rc.MaxReservationsPerASN {
+ 				return errTooManyReservationsForASN
+ 			}
+ 		}
+ 	}
+ 
+-	c.total = append(c.total, peerWithExpiry{Expiry: expiry, Peer: p})
++	// All caps passed. Now swap in the refreshed reservation: drop the
++	// peer's previous entry (if any) and commit the new one.
++	c.cleanupPeer(p)
++	ipReservations = c.ips[ip.String()]
+ 
++	c.total = append(c.total, peerWithExpiry{Expiry: expiry, Peer: p})
+ 	ipReservations = append(ipReservations, peerWithExpiry{Expiry: expiry, Peer: p})
+ 	c.ips[ip.String()] = ipReservations
+ 
+ 	if asn != 0 {
++		asnReservations = c.asns[asn]
+ 		asnReservations = append(asnReservations, peerWithExpiry{Expiry: expiry, Peer: p})
+ 		c.asns[asn] = asnReservations
+ 	}
+ 	return nil
+ }
+ 
++// countExcluding counts entries in list whose Peer is not p. Used to decide
++// whether a peer refreshing an existing reservation is still within the
++// per-IP / per-ASN cap, without double-counting the slot it is about to
++// replace.
++func (c *constraints) countExcluding(list []peerWithExpiry, p peer.ID) int {
++	n := 0
++	for _, pe := range list {
++		if pe.Peer != p {
++			n++
++		}
++	}
++	return n
++}
++
+ func (c *constraints) cleanup(now time.Time) {
+ 	expireFunc := func(pe peerWithExpiry) bool {
+ 		return pe.Expiry.Before(now)
+diff -ruN lp2p-base/p2p/protocol/circuitv2/relay/relay.go lp2p-fork3/p2p/protocol/circuitv2/relay/relay.go
+--- lp2p-base/p2p/protocol/circuitv2/relay/relay.go	2026-11-01 05:15:56.652384900 +0800
++++ lp2p-fork3/p2p/protocol/circuitv2/relay/relay.go	2026-10-25 18:56:15.655037600 +0800
+@@ -272,13 +272,13 @@
+ 		r.handleError(s, status)
+ 	}
+ 
+-	// reserve buffers for the relay
+-	if err := span.ReserveMemory(2*r.rc.BufferSize, network.ReservationPriorityHigh); err != nil {
+-		log.Debug("error reserving memory for relay",
+-			"error", err)
+-		fail(pbv2.Status_RESOURCE_LIMIT_EXCEEDED)
+-		return pbv2.Status_RESOURCE_LIMIT_EXCEEDED
+-	}
++	// Validate the request BEFORE reserving relay buffers. The previous
++	// order reserved memory first (span.ReserveMemory), then ran the
++	// isRelayAddr, PeerToPeerInfoV2, and ACL checks. On rejection the
++	// fail() path released the reservation, but the reservation was made
++	// unnecessarily — a denial-of-service vector where a peer floods
++	// malformed or ACL-denied CONNECT requests to consume the relay's
++	// memory budget before the slow validation runs.
+ 
+ 	if isRelayAddr(a) {
+ 		log.Debug("refusing connection",
+@@ -293,6 +293,17 @@
+ 		return pbv2.Status_MALFORMED_MESSAGE
+ 	}
+ 
++	// Reject circuits to self: addConn(src) + addConn(dest.ID) would count 2
++	// against the same peer's MaxCircuits, halving its budget. The NewStream
++	// to self would also burn a relay stream against the stop handler.
++	if src == dest.ID {
++		log.Debug("refusing connection",
++			"source_peer", src,
++			"reason", "source == destination")
++		fail(pbv2.Status_PERMISSION_DENIED)
++		return pbv2.Status_PERMISSION_DENIED
++	}
++
+ 	if r.acl != nil && !r.acl.AllowConnect(src, s.Conn().RemoteMultiaddr(), dest.ID) {
+ 		log.Debug("refusing connection",
+ 			"source_peer", src,
+@@ -302,6 +313,14 @@
+ 		return pbv2.Status_PERMISSION_DENIED
+ 	}
+ 
++	// All validation passed. Now reserve buffers for the relay.
++	if err := span.ReserveMemory(2*r.rc.BufferSize, network.ReservationPriorityHigh); err != nil {
++		log.Debug("error reserving memory for relay",
++			"error", err)
++		fail(pbv2.Status_RESOURCE_LIMIT_EXCEEDED)
++		return pbv2.Status_RESOURCE_LIMIT_EXCEEDED
++	}
++
+ 	r.mx.Lock()
+ 	_, rsvp := r.rsvp[dest.ID]
+ 	if !rsvp {
+diff -ruN lp2p-base/p2p/protocol/holepunch/metrics.go lp2p-fork3/p2p/protocol/holepunch/metrics.go
+--- lp2p-base/p2p/protocol/holepunch/metrics.go	2026-11-01 05:15:56.653389300 +0800
++++ lp2p-fork3/p2p/protocol/holepunch/metrics.go	2026-09-01 11:12:56.815353700 +0800
+@@ -35,10 +35,31 @@
+ 		[]string{"side", "num_attempts", "outcome"},
+ 	)
+ 
++	// New counters for timeout events
++	holePunchTimeouts = prometheus.NewCounterVec(
++		prometheus.CounterOpts{
++			Namespace: metricNamespace,
++			Name:      "holepunch_timeouts_total",
++			Help:      "Total hole‑punch timeout events (direct or relay)",
++		},
++		[]string{"type"},
++	)
++
++	relayTimeouts = prometheus.NewCounterVec(
++		prometheus.CounterOpts{
++			Namespace: metricNamespace,
++			Name:      "relay_timeouts_total",
++			Help:      "Total relay timeout events",
++		},
++		[]string{"reason"},
++	)
++
+ 	collectors = []prometheus.Collector{
+ 		directDialsTotal,
+ 		hpAddressOutcomesTotal,
+ 		hpOutcomesTotal,
++		holePunchTimeouts,
++		relayTimeouts,
+ 	}
+ )
+ 
+diff -ruN lp2p-base/p2p/protocol/holepunch/tracer.go lp2p-fork3/p2p/protocol/holepunch/tracer.go
+--- lp2p-base/p2p/protocol/holepunch/tracer.go	2026-11-01 05:15:56.654393800 +0800
++++ lp2p-fork3/p2p/protocol/holepunch/tracer.go	2026-09-01 11:12:56.815353700 +0800
+@@ -2,6 +2,7 @@
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"sync"
+ 	"time"
+ 
+@@ -164,6 +165,9 @@
+ 	}
+ 
+ 	if t.mt != nil {
++		if errors.Is(err, context.DeadlineExceeded) {
++			holePunchTimeouts.WithLabelValues("direct").Inc()
++		}
+ 		t.mt.DirectDialFinished(false)
+ 	}
+ }
+diff -ruN lp2p-base/p2p/security/tls/crypto.go lp2p-fork3/p2p/security/tls/crypto.go
+--- lp2p-base/p2p/security/tls/crypto.go	2026-11-01 05:15:56.661133200 +0800
++++ lp2p-fork3/p2p/security/tls/crypto.go	2026-10-14 09:52:43.531746600 +0800
+@@ -24,6 +24,17 @@
+ 
+ const certValidityPeriod = 100 * 365 * 24 * time.Hour // ~100 years
+ const certificatePrefix = "libp2p-tls-handshake:"
++
++// alpn is the fallback ALPN advertised on the QUIC ClientHello when no muxer is
++// negotiated via ALPN.
++//
++// RETRACTED LOCAL PATCH (was "h3"). Offering "h3" made the QUIC listener
++// register an ALPN that WebTransport must also register, and quicreuse refuses
++// the second registration — so a node running both transports on one UDP port
++// lost one of them entirely. "libp2p" is upstream and is accepted by every
++// libp2p implementation, patched or not. The security transport still recognises
++// "h3" as a valid non-muxer ALPN (see transport.go) so WebTransport keeps
++// working. See LOCAL_PATCHES.md.
+ const alpn string = "libp2p"
+ 
+ var extensionID = getPrefixedExtensionID([]int{1, 1})
+@@ -150,6 +161,11 @@
+ 		keyCh <- pubKey
+ 		return nil
+ 	}
++	// p2ptap LOCAL PATCH: apply the resolved SNI (per-peer suffix or static name)
++	// to this per-peer clone so BOTH TLS-over-TCP (SecureOutbound) and QUIC dials
++	// present the same server_name from one setting. remote drives the per-peer
++	// label when a suffix is configured. Server-side handshakes ignore it. (sni.go)
++	applyDialServerName(conf, remote.String())
+ 	return conf, keyCh
+ }
+ 
+diff -ruN lp2p-base/p2p/security/tls/sni.go lp2p-fork3/p2p/security/tls/sni.go
+--- lp2p-base/p2p/security/tls/sni.go	1970-01-01 08:00:00.000000000 +0800
++++ lp2p-fork3/p2p/security/tls/sni.go	2026-09-12 13:13:54.197789400 +0800
+@@ -0,0 +1,186 @@
++package libp2ptls
++
++import (
++	"crypto/sha256"
++	"crypto/tls"
++	"strings"
++	"sync"
++	"time"
++)
++
++// This file is a p2ptap LOCAL PATCH to go-libp2p's TLS security transport. It
++// centralises the handshake server_name (SNI) so a single operator setting
++// applies to BOTH TLS-over-TCP (SecureOutbound) and QUIC (whose transport builds
++// its tls.Config from the same Identity.ConfigForPeer). See LOCAL_PATCHES.md.
++//
++// Why central: upstream libp2p leaves ServerName unset (QUIC/TLS dial by IP
++// multiaddr, and real HTTP/3 clients always send SNI, so "no SNI" is itself a
++// DPI tell). p2ptap lets the operator supply a plausible server_name to look like
++// ordinary HTTP/3. Doing it per-transport (only QUIC) would be inconsistent, so
++// it is done here where both transports share the client tls.Config.
++
++// dialServerName / dialSNISuffix are the two SNI modes; suffix wins if set.
++//   - suffix != "": per-peer SNI = "<label(remote PeerID)>.<suffix>" — a distinct,
++//     stable DNS-safe label per link under one base domain.
++//   - else name != "": static SNI for every dial.
++//   - else: no SNI (upstream behaviour).
++//
++// Guarded like the other p2ptap runtime hooks; set once from config before dials.
++var (
++	sniMu          sync.RWMutex
++	dialServerName string
++	dialSNISuffix  string
++)
++
++// SetDialServerName registers the static SNI placed on outgoing TLS/QUIC
++// ClientHellos. An empty value (the default) sends no server_name, preserving
++// upstream behaviour and full interop with stock libp2p peers.
++func SetDialServerName(name string) {
++	sniMu.Lock()
++	dialServerName = name
++	sniMu.Unlock()
++}
++
++// SetDialSNISuffix enables per-peer derived SNI: outgoing ClientHellos carry
++// "<label(remote PeerID)>.<suffix>". Takes precedence over SetDialServerName.
++// An empty suffix disables it (falls back to the static name, or none).
++func SetDialSNISuffix(suffix string) {
++	suffix = strings.Trim(strings.TrimSpace(suffix), ".")
++	sniMu.Lock()
++	dialSNISuffix = suffix
++	sniMu.Unlock()
++}
++
++// DialServerName returns the configured static outgoing SNI ("" = none).
++func DialServerName() string {
++	sniMu.RLock()
++	defer sniMu.RUnlock()
++	return dialServerName
++}
++
++// DialSNISuffix returns the configured per-peer SNI suffix ("" = disabled).
++func DialSNISuffix() string {
++	sniMu.RLock()
++	defer sniMu.RUnlock()
++	return dialSNISuffix
++}
++
++// peerSNILabel turns a remote Peer ID into a short, lowercase, DNS-label-safe
++// prefix (RFC1123: [a-z0-9-], no leading/trailing '-'). Uses the first 8 bytes
++// of SHA-256 hex — stable for a given peer, distinct across peers, no entropy
++// beyond the peer identity already implied by the connection.
++func peerSNILabel(remote string) string {
++	if remote == "" {
++		return ""
++	}
++	sum := sha256.Sum256([]byte("p2ptap-sni:" + remote))
++	const hexdigits = "0123456789abcdef"
++	var b [16]byte
++	for i := range b {
++		b[i] = hexdigits[sum[i]&0xf]
++	}
++	return string(b[:])
++}
++
++// resolveDialServerName computes the SNI for a dial to the given remote peer ID.
++// Suffix mode wins; else static name; else empty (no SNI).
++func resolveDialServerName(remote string) string {
++	sniMu.RLock()
++	name, suffix := dialServerName, dialSNISuffix
++	sniMu.RUnlock()
++	if suffix != "" {
++		if label := peerSNILabel(remote); label != "" {
++			return label + "." + suffix
++		}
++		// No peer id yet (rare): fall back to the static name if any.
++		return name
++	}
++	return name
++}
++
++// applyDialServerName sets conf.ServerName for an outgoing (client) handshake to
++// the resolved SNI (per-peer suffix or static name). remote is the peer ID being
++// dialed (empty for the listener / unknown). Server-side configs ignore
++// ServerName in crypto/tls, so it is harmless to apply on the shared clone.
++func applyDialServerName(conf *tls.Config, remote string) {
++	if conf == nil || conf.ServerName != "" {
++		return
++	}
++	if sni := resolveDialServerName(remote); sni != "" {
++		conf.ServerName = sni
++	}
++}
++
++// --- Inbound SNI observation (operator visibility into what peers advertise) ---
++//
++// When a peer handshakes with US, its ClientHello server_name is visible in
++// GetConfigForClient before the peer identity is known. We key it by the remote
++// IP:port (the same string the node attributes connections by) — in a small
++// bounded map — and expose it so the node can show, per connected peer, the SNI
++// the peer actually presented. Keying by IP:port (not just IP) avoids conflating
++// two peers behind one NAT egress. This lets an operator verify a tls_server_name
++// rollout reached every node instead of assuming it.
++
++type observedSNI struct {
++	serverName string
++	seenAt     time.Time
++}
++
++const (
++	observedSNITTL        = 30 * time.Minute
++	observedSNIMaxEntries = 2048
++)
++
++var (
++	observedSNIMu    sync.Mutex
++	observedServerNI map[string]observedSNI = make(map[string]observedSNI)
++)
++
++// ObserveInboundServerName is the exported entry point used by the QUIC
++// transport's listener (which builds its tls.Config separately) to record the
++// server_name a peer presented, keyed by its remote host, for WebUI display.
++// No-op on empty inputs.
++func ObserveInboundServerName(remoteHost, serverName string) {
++	observeInboundServerName(remoteHost, serverName)
++}
++
++// observeInboundServerName records the server_name a peer presented, keyed by its
++// remote host. Best-effort: an oversized map is pruned by age rather than
++// growing unbounded (a connection flood must not turn this into a memory DoS).
++func observeInboundServerName(remoteHost, serverName string) {
++	if remoteHost == "" || serverName == "" {
++		return
++	}
++	observedSNIMu.Lock()
++	defer observedSNIMu.Unlock()
++	if len(observedServerNI) >= observedSNIMaxEntries {
++		// Opportunistic prune; if still too big, evict the oldest entries.
++		now := time.Now()
++		for k, v := range observedServerNI {
++			if now.Sub(v.seenAt) > observedSNITTL {
++				delete(observedServerNI, k)
++			}
++		}
++		if len(observedServerNI) >= observedSNIMaxEntries {
++			for k := range observedServerNI {
++				delete(observedServerNI, k)
++				if len(observedServerNI) < observedSNIMaxEntries/2 {
++					break
++				}
++			}
++		}
++	}
++	observedServerNI[remoteHost] = observedSNI{serverName: serverName, seenAt: time.Now()}
++}
++
++// InboundServerNames returns a snapshot of remote-host → last-presented SNI. The
++// node uses each connection's remote IP to attribute it to a peer for display.
++func InboundServerNames() map[string]string {
++	observedSNIMu.Lock()
++	defer observedSNIMu.Unlock()
++	out := make(map[string]string, len(observedServerNI))
++	for k, v := range observedServerNI {
++		out[k] = v.serverName
++	}
++	return out
++}
+diff -ruN lp2p-base/p2p/security/tls/sni_test.go lp2p-fork3/p2p/security/tls/sni_test.go
+--- lp2p-base/p2p/security/tls/sni_test.go	1970-01-01 08:00:00.000000000 +0800
++++ lp2p-fork3/p2p/security/tls/sni_test.go	2026-09-12 11:50:57.506831600 +0800
+@@ -0,0 +1,59 @@
++package libp2ptls
++
++import (
++	"strings"
++	"testing"
++)
++
++// TestSniResolution locks the SNI mode precedence + per-peer label properties:
++// suffix mode wins and yields a distinct, stable, DNS-safe "<label>.<suffix>"
++// per peer; static mode applies the literal name; neither set means no SNI.
++func TestSniResolution(t *testing.T) {
++	const peerA = "12D3KooWPeerAAAA"
++	const peerB = "12D3KooWPeerBBBB"
++
++	// No config -> no SNI.
++	SetDialServerName("")
++	SetDialSNISuffix("")
++	if got := resolveDialServerName(peerA); got != "" {
++		t.Fatalf("empty config must yield no SNI, got %q", got)
++	}
++
++	// Static mode.
++	SetDialServerName("www.example.com")
++	if got := resolveDialServerName(peerA); got != "www.example.com" {
++		t.Fatalf("static SNI = %q, want www.example.com", got)
++	}
++
++	// Suffix mode wins over static, and is per-peer distinct + stable.
++	SetDialSNISuffix("cdn.example.net")
++	sniA := resolveDialServerName(peerA)
++	sniA2 := resolveDialServerName(peerA)
++	sniB := resolveDialServerName(peerB)
++	if !strings.HasSuffix(sniA, ".cdn.example.net") {
++		t.Fatalf("suffix SNI %q must end with .cdn.example.net", sniA)
++	}
++	if sniA != sniA2 {
++		t.Fatal("same peer must derive a stable SNI")
++	}
++	if sniA == sniB {
++		t.Fatal("distinct peers must derive distinct SNIs")
++	}
++	// Label must be a single DNS-safe label (RFC1123-ish): lowercase hex, no
++	// leading/trailing dash, no dots inside the prefix.
++	label := strings.TrimSuffix(sniA, ".cdn.example.net")
++	if label == "" || strings.Contains(label, ".") || label != strings.ToLower(label) {
++		t.Fatalf("derived label %q is not a clean single DNS label", label)
++	}
++	for _, r := range label {
++		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
++			t.Fatalf("label %q contains non [a-z0-9] char %q", label, r)
++		}
++	}
++
++	// Suffix cleared -> falls back to static.
++	SetDialSNISuffix("")
++	if got := resolveDialServerName(peerA); got != "www.example.com" {
++		t.Fatalf("after clearing suffix, SNI = %q, want static www.example.com", got)
++	}
++}
+diff -ruN lp2p-base/p2p/security/tls/transport.go lp2p-fork3/p2p/security/tls/transport.go
+--- lp2p-base/p2p/security/tls/transport.go	2026-11-01 05:15:56.662143300 +0800
++++ lp2p-fork3/p2p/security/tls/transport.go	2026-09-12 12:51:59.589986900 +0800
+@@ -72,6 +72,15 @@
+ 	// We want to prefer the client's preference though.
+ 	getConfigForClient := config.GetConfigForClient
+ 	config.GetConfigForClient = func(info *tls.ClientHelloInfo) (*tls.Config, error) {
++		// p2ptap LOCAL PATCH: record the server_name the peer presented so the
++		// WebUI can show, per connected peer, what SNI it actually advertised
++		// (lets an operator confirm a tls_server_name rollout reached every node).
++		// Best-effort and non-authoritative — never blocks the handshake.
++		if info != nil && info.ServerName != "" && info.Conn != nil && info.Conn.RemoteAddr() != nil {
++			// Key by the full IP:port (matches the node-side attribution) so two
++			// peers sharing one NAT egress IP are not conflated.
++			observeInboundServerName(info.Conn.RemoteAddr().String(), info.ServerName)
++		}
+ 	alpnLoop:
+ 		for _, proto := range info.SupportedProtos {
+ 			for _, m := range muxers {
+@@ -156,12 +165,13 @@
+ 	}
+ 
+ 	nextProto := tlsConn.ConnectionState().NegotiatedProtocol
+-	// The special ALPN extension value "libp2p" is used by libp2p versions
+-	// that don't support early muxer negotiation. If we see this sepcial
+-	// value selected, that means we are handshaking with a version that does
+-	// not support early muxer negotiation. In this case return empty nextProto
+-	// to indicate no muxer is selected.
+-	if nextProto == "libp2p" {
++	// The special ALPN extension values "libp2p" (upstream) and "h3" (p2ptap
++	// LOCAL PATCH — we advertise "h3" as the non-muxer ALPN to defeat DPI
++	// classification) are placeholders used when early muxer negotiation did
++	// not select a real multiplexer. If we see either selected, treat it as "no
++	// muxer negotiated" so the caller falls back to multistream-select rather
++	// than wrongly reading "h3" as a muxer ID.
++	if nextProto == "libp2p" || nextProto == "h3" {
+ 		nextProto = ""
+ 	}
+ 
+diff -ruN lp2p-base/p2p/transport/quic/options.go lp2p-fork3/p2p/transport/quic/options.go
+--- lp2p-base/p2p/transport/quic/options.go	2026-11-01 05:15:56.668282500 +0800
++++ lp2p-fork3/p2p/transport/quic/options.go	2026-09-12 02:08:54.868811100 +0800
+@@ -17,3 +17,9 @@
+ 		return nil
+ 	}
+ }
++
++// NOTE (p2ptap): outgoing QUIC ClientHello SNI is configured centrally in the
++// p2ptls identity (see p2p/security/tls SetDialServerName + ConfigForPeer), NOT
++// here — so TLS-over-TCP and QUIC dials share ONE server_name setting, matching
++// how both transports obtain their tls.Config from the same Identity. See
++// pkg/go-libp2p/LOCAL_PATCHES.md.
+diff -ruN lp2p-base/p2p/transport/quic/transport.go lp2p-fork3/p2p/transport/quic/transport.go
+--- lp2p-base/p2p/transport/quic/transport.go	2026-11-01 05:15:56.668282500 +0800
++++ lp2p-fork3/p2p/transport/quic/transport.go	2026-10-14 09:52:20.300741200 +0800
+@@ -140,6 +140,9 @@
+ 	}
+ 
+ 	tlsConf, keyCh := t.identity.ConfigForPeer(p)
++	// ServerName (SNI) is applied inside p2ptls.ConfigForPeer for BOTH the TCP-TLS
++	// and QUIC client paths from one shared setting — see p2p/security/tls. Nothing
++	// to do here.
+ 	ctx = quicreuse.WithAssociation(ctx, t)
+ 	pconn, err := t.connManager.DialQUIC(ctx, raddr, tlsConf, t.allowWindowIncrease)
+ 	if err != nil {
+@@ -289,7 +292,14 @@
+ // Listen listens for new QUIC connections on the passed multiaddr.
+ func (t *transport) Listen(addr ma.Multiaddr) (tpt.Listener, error) {
+ 	var tlsConf tls.Config
+-	tlsConf.GetConfigForClient = func(_ *tls.ClientHelloInfo) (*tls.Config, error) {
++	tlsConf.GetConfigForClient = func(info *tls.ClientHelloInfo) (*tls.Config, error) {
++		// p2ptap LOCAL PATCH: record the peer's presented SNI (keyed by the full
++		// remote IP:port, matching the node-side attribution so two peers behind
++		// one NAT egress IP are not conflated) for WebUI display. Non-blocking,
++		// never affects the handshake.
++		if info != nil && info.ServerName != "" && info.Conn != nil && info.Conn.RemoteAddr() != nil {
++			p2ptls.ObserveInboundServerName(info.Conn.RemoteAddr().String(), info.ServerName)
++		}
+ 		// return a tls.Config that verifies the peer's certificate chain.
+ 		// Note that since we have no way of associating an incoming QUIC connection with
+ 		// the peer ID calculated here, we don't actually receive the peer's public key
+@@ -297,6 +307,15 @@
+ 		conf, _ := t.identity.ConfigForPeer("")
+ 		return conf, nil
+ 	}
++	// RETRACTED LOCAL PATCH (was "h3", "libp2p"). QUIC's registered ALPN set
++	// must stay DISJOINT from WebTransport's: quicreuse.Listener.Add refuses to
++	// register an ALPN that is already on the listener, and WebTransport's
++	// required "h3" therefore collides with a QUIC listener that also offers
++	// "h3". Both protocols sharing one UDP port — the normal p2ptap
++	// configuration — then dies with "already listening for protocol h3" and
++	// one of the two transports silently advertises an address nobody can
++	// reach. QUIC must therefore register "libp2p" only, which is also what
++	// every unpatched peer accepts. See LOCAL_PATCHES.md.
+ 	tlsConf.NextProtos = []string{"libp2p"}
+ 	udpAddr, version, err := quicreuse.FromQuicMultiaddr(addr)
+ 	if err != nil {
+diff -ruN lp2p-base/p2p/transport/quicreuse/config.go lp2p-fork3/p2p/transport/quicreuse/config.go
+--- lp2p-base/p2p/transport/quicreuse/config.go	2026-11-01 05:15:56.669287000 +0800
++++ lp2p-fork3/p2p/transport/quicreuse/config.go	2026-10-31 07:13:22.224582800 +0800
+@@ -6,13 +6,44 @@
+ 	"github.com/quic-go/quic-go"
+ )
+ 
++// quicConfig is the base config for every QUIC and WebTransport connection this
++// process accepts or dials (see ConnManager.clientConfig and newQuicListener).
++//
++// NOTE (p2ptap): the receive windows below are tuned for a VPN, not for the
++// request/response traffic upstream libp2p expects. A flow-control window is a
++// hard ceiling on throughput: bytes in flight cannot exceed it, so the best a
++// single stream can do is window/RTT. At the upstream defaults (512 KB initial,
++// 6 MB max stream, 15 MB connection) a transfer over a 100 ms path tops out
++// around 490 Mbps no matter how fast the link is, and the initial 512 KB makes
++// the first few hundred milliseconds of every bulk transfer crawl.
++//
++// Raising them costs no memory up front — quic-go sizes these as credit, and
++// only payload actually in flight occupies a buffer — so the ceilings are set
++// roughly an order of magnitude above the largest paths this overlay is
++// expected to run over (32 MB covers 1.28 Gbps at 200 ms RTT). The initial
++// windows are raised as well so a transfer reaches the ceiling in one RTT
++// instead of ramping through quic-go's window autotuning.
+ var quicConfig = &quic.Config{
+-	MaxIncomingStreams:         256,
+-	MaxIncomingUniStreams:      5,              // allow some unidirectional streams, in case we speak WebTransport
+-	MaxStreamReceiveWindow:     10 * (1 << 20), // 10 MB
+-	MaxConnectionReceiveWindow: 15 * (1 << 20), // 15 MB
+-	KeepAlivePeriod:            15 * time.Second,
+-	Versions:                   []quic.Version{quic.Version1},
++	MaxIncomingStreams:             256,
++	MaxIncomingUniStreams:          5,              // allow some unidirectional streams, in case we speak WebTransport
++	InitialStreamReceiveWindow:     1 * (1 << 20),  // 1 MB (quic-go default: 512 KB)
++	MaxStreamReceiveWindow:         32 * (1 << 20), // 32 MB (upstream libp2p: 10 MB)
++	InitialConnectionReceiveWindow: 4 * (1 << 20),  // 4 MB
++	MaxConnectionReceiveWindow:     64 * (1 << 20), // 64 MB (upstream libp2p: 15 MB)
++	// KeepAlivePeriod + MaxIdleTimeout together bound how long a path may be
++	// silently dead before the transport itself notices. Under "multipath" a
++	// path whose QUIC write still "succeeds" (the peer stops ACKing but the
++	// connection has not timed out) otherwise stalls its frames for up to the
++	// 30s upstream idle timeout — the scheduler thinks it delivered and never
++	// fails over. With a 5s keepalive below a 10s idle timeout, QUIC sends a
++	// PING every 5s on an idle connection, and a peer that does not answer is
++	// disconnected in ~10s: the stream write then fails and the existing
++	// writeMultipathLocked failover + per-path breaker + EnsureStreamsOnAllConns
++	// repair take over. A healthy idle peer ACKs the keepalive, so it is never
++	// dropped — the 10s window only closes genuinely dead links.
++	KeepAlivePeriod: 5 * time.Second,
++	MaxIdleTimeout:  10 * time.Second,
++	Versions:        []quic.Version{quic.Version1},
+ 	// We don't use datagrams (yet), but this is necessary for WebTransport
+ 	EnableDatagrams: true,
+ 	// Required for WebTransport
+diff -ruN lp2p-base/p2p/transport/quicreuse/listener.go lp2p-fork3/p2p/transport/quicreuse/listener.go
+--- lp2p-base/p2p/transport/quicreuse/listener.go	2026-11-01 05:15:56.669287000 +0800
++++ lp2p-fork3/p2p/transport/quicreuse/listener.go	2026-10-13 18:59:52.570090600 +0800
+@@ -95,6 +95,16 @@
+ 	l.protocolsMu.Lock()
+ 	defer l.protocolsMu.Unlock()
+ 
++	// A dead listener's running channel is closed. Attaching to it would hand
++	// the caller a listener whose acceptLoopRunning is already closed, so every
++	// Accept fails at once and the address is unreachable for the rest of the
++	// process. Failing here loudly lets the transport drop the address instead.
++	select {
++	case <-l.running:
++		return nil, fmt.Errorf("quic listener on %s is closed", l.l.Addr())
++	default:
++	}
++
+ 	if len(tlsConf.NextProtos) == 0 {
+ 		return nil, errors.New("no ALPN found in tls.Config")
+ 	}
+@@ -150,6 +160,12 @@
+ 			if errors.Is(err, quic.ErrServerClosed) || strings.Contains(err.Error(), "use of closed network connection") {
+ 				return transport.ErrListenerClosed
+ 			}
++			// Previously this error was discarded outright: Run() returns, the
++			// entry stays in the ConnManager's table with a refcount > 0, and
++			// the next listener on this address reuses it — attaching protocols
++			// to a listener whose running channel is already closed, which made
++			// every Accept fail instantly and the address dead forever.
++			log.Error("quic listener accept failed; listener is dead and no longer accepting", "addr", l.l.Addr(), "error", err)
+ 			return err
+ 		}
+ 		proto := conn.ConnectionState().TLS.NegotiatedProtocol
+diff -ruN lp2p-base/p2p/transport/tcp/tcp.go lp2p-fork3/p2p/transport/tcp/tcp.go
+--- lp2p-base/p2p/transport/tcp/tcp.go	2026-11-01 05:15:56.671296200 +0800
++++ lp2p-fork3/p2p/transport/tcp/tcp.go	2026-10-12 20:37:21.319410600 +0800
+@@ -63,6 +63,47 @@
+ 			log.Error("failed set keepalive period", "error", err)
+ 		}
+ 	}
++
++	setKeepAliveIdle(conn, keepAlivePeriod)
++}
++
++// setKeepAliveIdle sets TCP_KEEPIDLE so that keepalive probing starts after
++// keepAlivePeriod of silence instead of after the kernel default (7200 s on
++// Linux).
++//
++// Without this, keepalive is configured but almost never fires: most NATs and
++// middleboxes destroy an idle TCP mapping within minutes, long before the first
++// probe is scheduled. The mapping is gone while both ends still believe the
++// connection is alive, so the link hangs indefinitely instead of failing fast —
++// and nothing on the Go side reports a failure, because the very next write is
++// what finally gets a RST. Setting the idle timer to the probe period keeps the
++// NAT mapping re-armed every interval and makes a dead link detectable.
++//
++// It must be applied through the raw socket because net.TCPConn exposes only
++// SetKeepAlive and SetKeepAlivePeriod, neither of which reaches the idle timer.
++func setKeepAliveIdle(conn net.Conn, idle time.Duration) {
++	rawConn, ok := conn.(interface{ RawConn() (syscall.RawConn, error) })
++	if !ok {
++		return
++	}
++	rc, err := rawConn.RawConn()
++	if err != nil {
++		return
++	}
++	sec := int(idle.Seconds())
++	if sec <= 0 {
++		sec = int(time.Second)
++	}
++	var sockErr error
++	if err := rc.Control(func(fd uintptr) {
++		sockErr = setKeepAliveParams(fd, sec, sec)
++	}); err != nil {
++		log.Debug("failed to reach raw socket for keepalive idle time", "error", err)
++		return
++	}
++	if sockErr != nil {
++		log.Debug("failed to set TCP keepalive idle time", "error", sockErr)
++	}
+ }
+ 
+ // try to set linger on the connection, if possible.
+@@ -118,6 +159,17 @@
+ 	}
+ }
+ 
++// ListenControlFn is a function matching net.ListenConfig.Control hook.
++type ListenControlFn func(network, address string, c syscall.RawConn) error
++
++// WithListenControl sets a Control hook for net.ListenConfig when creating TCP listeners.
++func WithListenControl(fn ListenControlFn) Option {
++	return func(tr *TcpTransport) error {
++		tr.listenControl = fn
++		return nil
++	}
++}
++
+ // WithDialerForAddr sets a custom dialer for the given address.
+ // If set, it will be the *ONLY* dialer used.
+ func WithDialerForAddr(d DialerForAddr) Option {
+@@ -147,6 +199,8 @@
+ 	// dial or the shared TCP transport for dialing.
+ 	overrideDialerForAddr DialerForAddr
+ 
++	listenControl ListenControlFn
++
+ 	disableReuseport bool // Explicitly disable reuseport.
+ 	enableMetrics    bool
+ 
+@@ -308,6 +362,18 @@
+ }
+ 
+ func (t *TcpTransport) unsharedMAListen(laddr ma.Multiaddr) (manet.Listener, error) {
++	if t.listenControl != nil {
++		nw, addr, err := manet.DialArgs(laddr)
++		if err != nil {
++			return nil, err
++		}
++		lc := net.ListenConfig{Control: t.listenControl}
++		l, err := lc.Listen(context.Background(), nw, addr)
++		if err != nil {
++			return nil, err
++		}
++		return manet.WrapNetListener(l)
++	}
+ 	if t.UseReuseport() {
+ 		return t.reuse.Listen(laddr)
+ 	}
+diff -ruN lp2p-base/p2p/transport/tcp/tcp_keepalive_darwin.go lp2p-fork3/p2p/transport/tcp/tcp_keepalive_darwin.go
+--- lp2p-base/p2p/transport/tcp/tcp_keepalive_darwin.go	1970-01-01 08:00:00.000000000 +0800
++++ lp2p-fork3/p2p/transport/tcp/tcp_keepalive_darwin.go	2026-10-12 20:36:34.465351500 +0800
+@@ -0,0 +1,17 @@
++//go:build darwin
++
++package tcp
++
++import (
++	"golang.org/x/sys/unix"
++)
++
++// setKeepAliveParams sets the TCP keepalive idle and probe interval on a raw
++// socket. Darwin names the idle option TCP_KEEPALIVE rather than TCP_KEEPIDLE,
++// so it is set explicitly here instead of being left at the 300 s default.
++func setKeepAliveParams(fd uintptr, idle int, interval int) error {
++	if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_KEEPALIVE, idle); err != nil {
++		return err
++	}
++	return unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_KEEPINTVL, interval)
++}
+diff -ruN lp2p-base/p2p/transport/tcp/tcp_keepalive_other.go lp2p-fork3/p2p/transport/tcp/tcp_keepalive_other.go
+--- lp2p-base/p2p/transport/tcp/tcp_keepalive_other.go	1970-01-01 08:00:00.000000000 +0800
++++ lp2p-fork3/p2p/transport/tcp/tcp_keepalive_other.go	2026-10-12 20:37:07.825639700 +0800
+@@ -0,0 +1,15 @@
++//go:build !linux && !darwin && !freebsd && !netbsd && !dragonfly
++
++package tcp
++
++// setKeepAliveParams sets the TCP keepalive idle time on a raw socket. This
++// build tag covers Windows and OpenBSD, where the idle option is not available
++// through the same socket level and number: on Windows TCP_KEEPIDLE is a winsock
++// constant not exported by golang.org/x/sys/unix, and on OpenBSD it is spelled
++// TCP_KEEPALIVE with a different numeric value. SO_KEEPALIVE and the probe
++// interval are still applied by tryKeepAlive, so keepalive works — only the idle
++// delay stays at the OS default, which makes dead-connection detection slower on
++// those platforms.
++func setKeepAliveParams(fd uintptr, idle int, interval int) error {
++	return nil
++}
+diff -ruN lp2p-base/p2p/transport/tcp/tcp_keepalive_unix.go lp2p-fork3/p2p/transport/tcp/tcp_keepalive_unix.go
+--- lp2p-base/p2p/transport/tcp/tcp_keepalive_unix.go	1970-01-01 08:00:00.000000000 +0800
++++ lp2p-fork3/p2p/transport/tcp/tcp_keepalive_unix.go	2026-10-12 20:36:26.158233700 +0800
+@@ -0,0 +1,25 @@
++//go:build linux || freebsd || netbsd || dragonfly
++
++package tcp
++
++import (
++	"golang.org/x/sys/unix"
++)
++
++// setKeepAliveParams sets the TCP keepalive idle and probe interval on a raw
++// socket.
++//
++// SO_KEEPALIVE alone is not enough. The kernel only starts probing after
++// TCP_KEEPIDLE seconds of no data, and Linux defaults that to 7200 s. Most NATs
++// and middleboxes destroy idle TCP mappings far sooner, so a keepalive enabled
++// with only SetKeepAlive never fires before the mapping is already gone: the
++// connection is a corpse that nobody notices. Setting the idle time to the probe
++// period makes the first probe start promptly, which both re-arms the NAT
++// mapping on every interval and turns a silently dead link into a readable
++// RST/FIN.
++func setKeepAliveParams(fd uintptr, idle int, interval int) error {
++	if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_KEEPIDLE, idle); err != nil {
++		return err
++	}
++	return unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_KEEPINTVL, interval)
++}
+diff -ruN lp2p-base/p2p/transport/webrtc/connection.go lp2p-fork3/p2p/transport/webrtc/connection.go
+--- lp2p-base/p2p/transport/webrtc/connection.go	2026-11-01 05:15:56.673350600 +0800
++++ lp2p-fork3/p2p/transport/webrtc/connection.go	2026-10-09 15:17:45.901732000 +0800
+@@ -226,6 +226,9 @@
+ func (c *connection) Scope() network.ConnScope      { return c.scope }
+ func (c *connection) Transport() tpt.Transport      { return c.transport }
+ 
++// IsWebRTC returns true, identifying this as a WebRTC connection.
++func (c *connection) IsWebRTC() bool { return true }
++
+ func (c *connection) addStream(str *stream) error {
+ 	c.m.Lock()
+ 	defer c.m.Unlock()
+diff -ruN lp2p-base/p2p/transport/webrtc/listener.go lp2p-fork3/p2p/transport/webrtc/listener.go
+--- lp2p-base/p2p/transport/webrtc/listener.go	2026-11-01 05:15:56.674422900 +0800
++++ lp2p-fork3/p2p/transport/webrtc/listener.go	2026-10-14 19:33:27.594711800 +0800
+@@ -97,9 +97,11 @@
+ 	l.mux = udpmux.NewUDPMux(socket)
+ 	l.mux.Start()
+ 
+-	l.wg.Go(func() {
++	l.wg.Add(1)
++	go func() {
++		defer l.wg.Done()
+ 		l.listen()
+-	})
++	}()
+ 
+ 	return l, err
+ }
+@@ -120,7 +122,21 @@
+ 		candidate, err := l.mux.Accept(l.ctx)
+ 		if err != nil {
+ 			if l.ctx.Err() == nil {
+-				log.Debug("accepting candidate failed", "error", err)
++				// Our context is still alive, so the mux died underneath us
++				// (a read error on its socket — e.g. the interface it was bound
++				// to went away). Without propagating that here we become a
++				// zombie: listen() returns but nobody cancels l.ctx, so Accept
++				// blocks forever, the swarm never sees ErrListenerClosed and
++				// keeps advertising an address that can no longer accept
++				// anything, and the mux's UDP socket is never closed. Cancel
++				// l.ctx to make Accept return ErrListenerClosed, and close the
++				// mux to release the socket. l.ctx is derived from
++				// context.Background(), not from mux.ctx, so this only stops
++				// accepting NEW candidates — it cannot take down connections
++				// that are already established.
++				log.Error("udpmux died under the listener; withdrawing it", "local_addr", l.mux.GetListenAddresses(), "error", err)
++				l.mux.Close()
++				l.cancel()
+ 			}
+ 			return
+ 		}
+@@ -201,6 +217,9 @@
+ 	serverUfrag := candidate.LocalUfrag
+ 
+ 	settingEngine := webrtc.SettingEngine{LoggerFactory: pionLoggerFactory}
++	if l.transport.customNet != nil {
++		settingEngine.SetNet(l.transport.customNet)
++	}
+ 	settingEngine.SetAnsweringDTLSRole(webrtc.DTLSRoleServer)
+ 	settingEngine.SetICECredentials(serverUfrag, serverUfrag)
+ 	settingEngine.SetLite(true)
+@@ -222,7 +241,29 @@
+ 		return nil, err
+ 	}
+ 
+-	w, err = newWebRTCConnection(settingEngine, l.config)
++	// Never hand this (lite) agent the ICE server list. WebRTC Direct's listener
++	// is a LITE ICE agent, which per RFC 5245 publishes only host candidates, so
++	// pion builds its agent with CandidateTypes = [host] (see
++	// ICEGatherer.createAgent). ice.NewAgent then refuses to build an agent that
++	// was handed URLs it can never use:
++	//
++	//	if len(config.Urls) > 0 && !contains(srflx) && !contains(relay) {
++	//		return nil, ErrUselessUrlsProvided
++	//	}
++	//
++	// A lite agent has neither of those candidate types, so the error is
++	// guaranteed — and it is returned synchronously at agent construction, i.e.
++	// before the first ICE packet. That aborts every inbound WebRTC peer
++	// connection, so configuring even one STUN server silently disabled the
++	// whole listener; the default configuration ships eight UDP STUN servers.
++	// The servers are useless to a lite agent in any case: it can neither bind
++	// to a STUN server nor allocate a TURN relay, since both need the srflx and
++	// relay candidate types that would require SetLite(false). Dropping the list
++	// here instead keeps the dialer side unaffected, which IS a full agent and
++	// legitimately uses STUN/TURN.
++	config := l.config
++	config.ICEServers = nil
++	w, err = newWebRTCConnection(settingEngine, config)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("instantiating peer connection failed: %w", err)
+ 	}
+diff -ruN lp2p-base/p2p/transport/webrtc/signal.go lp2p-fork3/p2p/transport/webrtc/signal.go
+--- lp2p-base/p2p/transport/webrtc/signal.go	1970-01-01 08:00:00.000000000 +0800
++++ lp2p-fork3/p2p/transport/webrtc/signal.go	2026-10-29 10:43:46.122378400 +0800
+@@ -0,0 +1,406 @@
++package libp2pwebrtc
++
++import (
++	"context"
++	"crypto"
++	"errors"
++	"fmt"
++	"net"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/libp2p/go-libp2p/core/network"
++	"github.com/libp2p/go-libp2p/core/peer"
++	tpt "github.com/libp2p/go-libp2p/core/transport"
++	ma "github.com/multiformats/go-multiaddr"
++	manet "github.com/multiformats/go-multiaddr/net"
++
++	"github.com/pion/webrtc/v4"
++)
++
++// SignalTransport carries the SDP offer/answer for a signaled WebRTC dial.
++//
++// The exchange is NON-trickle: the offer is sent exactly once after local ICE
++// gathering completes (so it already contains every gathered host / srflx /
++// TURN-relay candidate), and the answer is received exactly once. The remote
++// SDP is what carries the remote's gathered candidates — this is the piece
++// webrtc-direct cannot do, because it synthesizes the SDP from a multiaddr and
++// therefore only ever knows a single host candidate.
++//
++// Implementations decide the transport (a direct stream, an overlay relay
++// tunnel, a circuit-relay stream, ...) and own the timeout.
++type SignalTransport interface {
++	// SendSDP delivers one side's SDP (isOffer=true for the offerer).
++	SendSDP(ctx context.Context, sdp string, isOffer bool) error
++	// RecvSDP blocks until the peer's SDP arrives, or returns on ctx.
++	RecvSDP(ctx context.Context) (sdp string, isOffer bool, err error)
++}
++
++// DialSignal establishes a full-ICE WebRTC connection to remote, exchanging
++// SDP through sig instead of inferring it from a /webrtc-direct multiaddr.
++//
++// Unlike WebRTC Direct (no signaling), this peer connection is a FULL ICE agent
++// (SetLite(false) — the default), so it gathers host, server-reflexive (STUN)
++// and relay (TURN) candidates and the remote learns them from the SDP. That is
++// what lets the connection survive when the remote listener sits behind NAT:
++// the answer's srflx/relay candidates are reachable, whereas the single host
++// candidate webrtc-direct would have used is not.
++//
++// The connection is fully authenticated (DTLS + Noise over the negotiated
++// data channel 0) and returned as a CapableConn that is NOT registered with any
++// swarm — the caller decides how to surface it (e.g. register its streams with
++// a strategy dispatcher).
++func (t *WebRTCTransport) DialSignal(ctx context.Context, remote peer.ID, sig SignalTransport) (tpt.CapableConn, error) {
++	scope, err := t.rcmgr.OpenConnection(network.DirOutbound, false, nil)
++	if err != nil {
++		return nil, err
++	}
++	if err := scope.SetPeer(remote); err != nil {
++		scope.Done()
++		return nil, err
++	}
++	conn, err := t.dialSignal(ctx, scope, remote, sig)
++	if err != nil {
++		scope.Done()
++		return nil, err
++	}
++	return conn, nil
++}
++
++func (t *WebRTCTransport) dialSignal(ctx context.Context, scope network.ConnManagementScope, remote peer.ID, sig SignalTransport) (tConn tpt.CapableConn, err error) {
++	var w webRTCConnection
++	defer func() {
++		if err != nil {
++			if w.PeerConnection != nil {
++				_ = w.PeerConnection.Close()
++			}
++			if tConn != nil {
++				_ = tConn.Close()
++				tConn = nil
++			}
++		}
++	}()
++
++	settingEngine := webrtc.SettingEngine{LoggerFactory: pionLoggerFactory}
++	if t.customNet != nil {
++		settingEngine.SetNet(t.customNet)
++	}
++	// Full ICE agent (no SetLite): gather host + srflx + TURN relay candidates.
++	// Both sides generate independent local credentials; the SDP carries them,
++	// so no ufrag/pwd recovery-from-STUN trickery is needed (unlike webrtc-direct).
++	settingEngine.SetICECredentials(randIceString(32), randIceString(32))
++	settingEngine.DetachDataChannels()
++	settingEngine.SetPrflxAcceptanceMinWait(0)
++	settingEngine.SetICETimeouts(
++		t.peerConnectionTimeouts.Disconnect,
++		t.peerConnectionTimeouts.Failed,
++		t.peerConnectionTimeouts.Keepalive,
++	)
++	settingEngine.SetIncludeLoopbackCandidate(true)
++	settingEngine.SetSCTPMaxReceiveBufferSize(sctpReceiveBufferSize)
++	if err := scope.ReserveMemory(sctpReceiveBufferSize, network.ReservationPriorityMedium); err != nil {
++		return nil, err
++	}
++
++	w, err = newWebRTCConnection(settingEngine, t.configWithIceServers())
++	if err != nil {
++		return nil, fmt.Errorf("instantiating peer connection failed: %w", err)
++	}
++	errC := addOnConnectionStateChangeCallback(w.PeerConnection)
++	gatherDone := waitForGatherComplete(w.PeerConnection)
++
++	// Non-trickle offer: wait for gathering to finish so the SDP already carries
++	// every candidate, then send it once.
++	offer, err := w.PeerConnection.CreateOffer(nil)
++	if err != nil {
++		return nil, fmt.Errorf("create offer: %w", err)
++	}
++	if err := w.PeerConnection.SetLocalDescription(offer); err != nil {
++		return nil, fmt.Errorf("set local description: %w", err)
++	}
++	select {
++	case <-gatherDone:
++	case <-ctx.Done():
++		return nil, ctx.Err()
++	}
++	localDesc := w.PeerConnection.LocalDescription()
++	if localDesc == nil {
++		return nil, errors.New("local description nil after gathering")
++	}
++	if err := sig.SendSDP(ctx, localDesc.SDP, true); err != nil {
++		return nil, fmt.Errorf("send offer: %w", err)
++	}
++
++	answerSDP, isOffer, err := sig.RecvSDP(ctx)
++	if err != nil {
++		return nil, fmt.Errorf("recv answer: %w", err)
++	}
++	if isOffer {
++		return nil, errors.New("expected answer, got offer")
++	}
++	if err := w.PeerConnection.SetRemoteDescription(webrtc.SessionDescription{SDP: answerSDP, Type: webrtc.SDPTypeAnswer}); err != nil {
++		return nil, fmt.Errorf("set remote description: %w", err)
++	}
++
++	// Await ICE + DTLS + SCTP connectivity.
++	select {
++	case err := <-errC:
++		if err != nil {
++			return nil, err
++		}
++	case <-ctx.Done():
++		return nil, errors.New("peerconnection opening timed out")
++	}
++
++	// Run the Noise handshake over the negotiated data channel 0. We are the
++	// DTLS server (we answer), matching webrtc-direct's dialer role, so the
++	// inbound flag is false (SecureInbound).
++	remoteHash, err := sdpFingerprintHash(answerSDP)
++	if err != nil {
++		return nil, fmt.Errorf("remote fingerprint: %w", err)
++	}
++	detached, err := detachHandshakeDataChannel(ctx, w.HandshakeDataChannel)
++	if err != nil {
++		return nil, err
++	}
++	channel := newStream(w.HandshakeDataChannel, detached, maxSendMessageSize, nil)
++	remotePubKey, err := t.noiseHandshake(ctx, w.PeerConnection, channel, remote, remoteHash, false)
++	if err != nil {
++		return nil, err
++	}
++
++	// Derive local/remote multiaddrs from the selected candidate pair.
++	cp, err := w.HandshakeDataChannel.Transport().Transport().ICETransport().GetSelectedCandidatePair()
++	if err != nil {
++		return nil, fmt.Errorf("ice selected candidate pair: %w", err)
++	}
++	if cp == nil {
++		return nil, errors.New("ice connection did not have selected candidate pair: nil result")
++	}
++	localAddr, err := udpCandidateMultiaddr(cp.Local.Address, int(cp.Local.Port))
++	if err != nil {
++		return nil, err
++	}
++	remoteAddr, err := udpCandidateMultiaddr(cp.Remote.Address, int(cp.Remote.Port))
++	if err != nil {
++		return nil, err
++	}
++
++	conn, err := newConnection(network.DirOutbound, w.PeerConnection, t, scope,
++		t.localPeerId, localAddr, remote, remotePubKey, remoteAddr,
++		w.IncomingDataChannels, w.PeerConnectionClosedCh)
++	if err != nil {
++		return nil, err
++	}
++	if t.gater != nil && !t.gater.InterceptSecured(network.DirOutbound, remote, &connMultiaddrs{local: localAddr, remote: remoteAddr}) {
++		_ = conn.Close()
++		return nil, errors.New("gater rejected secured connection")
++	}
++	return conn, nil
++}
++
++// AcceptSignal accepts an inbound full-ICE WebRTC connection whose SDP offer
++// arrives over sig. It answers with the local SDP (after gathering completes)
++// and returns the authenticated connection. The caller must have already
++// validated that remote is the peer it expects (the signal channel is trusted
++// for peer identity; the Noise handshake enforces it cryptographically).
++func (t *WebRTCTransport) AcceptSignal(ctx context.Context, remote peer.ID, sig SignalTransport) (tpt.CapableConn, error) {
++	scope, err := t.rcmgr.OpenConnection(network.DirInbound, false, nil)
++	if err != nil {
++		return nil, err
++	}
++	if err := scope.SetPeer(remote); err != nil {
++		scope.Done()
++		return nil, err
++	}
++	conn, err := t.acceptSignal(ctx, scope, remote, sig)
++	if err != nil {
++		scope.Done()
++		return nil, err
++	}
++	return conn, nil
++}
++
++func (t *WebRTCTransport) acceptSignal(ctx context.Context, scope network.ConnManagementScope, remote peer.ID, sig SignalTransport) (tConn tpt.CapableConn, err error) {
++	var w webRTCConnection
++	defer func() {
++		if err != nil {
++			if w.PeerConnection != nil {
++				_ = w.PeerConnection.Close()
++			}
++			if tConn != nil {
++				_ = tConn.Close()
++				tConn = nil
++			}
++		}
++	}()
++
++	settingEngine := webrtc.SettingEngine{LoggerFactory: pionLoggerFactory}
++	if t.customNet != nil {
++		settingEngine.SetNet(t.customNet)
++	}
++	settingEngine.SetICECredentials(randIceString(32), randIceString(32))
++	settingEngine.DetachDataChannels()
++	settingEngine.SetPrflxAcceptanceMinWait(0)
++	settingEngine.SetICETimeouts(
++		t.peerConnectionTimeouts.Disconnect,
++		t.peerConnectionTimeouts.Failed,
++		t.peerConnectionTimeouts.Keepalive,
++	)
++	settingEngine.SetIncludeLoopbackCandidate(true)
++	settingEngine.SetSCTPMaxReceiveBufferSize(sctpReceiveBufferSize)
++	if err := scope.ReserveMemory(sctpReceiveBufferSize, network.ReservationPriorityMedium); err != nil {
++		return nil, err
++	}
++
++	w, err = newWebRTCConnection(settingEngine, t.configWithIceServers())
++	if err != nil {
++		return nil, fmt.Errorf("instantiating peer connection failed: %w", err)
++	}
++	errC := addOnConnectionStateChangeCallback(w.PeerConnection)
++	gatherDone := waitForGatherComplete(w.PeerConnection)
++
++	offerSDP, isOffer, err := sig.RecvSDP(ctx)
++	if err != nil {
++		return nil, fmt.Errorf("recv offer: %w", err)
++	}
++	if !isOffer {
++		return nil, errors.New("expected offer, got answer")
++	}
++	if err := w.PeerConnection.SetRemoteDescription(webrtc.SessionDescription{SDP: offerSDP, Type: webrtc.SDPTypeOffer}); err != nil {
++		return nil, fmt.Errorf("set remote description: %w", err)
++	}
++	answer, err := w.PeerConnection.CreateAnswer(nil)
++	if err != nil {
++		return nil, fmt.Errorf("create answer: %w", err)
++	}
++	if err := w.PeerConnection.SetLocalDescription(answer); err != nil {
++		return nil, fmt.Errorf("set local description: %w", err)
++	}
++	select {
++	case <-gatherDone:
++	case <-ctx.Done():
++		return nil, ctx.Err()
++	}
++	localDesc := w.PeerConnection.LocalDescription()
++	if localDesc == nil {
++		return nil, errors.New("local description nil after gathering")
++	}
++	if err := sig.SendSDP(ctx, localDesc.SDP, false); err != nil {
++		return nil, fmt.Errorf("send answer: %w", err)
++	}
++
++	select {
++	case err := <-errC:
++		if err != nil {
++			return nil, err
++		}
++	case <-ctx.Done():
++		return nil, errors.New("peerconnection opening timed out")
++	}
++
++	// We are the DTLS client (we offer), matching webrtc-direct's listener
++	// role, so the inbound flag is true (SecureOutbound).
++	remoteHash, err := sdpFingerprintHash(offerSDP)
++	if err != nil {
++		return nil, fmt.Errorf("remote fingerprint: %w", err)
++	}
++	detached, err := detachHandshakeDataChannel(ctx, w.HandshakeDataChannel)
++	if err != nil {
++		return nil, err
++	}
++	channel := newStream(w.HandshakeDataChannel, detached, maxSendMessageSize, nil)
++	remotePubKey, err := t.noiseHandshake(ctx, w.PeerConnection, channel, remote, remoteHash, true)
++	if err != nil {
++		return nil, err
++	}
++
++	cp, err := w.HandshakeDataChannel.Transport().Transport().ICETransport().GetSelectedCandidatePair()
++	if err != nil {
++		return nil, fmt.Errorf("ice selected candidate pair: %w", err)
++	}
++	if cp == nil {
++		return nil, errors.New("ice connection did not have selected candidate pair: nil result")
++	}
++	localAddr, err := udpCandidateMultiaddr(cp.Local.Address, int(cp.Local.Port))
++	if err != nil {
++		return nil, err
++	}
++	remoteAddr, err := udpCandidateMultiaddr(cp.Remote.Address, int(cp.Remote.Port))
++	if err != nil {
++		return nil, err
++	}
++
++	conn, err := newConnection(network.DirInbound, w.PeerConnection, t, scope,
++		t.localPeerId, localAddr, remote, remotePubKey, remoteAddr,
++		w.IncomingDataChannels, w.PeerConnectionClosedCh)
++	if err != nil {
++		return nil, err
++	}
++	if t.gater != nil && !t.gater.InterceptSecured(network.DirInbound, remote, &connMultiaddrs{local: localAddr, remote: remoteAddr}) {
++		_ = conn.Close()
++		return nil, errors.New("gater rejected secured connection")
++	}
++	return conn, nil
++}
++
++// udpCandidateMultiaddr builds a UDP multiaddr from a candidate address/port.
++func udpCandidateMultiaddr(address string, port int) (ma.Multiaddr, error) {
++	return manet.FromNetAddr(&net.UDPAddr{IP: net.ParseIP(address), Port: port})
++}
++
++// sdpFingerprintHash maps the a=fingerprint: line of an SDP to the crypto.Hash
++// used to verify the remote DTLS certificate (and to seed the Noise prologue).
++// webrtc-direct derives this from the /certhash multiaddr; signaled mode must
++// read it out of the SDP, since there is no multiaddr.
++func sdpFingerprintHash(sdp string) (crypto.Hash, error) {
++	for _, line := range strings.Split(sdp, "\n") {
++		line = strings.TrimSpace(line)
++		if !strings.HasPrefix(line, "a=fingerprint:") {
++			continue
++		}
++		algo := strings.SplitN(strings.TrimPrefix(line, "a=fingerprint:"), " ", 2)[0]
++		switch algo {
++		case "md5":
++			return crypto.MD5, nil
++		case "sha-1":
++			return crypto.SHA1, nil
++		case "sha3-224":
++			return crypto.SHA3_224, nil
++		case "sha-256":
++			return crypto.SHA256, nil
++		case "sha3-384":
++			return crypto.SHA3_384, nil
++		case "sha-512":
++			return crypto.SHA512, nil
++		default:
++			return 0, fmt.Errorf("unsupported fingerprint algorithm %q", algo)
++		}
++	}
++	return 0, errors.New("no a=fingerprint line in SDP")
++}
++
++// signalDialTimeout is the default per-phase deadline a caller should apply to
++// a signaled dial/accept (gathering + SDP exchange + ICE + Noise). The ICE
++// gather of a TURN relay can take several seconds; the noise handshake runs on
++// top of SCTP. This mirrors the WebRTC Direct dial time budget so a slow but
++// reachable peer still succeeds.
++const signalDialTimeout = 30 * time.Second
++
++// waitForGatherComplete returns a channel closed when ICE gathering finishes.
++// It must be called BEFORE CreateOffer/SetLocalDescription so the state-change
++// handler is armed before gathering starts (pion fires the callback only on
++// state transitions, not for an already-complete gatherer). Non-trickle mode
++// waits for the full candidate set so the SDP we send already carries every
++// host / srflx / TURN-relay candidate.
++func waitForGatherComplete(pc *webrtc.PeerConnection) <-chan struct{} {
++	done := make(chan struct{})
++	var once sync.Once
++	pc.OnICEGatheringStateChange(func(s webrtc.ICEGatheringState) {
++		if s == webrtc.ICEGatheringStateComplete {
++			once.Do(func() { close(done) })
++		}
++	})
++	return done
++}
+diff -ruN lp2p-base/p2p/transport/webrtc/signal_test.go lp2p-fork3/p2p/transport/webrtc/signal_test.go
+--- lp2p-base/p2p/transport/webrtc/signal_test.go	1970-01-01 08:00:00.000000000 +0800
++++ lp2p-fork3/p2p/transport/webrtc/signal_test.go	2026-10-29 10:46:33.632111800 +0800
+@@ -0,0 +1,120 @@
++package libp2pwebrtc
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	tpt "github.com/libp2p/go-libp2p/core/transport"
++	"github.com/stretchr/testify/require"
++)
++
++type signalMsg struct {
++	sdp   string
++	offer bool
++}
++
++// memSignal is an in-memory SignalTransport pair for tests (non-trickle: one
++// message each way).
++type memSignal struct {
++	sendCh chan signalMsg
++	recvCh chan signalMsg
++}
++
++func newMemSignalPair() (*memSignal, *memSignal) {
++	a2b := make(chan signalMsg, 1)
++	b2a := make(chan signalMsg, 1)
++	return &memSignal{sendCh: a2b, recvCh: b2a}, &memSignal{sendCh: b2a, recvCh: a2b}
++}
++
++func (m *memSignal) SendSDP(ctx context.Context, sdp string, isOffer bool) error {
++	select {
++	case m.sendCh <- signalMsg{sdp: sdp, offer: isOffer}:
++		return nil
++	case <-ctx.Done():
++		return ctx.Err()
++	}
++}
++
++func (m *memSignal) RecvSDP(ctx context.Context) (string, bool, error) {
++	select {
++	case msg := <-m.recvCh:
++		return msg.sdp, msg.offer, nil
++	case <-ctx.Done():
++		return "", false, ctx.Err()
++	}
++}
++
++func TestTransportSignalDialAccept(t *testing.T) {
++	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
++	defer cancel()
++
++	dialer, dialerID := getTransport(t)
++	responder, responderID := getTransport(t)
++
++	dialerSig, responderSig := newMemSignalPair()
++
++	var accepted tpt.CapableConn
++	acceptErrCh := make(chan error, 1)
++	go func() {
++		conn, err := responder.AcceptSignal(ctx, dialerID, responderSig)
++		if err != nil {
++			acceptErrCh <- err
++			return
++		}
++		accepted = conn
++		acceptErrCh <- nil
++	}()
++
++	conn, err := dialer.DialSignal(ctx, responderID, dialerSig)
++	require.NoError(t, err)
++	require.NoError(t, <-acceptErrCh)
++	require.NotNil(t, accepted)
++	require.Equal(t, responderID, conn.RemotePeer())
++	require.Equal(t, dialerID, accepted.RemotePeer())
++
++	// Two-way stream over the negotiated connection.
++	s1, err := conn.OpenStream(ctx)
++	require.NoError(t, err)
++	s2, err := accepted.AcceptStream()
++	require.NoError(t, err)
++	defer s1.Close()
++	defer s2.Close()
++
++	_, err = s1.Write([]byte("hello-from-dialer"))
++	require.NoError(t, err)
++	buf := make([]byte, 64)
++	rn, err := s2.Read(buf)
++	require.NoError(t, err)
++	require.Equal(t, "hello-from-dialer", string(buf[:rn]))
++
++	_, err = s2.Write([]byte("hello-from-responder"))
++	require.NoError(t, err)
++	rn, err = s1.Read(buf)
++	require.NoError(t, err)
++	require.Equal(t, "hello-from-responder", string(buf[:rn]))
++}
++
++func TestTransportSignalRecvAnswerExpected(t *testing.T) {
++	// A dialer receiving an offer where it expected an answer must fail fast.
++	dialer, responderID := getTransport(t)
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++
++	// The dialer receives an offer where it expected an answer (wrong role) —
++	// it must fail fast instead of trying to SetRemoteDescription an offer.
++	badSig := &memSignal{sendCh: make(chan signalMsg, 1), recvCh: make(chan signalMsg, 1)}
++	badSig.recvCh <- signalMsg{sdp: "v=0\r\n", offer: true}
++	_, err := dialer.DialSignal(ctx, responderID, badSig)
++	require.Error(t, err)
++	require.Contains(t, err.Error(), "expected answer")
++}
++
++func TestSDPFingerprintHash(t *testing.T) {
++	h, err := sdpFingerprintHash("v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=fingerprint:sha-256 aa:bb\r\n")
++	require.NoError(t, err)
++	require.Equal(t, "SHA-256", h.String())
++
++	_, err = sdpFingerprintHash("v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n")
++	require.Error(t, err)
++}
+diff -ruN lp2p-base/p2p/transport/webrtc/stream_write.go lp2p-fork3/p2p/transport/webrtc/stream_write.go
+--- lp2p-base/p2p/transport/webrtc/stream_write.go	2026-11-01 05:15:56.675493200 +0800
++++ lp2p-fork3/p2p/transport/webrtc/stream_write.go	2026-10-13 09:30:47.936184700 +0800
+@@ -104,7 +104,12 @@
+ 	defer s.mx.Unlock()
+ 	s.writeDeadline = t
+ 	s.notifyWriteStateChanged()
+-	return nil
++	// Also propagate to the data channel. Without this a full send buffer leaves
++	// WriteMsg blocked inside the SCTP layer, where s.writeDeadline is never
++	// consulted, so the deadline never fires and the caller (plus every other
++	// stream sharing the data channel, including FIN_ACK control messages) stays
++	// wedged indefinitely.
++	return s.dataChannel.SetWriteDeadline(t)
+ }
+ 
+ // sendBufferSize() is the maximum data we enqueue on the underlying data channel for writes.
+diff -ruN lp2p-base/p2p/transport/webrtc/transport.go lp2p-fork3/p2p/transport/webrtc/transport.go
+--- lp2p-base/p2p/transport/webrtc/transport.go	2026-11-01 05:15:56.676623000 +0800
++++ lp2p-fork3/p2p/transport/webrtc/transport.go	2026-10-13 12:29:45.959170700 +0800
+@@ -11,6 +11,7 @@
+ 	"fmt"
+ 	"net"
+ 	"os"
++	"strings"
+ 	"time"
+ 
+ 	mrand "math/rand/v2"
+@@ -35,6 +36,7 @@
+ 	"github.com/multiformats/go-multihash"
+ 
+ 	"github.com/pion/datachannel"
++	pionnet "github.com/pion/transport/v3"
+ 	"github.com/pion/webrtc/v4"
+ )
+ 
+@@ -45,7 +47,7 @@
+ 	webrtcComponent, err = ma.NewComponent(ma.ProtocolWithCode(ma.P_WEBRTC_DIRECT).Name, "")
+ 	if err != nil {
+ 		fmt.Fprintln(os.Stderr, err.Error())
+-		os.Executable()
++		os.Exit(1)
+ 	}
+ }
+ 
+@@ -75,19 +77,41 @@
+ 	// Besides throughput, this only matters if an application is using multiple dependent
+ 	// streams, say streams 1 & 2. It reads from stream 1 only after receiving message from
+ 	// stream 2. A buffer of 10 messages should serve all such situations.
+-	sctpReceiveBufferSize = 10 * maxReceiveMessageSize
++	// Tuned up from 10x (approx 2.5MB): under a saturated bulk flow the
++	// 2.5MB window stalled the sender far too often (measured 30-70% frame
++	// loss in BenchmarkThroughput vs 0% for QUIC with a 10MB window).
++	sctpReceiveBufferSize = 40 * maxReceiveMessageSize
+ )
+ 
+ type WebRTCTransport struct {
+ 	webrtcConfig webrtc.Configuration
+-	rcmgr        network.ResourceManager
+-	gater        connmgr.ConnectionGater
+-	privKey      ic.PrivKey
+-	noiseTpt     *noise.Transport
+-	localPeerId  peer.ID
++
++	// iceServersProvider, when non-nil, resolves the ICE servers for every new
++	// peer connection (see configWithIceServers), so the STUN/TURN lists can be
++	// hot-reloaded without rebuilding the transport.
++	iceServersProvider func() []webrtc.ICEServer
++	rcmgr              network.ResourceManager
++	gater              connmgr.ConnectionGater
++	privKey            ic.PrivKey
++	noiseTpt           *noise.Transport
++	localPeerId        peer.ID
++
++	customNet pionnet.Net
+ 
+ 	listenUDP func(network string, laddr *net.UDPAddr) (net.PacketConn, error)
+ 
++	// stunServers is a list of STUN server URLs for ICE candidate gathering.
++	// Empty means no STUN servers (ICE relies on host/server-reflexive candidates only).
++	stunServers []string
++	// turnServers is a list of TURN server URLs for ICE relay candidates.
++	// Empty means no TURN servers (ICE relies on host/reflexive candidates only).
++	turnServers []string
++	// turnUsername / turnCredential are the ICE credentials applied to every
++	// entry in turnServers. Both empty means no credentials were supplied, which
++	// is exactly the state pion refuses to build a peer connection from.
++	turnUsername   string
++	turnCredential string
++
+ 	// dialerVersion picks which WebRTC Direct handshake to use when dialing: 1
+ 	// uses v1 (SDP munging), 2 uses v2 (no munging; the client password rides in
+ 	// the server ufrag). New defaults it to 1, and WithDialerVersion only accepts
+@@ -107,6 +131,142 @@
+ 
+ type Option func(*WebRTCTransport) error
+ 
++// WithNet configures a custom pion transport.Net for WebRTC ICE operations.
++func WithNet(net pionnet.Net) Option {
++	return func(t *WebRTCTransport) error {
++		t.customNet = net
++		return nil
++	}
++}
++
++// WithSTUNServers configures STUN servers for ICE candidate gathering.
++// URLs should be in the format "stun:host:port" or "/udp/host/port".
++// Empty means no STUN servers (ICE relies on host/server-reflexive candidates only).
++func WithSTUNServers(servers []string) Option {
++	return func(t *WebRTCTransport) error {
++		t.stunServers = servers
++		return nil
++	}
++}
++
++// WithTURNServers configures TURN servers for ICE relay candidates.
++// URLs should be in the format "turn:host:port".
++//
++// WebRTC mandates credentials on a TURN server, and pion enforces it hard: an
++// ICEServer with a turn:/turns: URL but an empty Username or Credential is
++// rejected by ICEServer.validate with ErrNoTurnCredentials, and
++// PeerConnection.initConfiguration aborts on the first invalid server. The
++// result is that the *entire* peer connection fails — so a TURN list passed
++// without WithTURNCredentials does not degrade gracefully, it disables all
++// WebRTC, including the STUN-only paths. Always pair this with
++// WithTURNCredentials.
++func WithTURNServers(servers []string) Option {
++	return func(t *WebRTCTransport) error {
++		t.turnServers = servers
++		return nil
++	}
++}
++
++// WithTURNCredentials supplies the ICE credentials for every TURN server
++// registered via WithTURNServers. The ICEServer entries built from those URLs
++// are tagged ICECredentialTypePassword with these values, which is what pion's
++// ICEServer.urls() requires in order to accept a turn:/turns: URL at all.
++// Ignored unless WithTURNServers is also set.
++func WithTURNCredentials(username, credential string) Option {
++	return func(t *WebRTCTransport) error {
++		t.turnUsername = username
++		t.turnCredential = credential
++		return nil
++	}
++}
++
++// WithIceServers supplies the STUN/TURN configuration dynamically. Each of the
++// three functions is consulted for every NEW peer connection, so the lists can
++// be changed at runtime (config reload, WebUI edit) without rebuilding the
++// transport or restarting. Passing nil for an argument means "no such servers".
++//
++// WithSTUNServers/WithTURNServers/WithTURNCredentials stay available for
++// callers that have a fixed list; a provider set here overrides them, since it
++// is meant to subsume the static pair rather than supplement it.
++func WithIceServers(
++	stunServers func() []string,
++	turnServers func() []string,
++	turnCredentials func() (username, credential string),
++) Option {
++	return func(t *WebRTCTransport) error {
++		t.iceServersProvider = func() []webrtc.ICEServer {
++			var stun, turn []string
++			if stunServers != nil {
++				stun = stunServers()
++			}
++			if turnServers != nil {
++				turn = turnServers()
++			}
++			var username, credential string
++			if turnCredentials != nil {
++				username, credential = turnCredentials()
++			}
++			return buildIceServers(stun, turn, username, credential)
++		}
++		return nil
++	}
++}
++
++// buildIceServers converts the raw p2ptap-style STUN/TURN lists into pion ICE
++// servers. STUN entries may be multiaddr ("/udp/host/port"), already in pion
++// form ("stun:host:port"), or bare "host:port" / "host". TCP STUN servers are
++// skipped: WebRTC ICE only speaks UDP.
++func buildIceServers(stunServers, turnServers []string, username, credential string) []webrtc.ICEServer {
++	var out []webrtc.ICEServer
++	for _, srv := range stunServers {
++		// Skip TCP STUN servers (WebRTC ICE only supports UDP).
++		if strings.HasPrefix(srv, "/tcp/") {
++			continue
++		}
++		var url string
++		switch {
++		case strings.HasPrefix(srv, "/udp/"):
++			url = "stun:" + strings.Replace(strings.TrimPrefix(srv, "/udp/"), "/", ":", 1)
++		case strings.HasPrefix(srv, "stun:"):
++			url = srv
++		case !strings.Contains(srv, ":"):
++			url = "stun:" + srv + ":19302"
++		default:
++			url = "stun:" + srv
++		}
++		out = append(out, webrtc.ICEServer{URLs: []string{url}})
++	}
++	if len(turnServers) > 0 {
++		if username == "" || credential == "" {
++			// Do NOT emit these servers. A turn:/turns: ICEServer without both
++			// Username and Credential is rejected by pion's ICEServer.validate
++			// (ErrNoTurnCredentials), and PeerConnection.initConfiguration
++			// aborts on the first invalid server — which takes down every WebRTC
++			// dial and every inbound answer, including the STUN-only ones.
++			// Dropping them degrades to host/reflexive candidates instead.
++			// Debug level: buildIceServers runs once per peer connection when a
++			// WithIceServers provider is set, so an Error here would be logged for
++			// every handshake of a permanently misconfigured list. The caller that
++			// owns the configuration should report the misconfiguration once, at
++			// startup.
++			log.Debug("TURN servers configured without ICE credentials; dropping "+
++				"them, since a credential-less TURN server aborts every WebRTC "+
++				"peer connection",
++				"count", len(turnServers))
++		} else {
++			for _, srv := range turnServers {
++				out = append(out, webrtc.ICEServer{
++					URLs:           []string{srv},
++					Username:       username,
++					Credential:     credential,
++					CredentialType: webrtc.ICECredentialTypePassword,
++				})
++			}
++		}
++	}
++	return out
++}
++
+ // WithDialerVersion picks which WebRTC Direct handshake to use when dialing. It
+ // must be 1 (v1, SDP munging) or 2 (v2, no munging); any other value, including
+ // 0, is rejected. With the option unset, dialing defaults to v1. The listener
+@@ -184,9 +344,29 @@
+ 			return nil, err
+ 		}
+ 	}
++	// Add STUN/TURN servers for ICE candidate gathering if configured via
++	// WithSTUNServers / WithTURNServers.
++	if servers := buildIceServers(transport.stunServers, transport.turnServers,
++		transport.turnUsername, transport.turnCredential); len(servers) > 0 {
++		config.ICEServers = servers
++		transport.webrtcConfig = config
++	}
+ 	return transport, nil
+ }
+ 
++// configWithIceServers returns the peer-connection configuration with the ICE
++// servers resolved for THIS connection. A dynamic provider (WithIceServers)
++// wins so the lists can be changed at runtime; otherwise the static list built
++// at construction time is used.
++func (t *WebRTCTransport) configWithIceServers() webrtc.Configuration {
++	if t.iceServersProvider == nil {
++		return t.webrtcConfig
++	}
++	conf := t.webrtcConfig
++	conf.ICEServers = t.iceServersProvider()
++	return conf
++}
++
+ func (t *WebRTCTransport) ListenOrder() int {
+ 	return libp2pquic.ListenOrder + 1 // We want to listen after QUIC listens so we can possibly reuse the same port.
+ }
+@@ -263,7 +443,7 @@
+ 		t,
+ 		listenerMultiaddr,
+ 		socket,
+-		t.webrtcConfig,
++		t.configWithIceServers(),
+ 	)
+ }
+ 
+@@ -348,6 +528,9 @@
+ 	settingEngine := webrtc.SettingEngine{
+ 		LoggerFactory: pionLoggerFactory,
+ 	}
++	if t.customNet != nil {
++		settingEngine.SetNet(t.customNet)
++	}
+ 	settingEngine.SetICECredentials(localUfrag, localPwd)
+ 	settingEngine.DetachDataChannels()
+ 	// use the first best address candidate
+@@ -368,7 +551,7 @@
+ 		return nil, err
+ 	}
+ 
+-	w, err = newWebRTCConnection(settingEngine, t.webrtcConfig)
++	w, err = newWebRTCConnection(settingEngine, t.configWithIceServers())
+ 	if err != nil {
+ 		return nil, fmt.Errorf("instantiating peer connection failed: %w", err)
+ 	}
+diff -ruN lp2p-base/p2p/transport/webrtc/transport_ice_servers_test.go lp2p-fork3/p2p/transport/webrtc/transport_ice_servers_test.go
+--- lp2p-base/p2p/transport/webrtc/transport_ice_servers_test.go	1970-01-01 08:00:00.000000000 +0800
++++ lp2p-fork3/p2p/transport/webrtc/transport_ice_servers_test.go	2026-10-13 12:27:10.381441200 +0800
+@@ -0,0 +1,146 @@
++package libp2pwebrtc
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/pion/webrtc/v4"
++)
++
++// TestBuildIceServers pins the p2ptap -> pion URL translation. Every form the
++// config accepts must land as a server pion will actually accept, and nothing
++// must be emitted that pion would reject (a single bad server aborts the whole
++// peer connection, STUN-only ones included).
++func TestBuildIceServers(t *testing.T) {
++	stun := []string{
++		"/udp/stun.l.google.com:19302",     // multiaddr form
++		"stun:stun1.l.google.com:19302",    // already in pion form
++		"stun2.l.google.com:19302",         // bare host:port
++		"stun3.l.google.com",               // bare host, needs the default port
++		"/tcp/relay1.expressturn.com:3478", // TCP: WebRTC ICE speaks UDP only
++	}
++	turn := []string{
++		"turn:turn.cloud-rtc.com:80",
++		"turn:relay1.expressturn.com:3478",
++	}
++
++	got := buildIceServers(stun, turn, "user", "cred")
++
++	if len(got) != 6 {
++		t.Fatalf("built %d ICE servers, want 6 (5 STUN minus 1 TCP, plus 2 TURN): %v", len(got), got)
++	}
++
++	var urls []string
++	for _, s := range got {
++		urls = append(urls, s.URLs...)
++		if strings.HasPrefix(s.URLs[0], "turn:") {
++			if s.Username != "user" || s.Credential != "cred" {
++				t.Fatalf("TURN server %v missing credentials: user=%q cred=%q", s.URLs, s.Username, s.Credential)
++			}
++			if s.CredentialType != webrtc.ICECredentialTypePassword {
++				t.Fatalf("TURN server %v credential type = %v, want Password", s.URLs, s.CredentialType)
++			}
++			continue
++		}
++		// The CredentialType zero value IS Password, so it cannot tell a STUN
++		// entry from a TURN one; the credentials themselves can.
++		if s.Username != "" || s.Credential != nil {
++			t.Fatalf("STUN server %v must carry no credentials: %q / %v", s.URLs, s.Username, s.Credential)
++		}
++	}
++
++	want := []string{
++		"stun:stun.l.google.com:19302",
++		"stun:stun1.l.google.com:19302",
++		"stun:stun2.l.google.com:19302",
++		"stun:stun3.l.google.com:19302",
++		"turn:turn.cloud-rtc.com:80",
++		"turn:relay1.expressturn.com:3478",
++	}
++	if len(urls) != len(want) {
++		t.Fatalf("got %d URLs, want %d: %v", len(urls), len(want), urls)
++	}
++	for i := range want {
++		if urls[i] != want[i] {
++			t.Errorf("URL[%d] = %q, want %q", i, urls[i], want[i])
++		}
++	}
++
++	// A credential-less TURN list must come back with only the STUN servers, so
++	// the connection degrades instead of aborting.
++	if got := buildIceServers(stun, turn, "", ""); len(got) != 4 {
++		t.Fatalf("credential-less TURN list produced %d servers, want the 4 STUN ones: %v", len(got), got)
++	}
++}
++
++// TestWithIceServersProviderResolvesPerConnection is the regression test for
++// the STUN/TURN lists being frozen at transport construction: the provider must
++// be consulted for every new peer connection, and it must not mutate the
++// transport's base configuration.
++func TestWithIceServersProviderResolvesPerConnection(t *testing.T) {
++	var stun, turn []string
++	tpt, err := New(testKey(t), nil, nil, nil, nil, WithIceServers(
++		func() []string { return stun },
++		func() []string { return turn },
++		func() (username, credential string) { return "user", "cred" },
++	))
++	if err != nil {
++		t.Fatalf("New: %v", err)
++	}
++
++	stun = []string{"stun:stun1.l.google.com:19302"}
++	first := tpt.configWithIceServers()
++	if len(first.ICEServers) != 1 {
++		t.Fatalf("first resolution produced %d servers, want 1", len(first.ICEServers))
++	}
++
++	// Reload: the next connection must see the new list.
++	stun = []string{"stun:stun2.l.google.com:19302"}
++	turn = []string{"turn:turn.cloud-rtc.com:80"}
++	second := tpt.configWithIceServers()
++	if len(second.ICEServers) != 2 {
++		t.Fatalf("after reload got %d servers, want 2: %v", len(second.ICEServers), second.ICEServers)
++	}
++	if got := second.ICEServers[0].URLs[0]; got != "stun:stun2.l.google.com:19302" {
++		t.Fatalf("after reload URL = %q, want the reloaded server", got)
++	}
++
++	// The base configuration must be untouched, so code that still reads
++	// webrtcConfig directly observes the construction-time view.
++	if len(tpt.webrtcConfig.ICEServers) != 0 {
++		t.Fatalf("base configuration was mutated by the provider: %v", tpt.webrtcConfig.ICEServers)
++	}
++
++	// Certificates from the base configuration must survive the override.
++	if len(second.Certificates) != 1 {
++		t.Fatalf("Certificates = %d, want the base certificate", len(second.Certificates))
++	}
++}
++
++// TestWithIceServersNilProviders documents that nil arguments mean "no such
++// servers" rather than a nil-function panic mid-handshake.
++func TestWithIceServersNilProviders(t *testing.T) {
++	tpt, err := New(testKey(t), nil, nil, nil, nil, WithIceServers(nil, nil, nil))
++	if err != nil {
++		t.Fatalf("New: %v", err)
++	}
++	if got := tpt.configWithIceServers(); len(got.ICEServers) != 0 {
++		t.Fatalf("nil providers produced %d ICE servers, want none", len(got.ICEServers))
++	}
++}
++
++// TestWithIceServersOverridesStaticOptions confirms the provider subsumes the
++// static pair instead of supplementing it, so a caller that sets both does not
++// end up with a doubled list.
++func TestWithIceServersOverridesStaticOptions(t *testing.T) {
++	tpt, err := New(testKey(t), nil, nil, nil, nil,
++		WithSTUNServers([]string{"stun:stun1.l.google.com:19302"}),
++		WithIceServers(nil, nil, nil),
++	)
++	if err != nil {
++		t.Fatalf("New: %v", err)
++	}
++	if got := tpt.configWithIceServers(); len(got.ICEServers) != 0 {
++		t.Fatalf("static servers survived the provider override: %v", got.ICEServers)
++	}
++}
+diff -ruN lp2p-base/p2p/transport/webrtc/transport_test.go lp2p-fork3/p2p/transport/webrtc/transport_test.go
+--- lp2p-base/p2p/transport/webrtc/transport_test.go	2026-11-01 05:15:56.676623000 +0800
++++ lp2p-fork3/p2p/transport/webrtc/transport_test.go	2026-10-12 23:47:39.066304500 +0800
+@@ -666,6 +666,21 @@
+ }
+ 
+ func TestTransportWebRTC_StreamWriteBufferContention(t *testing.T) {
++	// The payload has to exceed the write path's non-blocking push threshold.
++	//
++	// Association.sendPayloadData queues chunks into pendingQueue and returns
++	// immediately; it only waits (and only there does it consult the deadline)
++	// while another write holds the association's write slot. So whether a write
++	// times out depends on whether the payload fills the write window, not on
++	// wall-clock speed. Measured on this tree into a never-read stream: up to
++	// ~4MB returns nil in ~35ms with every byte reported as written, while
++	// 12MB+ reliably times out at the deadline with a fixed partial count of
++	// ~32KB. The 2MB payload this test used before is well below the threshold,
++	// so both writes completed in ~32ms and the deadline assertion below was
++	// unreachable — the test failed on any machine fast enough to queue 2MB,
++	// which is to say all of them.
++	const largeBuffer = 16 * 1024 * 1024
++
+ 	tr, listeningPeer := getTransport(t)
+ 	listenMultiaddr := ma.StringCast("/ip4/127.0.0.1/udp/0/webrtc-direct")
+ 	listener, err := tr.Listen(listenMultiaddr)
+@@ -682,6 +697,8 @@
+ 		require.NoError(t, err)
+ 		t.Cleanup(func() { lconn.Close() })
+ 		require.Equal(t, connectingPeer, lconn.RemotePeer())
++		// Never read: the unread receive buffers are what fills the write
++		// window and creates the contention being asserted on below.
+ 		for range 2 {
+ 			go func() {
+ 				defer wg.Done()
+@@ -703,8 +720,7 @@
+ 			require.NoError(t, err)
+ 
+ 			stream.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
+-			largeBuffer := make([]byte, 2*1024*1024)
+-			_, err = stream.Write(largeBuffer)
++			_, err = stream.Write(make([]byte, largeBuffer))
+ 			errC <- err
+ 		}()
+ 	}
+diff -ruN lp2p-base/p2p/transport/webrtc/transport_turn_credentials_test.go lp2p-fork3/p2p/transport/webrtc/transport_turn_credentials_test.go
+--- lp2p-base/p2p/transport/webrtc/transport_turn_credentials_test.go	1970-01-01 08:00:00.000000000 +0800
++++ lp2p-fork3/p2p/transport/webrtc/transport_turn_credentials_test.go	2026-10-12 20:42:23.183074700 +0800
+@@ -0,0 +1,81 @@
++package libp2pwebrtc
++
++import (
++	"bytes"
++	"testing"
++
++	"github.com/libp2p/go-libp2p/core/crypto"
++	"github.com/pion/webrtc/v4"
++)
++
++func testKey(t *testing.T) crypto.PrivKey {
++	t.Helper()
++	k, _, err := crypto.GenerateEd25519Key(bytes.NewReader(make([]byte, 32)))
++	if err != nil {
++		t.Fatalf("GenerateEd25519Key: %v", err)
++	}
++	return k
++}
++
++// TestWithTURNServersWithoutCredentialsDoesNotPoisonPeerConnections guards the
++// option pair that TURN support depends on. pion's ICEServer.validate rejects a
++// turn: URL with no Username or Credential, and PeerConnection.initConfiguration
++// returns on the first invalid server — so a TURN list registered without
++// credentials did not fall back to host/reflexive candidates, it made every
++// WebRTC dial and answer fail. The transport therefore has to refuse to emit
++// them.
++func TestWithTURNServersWithoutCredentialsDoesNotPoisonPeerConnections(t *testing.T) {
++	tpt, err := New(testKey(t), nil, nil, nil, nil, WithTURNServers([]string{"turn:turn.cloud-rtc.com:80"}))
++	if err != nil {
++		t.Fatalf("New: %v", err)
++	}
++	if len(tpt.webrtcConfig.ICEServers) != 0 {
++		t.Fatalf("emitted %d ICE servers without credentials: %v", len(tpt.webrtcConfig.ICEServers), tpt.webrtcConfig.ICEServers)
++	}
++
++	// Sanity: had it emitted the entry, pion would have rejected it.
++	_, err = webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: []webrtc.ICEServer{
++		{URLs: []string{"turn:turn.cloud-rtc.com:80"}},
++	}})
++	if err == nil {
++		t.Fatal("pion accepted a credential-less TURN server; the guard is no longer needed")
++	}
++}
++
++func TestWithTURNServersWithCredentialsEmitsThem(t *testing.T) {
++	tpt, err := New(testKey(t), nil, nil, nil, nil,
++		WithSTUNServers([]string{"/udp/stun.l.google.com/19302"}),
++		WithTURNServers([]string{"turn:relay1.expressturn.com:3478"}),
++		WithTURNCredentials("alice", "s3cr3t"),
++	)
++	if err != nil {
++		t.Fatalf("New: %v", err)
++	}
++	if len(tpt.webrtcConfig.ICEServers) != 2 {
++		t.Fatalf("ICE servers = %v, want 2 entries", tpt.webrtcConfig.ICEServers)
++	}
++
++	turn := tpt.webrtcConfig.ICEServers[1]
++	if len(turn.URLs) != 1 || turn.URLs[0] != "turn:relay1.expressturn.com:3478" {
++		t.Fatalf("TURN entry = %v", turn)
++	}
++	if turn.Username != "alice" || turn.Credential != "s3cr3t" || turn.CredentialType != webrtc.ICECredentialTypePassword {
++		t.Fatalf("TURN credentials = (user=%q cred=%q type=%v)", turn.Username, turn.Credential, turn.CredentialType)
++	}
++
++	// The config the transport actually produced must be accepted by pion.
++	_, err = webrtc.NewPeerConnection(tpt.webrtcConfig)
++	if err != nil {
++		t.Fatalf("pion rejected the transport's own ICE config: %v", err)
++	}
++}
++
++func TestWithTURNCredentialsAloneEmitsNoServers(t *testing.T) {
++	tpt, err := New(testKey(t), nil, nil, nil, nil, WithTURNCredentials("alice", "s3cr3t"))
++	if err != nil {
++		t.Fatalf("New: %v", err)
++	}
++	if len(tpt.webrtcConfig.ICEServers) != 0 {
++		t.Fatalf("ICE servers = %v, want none", tpt.webrtcConfig.ICEServers)
++	}
++}
+diff -ruN lp2p-base/p2p/transport/webrtc/udpmux/mux.go lp2p-fork3/p2p/transport/webrtc/udpmux/mux.go
+--- lp2p-base/p2p/transport/webrtc/udpmux/mux.go	2026-11-01 05:15:56.676623000 +0800
++++ lp2p-fork3/p2p/transport/webrtc/udpmux/mux.go	2026-10-13 18:55:35.724718600 +0800
+@@ -22,7 +22,14 @@
+ // ReceiveBufSize is the size of the buffer used to receive packets from the PacketConn.
+ // It is fine for this number to be higher than the actual path MTU as this value is not
+ // used to decide the packet size on the write path.
+-const ReceiveBufSize = 1500
++//
++// LOCAL PATCH: raised from 1500. A UDP ReadFrom into a buffer smaller than the
++// datagram silently truncates and reports no error, so any packet above 1500
++// bytes lost its tail with nothing to report the loss. pion reads its ICE
++// candidates into 8192-byte buffers, so the truncation happened here before
++// pion ever saw it and could only surface upstream as a stuck DTLS/SCTP
++// handshake with no diagnostic.
++const ReceiveBufSize = 65535
+ 
+ // maxAddrsPerUfrag bounds the number of remote addresses we will track for a
+ // single ufrag. ICE typically advertises a handful of candidates per session
+@@ -131,11 +138,9 @@
+ 
+ // Close implements ice.UDPMux
+ func (mux *UDPMux) Close() error {
+-	select {
+-	case <-mux.ctx.Done():
+-		return nil
+-	default:
+-	}
++	// readLoop can cancel the mux context itself (after an unexpected read
++	// error), so the "already done" check must not short-circuit the socket
++	// close — otherwise a dead mux would leak its listening socket forever.
+ 	mux.cancel()
+ 	mux.socket.Close()
+ 	mux.wg.Wait()
+@@ -165,6 +170,12 @@
+ 				log.Error("error reading from socket", "local_addr", mux.socket.LocalAddr(), "error", err)
+ 			}
+ 			pool.Put(buf)
++			// An unexpected read error means the mux is dead: no more incoming
++			// packets will ever arrive. Cancelling the mux context makes that
++			// observable — Accept and GetConn unblock with mux.ctx.Err()
++			// instead of blocking forever on an empty queue, and the caller can
++			// drop the listener and come back with a fresh socket.
++			mux.cancel()
+ 			return
+ 		}
+ 		buf = buf[:n]
+diff -ruN lp2p-base/p2p/transport/webtransport/transport.go lp2p-fork3/p2p/transport/webtransport/transport.go
+--- lp2p-base/p2p/transport/webtransport/transport.go	2026-11-01 05:15:56.680840200 +0800
++++ lp2p-fork3/p2p/transport/webtransport/transport.go	2026-10-10 07:31:58.701978900 +0800
+@@ -327,7 +327,7 @@
+ 		return nil, errors.New("static TLS config not supported on WebTransport")
+ 	}
+ 	tlsConf := t.staticTLSConf.Clone()
+-	if tlsConf == nil {
++	if t.staticTLSConf == nil {
+ 		tlsConf = &tls.Config{GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+ 			return t.certManager.GetConfig(), nil
+ 		}}

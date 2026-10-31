@@ -23,6 +23,16 @@ Set-Location $RootDir
 $origGOOS = $env:GOOS
 $origGOARCH = $env:GOARCH
 
+# pkg/go-libp2p is not versioned: it is materialised from the pin in
+# patches/go-libp2p/UPSTREAM plus the local patch. Fetch it when missing so a
+# fresh clone builds without a separate manual step (a no-op when present).
+if (-not (Test-Path (Join-Path $RootDir "pkg\go-libp2p"))) {
+    & (Join-Path $ScriptDir "fetch-libp2p.ps1")
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $RootDir "pkg\go-libp2p"))) {
+        throw "pkg/go-libp2p is missing and could not be materialised (see scripts/fetch-libp2p.ps1)"
+    }
+}
+
 $BinDir = if ($OutDir -ne "") { $OutDir } else { Join-Path $RootDir "bin" }
 if (-not (Test-Path $BinDir)) {
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null

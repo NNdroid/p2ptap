@@ -112,7 +112,7 @@ type Node struct {
 	// coalescer merges short unicast TAP frames per destination so the padding
 	// rule has nothing to pad (see coalesce_tx.go). Nil when the node runs
 	// without a packer; started in Start(), drained on shutdown.
-	coalescer    *txCoalescer
+	coalescer *txCoalescer
 	// Per-peer anti-replay windows. Every inbound frame (direct, relay, boot-
 	// relay) does a Load on the hot path; the old RWMutex-guarded map made that
 	// a process-wide lock on ALL peers' receive paths. Deduplicator is itself

@@ -64,7 +64,7 @@ func stringAddrs(addrs []multiaddr.Multiaddr) []string {
 //     quicreuse.Listener.Add return "already listening for protocol h3" and the
 //     transport that registers second silently loses its listener while its
 //     address is still advertised. This test fails if that is reintroduced; see
-//     the retraction note in pkg/go-libp2p/LOCAL_PATCHES.md.
+//     the retraction note in patches/go-libp2p/LOCAL_PATCHES.md.
 //
 // newSharedPortHost builds a host that listens for QUIC and WebTransport on the
 // SAME UDP port, and returns it with the two listen addresses and the port
