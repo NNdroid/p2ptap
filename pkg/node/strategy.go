@@ -350,6 +350,49 @@ func nonRelayStreams(streams []network.Stream) []network.Stream {
 	return out
 }
 
+// dedupStreamsByConn collapses the per-peer stream set to ONE representative per
+// underlying connection. libp2p keeps both the locally-opened outbound stream
+// and the peer-opened inbound stream for a single connection alive, but they are
+// the same wire path to the same peer — counting them as two paths is wrong on
+// every strategy:
+//
+//   - multipath: a single direct connection would claim 2x its fair DWRR share,
+//     and a circuit-relay connection would have its frames split across in/out,
+//     churning the receiver's reorder window for zero throughput gain.
+//   - redundant: a frame would be duplicated onto the SAME connection instead of
+//     once per distinct path.
+//   - best_path/fallback: selectStreamIndex picks one anyway; the extra entry is
+//     dead weight in the candidate scan and a second writeFailure surface.
+//
+// Prefers the outbound stream (our own open) as the representative so the writer
+// owns the write direction; an inbound stream is already being written to by the
+// peer, so reusing it as our send path races the peer's own writes (libp2p
+// streams are not safe for concurrent Write). A nil stream or one whose Conn()
+// is unrecoverable is kept verbatim so we never silently drop a frame's only path.
+func dedupStreamsByConn(streams []network.Stream) []network.Stream {
+	if len(streams) <= 1 {
+		return streams
+	}
+	byConn := make(map[network.Conn]int, len(streams)) // conn → index in out
+	out := make([]network.Stream, 0, len(streams))
+	for _, s := range streams {
+		if s == nil || s.Conn() == nil {
+			out = append(out, s)
+			continue
+		}
+		c := s.Conn()
+		if idx, ok := byConn[c]; !ok {
+			byConn[c] = len(out)
+			out = append(out, s)
+		} else if streamDirection(s) == network.DirOutbound && streamDirection(out[idx]) != network.DirOutbound {
+			// Upgrade an existing inbound rep to this outbound one.
+			out[idx] = s
+			byConn[c] = idx
+		}
+	}
+	return out
+}
+
 // StrategyDispatcher implements 'best_path', 'multipath', 'redundant', and 'fallback' transport strategies
 type StrategyDispatcher struct {
 	h    host.Host
@@ -1266,7 +1309,18 @@ type batchFrame struct {
 // packed frames, which may be retried after a partial transport write.
 // Callers hold ps.writeMu and pass at most 32 logical frames.
 func (sd *StrategyDispatcher) writePackedBatchLocked(targetPeer peer.ID, ps *PeerStreams, cipher obfuscate.ObfCipher, packedFrames [][]byte) error {
-	streams := nonRelayStreams(ps.GetAllStreams())
+	streams := ps.GetAllStreams()
+	if sd.Mode() != "multipath" {
+		// best_path/redundant/fallback: never schedule a circuit-relay path
+		// alongside a healthy direct path (see nonRelayStreams). multipath KEEPS
+		// relay paths so they stay warm and participate at their min-share weight
+		// (see multipath_scheduler.go) — that is the whole point of multipath.
+		streams = nonRelayStreams(streams)
+	}
+	// Collapse each connection's in/out pair to one path; otherwise a single
+	// direct connection claims 2x its share and a relay circuit's frames get
+	// split across in/out, churning the receiver's reorder window.
+	streams = dedupStreamsByConn(streams)
 	if len(streams) == 0 {
 		return fmt.Errorf("no direct streams for peer %s", targetPeer)
 	}
@@ -1580,10 +1634,16 @@ func (sd *StrategyDispatcher) writeFragsOnStream(ps *PeerStreams, targetPeer pee
 //
 // ps must not be nil. Callers must hold ps.writeMu.
 func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer peer.ID, streams []network.Stream, stat tapPayloadStat, frags [][]byte, recordPeerPayload bool) error {
-	// Never schedule a circuit-relay path alongside a healthy direct path (see
-	// nonRelayStreams). This is the fallback/best_path/redundant entry; the
-	// multipath batch entry filters in writePackedBatchLocked.
-	streams = nonRelayStreams(streams)
+	// Never schedule a circuit-relay path alongside a healthy direct path for the
+	// synchronous strategies (see nonRelayStreams). multipath KEEPS relay paths
+	// so they stay warm and carry their min-share of the load (the batch entry in
+	// writePackedBatchLocked does the same filtering); this per-frame entry serves
+	// the same strategy, so it must agree.
+	if sd.Mode() != "multipath" {
+		streams = nonRelayStreams(streams)
+	}
+	// Collapse each connection's in/out pair to one path (see dedupStreamsByConn).
+	streams = dedupStreamsByConn(streams)
 	if ps != nil {
 		snapshot := ps.snapshot.Load()
 		if snapshot != ps.writeDeadlineSnapshot {

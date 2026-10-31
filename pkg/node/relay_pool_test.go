@@ -24,6 +24,7 @@ type mockWriteStream struct {
 	writeErr   error
 	failWrites int // fail this many initial Write calls, then behave normally
 	deadline   time.Time
+	conn       *mockNetConn // per-instance conn so distinct streams have distinct identities
 }
 
 func (s *mockWriteStream) Read([]byte) (int, error) { return 0, io.EOF }
@@ -48,15 +49,31 @@ func (s *mockWriteStream) CloseWrite() error                                    
 func (s *mockWriteStream) SetDeadline(t time.Time) error                        { s.deadline = t; return nil }
 func (s *mockWriteStream) SetReadDeadline(t time.Time) error                    { return nil }
 func (s *mockWriteStream) SetWriteDeadline(t time.Time) error                   { s.deadline = t; return nil }
-func (s *mockWriteStream) Conn() network.Conn                                   { return &mockNetConn{} }
-func (s *mockWriteStream) ID() string                                           { return "mock:1" }
-func (s *mockWriteStream) Protocol() protocol.ID                                { return "" }
-func (s *mockWriteStream) SetProtocol(id protocol.ID) error                     { return nil }
-func (s *mockWriteStream) Stat() network.Stats                                  { return network.Stats{Direction: network.DirOutbound} }
-func (s *mockWriteStream) Scope() network.StreamScope                           { return nil }
+
+// Conn returns a per-instance connection. Each mockWriteStream caches its own
+// mockNetConn so two distinct streams expose distinct connection identities — a
+// zero-size struct allocated fresh per call would share Go's zerobase pointer and
+// look identical to connection-keyed logic (e.g. dedupStreamsByConn).
+func (s *mockWriteStream) Conn() network.Conn {
+	if s.conn == nil {
+		s.conn = &mockNetConn{}
+	}
+	return s.conn
+}
+func (s *mockWriteStream) ID() string                       { return "mock:1" }
+func (s *mockWriteStream) Protocol() protocol.ID            { return "" }
+func (s *mockWriteStream) SetProtocol(id protocol.ID) error { return nil }
+func (s *mockWriteStream) Stat() network.Stats              { return network.Stats{Direction: network.DirOutbound} }
+func (s *mockWriteStream) Scope() network.StreamScope       { return nil }
 
 // mockNetConn is a minimal network.Conn implementation returned by mockWriteStream.Conn().
-type mockNetConn struct{}
+// It carries an id field so it is NOT a zero-size struct: a zero-size struct would make every
+// &mockNetConn{} allocation share Go's zerobase pointer, so two distinct streams would expose
+// identical connection identities and connection-keyed logic (e.g. dedupStreamsByConn) would
+// wrongly collapse them.
+type mockNetConn struct {
+	id int
+}
 
 func (c *mockNetConn) Close() error                                      { return nil }
 func (c *mockNetConn) LocalPeer() peer.ID                                { return "" }

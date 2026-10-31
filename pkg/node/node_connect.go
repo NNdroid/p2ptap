@@ -361,31 +361,120 @@ func (n *Node) repairMultipathPaths(pid peer.ID) {
 	if len(direct) == 0 {
 		return
 	}
-	// Count existing non-relay connections. Counting connections against distinct
-	// addresses is a conservative under-count of missing paths (multiple conns to
-	// one addr are not expected), which is exactly the safe direction.
+	conns := n.Host.Network().ConnsToPeer(pid)
+	// Count existing non-relay connections.
 	directConns := 0
-	for _, c := range n.Host.Network().ConnsToPeer(pid) {
+	for _, c := range conns {
 		if c == nil || c.RemoteMultiaddr() == nil || maddrutil.IsCircuitRelay(c.RemoteMultiaddr()) {
 			continue
 		}
 		directConns++
 	}
 	if len(direct) <= directConns {
-		// Every known direct addr has a connection (or there are spare conns).
+		// Every known direct addr already has a connection (or there are spare
+		// conns). Nothing to repair.
+		n.setMpRepairNext(pid, time.Now().Add(mpRepairHealthyInterval))
+		return
+	}
+
+	// Dial each known direct addr we do not yet have a live connection on. This
+	// is what lets dual-stack / multi-protocol peers yield >1 multipath path: a
+	// peer reachable over both IPv4 and IPv6 (or TCP and QUIC) keeps one libp2p
+	// connection per address family / transport, and a plain Host.Connect would
+	// short-circuit on the existing connection (it returns as soon as the peer is
+	// "Connected") and never dial the second address.
+	missing := n.missingMultipathAddrs(direct, conns)
+	if len(missing) == 0 {
 		n.setMpRepairNext(pid, time.Now().Add(mpRepairHealthyInterval))
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(n.ctx, 5*time.Second)
 	defer cancel()
-	err := n.Host.Connect(network.WithForceDirectDial(ctx, "p2ptap-path-repair"), peer.AddrInfo{ID: pid, Addrs: prioritizeMultiaddrs(direct)})
-	if err != nil {
-		log.Debug("Multipath path repair: re-dial of direct addrs for %s failed this round: %v", pid.ShortString(), err)
-		n.setMpRepairNext(pid, time.Now().Add(mpRepairRetryInterval))
-		return
+	failed := false
+	for _, a := range prioritizeMultiaddrs(missing) {
+		if err := n.dialPeerToAddr(ctx, pid, a); err != nil {
+			log.Debug("Multipath path repair: re-dial of %s for %s failed this round: %v", a, pid.ShortString(), err)
+			failed = true
+			continue
+		}
+		log.Debug("Multipath path repair: established additional path to %s over %s", pid.ShortString(), a)
 	}
-	n.setMpRepairNext(pid, time.Now().Add(mpRepairHealthyInterval))
+	if failed {
+		n.setMpRepairNext(pid, time.Now().Add(mpRepairRetryInterval))
+	} else {
+		n.setMpRepairNext(pid, time.Now().Add(mpRepairHealthyInterval))
+	}
+}
+
+// multipathAddrKey normalizes a multiaddr to a comparable key for deciding
+// whether two addresses represent the SAME underlying path. It strips only a
+// trailing /p2p/<peerid> component (peerstore addresses carry it; the transport
+// addresses reported by an established connection do not). It deliberately does
+// NOT blindly strip the last component, because that would also drop /tcp or
+// /quic and corrupt the key. Two addresses that differ in IP family or transport
+// (e.g. /ip4/.../tcp vs /ip6/.../tcp, or /tcp vs /quic-v1 on the same IP) yield
+// distinct keys — which is exactly right: each is a separate multipath path.
+func multipathAddrKey(a multiaddr.Multiaddr) string {
+	if a == nil {
+		return ""
+	}
+	if _, err := a.ValueForProtocol(multiaddr.P_P2P); err == nil {
+		// SplitLast returns (head, *Component); the second value is NOT an error,
+		// so only the head (a Multiaddr, possibly nil) needs a nil check.
+		if stripped, _ := multiaddr.SplitLast(a); stripped != nil {
+			a = stripped
+		}
+	}
+	return a.String()
+}
+
+// missingMultipathAddrs returns the subset of direct addrs for which the local
+// node does not yet hold a live connection. It is the core of multipath
+// path-repair: a peer advertised over IPv4 and IPv6 (or TCP and QUIC) should
+// keep one connection per address, and any address without a matching
+// connection is a path we still need to dial.
+func (n *Node) missingMultipathAddrs(direct []multiaddr.Multiaddr, conns []network.Conn) []multiaddr.Multiaddr {
+	have := make(map[string]bool, len(conns))
+	for _, c := range conns {
+		if c == nil || c.RemoteMultiaddr() == nil {
+			continue
+		}
+		have[multipathAddrKey(c.RemoteMultiaddr())] = true
+	}
+	missing := make([]multiaddr.Multiaddr, 0)
+	seen := make(map[string]bool, len(direct))
+	for _, a := range direct {
+		if a == nil {
+			continue
+		}
+		k := multipathAddrKey(a)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		if !have[k] {
+			missing = append(missing, a)
+		}
+	}
+	return missing
+}
+
+// dialPeerToAddr opens a new outbound connection to p over the specific
+// multiaddr addr, even if an acceptable connection to p already exists. It
+// bypasses the Host.Connect / swarm.dialPeer short-circuit (which returns the
+// existing connection as soon as the peer is "Connected") by calling the
+// swarm's DialPeerToAddr directly. This is what lets multipath establish a
+// second path to a dual-stack or multi-protocol peer.
+func (n *Node) dialPeerToAddr(ctx context.Context, p peer.ID, addr multiaddr.Multiaddr) error {
+	sw, ok := n.Host.Network().(*swarm.Swarm)
+	if !ok {
+		return fmt.Errorf("underlying network is %T, not *swarm.Swarm; cannot force a targeted multipath dial", n.Host.Network())
+	}
+	if _, err := sw.DialPeerToAddr(ctx, p, addr); err != nil {
+		return err
+	}
+	return nil
 }
 
 // setMpRepairNext records the next allowed repair attempt for pid.

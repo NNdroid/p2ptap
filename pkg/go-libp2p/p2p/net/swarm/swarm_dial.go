@@ -653,6 +653,58 @@ func (s *Swarm) dialAddr(ctx context.Context, p peer.ID, addr ma.Multiaddr, updC
 	return connC, nil
 }
 
+// DialPeerToAddr forces a new outbound connection to peer p over the specific
+// multiaddr addr, even if an acceptable connection to p already exists. It is
+// used by higher layers (e.g. p2ptap's multipath path-repair) to establish
+// additional parallel paths to the same peer — over a different IP family
+// (IPv4 vs IPv6) or transport (TCP vs QUIC) — which the standard Host.Connect
+// short-circuits on: Host.Connect returns the existing connection as soon as
+// the peer is "Connected", and swarm.dialPeer likewise returns the best
+// existing connection via bestAcceptableConnToPeer.
+//
+// The returned connection is fully upgraded (security handshake + peer
+// verification) and registered with the swarm, so it appears in
+// ConnsToPeer(p) alongside any pre-existing connection. It does NOT go through
+// the dial-rate limiter or the per-peer dialSync dedup; callers are responsible
+// for throttling their own attempts (p2ptap does this via mpRepair* intervals).
+func (s *Swarm) DialPeerToAddr(ctx context.Context, p peer.ID, addr ma.Multiaddr) (network.Conn, error) {
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	if p == s.local {
+		return nil, ErrDialToSelf
+	}
+	if s.gater != nil {
+		if !s.gater.InterceptPeerDial(p) {
+			return nil, &DialError{Peer: p, Cause: ErrGaterDisallowedConnection}
+		}
+		if !s.gater.InterceptAddrDial(p, addr) {
+			return nil, &DialError{Peer: p, Cause: ErrGaterDisallowedConnection}
+		}
+	}
+
+	// Drain DialUpdate events from transports that emit them (e.g. QUIC). We do
+	// not need the updates, but the channel must be consumed to avoid blocking
+	// the dial.
+	updCh := make(chan transport.DialUpdate, 8)
+	go func() {
+		for range updCh {
+		}
+	}()
+	defer close(updCh)
+
+	connC, err := s.dialAddr(ctx, p, addr, updCh)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := s.addConn(connC, network.DirOutbound)
+	if err != nil {
+		connC.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
 // TODO We should have a `IsFdConsuming() bool` method on the `Transport` interface in go-libp2p/core/transport.
 // This function checks if any of the transport protocols in the address requires a file descriptor.
 // For now:
