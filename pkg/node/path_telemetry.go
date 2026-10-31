@@ -268,8 +268,12 @@ func (n *Node) pathDTOFor(pID peer.ID, path string, s network.Stream, q streamWr
 		dto.RelayKind = "direct"
 		if maddrutil.IsCircuitRelay(s.Conn().RemoteMultiaddr()) {
 			dto.RelayKind = "circuit-relay"
+		} else if s.Conn().RemotePeer() != pID {
+			// A relayed path's underlying connection terminates at a hop (the
+			// boot-relay uplink), so its connection peer is the hop, not pID.
+			dto.RelayKind = "boot-relay"
 		}
-		dto.Score = scoreStreamTransport(s)
+		dto.Score = scoreStreamTransport(s, pID)
 		dto.Priority = transportPriorityLabel(dto.Score)
 
 		if q.samples > 0 {

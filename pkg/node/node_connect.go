@@ -333,19 +333,35 @@ const (
 	mpRepairHealthyInterval = 2 * time.Minute
 )
 
-// repairMultipathPaths re-dials the direct multiaddrs of a peer that still has a
-// direct connection but lost one of its paths. This is the only recovery for a
-// path whose connection was closed — a QUIC idle timeout after a silent death,
-// or a write failure that retired the stream. EnsureStreamsOnAllConns walks only
-// EXISTING connections, so a closed connection is never re-opened by it, and the
+// repairMultipathPaths re-dials any advertised address of a peer that does not
+// yet have a live connection. This is the recovery path for a path whose
+// connection was closed — a QUIC idle timeout after a silent death, or a write
+// failure that retired the stream. EnsureStreamsOnAllConns walks only EXISTING
+// connections, so a closed connection is never re-opened by it, and the
 // relay-only upgrade loop only targets peers with NO direct link. Without this a
 // multipath session silently decays to fewer paths for the rest of the
-// connection. It is a no-op (early return) when every known direct addr already
-// has a connection, so a healthy peer costs one map lookup plus a conn count.
+// connection.
+//
+// Candidate paths are EVERY dialable address the peer advertises — direct
+// (TCP/QUIC, IPv4/IPv6) AND circuit-relay (one per relay hop). This is what
+// lets the multipath set span more than one KIND of path:
+//   - a dual-stack / multi-protocol peer (IPv4+IPv6, or TCP+QUIC) yields >1
+//     direct path;
+//   - a peer behind two boots advertises two /p2p-circuit addrs, yielding a
+//     relayA+relayB pair;
+//   - a peer reachable over BOTH a direct link and a relay keeps both, so the
+//     relay path participates in multipath instead of being silently dropped.
+//
+// A plain Host.Connect / swarm.dialPeer would short-circuit on the existing
+// connection (it returns as soon as the peer is "Connected") and never dial the
+// second address, which is exactly why dialPeerToAddr (bypassing that
+// short-circuit) is used here.
 //
 // Gated per peer: a failed dial re-arms in mpRepairRetryInterval, a healthy or
 // fully-repaired peer in mpRepairHealthyInterval, so a persistently unreachable
-// stale address cannot become a dial storm on the 10s health tick.
+// stale address cannot become a dial storm on the health tick. Only invoked in
+// multipath mode (see the probe loop), so opening a relay circuit for an
+// otherwise-direct peer only happens when multipath actually wants every path.
 func (n *Node) repairMultipathPaths(pid peer.ID) {
 	if pid == "" || pid == n.Host.ID() {
 		return
@@ -357,38 +373,27 @@ func (n *Node) repairMultipathPaths(pid peer.ID) {
 	}
 	n.mpRepairMu.Unlock()
 
-	direct := directCandidates(filterUndialableAddrs(n.Host.Peerstore().Addrs(pid)))
-	if len(direct) == 0 {
+	// Candidate paths are every dialable address the peer advertises — direct AND
+	// circuit-relay. A peer behind two boots carries two /p2p-circuit addrs; a
+	// directly-reachable peer that also advertises a relay carries both. Each is a
+	// distinct multipath path.
+	candidates := filterUndialableAddrs(n.Host.Peerstore().Addrs(pid))
+	if len(candidates) == 0 {
 		return
 	}
 	conns := n.Host.Network().ConnsToPeer(pid)
-	// Count existing non-relay connections.
-	directConns := 0
-	for _, c := range conns {
-		if c == nil || c.RemoteMultiaddr() == nil || maddrutil.IsCircuitRelay(c.RemoteMultiaddr()) {
-			continue
-		}
-		directConns++
-	}
-	if len(direct) <= directConns {
-		// Every known direct addr already has a connection (or there are spare
-		// conns). Nothing to repair.
-		n.setMpRepairNext(pid, time.Now().Add(mpRepairHealthyInterval))
-		return
-	}
-
-	// Dial each known direct addr we do not yet have a live connection on. This
-	// is what lets dual-stack / multi-protocol peers yield >1 multipath path: a
-	// peer reachable over both IPv4 and IPv6 (or TCP and QUIC) keeps one libp2p
-	// connection per address family / transport, and a plain Host.Connect would
-	// short-circuit on the existing connection (it returns as soon as the peer is
-	// "Connected") and never dial the second address.
-	missing := n.missingMultipathAddrs(direct, conns)
+	// Every known candidate already has a live connection: healthy, nothing to do.
+	missing := n.missingMultipathAddrs(candidates, conns)
 	if len(missing) == 0 {
 		n.setMpRepairNext(pid, time.Now().Add(mpRepairHealthyInterval))
 		return
 	}
 
+	// Dial each advertised address we do not yet hold a live connection on. For a
+	// circuit addr this establishes an additional relay path to the target
+	// (through that relay hop); for a direct addr it opens the second/third
+	// physical path. dialPeerToAddr bypasses Host.Connect's short-circuit so the
+	// second path is actually dialed.
 	ctx, cancel := context.WithTimeout(n.ctx, 5*time.Second)
 	defer cancel()
 	failed := false

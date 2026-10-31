@@ -44,7 +44,7 @@ func BenchmarkEncryptStreamFrame(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				frags, _, pooled, err := sd.encryptAndFragment(pid, cipher, original, limit.size)
+				frags, _, pooled, err := sd.encryptAndFragment(pid, nil, cipher, original, limit.size)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -77,7 +77,7 @@ func TestStreamFragmentPolicyPreservesExplicitLimit(t *testing.T) {
 			cfg.Obfuscation.MaxFragSize = explicit
 			n.SetConfig(cfg)
 			cipher := &sealCountingCipher{ObfCipher: baseCipher}
-			frags, _, pooled, err := sd.encryptAndFragment(pid, cipher, original, n.maxFragPayloadForPS(ps))
+			frags, _, pooled, err := sd.encryptAndFragment(pid, ps, cipher, original, n.maxFragPayloadForPS(ps))
 			if err != nil {
 				t.Fatal(err)
 			}

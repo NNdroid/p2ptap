@@ -155,7 +155,7 @@ func (ps *PeerStreams) mpWeightFor(s network.Stream, now time.Time) float64 {
 			return bps
 		}
 	}
-	return mpNominalBps(scoreStreamTransport(s))
+	return mpNominalBps(scoreStreamTransport(s, ps.peerID))
 }
 
 // pickMultipathStreamIndex returns the index of the stream that should carry

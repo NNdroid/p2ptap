@@ -2,6 +2,7 @@ package obfuscate
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 
 	"p2ptap/pkg/config"
@@ -9,9 +10,9 @@ import (
 
 func TestFramePackAndUnpackRules(t *testing.T) {
 	rules := []string{
-		"0 -> 512-512",        // fixed single target
+		"0 -> 512-512",                    // fixed single target
 		"0 -> 256-256\n1024 -> 1100-1400", // multi-band
-		"0 -> 400-600",        // default-style random range
+		"0 -> 400-600",                    // default-style random range
 	}
 	originalPayload := []byte("Hello P2P TAP VPN Packet Obfuscation Test Payload Data!")
 
@@ -43,6 +44,44 @@ func TestFramePackAndUnpackRules(t *testing.T) {
 			}
 			t.Logf("[ok] rule=%q round-trip verified", rule)
 		})
+	}
+}
+
+// TestUnpackRejectsPaddingLengthOverflow covers the header self-consistency
+// check: Pack always emits exactly HeaderLen+payloadLen+paddingLen bytes (plus
+// the AEAD tag when sealed), so a header claiming more padding than the frame
+// carries describes padding that does not exist. Reading the field without
+// validating it let such a frame through as "valid" and left the field unusable
+// as a cross-check on the frame length.
+func TestUnpackRejectsPaddingLengthOverflow(t *testing.T) {
+	packer := NewFramePackerFull(&config.ObfuscationConfig{Enable: true, PaddingRules: "0 -> 512-512"})
+	payload := []byte("padding-length-validation-payload")
+	buf := make([]byte, 2048)
+	n, err := packer.Pack(packer.NextSeqID(0), payload, buf)
+	if err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+	if padLen := binary.BigEndian.Uint16(buf[13:15]); padLen == 0 {
+		t.Fatal("test needs a padded frame, got PaddingLen=0")
+	}
+
+	// Round-trip still works.
+	if _, got, err := Unpack(buf[:n]); err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("baseline unpack failed: %v", err)
+	}
+
+	// Claim more padding than the frame carries: one past the end.
+	bad := append([]byte(nil), buf[:n]...)
+	overshoot := uint16(len(bad)-HeaderLen-int(binary.BigEndian.Uint16(bad[11:13]))) + 1
+	binary.BigEndian.PutUint16(bad[13:15], overshoot)
+	if _, _, err := Unpack(bad); err != ErrFrameCorrupted {
+		t.Fatalf("padding overflow accepted: err = %v, want ErrFrameCorrupted", err)
+	}
+
+	// A sealed frame legitimately carries AEADTagSize extra bytes, so the check
+	// must stay an upper bound rather than an exact equality.
+	if _, _, err := Unpack(buf[:n]); err != nil {
+		t.Fatalf("exact-size frame rejected: %v", err)
 	}
 }
 

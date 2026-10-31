@@ -149,7 +149,7 @@ func TestFragReassembleDuplicateFragmentIgnored(t *testing.T) {
 func TestFragReassembleExcessiveFragTotalDropped(t *testing.T) {
 	f := newFragReassembler()
 	p := newTestPeerID(t)
-	env := appendFragHeader(nil, 1, 0, 300, []byte("x")) // maxFragTotal = 256
+	env := appendFragHeader(nil, 1, 0, uint16(maxFragTotal+1), []byte("x"))
 	out, complete := f.reassemble(p, env, reasmChannelDirect, 0)
 	if complete || out != nil {
 		t.Fatalf("excessive fragTotal must be dropped (complete=%v out=%v)", complete, out)

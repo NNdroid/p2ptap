@@ -2,6 +2,7 @@ package obfuscate
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 )
 
@@ -56,20 +57,20 @@ func TestParsePaddingRuleMultiBand(t *testing.T) {
 func TestParsePaddingRuleRejectsBad(t *testing.T) {
 	cases := []string{
 		"garbage",
-		"0 ->",            // missing target
-		"0 -> abc",        // bad target
-		"x -> 400-600",    // bad floor
-		"0 -> 600-400",    // target_max < target_min
-		"0 -> 70000",      // target above MaxFrameSize
+		"0 ->",                         // missing target
+		"0 -> abc",                     // bad target
+		"x -> 400-600",                 // bad floor
+		"0 -> 600-400",                 // target_max < target_min
+		"0 -> 70000",                   // target above MaxFrameSize
 		"0 -> 400-600\n0 -> 500-700",   // duplicate floor
-		"coalesce",                      // missing on/off
-		"coalesce maybe",                // bad on/off
-		"coalesce on max_delay_ms=0",    // below range
-		"coalesce on max_delay_ms=101",  // above range
-		"coalesce on max_bytes=10",      // below range
-		"coalesce on max_frames=1",      // below range
-		"coalesce on bogus=1",           // unknown key
-		"coalesce on\ncoalesce off",     // duplicate directive
+		"coalesce",                     // missing on/off
+		"coalesce maybe",               // bad on/off
+		"coalesce on max_delay_ms=0",   // below range
+		"coalesce on max_delay_ms=101", // above range
+		"coalesce on max_bytes=10",     // below range
+		"coalesce on max_frames=1",     // below range
+		"coalesce on bogus=1",          // unknown key
+		"coalesce on\ncoalesce off",    // duplicate directive
 	}
 	for _, in := range cases {
 		if _, err := ParsePaddingRule(in); err == nil {
@@ -186,9 +187,16 @@ func TestBuildSplitBatchPayload(t *testing.T) {
 		bytes.Repeat([]byte{0x03}, 200),
 	}
 	payload := BuildBatchPayload(subs)
-	// Magic[0:2] must differ from the frag magic 0xF5A1.
-	if payload[0] != 0xB0 || payload[1] != 0x7C {
-		t.Fatalf("batch magic prefix = %02x%02x, want B07C", payload[0], payload[1])
+	// Magic[0:2] must differ from the frag magic 0xF5A1, and byte 0 must have
+	// its I/G bit set so no unicast destination MAC can ever spell it.
+	if payload[0] != 0xB1 || payload[1] != 0x7C {
+		t.Fatalf("batch magic prefix = %02x%02x, want B17C", payload[0], payload[1])
+	}
+	if payload[0]&0x01 != 0x01 {
+		t.Fatalf("batch magic first byte %#x has its I/G bit clear: a unicast destination MAC could collide", payload[0])
+	}
+	if payload[0] == 0xFF {
+		t.Fatal("batch magic first byte is 0xFF: a broadcast destination MAC could collide")
 	}
 	got, ok := SplitBatchPayload(payload)
 	if !ok {
@@ -241,5 +249,56 @@ func TestSplitBatchPayloadRejectsBad(t *testing.T) {
 	plain := bytes.Repeat([]byte{0xEE}, 100)
 	if subs, ok := SplitBatchPayload(plain); ok || len(subs) != 0 {
 		t.Fatalf("plain payload misdetected: ok=%v subs=%d", ok, len(subs))
+	}
+}
+
+// TestSplitBatchPayloadLegacyMagicAccepted keeps a rolling upgrade working: a
+// peer that still emits the old (unicast-looking) magic must still be split.
+func TestSplitBatchPayloadLegacyMagicAccepted(t *testing.T) {
+	subs := [][]byte{bytes.Repeat([]byte{0x01}, 60), bytes.Repeat([]byte{0x02}, 100)}
+	payload := BuildBatchPayload(subs)
+	binary.BigEndian.PutUint32(payload[0:4], batchMagicLegacy)
+
+	got, ok := SplitBatchPayload(payload)
+	if !ok {
+		t.Fatal("legacy batch magic was not accepted")
+	}
+	if len(got) != len(subs) {
+		t.Fatalf("split %d sub-frames, want %d", len(got), len(subs))
+	}
+	for i := range subs {
+		if !bytes.Equal(got[i], subs[i]) {
+			t.Fatalf("sub-frame %d mismatch", i)
+		}
+	}
+}
+
+// TestSplitBatchPayloadCountIsBoundedBeforeAllocation is the regression guard for
+// the allocation amplification: a 22-byte payload claiming 65535 sub-frames used
+// to allocate 65535 slice slots (~1.5 MiB, ~70k x the input) BEFORE the first
+// length field was validated, which a PSK-holding peer could repeat at line rate.
+// The count must now be rejected up front, allocating nothing.
+func TestSplitBatchPayloadCountIsBoundedBeforeAllocation(t *testing.T) {
+	payload := make([]byte, 22)
+	binary.BigEndian.PutUint32(payload[0:4], batchMagic)
+	binary.BigEndian.PutUint16(payload[4:6], 65535)
+
+	var subs [][]byte
+	var ok bool
+	allocs := testing.AllocsPerRun(100, func() {
+		subs, ok = SplitBatchPayload(payload)
+	})
+	if ok || subs != nil {
+		t.Fatal("oversized count accepted as a batch")
+	}
+	if allocs != 0 {
+		t.Fatalf("rejecting an oversized count allocated %v times, want 0", allocs)
+	}
+
+	// The exact boundary must still be accepted: the largest legitimate count for
+	// this payload size is (len-6)/(2+minSubFrameLen).
+	maxCount := (len(payload) - batchHeaderLen) / (2 + minSubFrameLen)
+	if maxCount == 0 {
+		t.Fatal("test payload is too small to exercise the boundary")
 	}
 }

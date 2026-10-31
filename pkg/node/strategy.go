@@ -115,7 +115,7 @@ func (ps *PeerStreams) rebuildLocked() {
 		names = append(names, name)
 	}
 	sort.Slice(names, func(i, j int) bool {
-		a, b := scoreStreamTransport(ps.streams[names[i]]), scoreStreamTransport(ps.streams[names[j]])
+		a, b := scoreStreamTransport(ps.streams[names[i]], ps.peerID), scoreStreamTransport(ps.streams[names[j]], ps.peerID)
 		if a != b {
 			return a < b
 		}
@@ -273,9 +273,17 @@ func (ps *PeerStreams) GetAllStreams() []network.Stream {
 // 0: Local loopback (fastest)
 // 10: Private LAN IP (192.168.x, 10.x, 172.16-31.x, ULA fd00::/8) - LAN direct pass-through
 // 20: Direct Public WAN IP (QUIC / TCP / WebRTC direct)
-// 100: Relayed connection (/p2p-circuit) - slowest, rate-limited
+// 100: Relayed connection (circuit relay OR boot-relay/overlay hop) - slowest, rate-limited
 // streamDirectionRank orders streams within one transport tier: our own
 // outbound stream first (0), a peer-opened inbound stream second (1).
+//
+// A relay path's underlying transport connection terminates at a HOP (the
+// circuit relay or the boot-relay uplink), so its connection's RemotePeer() is
+// the hop, not peerID. Testing that — in addition to the IsCircuitRelay
+// multiaddr test — is what lets boot-relay (overlay-relay) streams be
+// down-prioritized like libp2p /p2p-circuit streams: their RemoteMultiaddr is a
+// direct address of the boot, so IsCircuitRelay alone misses them and would let
+// multipath over-schedule the slowest hop.
 func streamDirectionRank(s network.Stream) int {
 	if s == nil {
 		return 2
@@ -286,16 +294,17 @@ func streamDirectionRank(s network.Stream) int {
 	return 0
 }
 
-func scoreStreamTransport(s network.Stream) int {
+func scoreStreamTransport(s network.Stream, peerID peer.ID) int {
 	if s == nil || s.Conn() == nil {
 		return 999
 	}
-	rMA := s.Conn().RemoteMultiaddr()
+	c := s.Conn()
+	rMA := c.RemoteMultiaddr()
 	if rMA == nil {
 		return 999
 	}
-	if maddrutil.IsCircuitRelay(rMA) {
-		return 100 // Relay stream: lowest priority
+	if c.RemotePeer() != peerID || maddrutil.IsCircuitRelay(rMA) {
+		return 100 // Relay stream (circuit or boot-relay hop): lowest priority
 	}
 	if manet.IsIPLoopback(rMA) {
 		return 0 // Local loopback: top priority
@@ -306,34 +315,54 @@ func scoreStreamTransport(s network.Stream) int {
 	return 20 // Public WAN direct: medium priority
 }
 
-// isRelayStream reports whether s rides a circuit-relay connection.
-func isRelayStream(s network.Stream) bool {
-	if s == nil || s.Conn() == nil || s.Conn().RemoteMultiaddr() == nil {
+// connIsRelayForPeer reports whether c is a relayed (hop-terminated) connection
+// to peerID rather than a direct connection to peerID. A relay path's connection
+// terminates at a hop, so its RemotePeer() differs from peerID for BOTH libp2p
+// /p2p-circuit connections and boot-relay (overlay-relay) connections.
+func connIsRelayForPeer(c network.Conn, peerID peer.ID) bool {
+	if c == nil || c.RemoteMultiaddr() == nil {
 		return false
 	}
-	return maddrutil.IsCircuitRelay(s.Conn().RemoteMultiaddr())
+	if c.RemotePeer() != peerID {
+		return true
+	}
+	return maddrutil.IsCircuitRelay(c.RemoteMultiaddr())
 }
 
-// nonRelayStreams drops circuit-relay streams from the candidate set while at
-// least one direct (non-relay) stream exists. A relay path is rate-limited and
-// adds a slow high-latency hop, so scheduling it alongside a direct path taxes
-// every frame it carries — under multipath the DWRR min-share gives it ~5% of
-// the budget, and under redundant it would carry a full duplicate of EVERY
-// frame. The relay stream is left REGISTERED (not closed) so the post-failure
-// fallbacks (sendFramesViaSendToPeer / relayFallbackIfPossible) can still use it
-// once every direct path drops; this filter only stops it being scheduled while
-// a direct path is healthy.
+// streamIsRelayForPeer reports whether s rides a relayed path to peerID. See
+// connIsRelayForPeer for why this catches both circuit-relay and boot-relay
+// streams (the latter IsCircuitRelay alone cannot detect).
+func streamIsRelayForPeer(s network.Stream, peerID peer.ID) bool {
+	if s == nil || s.Conn() == nil {
+		return false
+	}
+	return connIsRelayForPeer(s.Conn(), peerID)
+}
+
+// nonRelayStreams drops relay streams from the candidate set while at least one
+// direct (non-relay) stream exists. A relay path is rate-limited and adds a slow
+// high-latency hop, so scheduling it alongside a direct path taxes every frame
+// it carries — under multipath the DWRR min-share gives it ~5% of the budget,
+// and under redundant it would carry a full duplicate of EVERY frame. The relay
+// stream is left REGISTERED (not closed) so the post-failure fallbacks
+// (sendFramesViaSendToPeer / relayFallbackIfPossible) can still use it once
+// every direct path drops; this filter only stops it being scheduled while a
+// direct path is healthy.
+//
+// peerID is the logical peer the streams are registered under; relay detection
+// uses streamIsRelayForPeer so both libp2p /p2p-circuit and boot-relay
+// (overlay-relay) streams are recognized (see connIsRelayForPeer).
 //
 // The caller's slice is the published PeerStreams snapshot and is shared by
 // every reader, so a filtered result is always a fresh slice, never a
 // zero-length view into the shared backing array.
-func nonRelayStreams(streams []network.Stream) []network.Stream {
+func nonRelayStreams(streams []network.Stream, peerID peer.ID) []network.Stream {
 	if len(streams) <= 1 {
 		return streams
 	}
 	hasDirect := false
 	for _, s := range streams {
-		if !isRelayStream(s) {
+		if !streamIsRelayForPeer(s, peerID) {
 			hasDirect = true
 			break
 		}
@@ -343,7 +372,7 @@ func nonRelayStreams(streams []network.Stream) []network.Stream {
 	}
 	out := make([]network.Stream, 0, len(streams))
 	for _, s := range streams {
-		if !isRelayStream(s) {
+		if !streamIsRelayForPeer(s, peerID) {
 			out = append(out, s)
 		}
 	}
@@ -615,10 +644,10 @@ func (sd *StrategyDispatcher) openStreamOnConn(ctx context.Context, target peer.
 	return s, nil
 }
 
-// EnsureStreamsOnAllConns opens one data stream on EVERY direct (non-relayed)
-// connection to target, so each physical path carries its own stream.
+// EnsureStreamsOnAllConns opens one data stream on EVERY connection to target, so
+// each physical path carries its own stream.
 //
-// It exists because of two separate problems:
+// It exists because of three separate problems:
 //
 //  1. No multi-path to schedule. Every other stream is created through
 //     Host.NewStream -> swarm.bestConnToPeer, so a peer with QUIC and TCP up
@@ -631,6 +660,11 @@ func (sd *StrategyDispatcher) openStreamOnConn(ctx context.Context, target peer.
 //     rest of the session, so multipath's benefit decayed to zero after the
 //     first transient failure. Called on connect and, under multipath, on the
 //     health-probe tick, so a lost path returns within one tick.
+//  3. Hidden relay paths. A relay conn was previously skipped whenever a direct
+//     conn existed, so a peer reachable over both a direct link AND a relay (or
+//     over two relays) never got its relay path into the multipath set. Under
+//     multipath we now pin a stream on relay conns too, so those paths
+//     participate at their DWRR min-share instead of being silently dropped.
 //
 // Idempotent (it checks the (direction, conn) slot first) and serialized per
 // peer, because two concurrent opens against the same conn would register two
@@ -645,18 +679,21 @@ func (sd *StrategyDispatcher) EnsureStreamsOnAllConns(target peer.ID) (opened in
 		// NewStream would just dial. Leave it to the lazy path.
 		return 0
 	}
-	// Skip relayed connections whenever a direct one exists: a circuit stream
-	// scores 100 and would be scheduled as a real "path", quietly shifting
-	// traffic onto the slowest hop.
+	// Split connections into direct (conn peer == target) and relay (conn peer is
+	// a hop — circuit relay or boot-relay uplink). Both are valid multipath
+	// paths; under multipath we pin a stream on EACH so the set spans every
+	// available path.
 	direct := make([]network.Conn, 0, len(conns))
+	relay := make([]network.Conn, 0, len(conns))
 	for _, c := range conns {
 		if c == nil || c.RemoteMultiaddr() == nil {
 			continue
 		}
-		if maddrutil.IsCircuitRelay(c.RemoteMultiaddr()) {
-			continue
+		if connIsRelayForPeer(c, target) {
+			relay = append(relay, c)
+		} else {
+			direct = append(direct, c)
 		}
-		direct = append(direct, c)
 	}
 
 	ps := sd.GetOrCreatePeerStreams(target)
@@ -668,34 +705,19 @@ func (sd *StrategyDispatcher) EnsureStreamsOnAllConns(target peer.ID) (opened in
 		baseCtx = sd.node.ctx
 	}
 
-	if len(direct) == 0 {
-		// Relay-only / circuit peer. The lazy path would create exactly one
-		// stream here, so create it now to keep the "first frame never waits on
-		// a NewStream" guarantee that PrimeStream exists for. openStream reuses
-		// any existing stream, so a repeat call is a no-op.
-		if len(ps.GetAllStreams()) > 0 {
-			return 0
-		}
-		openCtx, cancel := context.WithTimeout(baseCtx, 3*time.Second)
-		defer cancel()
-		if _, _, err := sd.openStream(openCtx, target); err != nil {
-			log.Debug("Relay-path prime for peer %s failed (will open lazily): %v", target.ShortString(), err)
-			return 0
-		}
-		return 1
-	}
-
-	for _, c := range direct {
+	// openOn pins one data stream on c if none is registered yet. It returns true
+	// if a stream was opened.
+	openOn := func(c network.Conn) bool {
 		key := outboundKeyForConn(c)
 		if key == "" || ps.HasStreamKey(key) {
-			continue
+			return false
 		}
 		openCtx, cancel := context.WithTimeout(baseCtx, 3*time.Second)
 		s, err := sd.openStreamOnConn(openCtx, target, c)
 		cancel()
 		if err != nil {
 			log.Debug("Per-connection stream to peer %s on conn %s failed: %v", target.ShortString(), c.ID(), err)
-			continue
+			return false
 		}
 		ps.AddStream(streamRegistryKey(s), s)
 		if sd.outgoingStreamHandler != nil {
@@ -703,9 +725,52 @@ func (sd *StrategyDispatcher) EnsureStreamsOnAllConns(target peer.ID) (opened in
 		}
 		log.Debug("Per-connection data stream opened to peer %s on conn %s (%s)",
 			target.ShortString(), c.ID(), c.RemoteMultiaddr().String())
-		opened++
+		return true
 	}
-	return opened
+
+	if len(direct) > 0 {
+		for _, c := range direct {
+			if openOn(c) {
+				opened++
+			}
+		}
+		// Under multipath, also pin a stream on each relay conn so a direct+relay
+		// peer (or a peer behind two relays) actually exercises multiple paths.
+		if sd.Mode() == "multipath" {
+			for _, c := range relay {
+				if openOn(c) {
+					opened++
+				}
+			}
+		}
+		return opened
+	}
+
+	// Relay-only / circuit peer.
+	if sd.Mode() == "multipath" && len(relay) > 0 {
+		// Pin a stream on every relay conn we already hold, so multiple relay
+		// circuits (relayA + relayB) each carry their own stream.
+		for _, c := range relay {
+			if openOn(c) {
+				opened++
+			}
+		}
+		return opened
+	}
+	// Non-multipath, or no relay conn established yet: open one lazy stream to
+	// bootstrap the relay path (openStream reuses any existing stream, so a
+	// repeat call is a no-op). This keeps the "first frame never waits on a
+	// NewStream" guarantee that PrimeStream exists for.
+	if len(ps.GetAllStreams()) > 0 {
+		return 0
+	}
+	openCtx, cancel := context.WithTimeout(baseCtx, 3*time.Second)
+	defer cancel()
+	if _, _, err := sd.openStream(openCtx, target); err != nil {
+		log.Debug("Relay-path prime for peer %s failed (will open lazily): %v", target.ShortString(), err)
+		return 0
+	}
+	return 1
 }
 
 // extractUnderlyingTCPConn unwraps libp2p transport layers to find a *net.TCPConn for NoDelay tuning.
@@ -807,7 +872,7 @@ func (sd *StrategyDispatcher) SendToPeer(ctx context.Context, targetPeer peer.ID
 	if sd.node != nil {
 		fragMaxPayload = sd.node.maxFragPayloadForPS(ps)
 	}
-	frags, stat, releaseFrags, encErr := sd.encryptAndFragment(targetPeer, cipher, packedData, fragMaxPayload)
+	frags, stat, releaseFrags, encErr := sd.encryptAndFragment(targetPeer, ps, cipher, packedData, fragMaxPayload)
 	if encErr != nil {
 		// Never fall through to the wire with an unsealed frame: the peer would
 		// drop it and the operator would see only an unexplained packet loss.
@@ -845,7 +910,12 @@ func (sd *StrategyDispatcher) SendToPeer(ctx context.Context, targetPeer peer.ID
 //
 // maxPayload controls the per-fragment inner-payload threshold. Callers with
 // active streams use maxFragPayloadForPS(ps); 0 selects the overlay default.
-func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, cipher obfuscate.ObfCipher, rawData []byte, maxPayload int) ([][]byte, tapPayloadStat, bool, error) {
+//
+// ps is used only to decide how many paths the frame may be striped across: with
+// two or more paths in multipath mode a large frame is sharded and given FEC
+// parity (fragmentFrameForPaths) so it can span links and survive one dying
+// mid-frame. Any other mode, or a single path, keeps plain fragmentation.
+func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, ps *PeerStreams, cipher obfuscate.ObfCipher, rawData []byte, maxPayload int) ([][]byte, tapPayloadStat, bool, error) {
 	if sd.node == nil {
 		stat := framePayloadStats(rawData)
 		return [][]byte{rawData}, stat, false, nil
@@ -875,7 +945,24 @@ func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, cipher obfu
 			targetPeer.String())
 	}
 
-	frags, pooled := sd.node.fragmentFrame(data, sd.node.fragRX, targetPeer, maxPayload)
+	// Path count drives whether a large frame is striped (and given FEC parity)
+	// or fragmented onto a single link. Only multipath can use more than one
+	// path; every other strategy hands the whole frame set to one stream.
+	//
+	// The cheap raw count is enough to decide, but when it says "more than one"
+	// and the frame is actually large enough to stripe, the count is refined to
+	// the DEDUPED path count (a single connection exposes an in/out stream pair
+	// that the writers collapse into one path). Doing that on every frame would
+	// allocate on the hot path for no benefit, so it is gated on the frame size.
+	pathCount := 1
+	if sd.Mode() == "multipath" && ps != nil {
+		streams := ps.GetAllStreams()
+		pathCount = len(streams)
+		if pathCount > 1 && len(data) > multipathStripeChunk {
+			pathCount = len(dedupStreamsByConn(streams))
+		}
+	}
+	frags, pooled := sd.node.fragmentFrameForPaths(data, sd.node.fragRX, targetPeer, maxPayload, pathCount)
 	if innerPooled {
 		if pooled {
 			// fragmentFrame has copied every chunk out of the logical sealed frame.
@@ -1311,11 +1398,12 @@ type batchFrame struct {
 func (sd *StrategyDispatcher) writePackedBatchLocked(targetPeer peer.ID, ps *PeerStreams, cipher obfuscate.ObfCipher, packedFrames [][]byte) error {
 	streams := ps.GetAllStreams()
 	if sd.Mode() != "multipath" {
-		// best_path/redundant/fallback: never schedule a circuit-relay path
-		// alongside a healthy direct path (see nonRelayStreams). multipath KEEPS
-		// relay paths so they stay warm and participate at their min-share weight
-		// (see multipath_scheduler.go) — that is the whole point of multipath.
-		streams = nonRelayStreams(streams)
+		// best_path/redundant/fallback: never schedule a relay path
+		// (circuit-relay OR boot-relay hop) alongside a healthy direct path (see
+		// nonRelayStreams). multipath KEEPS relay paths so they stay warm and
+		// participate at their min-share weight (see multipath_scheduler.go) —
+		// that is the whole point of multipath.
+		streams = nonRelayStreams(streams, targetPeer)
 	}
 	// Collapse each connection's in/out pair to one path; otherwise a single
 	// direct connection claims 2x its share and a relay circuit's frames get
@@ -1336,7 +1424,7 @@ func (sd *StrategyDispatcher) writePackedBatchLocked(targetPeer peer.ID, ps *Pee
 	}()
 	frames := make([]batchFrame, 0, len(packedFrames))
 	for i, data := range packedFrames {
-		frags, stat, pooled, err := sd.encryptAndFragment(targetPeer, cipher, data, fragMaxPayload)
+		frags, stat, pooled, err := sd.encryptAndFragment(targetPeer, ps, cipher, data, fragMaxPayload)
 		if err != nil {
 			return err
 		}
@@ -1365,14 +1453,22 @@ func (sd *StrategyDispatcher) writePackedBatchLocked(targetPeer peer.ID, ps *Pee
 	return sd.writeFragsToStreams(ps, targetPeer, streams, logicalStat, wireFrames, true)
 }
 
-// writeBatchMultipathLocked assigns every logical frame in the batch to a path
-// with the same DWRR the per-frame path uses, then issues ONE coalesced write
-// per path on that path's async writer goroutine. Batching keeps its syscall
+// writeBatchMultipathLocked assigns every FRAGMENT in the batch to a path with
+// the same DWRR the per-frame path uses, then issues ONE coalesced write per
+// path on that path's async writer goroutine. Batching keeps its syscall
 // advantage while the path split stays proportional to capacity instead of
 // concentrating on one link, and — because every write waits OFF the peer's
 // write lock (stream_writer.go) — a slow path's bucket no longer delays the
 // other paths' buckets beyond its own queue. Caller holds ps.writeMu (and it
 // is re-acquired before return).
+//
+// The assignment unit is the FRAGMENT, not the frame. A frame that fits one
+// fragment (every ordinary <=MTU packet) still lands on exactly one path, so the
+// common case is unchanged and the receiver's reorder window is not disturbed.
+// A large frame that was striped into several shards (fragmentFrameForPaths) is
+// spread across the paths instead of being pinned to one link while the others
+// idle; the receive-side reassembler is path-agnostic (keyed by peer+origin
+// sequence), so cross-path shards land in the same group.
 func (sd *StrategyDispatcher) writeBatchMultipathLocked(targetPeer peer.ID, ps *PeerStreams, streams []network.Stream, frames []batchFrame) error {
 	if len(frames) == 0 {
 		return nil
@@ -1381,36 +1477,49 @@ func (sd *StrategyDispatcher) writeBatchMultipathLocked(targetPeer peer.ID, ps *
 		return fmt.Errorf("no direct streams for peer %s", targetPeer)
 	}
 
-	// Phase 1 — under the write lock: assign frames to paths and hand every
+	// Phase 1 — under the write lock: assign fragments to paths and hand every
 	// bucket to its path's writer without blocking on queue capacity.
 	type mpBucket struct {
 		s     network.Stream
 		frags [][]byte
-		stat  tapPayloadStat
-		items []batchFrame
-		wait  func() mpWriteResult // nil = queue was full
+		// counts maps frame index -> how many of its fragments went here. A
+		// striped frame can appear in the same bucket more than once when the
+		// fragment count exceeds the path count.
+		counts map[int]int
+		wait   func() mpWriteResult
 	}
 	order := make([]*mpBucket, 0, len(streams))
 	byStream := make(map[network.Stream]*mpBucket, len(streams))
-	for _, f := range frames {
-		idx := ps.pickMultipathStreamIndex(streams, time.Now())
-		if idx < 0 {
-			idx = 0
+	owner := make([]*mpBucket, len(frames)) // bucket holding frame i's first fragment
+	fragTotal := make([]int, len(frames))
+	now := time.Now()
+	for fi := range frames {
+		for _, frag := range frames[fi].frags {
+			idx := ps.pickMultipathStreamIndex(streams, now)
+			if idx < 0 {
+				idx = 0
+			}
+			s := streams[idx]
+			b := byStream[s]
+			if b == nil {
+				b = &mpBucket{s: s, counts: make(map[int]int, len(frames))}
+				byStream[s] = b
+				order = append(order, b)
+			}
+			b.frags = append(b.frags, frag)
+			b.counts[fi]++
+			if owner[fi] == nil {
+				owner[fi] = b
+			}
+			fragTotal[fi]++
 		}
-		s := streams[idx]
-		b := byStream[s]
-		if b == nil {
-			b = &mpBucket{s: s}
-			byStream[s] = b
-			order = append(order, b)
-		}
-		b.frags = append(b.frags, f.frags...)
-		b.stat.bytes += f.stat.bytes
-		b.stat.frames += f.stat.frames
-		b.items = append(b.items, f)
 	}
 	for _, b := range order {
-		wait, err := ps.submitMpWriteLocked(b.s, sd.node, targetPeer, b.frags, b.stat)
+		// Per-path attribution is done in phase 3, once it is known which frames
+		// were FULLY delivered: the writer would otherwise attribute a frame that
+		// only partly made it onto this path, and phase 3 would then count it a
+		// second time.
+		wait, err := ps.submitMpWriteLocked(b.s, sd.node, targetPeer, b.frags, tapPayloadStat{})
 		if err != nil {
 			continue // queue full: b.wait stays nil, handled as a failure below
 		}
@@ -1427,12 +1536,12 @@ func (sd *StrategyDispatcher) writeBatchMultipathLocked(targetPeer peer.ID, ps *
 	}
 	ps.writeMu.Lock()
 
-	// Phase 3 — same failure handling as the synchronous version.
+	// Phase 3 — a failed bucket can only strand the fragments it carried; the
+	// rest of a striped frame is already on a healthy path, so only the frames
+	// that did NOT receive all of their fragments re-enter the queue.
 	var firstErr error
-	var retry []batchFrame
-	var sentBytes int
-	var sentFrames []batchFrame
-	var sentWireBytes int
+	delivered := make([]int, len(frames))
+	live := make(map[network.Stream]bool, len(order))
 	for _, b := range order {
 		res, ok := results[b.s]
 		if !ok {
@@ -1442,33 +1551,48 @@ func (sd *StrategyDispatcher) writeBatchMultipathLocked(targetPeer peer.ID, ps *
 			if firstErr == nil {
 				firstErr = res.err
 			}
-			// Frames already handed to this broken path cannot be recovered from
-			// it, but they CAN still go out on a surviving path — that is the
-			// whole point of having more than one.
+			// Fragments already handed to this broken path cannot be recovered
+			// from it, but they CAN still go out on a surviving path — that is
+			// the whole point of having more than one.
 			ps.notePathFailureUnderLock(b.s, time.Now())
-			log.Debug("Multipath batch: path to peer %s failed (%v); re-queuing %d frame(s) on the remaining paths",
-				targetPeer.String(), res.err, len(b.items))
+			log.Debug("Multipath batch: path to peer %s failed (%v); its %d fragment(s) will be re-queued on the remaining paths",
+				targetPeer.String(), res.err, len(b.frags))
 			sd.removeStreamUnderLock(ps, b.s)
-			retry = append(retry, b.items...)
 			streams = withoutStream(streams, b.s)
 			continue
 		}
 		ps.notePathSuccessUnderLock(b.s)
-		sentBytes += b.stat.bytes
-		sentFrames = append(sentFrames, b.items...)
-		for _, it := range b.items {
-			for _, frag := range it.frags {
-				sentWireBytes += len(frag)
-			}
+		live[b.s] = true
+		for fi, n := range b.counts {
+			delivered[fi] += n
 		}
-		// Per-path TX attribution, matching writeFragsOnStream: the peer-level
-		// recordPeerTxBytes below covers the aggregate, but without this the
-		// per-path table (pathTx) misses every byte a batch went out on, so a
-		// multipath peer's path rows read zero while its peer row is full.
-		if sd.node != nil {
-			if conn := b.s.Conn(); conn != nil {
-				sd.node.recordPeerTxBytesOnPath(targetPeer, conn.RemoteMultiaddr().String(), b.stat.bytes, b.stat.frames)
+	}
+
+	// Account for exactly the frames that are now complete, and re-queue the
+	// rest. Counting here (rather than per bucket) is what keeps the totals
+	// correct when one frame was striped over several buckets.
+	var retry []batchFrame
+	var sentBytes, sentTaps, sentLogical, sentWireBytes int
+	attrib := make(map[network.Stream]*tapPayloadStat, len(order))
+	for fi := range frames {
+		if delivered[fi] < fragTotal[fi] {
+			retry = append(retry, frames[fi])
+			continue
+		}
+		sentBytes += frames[fi].stat.bytes
+		sentTaps += frames[fi].stat.frames
+		sentLogical++
+		for _, fr := range frames[fi].frags {
+			sentWireBytes += len(fr)
+		}
+		if b := owner[fi]; b != nil && live[b.s] {
+			st := attrib[b.s]
+			if st == nil {
+				st = &tapPayloadStat{}
+				attrib[b.s] = st
 			}
+			st.bytes += frames[fi].stat.bytes
+			st.frames += frames[fi].stat.frames
 		}
 	}
 
@@ -1477,12 +1601,20 @@ func (sd *StrategyDispatcher) writeBatchMultipathLocked(targetPeer peer.ID, ps *
 	// on the survivors, the bytes that DID go out on the successful paths were
 	// never counted (the accounting leak): the recursion records only its own
 	// (retry) successes, so the two passes together must cover every sent frame
-	// exactly once. This same block also serves the all-success case (no retry),
-	// where sentFrames == frames and the old post-branch block is now redundant.
+	// exactly once. This same block also serves the all-success case (no retry).
 	if sd.node != nil && sentBytes > 0 {
 		sd.node.recordPeerTxBytes(targetPeer, sentBytes)
 		if sd.node.protoTracker != nil {
-			sd.node.protoTracker.Data.RecordTx(uint64(len(sentFrames)), uint64(sentWireBytes))
+			sd.node.protoTracker.Data.RecordTx(uint64(sentLogical), uint64(sentWireBytes))
+		}
+		// Per-path TX attribution, matching writeFragsOnStream: the peer-level
+		// recordPeerTxBytes above covers the aggregate, but without this the
+		// per-path table (pathTx) misses every byte a batch went out on, so a
+		// multipath peer's path rows read zero while its peer row is full.
+		for s, st := range attrib {
+			if conn := s.Conn(); conn != nil {
+				sd.node.recordPeerTxBytesOnPath(targetPeer, conn.RemoteMultiaddr().String(), st.bytes, st.frames)
+			}
 		}
 	}
 
@@ -1634,13 +1766,13 @@ func (sd *StrategyDispatcher) writeFragsOnStream(ps *PeerStreams, targetPeer pee
 //
 // ps must not be nil. Callers must hold ps.writeMu.
 func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer peer.ID, streams []network.Stream, stat tapPayloadStat, frags [][]byte, recordPeerPayload bool) error {
-	// Never schedule a circuit-relay path alongside a healthy direct path for the
-	// synchronous strategies (see nonRelayStreams). multipath KEEPS relay paths
-	// so they stay warm and carry their min-share of the load (the batch entry in
-	// writePackedBatchLocked does the same filtering); this per-frame entry serves
-	// the same strategy, so it must agree.
+	// Never schedule a relay path (circuit-relay OR boot-relay hop) alongside a
+	// healthy direct path for the synchronous strategies (see nonRelayStreams).
+	// multipath KEEPS relay paths so they stay warm and carry their min-share of
+	// the load (the batch entry in writePackedBatchLocked does the same
+	// filtering); this per-frame entry serves the same strategy, so it must agree.
 	if sd.Mode() != "multipath" {
-		streams = nonRelayStreams(streams)
+		streams = nonRelayStreams(streams, targetPeer)
 	}
 	// Collapse each connection's in/out pair to one path (see dedupStreamsByConn).
 	streams = dedupStreamsByConn(streams)
@@ -1765,55 +1897,146 @@ func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer pe
 //
 // A failed write may have emitted a partial length prefix or body, so the stream
 // can never carry another frame: it is retired (and reset) exactly as before.
+//
+// The frame's fragments are planned across ALL paths before anything is
+// submitted (planFragsOnPaths). For the ordinary single-fragment frame that is
+// one plan on the scheduler-chosen path — identical to the old behaviour. A
+// striped (multi-shard) frame is spread over the paths, which is what keeps one
+// large frame from being pinned to a single link; the receiver's reassembler is
+// keyed by origin sequence, not by path, so the shards meet again there. If a plan
+// fails, only ITS shards are re-planned on the survivors (a partially written
+// stream may have delivered some of them, and a duplicate shard is ignored by the
+// reassembler).
 func (sd *StrategyDispatcher) writeMultipathLocked(ps *PeerStreams, targetPeer peer.ID, streams []network.Stream, stat tapPayloadStat, frags [][]byte, record func(bool)) error {
 	remaining := streams
+	pending := frags
 	var firstErr error
-	for len(remaining) > 0 {
-		idx := ps.pickMultipathStreamIndex(remaining, time.Now())
-		if idx < 0 {
+	recorded := false
+	delivered := 0
+	for len(remaining) > 0 && len(pending) > 0 {
+		plans := ps.planFragsOnPaths(remaining, pending)
+		if len(plans) == 0 {
 			break
 		}
-		s := remaining[idx]
-		wait, err := ps.submitMpWriteLocked(s, sd.node, targetPeer, frags, stat)
-		if err != nil {
-			// Queue full: the path is a whole window behind live traffic.
-			// Treat it exactly like a failed write — open the per-path circuit
-			// and retire the stream so the scheduler stops feeding it.
-			if firstErr == nil {
-				firstErr = err
+
+		type staged struct {
+			s     network.Stream
+			frags [][]byte
+			wait  func() mpWriteResult
+		}
+		inflight := make([]*staged, 0, len(plans))
+		var stranded [][]byte
+		for _, pl := range plans {
+			wait, err := ps.submitMpWriteLocked(pl.s, sd.node, targetPeer, pl.frags, stat)
+			if err != nil {
+				// Queue full: the path is a whole window behind live traffic.
+				// Treat it exactly like a failed write — open the per-path circuit
+				// and retire the stream so the scheduler stops feeding it.
+				if firstErr == nil {
+					firstErr = err
+				}
+				ps.notePathFailureUnderLock(pl.s, time.Now())
+				log.Debug("Multipath: writer queue full on a path to peer %s; retiring it and retrying its %d fragment(s) on a remaining path",
+					targetPeer.String(), len(pl.frags))
+				sd.removeStreamUnderLock(ps, pl.s)
+				remaining = withoutStream(remaining, pl.s)
+				stranded = append(stranded, pl.frags...)
+				continue
 			}
-			ps.notePathFailureUnderLock(s, time.Now())
-			log.Debug("Multipath: writer queue full on a path to peer %s; retiring it and retrying the frame on a remaining path",
-				targetPeer.String())
-			sd.removeStreamUnderLock(ps, s)
-			remaining = withoutStream(remaining, s)
+			inflight = append(inflight, &staged{s: pl.s, frags: pl.frags, wait: wait})
+		}
+
+		if len(inflight) > 0 {
+			// Wait OFF the write lock — the whole point of the per-stream writers.
+			ps.writeMu.Unlock()
+			results := make([]mpWriteResult, len(inflight))
+			for i, st := range inflight {
+				results[i] = st.wait()
+			}
+			ps.writeMu.Lock()
+			for i, st := range inflight {
+				if results[i].err != nil {
+					if firstErr == nil {
+						firstErr = results[i].err
+					}
+					// Open the circuit for this PATH (not just this stream) before
+					// retiring it: the replacement stream will be the same physical
+					// path, and the scheduler must keep avoiding it until the
+					// cooldown expires.
+					ps.notePathFailureUnderLock(st.s, time.Now())
+					log.Debug("Multipath: path to peer %s failed (%v); retiring it and retrying its fragments on a remaining path",
+						targetPeer.String(), results[i].err)
+					sd.removeStreamUnderLock(ps, st.s)
+					remaining = withoutStream(remaining, st.s)
+					stranded = append(stranded, st.frags...)
+					continue
+				}
+				ps.notePathSuccessUnderLock(st.s)
+				delivered += len(st.frags)
+				// The payload is counted ONCE for the logical frame, after the
+				// first shard lands, even when the frame is striped over paths.
+				if !recorded {
+					record(true)
+					recorded = true
+				}
+			}
+		}
+		pending = stranded
+	}
+	// Every fragment landed, possibly after failing over: the frame is delivered
+	// and the earlier path error is history, not a failure of this call (the
+	// failover is the whole point).
+	if delivered == len(frags) {
+		return nil
+	}
+	// A partially delivered frame is NOT a success: an incomplete shard set only
+	// sits in the receiver's reassembly buffer until it expires, so reporting an
+	// error makes the caller re-send the same envelopes (identical origin
+	// sequence, so the reassembler simply fills the holes).
+	if firstErr != nil {
+		return firstErr
+	}
+	return fmt.Errorf("no streams for peer %s", targetPeer)
+}
+
+// mpFragPlan is one path's share of a single logical frame.
+type mpFragPlan struct {
+	s     network.Stream
+	frags [][]byte
+}
+
+// planFragsOnPaths splits a logical frame's fragments across the available paths
+// with the same DWRR the scheduler uses, ONE FRAGMENT AT A TIME.
+//
+// A single-fragment frame (everything that fits one transport write) therefore
+// still goes to exactly one path — the scheduler's choice, unchanged. Only a
+// striped frame (see fragmentFrameForPaths) is spread across paths, and its
+// shards meet again in the receiver's reassembler, which is keyed by
+// peer/epoch/origin-sequence and is therefore path-agnostic.
+func (ps *PeerStreams) planFragsOnPaths(streams []network.Stream, frags [][]byte) []mpFragPlan {
+	if len(streams) == 0 || len(frags) == 0 {
+		return nil
+	}
+	if len(streams) == 1 {
+		return []mpFragPlan{{s: streams[0], frags: frags}}
+	}
+	now := time.Now()
+	plans := make([]mpFragPlan, 0, len(streams))
+	pos := make(map[network.Stream]int, len(streams))
+	for _, f := range frags {
+		idx := ps.pickMultipathStreamIndex(streams, now)
+		if idx < 0 || idx >= len(streams) {
+			idx = 0
+		}
+		s := streams[idx]
+		if p, ok := pos[s]; ok {
+			plans[p].frags = append(plans[p].frags, f)
 			continue
 		}
-		// Wait OFF the write lock — the whole point of the per-stream writers.
-		ps.writeMu.Unlock()
-		res := wait()
-		ps.writeMu.Lock()
-		if res.err == nil {
-			ps.notePathSuccessUnderLock(s)
-			record(true)
-			return nil
-		}
-		if firstErr == nil {
-			firstErr = res.err
-		}
-		// Open the circuit for this PATH (not just this stream) before retiring
-		// it: the replacement stream will be the same physical path, and the
-		// scheduler must keep avoiding it until the cooldown expires.
-		ps.notePathFailureUnderLock(s, time.Now())
-		log.Debug("Multipath: path to peer %s failed (%v); retiring it and retrying the frame on a remaining path",
-			targetPeer.String(), res.err)
-		sd.removeStreamUnderLock(ps, s)
-		remaining = withoutStream(remaining, s)
+		pos[s] = len(plans)
+		plans = append(plans, mpFragPlan{s: s, frags: [][]byte{f}})
 	}
-	if firstErr == nil {
-		firstErr = fmt.Errorf("no streams for peer %s", targetPeer)
-	}
-	return firstErr
+	return plans
 }
 
 // withoutStream returns a NEW slice with s removed. It never mutates the input:

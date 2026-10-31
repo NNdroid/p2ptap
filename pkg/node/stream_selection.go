@@ -81,7 +81,7 @@ func (ps *PeerStreams) selectStreamIndex(streams []network.Stream, now time.Time
 	}
 	ps.selectionSnapshot = ps.snapshot.Load()
 	initial := preferred < 0
-	if preferred < 0 || scoreStreamTransport(streams[preferred]) > scoreStreamTransport(streams[0]) {
+	if preferred < 0 || scoreStreamTransport(streams[preferred], ps.peerID) > scoreStreamTransport(streams[0], ps.peerID) {
 		preferred = 0
 		ps.preferredStream = streams[0]
 		ps.streamSelectedAt = now
@@ -105,7 +105,7 @@ func (ps *PeerStreams) selectStreamIndex(streams []network.Stream, now time.Time
 		}
 	}
 	ps.qualityMu.Unlock()
-	score := scoreStreamTransport(streams[preferred])
+	score := scoreStreamTransport(streams[preferred], ps.peerID)
 	// Snapshot every stream's quality under one lock: the loop below otherwise
 	// re-reads the map through qualityFor up to three times per candidate, each
 	// a separate mutex acquisition on a hot scheduling path.
@@ -115,7 +115,7 @@ func (ps *PeerStreams) selectStreamIndex(streams []network.Stream, now time.Time
 	bestQ := incumbent
 	for i, s := range streams {
 		q := ps.writeQuality[s]
-		if scoreStreamTransport(s) != score || !q.usable(now) {
+		if scoreStreamTransport(s, ps.peerID) != score || !q.usable(now) {
 			continue
 		}
 		if !bestQ.usable(now) || q.nanosPerByte < bestQ.nanosPerByte {
@@ -135,7 +135,7 @@ func (ps *PeerStreams) selectStreamIndex(streams []network.Stream, now time.Time
 	for i := 0; i < len(streams); i++ {
 		ps.streamProbeCursor = (ps.streamProbeCursor + 1) % len(streams)
 		candidate := ps.streamProbeCursor
-		if candidate != preferred && scoreStreamTransport(streams[candidate]) == score {
+		if candidate != preferred && scoreStreamTransport(streams[candidate], ps.peerID) == score {
 			return candidate
 		}
 	}

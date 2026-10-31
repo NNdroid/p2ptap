@@ -9,22 +9,30 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 )
 
-// pathTestConn pins a remote multiaddr so scoreStreamTransport classifies the
-// path (loopback / LAN / WAN / circuit-relay) exactly like a real connection.
+// pathTestConn pins a remote multiaddr and remote peer so scoreStreamTransport
+// classifies the path (loopback / LAN / WAN / circuit-relay) exactly like a real
+// connection, including the relay signal: a relay path's underlying transport
+// connection terminates at a HOP, so its RemotePeer() differs from the target
+// peer (see connIsRelayForPeer). A direct path's RemotePeer() equals the target.
 type pathTestConn struct {
 	mockNetConn
-	ma ma.Multiaddr
+	ma         ma.Multiaddr
+	remotePeer peer.ID
 }
 
 func (c *pathTestConn) RemoteMultiaddr() ma.Multiaddr { return c.ma }
+func (c *pathTestConn) RemotePeer() peer.ID           { return c.remotePeer }
 
 // pathTestStream is a mock stream whose connection reports a fixed multiaddr.
 type pathTestStream struct {
 	mockWriteStream
-	ma ma.Multiaddr
+	ma         ma.Multiaddr
+	remotePeer peer.ID
 }
 
-func (s *pathTestStream) Conn() network.Conn { return &pathTestConn{ma: s.ma} }
+func (s *pathTestStream) Conn() network.Conn {
+	return &pathTestConn{ma: s.ma, remotePeer: s.remotePeer}
+}
 
 func TestMultipathSingleStreamFallsBack(t *testing.T) {
 	ps := NewPeerStreams(peer.ID("mp-single"))
@@ -47,8 +55,8 @@ func TestMultipathFollowsTopologyNominal(t *testing.T) {
 	// the 5% min-share floor must keep the slow path alive so its measurement
 	// can accumulate.
 	ps := NewPeerStreams(peer.ID("mp-topology"))
-	lan := &pathTestStream{ma: mustMA("/ip4/192.168.1.5/tcp/4001")}
-	relay := &pathTestStream{ma: mustMA("/ip4/100.64.0.1/tcp/4002/p2p-circuit")}
+	lan := &pathTestStream{ma: mustMA("/ip4/192.168.1.5/tcp/4001"), remotePeer: peer.ID("mp-topology")}
+	relay := &pathTestStream{ma: mustMA("/ip4/100.64.0.1/tcp/4002/p2p-circuit"), remotePeer: peer.ID("mp-hop")}
 	streams := []network.Stream{lan, relay}
 
 	const n = 4000
@@ -76,8 +84,8 @@ func TestMultipathMeasuredCapacityDominates(t *testing.T) {
 	// Both paths measured: the fast path (low nanosPerByte) should carry nearly
 	// all traffic, while the slow path keeps a nonzero share.
 	ps := NewPeerStreams(peer.ID("mp-measured"))
-	fast := &pathTestStream{ma: mustMA("/ip4/192.168.1.5/tcp/4001")}
-	slow := &pathTestStream{ma: mustMA("/ip4/100.64.0.1/tcp/4002/p2p-circuit")}
+	fast := &pathTestStream{ma: mustMA("/ip4/192.168.1.5/tcp/4001"), remotePeer: peer.ID("mp-measured")}
+	slow := &pathTestStream{ma: mustMA("/ip4/100.64.0.1/tcp/4002/p2p-circuit"), remotePeer: peer.ID("mp-hop")}
 	streams := []network.Stream{fast, slow}
 	now := time.Now()
 
@@ -109,8 +117,8 @@ func TestMultipathDeficitStaysBounded(t *testing.T) {
 	// DWRR must keep deficits bounded (weights normalized to sum to 1), so no
 	// single path accumulates an ever-growing lead.
 	ps := NewPeerStreams(peer.ID("mp-bounded"))
-	lan := &pathTestStream{ma: mustMA("/ip4/192.168.1.5/tcp/4001")}
-	wan := &pathTestStream{ma: mustMA("/ip4/203.0.113.9/tcp/4001")}
+	lan := &pathTestStream{ma: mustMA("/ip4/192.168.1.5/tcp/4001"), remotePeer: peer.ID("mp-bounded")}
+	wan := &pathTestStream{ma: mustMA("/ip4/203.0.113.9/tcp/4001"), remotePeer: peer.ID("mp-bounded")}
 	streams := []network.Stream{lan, wan}
 
 	const n = 2000

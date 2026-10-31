@@ -299,13 +299,28 @@ func (r *PaddingRule) FlushThreshold(size int) int {
 //
 // All sub-frames share the frame's single SeqID, so fragmentation, dedup and
 // reordering operate on the batch as one logical frame; the receiver splits it
-// back into per-frame TAP writes. batchMagic[0:2] (0xB07C) deliberately differs
-// from the fragmentation envelope magic (0xF5A1) so a batch is never mistaken
-// for a fragment envelope.
+// back into per-frame TAP writes.
+//
+// The magic is chosen so that the splitter cannot mistake an ordinary Ethernet
+// frame for a batch. The bytes it inspects are the FRONT of a TAP frame when the
+// payload is not a batch, and a TAP frame starts with its destination MAC:
+//
+//   - byte 0 must have its I/G bit SET (0xB1 = ...0001), because a unicast
+//     destination MAC always has that bit clear. A batch magic starting with a
+//     unicast-looking byte could collide with a real frame's destination MAC.
+//   - byte 0 must not be 0xFF, so a broadcast frame (ff:ff:...:) can never match.
+//
+// The pre-existing 0xB07C prefix had its I/G bit CLEAR and could therefore
+// collide with the unicast destination MAC b0:7c:b0:7c:xx:xx. It is still
+// ACCEPTED on receive (batchMagicLegacy) so that a rolling upgrade, where the
+// peer still emits the old value, keeps working; only the new value is emitted.
+// batchMagic[0:2] also differs from the fragmentation envelope magic (0xF5A1)
+// so a batch is never mistaken for a fragment envelope.
 
 const (
-	batchMagic     uint32 = 0xB07CB07C
-	batchHeaderLen        = 6 // magic(4) + count(2)
+	batchMagic       uint32 = 0xB17CB17C // emits: I/G bit set, not 0xFF
+	batchMagicLegacy uint32 = 0xB07CB07C // accepts only: pre-multicast-safe value
+	batchHeaderLen          = 6          // magic(4) + count(2)
 	// minSubFrameLen is the smallest legal sub-frame (an Ethernet header).
 	// Shorter payloads are not a batch.
 	minSubFrameLen = 14
@@ -384,11 +399,23 @@ func SplitBatchPayload(payload []byte) ([][]byte, bool) {
 	if len(payload) < batchHeaderLen+2+minSubFrameLen {
 		return nil, false
 	}
-	if binary.BigEndian.Uint32(payload[0:4]) != batchMagic {
+	if magic := binary.BigEndian.Uint32(payload[0:4]); magic != batchMagic && magic != batchMagicLegacy {
 		return nil, false
 	}
 	count := int(binary.BigEndian.Uint16(payload[4:6]))
 	if count < 1 {
+		return nil, false
+	}
+	// Bound the count BEFORE allocating. A sub-frame costs at least
+	// 2 (its length field) + minSubFrameLen bytes, so a payload of this size
+	// can never legitimately claim more than maxCount of them. Without this
+	// check a 22-byte payload bearing the magic and count=65535 makes the
+	// receiver allocate 65535 slice slots (1.5 MiB, a ~71494x amplification)
+	// before the first length field is even read — a PSK-holding peer can
+	// repeat that at line rate and turn the splitter into a GC bomb. The
+	// structural walk below is unchanged; this only makes the rejected case
+	// cheap.
+	if maxCount := (len(payload) - batchHeaderLen) / (2 + minSubFrameLen); count > maxCount {
 		return nil, false
 	}
 	off := batchHeaderLen

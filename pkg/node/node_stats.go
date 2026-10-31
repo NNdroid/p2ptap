@@ -702,7 +702,7 @@ func (n *Node) updateWebCollectorState() {
 			if ps := n.Dispatcher.GetPeerStreams(pID); ps != nil {
 				streams := ps.GetAllStreams()
 				if len(streams) > 0 {
-					transportScore = scoreStreamTransport(streams[0])
+					transportScore = scoreStreamTransport(streams[0], pID)
 				}
 			}
 		}

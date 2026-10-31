@@ -535,6 +535,20 @@ func UnpackWith(frame []byte, cipher ObfCipher) (seqID uint64, payload []byte, e
 		log.Debug("UnpackWith: payload length overflow, pLen=%d frameLen=%d", pLen, len(frame))
 		return 0, nil, ErrFrameCorrupted
 	}
+	// PaddingLen must also be self-consistent. Pack always emits a frame of
+	// exactly HeaderLen+payloadLen+paddingLen bytes (plus the AEAD tag when the
+	// payload is sealed), so the three header fields together can never claim
+	// more bytes than the frame carries. Reading the field and not checking it
+	// left the header internally inconsistent on corrupt input: it was reported
+	// as valid while describing padding that does not exist, and the value could
+	// not be used as a cross-check on the frame length. Deliberately only an
+	// upper bound — the sealed case legitimately adds AEADTagSize on top, so the
+	// check must accept "more bytes than padding accounts for".
+	padLen := int(binary.BigEndian.Uint16(frame[13:15]))
+	if HeaderLen+pLen+padLen > len(frame) {
+		log.Debug("UnpackWith: padding length overflow, pLen=%d padLen=%d frameLen=%d", pLen, padLen, len(frame))
+		return 0, nil, ErrFrameCorrupted
+	}
 	raw := frame[HeaderLen : HeaderLen+pLen]
 
 	if cipher != nil {
