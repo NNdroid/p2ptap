@@ -293,18 +293,24 @@ func (n *Node) fragmentFrameForPaths(packed []byte, frag *fragReassembler, targe
 	if chunkSize <= 0 || chunkSize > multipathStripeChunk {
 		chunkSize = multipathStripeChunk
 	}
-	return n.fragmentFrameStriped(packed, frag, targetPeer, chunkSize)
+	return n.fragmentFrameStriped(packed, frag, targetPeer, chunkSize, pathCount)
 }
 
 // fragmentFrameStriped cuts packed into equal shards of at most chunkSize and
 // appends Reed-Solomon parity shards, so the receiver can rebuild the frame from
 // ANY dataParts of the FragTotal shards.
 //
+// `paths` is the number of physical paths the shards will be spread over. It
+// sizes the parity so the stripe survives ANY ONE path dying mid-frame: a path
+// carries at most ~(dataParts+parity)/paths shards, so parity is raised until a
+// dead path's shards are always within the FEC budget (see fecParityFor). With a
+// single path there is nothing to survive, so plain fragmentation is used.
+//
 // Shards are equal-length on the wire except the last DATA shard, whose chunkLen
 // is its real length; the codec works on a zero-padded copy, and OrigLen in the
 // header tells the receiver exactly how much to keep, so padding never reaches
 // the inner AEAD open.
-func (n *Node) fragmentFrameStriped(packed []byte, frag *fragReassembler, targetPeer peer.ID, chunkSize int) ([][]byte, bool) {
+func (n *Node) fragmentFrameStriped(packed []byte, frag *fragReassembler, targetPeer peer.ID, chunkSize, paths int) ([][]byte, bool) {
 	if chunkSize <= 0 || len(packed) <= chunkSize {
 		return n.fragmentFrame(packed, frag, targetPeer, chunkSize)
 	}
@@ -315,7 +321,14 @@ func (n *Node) fragmentFrameStriped(packed []byte, frag *fragReassembler, target
 	}
 
 	dataParts := (len(packed) + chunkSize - 1) / chunkSize
-	parityParts := fecParityFor(dataParts)
+	parityParts := fecParityFor(dataParts, paths)
+	if parityParts < 0 {
+		// The codec cannot carry enough parity for this path count (a huge frame
+		// over too few paths). Striping would be structurally unrecoverable, so
+		// degrade to plain single-path fragmentation: each fragment rides one
+		// path and the frame is never left half-reassembled by a dead path.
+		return n.fragmentFrame(packed, frag, targetPeer, chunkSize)
+	}
 	if dataParts < 2 || parityParts <= 0 {
 		return n.fragmentFrame(packed, frag, targetPeer, chunkSize)
 	}
@@ -369,10 +382,22 @@ func (n *Node) fragmentFrameStriped(packed []byte, frag *fragReassembler, target
 	return out, true
 }
 
-// fecParityFor returns how many parity shards to add for dataParts data shards:
-// ceil(fecParityPercent%) of them, at least one (a group with no parity could not
-// recover anything) and at most the field's remaining capacity.
-func fecParityFor(dataParts int) int {
+// fecParityFor returns how many parity shards to add for dataParts data shards
+// spread over `paths` physical paths, so the stripe can survive ANY ONE of them
+// dying mid-frame. Returns -1 when the codec cannot carry that much parity (a
+// huge frame over too few paths), signalling the caller to degrade to plain
+// single-path fragmentation rather than ship a stripe that a single dead path
+// would strand.
+//
+// Two constraints are combined:
+//  1. Baseline redundancy: fecParityPercent% of the data shards, at least one
+//     (a group with no parity could not recover anything) — the historical value.
+//  2. Survivability: the DWRR spreads ~(dataParts+parity)/paths shards per path,
+//     so a path carrying more than `parity` shards kills the frame when it dies
+//     (lost shards > parity, unrecoverable). Requiring
+//     ceil((dataParts+parity)/paths) <= parity simplifies exactly to
+//     parity >= dataParts/(paths-1), i.e. ceil(dataParts/(paths-1)).
+func fecParityFor(dataParts, paths int) int {
 	if dataParts < 2 {
 		return 0
 	}
@@ -380,8 +405,18 @@ func fecParityFor(dataParts int) int {
 	if r < 1 {
 		r = 1
 	}
+	// Survivability bound applies only with 2+ paths: with a single path there is
+	// no "another path dying" to survive, so the 25% baseline (loss recovery) is
+	// enough and the bound would only inflate the overhead.
+	if paths >= 2 {
+		// ceil(dataParts/(paths-1)): with `paths` paths and one dying, the surviving
+		// paths must still reach dataParts shards.
+		if need := (dataParts + paths - 2) / (paths - 1); need > r {
+			r = need
+		}
+	}
 	if dataParts+r > fec.MaxShards {
-		r = fec.MaxShards - dataParts
+		return -1
 	}
 	return r
 }

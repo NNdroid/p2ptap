@@ -42,6 +42,11 @@ func feedShards(t *testing.T, rx *fragReassembler, remote peer.ID, frags [][]byt
 // multi-path FEC layer: a large frame is sharded with parity, and losing any ONE
 // shard (the case where a whole path dies mid-frame) must still reconstruct it
 // byte for byte, without waiting for a retransmit.
+//
+// With paths=2 the survivability bound is the strongest case: fecParityFor sizes
+// parity = dataParts so the stripe is a full MDS code (any `dataParts` of the
+// 2*dataParts shards reconstruct the frame) — the minimum parity that lets one
+// path die without stranding the frame. So 4 data shards carry 4 parity shards.
 func TestFragStripeRebuildsFromAnyDataParts(t *testing.T) {
 	packer := obfuscate.NewFramePackerFull(nil)
 	n := &Node{Packer: packer}
@@ -54,9 +59,10 @@ func TestFragStripeRebuildsFromAnyDataParts(t *testing.T) {
 	}
 	defer releaseFragmentBuffers(frags)
 
-	// 60000 / 16384 -> 4 data shards + 1 parity shard.
-	if len(frags) != 5 {
-		t.Fatalf("shard count = %d, want 5 (4 data + 1 parity)", len(frags))
+	// 60000 / 16384 -> 4 data shards. paths=2 -> parity = 4 (survivability bound
+	// ceil(4/(2-1))), so 8 shards total: any 4 of them reconstruct the frame.
+	if len(frags) != 8 {
+		t.Fatalf("shard count = %d, want 8 (4 data + 4 parity)", len(frags))
 	}
 	first := unpackFragPayload(t, frags[0])
 	if binary.BigEndian.Uint16(first[0:2]) != fragMagicFEC {
@@ -65,8 +71,8 @@ func TestFragStripeRebuildsFromAnyDataParts(t *testing.T) {
 	if dp := binary.BigEndian.Uint16(first[10:12]); dp != 4 {
 		t.Fatalf("dataParts = %d, want 4", dp)
 	}
-	if total := binary.BigEndian.Uint16(first[8:10]); total != 5 {
-		t.Fatalf("fragTotal = %d, want 5", total)
+	if total := binary.BigEndian.Uint16(first[8:10]); total != 8 {
+		t.Fatalf("fragTotal = %d, want 8", total)
 	}
 
 	remote := peer.ID("stripe-fec-peer")
@@ -82,10 +88,28 @@ func TestFragStripeRebuildsFromAnyDataParts(t *testing.T) {
 		}
 	}
 
-	// ...and with only one parity shard, losing two is genuinely unrecoverable.
+	// ...and the MDS property holds up to the full parity budget: losing
+	// dataParts shards (half the stripe) still reconstructs, but losing any more
+	// than `parity` shards leaves fewer than dataParts shards and is genuinely
+	// unrecoverable.
+	parity := len(frags) - 4
+	for lost := 0; lost <= parity; lost++ {
+		skip := map[int]bool{}
+		for k := 0; k < lost; k++ {
+			skip[k] = true
+		}
+		rx := newFragReassembler()
+		if _, ok := feedShards(t, rx, remote, frags, skip); !ok {
+			t.Fatalf("losing %d shards (<= parity=%d) must still reconstruct", lost, parity)
+		}
+	}
 	rx := newFragReassembler()
-	if _, ok := feedShards(t, rx, remote, frags, map[int]bool{0: true, 1: true}); ok {
-		t.Fatal("two lost shards must not report completion with a single parity shard")
+	skip := map[int]bool{}
+	for k := 0; k < parity+1; k++ {
+		skip[k] = true
+	}
+	if _, ok := feedShards(t, rx, remote, frags, skip); ok {
+		t.Fatalf("losing %d shards (> parity=%d) must not report completion", parity+1, parity)
 	}
 }
 

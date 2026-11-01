@@ -786,11 +786,40 @@ func (n *Node) sealRelayEnvelopeForHopInto(hop peer.ID, envelope []byte, dst []b
 	return sealed, nil
 }
 
-func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
+// relayHopsForTarget returns EVERY eligible relay hop for targetPeer, ordered by
+// descending preference, so the multi-relay path can round-robin frames across
+// all of them (see sendToPeerViaRelayHops) instead of pinning them on one hop.
+//
+// Ordering preserves the exact precedence of the single-hop relayHopForTarget
+// (which now delegates here and returns hops[0]):
+//
+//  1. Provenance-aware: the Peek-Map origin / frame-origin boot or overlay hop
+//     that the target was actually discovered through.
+//  2. The route-table next hop (hop-bounded overlay route).
+//  3. All connected overlay-relay peers with a graph edge to the target, then
+//     all connected boot peers with a live boot-relay uplink.
+//
+// Returns nil (no usable hop) when the target is directly connected, and nudges
+// a boot uplink to re-open exactly when the single-hop path would have. The
+// returned slice is freshly allocated each call and safe for the caller to own.
+func (n *Node) relayHopsForTarget(targetPeer peer.ID) []peer.ID {
 	// A directly-connected target is routed directly; never return it (or self)
 	// as a relay hop, which would wrap its own frames in a relay envelope.
 	if n.isDirectlyConnected(targetPeer) {
-		return ""
+		return nil
+	}
+
+	var hops []peer.ID
+	seen := make(map[peer.ID]struct{})
+	add := func(h peer.ID) {
+		if h == "" || h == targetPeer || (n.Host != nil && h == n.Host.ID()) {
+			return
+		}
+		if _, ok := seen[h]; ok {
+			return
+		}
+		seen[h] = struct{}{}
+		hops = append(hops, h)
 	}
 
 	// 1. Provenance-aware routing: if the target peer was discovered via Peek-Map or
@@ -801,10 +830,10 @@ func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
 	if orig, ok := n.lookupPeekMapOrigin(targetPeer); ok && orig.Via != "" && orig.Via != targetPeer && (n.Host == nil || orig.Via != n.Host.ID()) {
 		if n.isBootstrapPeer(orig.Via) {
 			if n.hasBootRelayUplink(orig.Via) && !n.isBootRelayBlacklisted(orig.Via) {
-				return orig.Via
+				add(orig.Via)
 			}
 		} else if n.routeHopUsable(orig.Via, targetPeer) {
-			return orig.Via
+			add(orig.Via)
 		}
 	}
 
@@ -814,26 +843,28 @@ func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
 		// peer: it is only usable while its uplink is alive. The Peek-Map branch
 		// above checks that, but a route-table hop must be held to the same
 		// standard — canEgressToPeer gates boot hops on hasBootRelayUplink, so
-		// returning a dead boot would just get the frame rejected, and without a
-		// retry nudge the dead uplink would never be re-established (the only
-		// other nudge lives in the last-resort branch below). Fall through to the
-		// fallback scan so a healthy sibling can win instead of a dead boot.
+		// adding a dead boot would just get the frame rejected, and without a
+		// retry nudge the dead uplink would never be re-established. Only nudge
+		// when the hop is NOT usable, so a healthy sibling can win instead of a
+		// dead boot.
 		if n.isBootstrapPeer(route.NextHop) {
 			if n.hasBootRelayUplink(route.NextHop) && !n.isBootRelayBlacklisted(route.NextHop) {
-				return route.NextHop
-			}
-			if !n.isBootRelayBlacklisted(route.NextHop) {
+				add(route.NextHop)
+			} else if !n.isBootRelayBlacklisted(route.NextHop) {
 				go n.ensureRelayAuth(peer.AddrInfo{ID: route.NextHop})
 			}
 		} else {
-			return route.NextHop
+			add(route.NextHop)
 		}
 	}
 
 	// 3. Fallback when the route table has no entry for the target yet:
-	// pick any connected peer that supports overlay relay or has a live boot-relay uplink.
-	var fallback peer.ID
-	var fallbackBoot peer.ID
+	// collect EVERY connected peer that supports overlay relay (with a graph
+	// edge) or has a live boot-relay uplink. Overlay peers are preferred over
+	// boots (a boot is relay-over-backbone; overlay is a true mesh hop), but all
+	// of them are returned so multi-relay can spread frames across the set.
+	var overlayFallback []peer.ID
+	var bootFallback []peer.ID
 	var bootHopNoUplink peer.ID
 
 	if n.Host != nil {
@@ -850,9 +881,7 @@ func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
 					continue
 				}
 				if n.hasBootRelayUplink(pID) {
-					if fallbackBoot == "" {
-						fallbackBoot = pID
-					}
+					bootFallback = append(bootFallback, pID)
 				} else if bootHopNoUplink == "" {
 					bootHopNoUplink = pID
 				}
@@ -864,20 +893,14 @@ func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
 			if _, ok := n.Router.GetEdge(pID, targetPeer); !ok {
 				continue
 			}
-			if fallback == "" {
-				fallback = pID
-			}
+			overlayFallback = append(overlayFallback, pID)
 		}
 	}
-
-	// Prefer overlay-relay peer if graph edge confirms reachability
-	if fallback != "" {
-		return fallback
+	for _, h := range overlayFallback {
+		add(h)
 	}
-
-	// Otherwise use the connected boot with an active uplink
-	if fallbackBoot != "" {
-		return fallbackBoot
+	for _, h := range bootFallback {
+		add(h)
 	}
 
 	// Last resort: a connected boot exists but its boot-relay uplink was never
@@ -887,10 +910,18 @@ func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
 	// only to fail at bootRelaySubmit with an uplinkGone error. Nudge the uplink
 	// open and report no usable relay hop; the caller drops and retries once the
 	// uplink comes up.
-	if bootHopNoUplink != "" && !n.isBootRelayBlacklisted(bootHopNoUplink) {
+	if len(hops) == 0 && bootHopNoUplink != "" && !n.isBootRelayBlacklisted(bootHopNoUplink) {
 		go n.ensureRelayAuth(peer.AddrInfo{ID: bootHopNoUplink})
 	}
-	return ""
+	return hops
+}
+
+func (n *Node) relayHopForTarget(targetPeer peer.ID) peer.ID {
+	hops := n.relayHopsForTarget(targetPeer)
+	if len(hops) == 0 {
+		return ""
+	}
+	return hops[0]
 }
 
 // supportsOverlayRelay reports whether the peer advertises the application-level

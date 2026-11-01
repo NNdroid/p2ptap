@@ -388,6 +388,12 @@ type Node struct {
 	// stream per relay hop, eliminating per-frame stream open handshakes.
 	relayPool *relayStreamPool
 
+	// relayRR rotates the STARTING relay hop for multi-relay round-robin
+	// distribution (see relayHopsForTarget / sendToPeerViaRelayHops), so frames
+	// to a relay-only target spread across every eligible hop instead of always
+	// hammering the first one. Monotonic; only the low bits select a hop index.
+	relayRR atomic.Uint64
+
 	// relayDiag counts frames dropped at each TAP-frame transit choke point
 	// (see relay_diag.go). Always non-nil once the node is built.
 	relayDiag *RelayDiag

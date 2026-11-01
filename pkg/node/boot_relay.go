@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -539,40 +540,68 @@ func (n *Node) handleBootRelayFrame(boot peer.ID, data []byte) {
 		n.deliverBootRelayControl(finalDst, srcPeer, proto, boot, innerPayload)
 		return
 	}
-	// Decrypt the inner payload with the cipher negotiated for srcPeer.
-	if cipher := n.obfDecryptCipherForPeer(srcPeer); cipher != nil {
-		dec, derr := obfuscate.DecryptPayloadRegion(innerPayload, cipher)
-		if derr != nil {
-			log.Debug("[boot-relay] downlink decrypt error from origin %s (via %s): %v",
-				srcPeer.String(), boot.String(), derr)
-			n.relayDiag.finalDecFail()
+	// deliverSealed handles ONE end-to-end sealed frame: peel the per-peer
+	// cipher (no-op in plaintext mode), Unpack, and either deliver it straight to
+	// the TAP (common non-fragmented case) or feed it to the reassembler. A
+	// fragmented frame recurses once: the reassembled bytes are the ORIGINAL
+	// end-to-end sealed frame, so they are decrypted and unpacked exactly like an
+	// unfragmented one. Mirrors handleStream's decrypt→reassemble→re-decrypt.
+	//
+	// This is the receiver half of the boot-relay fragmentation added to
+	// sendToPeerViaBootRelay: shards arrive as independent boot-relay envelopes,
+	// each already carrying its own obfuscate frame + per-peer seal, so they are
+	// joined by (srcPeer, origSeq, reasmChannelRelay, epoch) before the single
+	// TAP payload is delivered.
+	var deliverSealed func(sealed []byte)
+	deliverSealed = func(sealed []byte) {
+		payload := sealed
+		// Decrypt the inner payload with the cipher negotiated for srcPeer.
+		if cipher := n.obfDecryptCipherForPeer(srcPeer); cipher != nil {
+			dec, derr := obfuscate.DecryptPayloadRegion(payload, cipher)
+			if derr != nil {
+				log.Debug("[boot-relay] downlink decrypt error from origin %s (via %s): %v",
+					srcPeer.String(), boot.String(), derr)
+				n.relayDiag.finalDecFail()
+				n.recordPeerRxDecrypt(srcPeer, false)
+				// Self-heal parity with the overlay-relay path (handleRelayFrame):
+				// a persistent inner-open failure means srcPeer↔us keys diverged.
+				// Without the throttled resync nudge, a boot-relay-only peer had to
+				// wait for the reconciler's next full round — minutes of one-way
+				// blackhole that looked exactly like "connects but no data", and
+				// with no direct path the peer never resyncs on its own.
+				n.maybeResyncOnDecryptFail(srcPeer)
+				return
+			}
+			n.recordPeerRxDecrypt(srcPeer, true)
+			n.maybeMarkReadyOnDecrypt(srcPeer, true)
+			payload = dec
+		}
+		seqID, unpacked, uerr := obfuscate.Unpack(payload)
+		if uerr != nil {
+			log.Debug("[boot-relay] downlink Unpack err=%v from origin=%s; dropping", uerr, srcPeer.String())
+			n.relayDiag.finalUnpack()
 			n.recordPeerRxDecrypt(srcPeer, false)
-			// Self-heal parity with the overlay-relay path (handleRelayFrame):
-			// a persistent inner-open failure means srcPeer↔us keys diverged.
-			// Without the throttled resync nudge, a boot-relay-only peer had to
-			// wait for the reconciler's next full round — minutes of one-way
-			// blackhole that looked exactly like "connects but no data", and
-			// with no direct path the peer never resyncs on its own.
-			n.maybeResyncOnDecryptFail(srcPeer)
 			return
 		}
-		n.recordPeerRxDecrypt(srcPeer, true)
-		n.maybeMarkReadyOnDecrypt(srcPeer, true)
-		innerPayload = dec
+		// Tunnel fragmentation reassembly: a boot-relay shard is a fragment
+		// envelope of the end-to-end sealed frame. Buffer until complete, then
+		// re-decrypt + re-unpack the reassembled original (deliverSealed again).
+		if n.fragRX != nil && isFragPayload(unpacked) {
+			finalPacked, complete := n.fragRX.reassemble(srcPeer, unpacked, reasmChannelRelay, obfuscate.ConnEpochFromSeq(seqID))
+			if !complete {
+				return // more fragments pending
+			}
+			deliverSealed(finalPacked)
+			return
+		}
+		// Return-path liveness and provenance are recorded by
+		// deliverRelayedFrameToTAP, and only AFTER its PSK gate — recording them
+		// here too would double-count every boot-relay frame, and would stamp
+		// liveness on a frame that then fails the PSK check. Decrypt+unpack
+		// success alone is not enough to keep a peer connection alive.
+		n.deliverRelayedFrameToTAP(unpacked, srcPeer, boot, seqID)
 	}
-	seqID, unpacked, uerr := obfuscate.Unpack(innerPayload)
-	if uerr != nil {
-		log.Debug("[boot-relay] downlink Unpack err=%v from origin=%s; dropping", uerr, srcPeer.String())
-		n.relayDiag.finalUnpack()
-		n.recordPeerRxDecrypt(srcPeer, false)
-		return
-	}
-	// Return-path liveness and provenance are recorded by
-	// deliverRelayedFrameToTAP, and only AFTER its PSK gate — recording them
-	// here too would double-count every boot-relay frame, and would stamp
-	// liveness on a frame that then fails the PSK check. Decrypt+unpack
-	// success alone is not enough to keep a peer connection alive.
-	n.deliverRelayedFrameToTAP(unpacked, srcPeer, boot, seqID)
+	deliverSealed(innerPayload)
 }
 
 // sendToPeerViaBootRelay delivers packedData to a peer reachable only through a
@@ -604,25 +633,100 @@ func (sd *StrategyDispatcher) sendToPeerViaBootRelay(target, bootHop peer.ID, pa
 		inner = enc
 	}
 
-	// 2. Wrap in a boot-relay envelope with the in-band network ID. kind=Data
-	//    means the inner payload is an end-to-end-encrypted TAP frame.
-	env, err := routing.PackBootRelayFrame(n.bootRelayNetID, routing.BootRelayKindData, "", target, n.Host.ID(), routing.MaxRelayTTL, inner)
-	if err != nil {
-		return fmt.Errorf("boot-relay pack for %s failed: %w", target.String(), err)
+	// 2. Fragment + FEC a large frame so a boot queue drop that takes a few
+	//    shards is recoverable instead of costing the whole TAP frame. The uplink
+	//    is a SINGLE path, so fecParityFor(_, 1) keeps the 25% baseline (loss
+	//    recovery only — there is no second path to survive). Each shard is
+	//    re-sealed for the target (the receiver peels the boot-relay envelope,
+	//    then the per-peer cipher, then the frag envelope) and shipped in its own
+	//    boot-relay envelope; shards share one origSeq, so the receiver joins them
+	//    by (srcPeer, origSeq, epoch) — see handleBootRelayFrame. Small frames
+	//    stay a single envelope (zero-overhead common path).
+	//
+	// Owned buffers: fragmentFrameStriped hands back pooled fragment envelopes;
+	// each is released as soon as it is sealed into its own pooled destination,
+	// and the sealed set is released once PackBootRelayFrame copies it out.
+	shards := [][]byte{inner}
+	releaseShards := func() {}
+	if n.fragRX != nil && len(inner) > multipathStripeChunk {
+		st, ok := n.fragmentFrameStriped(inner, n.fragRX, target, multipathStripeChunk, 1)
+		if ok && len(st) > 1 {
+			sealed := make([][]byte, 0, len(st))
+			var sealErr error
+			for i, sh := range st {
+				cipher := n.obfCipherForPeer(target)
+				if cipher == nil {
+					sealed = append(sealed, sh)
+					continue
+				}
+				sb := acquireFrameBuf(len(sh) + cipher.Overhead())
+				enc, serr := n.sealPeerFrameInto(target, cipher, sh, sb[:0])
+				releaseFrameBuf(sh)
+				if serr != nil {
+					releaseFrameBuf(sb)
+					releaseFragmentBuffers(sealed)
+					// st[i+1:] holds every not-yet-sealed shard after the current
+					// one; the current shard was already released by
+					// releaseFrameBuf(sh) above, so return the remainder so an
+					// abort mid-seal leaks nothing.
+					releaseFragmentBuffers(st[i+1:])
+					sealErr = serr
+					break
+				}
+				sealed = append(sealed, enc)
+			}
+			if sealErr != nil {
+				return fmt.Errorf("boot-relay seal fragment for %s failed: %w", target.String(), sealErr)
+			}
+			shards = sealed
+			releaseShards = func() { releaseFragmentBuffers(shards) }
+		}
 	}
+	defer releaseShards()
 
-	// 3. Submit to the persistent boot-relay uplink.
-	if !n.bootRelaySubmit(bootHop, env,
-		func() {
-			n.recordPeerTxBytes(target, stat.bytes)
-			n.recordPeerTxBytesOnPath(target, "boot-relay://"+bootHop.String(), stat.bytes, stat.frames)
-		},
-		func() {
-			log.Debug("[boot-relay] send to peer %s via %s permanently failed", target.String(), bootHop.String())
-		},
-	) {
-		n.relayDiag.uplinkGone()
-		return fmt.Errorf("boot-relay send to %s via %s: uplink unavailable", target.String(), bootHop.String())
+	// 3. Wrap each shard in a boot-relay envelope with the in-band network ID and
+	//    submit to the persistent uplink. The logical payload is counted once (on
+	//    the first shard to land); per-path wire bytes are counted per shard.
+	pathKey := "boot-relay://" + bootHop.String()
+	var firstSent atomic.Bool
+	submitted := 0
+	for i, sh := range shards {
+		sh := sh
+		env, err := routing.PackBootRelayFrame(n.bootRelayNetID, routing.BootRelayKindData, "", target, n.Host.ID(), routing.MaxRelayTTL, sh)
+		if err != nil {
+			if i == 0 {
+				return fmt.Errorf("boot-relay pack for %s failed: %w", target.String(), err)
+			}
+			log.Warn("[boot-relay] shard %d/%d pack for %s failed: %v; dropping shard", i+1, len(shards), target.String(), err)
+			continue
+		}
+		if !n.bootRelaySubmit(bootHop, env,
+			func() {
+				// Logical TAP bytes once; wire bytes per physical shard.
+				if firstSent.CompareAndSwap(false, true) {
+					n.recordPeerTxBytes(target, stat.bytes)
+				}
+				n.recordPeerTxBytesOnPath(target, pathKey, len(env), 1)
+			},
+			func() {
+				log.Debug("[boot-relay] send to peer %s via %s permanently failed", target.String(), bootHop.String())
+			},
+		) {
+			n.relayDiag.uplinkGone()
+			// A striped frame keeps its integrity as long as at most `parity`
+			// shards are lost; only a TOTAL failure (nothing submitted — the
+			// uplink is gone, so no shard can land) is surfaced so the caller can
+			// retry through another path. Later shards of a partially-submitted
+			// stripe stay recoverable by FEC.
+			if submitted == 0 {
+				return fmt.Errorf("boot-relay send to %s via %s: uplink unavailable", target.String(), bootHop.String())
+			}
+			continue
+		}
+		submitted++
+	}
+	if submitted == 0 {
+		return fmt.Errorf("boot-relay send to %s via %s: no shard submitted", target.String(), bootHop.String())
 	}
 	return nil
 }

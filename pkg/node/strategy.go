@@ -825,15 +825,8 @@ func (sd *StrategyDispatcher) SendToPeer(ctx context.Context, targetPeer peer.ID
 		// A live circuit also reaches the final peer; keep its data encrypted
 		// for that endpoint rather than diverting it into a speculative hop.
 		if !sd.node.hasPeerConnection(targetPeer) {
-			if hop := sd.node.relayHopForTarget(targetPeer); hop != "" {
-				// A boot hop means the target is only reachable THROUGH a boot
-				// (same boot, or another boot in the same PSK network across the
-				// backbone). The boot does not speak the overlay relay protocol, so
-				// it must go via the boot-relay (relay-over-backbone) uplink.
-				if sd.node.isBootstrapPeer(hop) {
-					return sd.sendToPeerViaBootRelay(targetPeer, hop, packedData)
-				}
-				return sd.sendToPeerViaOverlayRelay(targetPeer, hop, packedData)
+			if hops := sd.node.relayHopsForTarget(targetPeer); len(hops) > 0 {
+				return sd.sendToPeerViaRelayHops(targetPeer, packedData, hops)
 			}
 		}
 	}
@@ -955,12 +948,19 @@ func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, ps *PeerStr
 	// the DEDUPED path count (a single connection exposes an in/out stream pair
 	// that the writers collapse into one path). Doing that on every frame would
 	// allocate on the hot path for no benefit, so it is gated on the frame size.
+	//
+	// Relay paths (circuit-relay / boot-relay hop) are excluded from the count
+	// while a direct path is healthy: they are rate-limited and fragile, so a
+	// stripe sized to include them would let one relay reset strand the frame.
+	// nonRelayStreams returns the set unchanged for a relay-only peer (the relay
+	// IS the only path there), so those peers still stripe across relays — with
+	// fecParityFor sizing the parity for that path count.
 	pathCount := 1
 	if sd.Mode() == "multipath" && ps != nil {
-		streams := ps.GetAllStreams()
-		pathCount = len(streams)
+		stripeStreams := nonRelayStreams(ps.GetAllStreams(), targetPeer)
+		pathCount = len(stripeStreams)
 		if pathCount > 1 && len(data) > multipathStripeChunk {
-			pathCount = len(dedupStreamsByConn(streams))
+			pathCount = len(dedupStreamsByConn(stripeStreams))
 		}
 	}
 	frags, pooled := sd.node.fragmentFrameForPaths(data, sd.node.fragRX, targetPeer, maxPayload, pathCount)
@@ -1283,6 +1283,48 @@ func (sd *StrategyDispatcher) sendToPeerViaOverlayRelay(targetPeer, relayHop pee
 	return nil
 }
 
+// sendToPeerViaRelayHops distributes ONE frame to targetPeer across the given
+// eligible relay hops, rotating the starting hop per call so consecutive frames
+// spread over the whole hop set instead of pinning them on the first hop (the
+// true multi-relay parallelism behind fix C). Each candidate hop is tried in
+// turn until one accepts the frame; a hop that rejects (queue full, stream in
+// reconnect backoff, blacklisted, no uplink) falls through to the next, so a
+// single stalled relay never blackholes the whole target.
+//
+// A boot hop routes through the boot-relay (relay-over-backbone) uplink; a mesh
+// hop through the overlay relay pool. Exactly one hop accepts the frame (the
+// others reject before queueing), so there is no duplicate delivery. Each
+// candidate is sealed fresh for ITS hop (end-to-end + hop-by-hop), which is
+// correct because a rejected submit never queues anything.
+//
+// Returns nil as soon as ANY hop accepted the frame; otherwise the last error,
+// or a "no usable relay hop" error when hops is empty.
+func (sd *StrategyDispatcher) sendToPeerViaRelayHops(targetPeer peer.ID, packedData []byte, hops []peer.ID) error {
+	n := sd.node
+	if n == nil {
+		return fmt.Errorf("overlay relay send to %s requires node", targetPeer.String())
+	}
+	if len(hops) == 0 {
+		return fmt.Errorf("overlay relay send to %s: no usable relay hop", targetPeer.String())
+	}
+	start := int(n.relayRR.Add(1)-1) % len(hops)
+	var lastErr error
+	for i := 0; i < len(hops); i++ {
+		hop := hops[(start+i)%len(hops)]
+		var err error
+		if n.isBootstrapPeer(hop) {
+			err = sd.sendToPeerViaBootRelay(targetPeer, hop, packedData)
+		} else {
+			err = sd.sendToPeerViaOverlayRelay(targetPeer, hop, packedData)
+		}
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+	}
+	return lastErr
+}
+
 // relayFallbackIfPossible re-routes rawData to targetPeer through an overlay
 // relay hop when every direct stream write has failed. It returns nil on a
 // successful relay hand-off (frame queued for delivery) and an error when no
@@ -1293,7 +1335,7 @@ func (sd *StrategyDispatcher) sendToPeerViaOverlayRelay(targetPeer, relayHop pee
 // traffic flowing instead of silently dropping frames during a transient
 // UDP/QUIC stall (e.g. the "write frame header: i/o deadline reached" symptom).
 //
-// relayHopForTarget already excludes the target itself and any directly
+// relayHopsForTarget already excludes the target itself and any directly
 // connected peer as a hop, so this never wraps a frame in a relay envelope
 // addressed to self (which would drop the payload). When no relay is
 // configured/available the call returns an error and behaviour is unchanged.
@@ -1301,18 +1343,11 @@ func (sd *StrategyDispatcher) relayFallbackIfPossible(targetPeer peer.ID, rawDat
 	if sd.node == nil {
 		return fmt.Errorf("relay fallback unavailable: node is nil")
 	}
-	hop := sd.node.relayHopForTarget(targetPeer)
-	if hop == "" {
+	hops := sd.node.relayHopsForTarget(targetPeer)
+	if len(hops) == 0 {
 		return fmt.Errorf("relay fallback unavailable: no relay hop for %s", targetPeer.String())
 	}
-	// A boot hop routes through boot-relay (relay-over-backbone); a real
-	// overlay-relay peer routes through the overlay relay pool.
-	if sd.node.isBootstrapPeer(hop) {
-		log.Debug("Direct send to %s failed; falling back to boot-relay via %s", targetPeer.String(), hop.String())
-		return sd.sendToPeerViaBootRelay(targetPeer, hop, rawData)
-	}
-	log.Debug("Direct send to %s failed; falling back to overlay relay via %s", targetPeer.String(), hop.String())
-	return sd.sendToPeerViaOverlayRelay(targetPeer, hop, rawData)
+	return sd.sendToPeerViaRelayHops(targetPeer, rawData, hops)
 }
 
 // SendBatchToPeer sends multiple packed frames to the same target peer.  When
@@ -1398,14 +1433,13 @@ type batchFrame struct {
 // Callers hold ps.writeMu and pass at most 32 logical frames.
 func (sd *StrategyDispatcher) writePackedBatchLocked(targetPeer peer.ID, ps *PeerStreams, cipher obfuscate.ObfCipher, packedFrames [][]byte) error {
 	streams := ps.GetAllStreams()
-	if sd.Mode() != "multipath" {
-		// best_path/redundant/fallback: never schedule a relay path
-		// (circuit-relay OR boot-relay hop) alongside a healthy direct path (see
-		// nonRelayStreams). multipath KEEPS relay paths so they stay warm and
-		// participate at their min-share weight (see multipath_scheduler.go) —
-		// that is the whole point of multipath.
-		streams = nonRelayStreams(streams, targetPeer)
-	}
+	// Relay paths (circuit-relay / boot-relay hop) are failover-only: they are
+	// rate-limited and fragile, so never schedule one alongside a healthy direct
+	// path — for multipath's frame-granularity split (writeBatchMultipathLocked)
+	// AND its fragment striping (writeMultipathLocked) alike. A relay-only peer
+	// has no direct path, so nonRelayStreams leaves its relay set intact and those
+	// paths still carry the traffic. See nonRelayStreams.
+	streams = nonRelayStreams(streams, targetPeer)
 	// Collapse each connection's in/out pair to one path; otherwise a single
 	// direct connection claims 2x its share and a relay circuit's frames get
 	// split across in/out, churning the receiver's reorder window.
@@ -1777,14 +1811,14 @@ func (sd *StrategyDispatcher) writeFragsOnStream(ps *PeerStreams, targetPeer pee
 //
 // ps must not be nil. Callers must hold ps.writeMu.
 func (sd *StrategyDispatcher) writeFragsToStreams(ps *PeerStreams, targetPeer peer.ID, streams []network.Stream, stat tapPayloadStat, frags [][]byte, recordPeerPayload bool) error {
-	// Never schedule a relay path (circuit-relay OR boot-relay hop) alongside a
-	// healthy direct path for the synchronous strategies (see nonRelayStreams).
-	// multipath KEEPS relay paths so they stay warm and carry their min-share of
-	// the load (the batch entry in writePackedBatchLocked does the same
-	// filtering); this per-frame entry serves the same strategy, so it must agree.
-	if sd.Mode() != "multipath" {
-		streams = nonRelayStreams(streams, targetPeer)
-	}
+	// Relay paths (circuit-relay OR boot-relay hop) are failover-only: never
+	// schedule one alongside a healthy direct path. multipath's stripe
+	// (writeMultipathLocked) uses the filtered direct set and falls back to the
+	// registered relay streams via retryWithFreshStream → relayFallbackIfPossible
+	// once every direct path drops. A relay-only peer has no direct path, so
+	// nonRelayStreams leaves its relay set intact and it still stripes across its
+	// relay paths (with fecParityFor sizing the parity for that count).
+	streams = nonRelayStreams(streams, targetPeer)
 	// Collapse each connection's in/out pair to one path (see dedupStreamsByConn).
 	streams = dedupStreamsByConn(streams)
 	if ps != nil {
