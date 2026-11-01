@@ -125,6 +125,35 @@ func (ps *PeerStreams) notePathFailureUnderLock(s network.Stream, now time.Time)
 	b.until = now.Add(cooldown)
 }
 
+// notePathCongestedUnderLock opens a SHORT, fixed circuit for a path whose
+// writer queue is full. Queue-full means the path is alive but behind live
+// traffic: the connection and its measured capacity are fine, so this must not
+// feed the exponential backoff a real write failure earns — otherwise a burst
+// of congestion exiles a healthy path for up to pathBackoffMax, exactly when
+// the peer can least afford to lose it. The stream is still retired (its queue
+// is dropped with it); pathBackoffBase later it is eligible again with an empty
+// queue, and the first successful submit clears the circuit entirely.
+// Caller holds ps.writeMu.
+func (ps *PeerStreams) notePathCongestedUnderLock(s network.Stream, now time.Time) {
+	k := ps.pathKeyForLocked(s)
+	if k == "" {
+		return
+	}
+	if ps.pathBackoff == nil {
+		ps.pathBackoff = make(map[string]*pathBackoff, 4)
+	}
+	b := ps.pathBackoff[k]
+	if b == nil {
+		b = &pathBackoff{}
+		ps.pathBackoff[k] = b
+	}
+	// Never shorten a real failure's circuit, never grow it: congestion gets
+	// exactly pathBackoffBase, whatever the failure counter says.
+	if until := now.Add(pathBackoffBase); until.After(b.until) {
+		b.until = until
+	}
+}
+
 // notePathSuccessUnderLock closes the circuit for the path carrying s.
 // Caller holds ps.writeMu.
 func (ps *PeerStreams) notePathSuccessUnderLock(s network.Stream) {

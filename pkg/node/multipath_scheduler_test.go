@@ -138,3 +138,51 @@ func TestMultipathDeficitStaysBounded(t *testing.T) {
 		t.Fatalf("DWRR deficit grew unbounded: max=%.4f", maxDeficit)
 	}
 }
+
+// Congestion (writer queue full) must arm the SHORT fixed circuit, never the
+// exponential one: a merely busy path is eligible again after pathBackoffBase,
+// while a path whose writes actually fail keeps doubling up to pathBackoffMax.
+// Success clears either circuit entirely.
+func TestMpCongestionBackoffStaysAtBase(t *testing.T) {
+	ps := NewPeerStreams(peer.ID("mp-congest"))
+	s := &pathTestStream{ma: mustMA("/ip4/192.168.9.7/tcp/4001")}
+	key := "/ip4/192.168.9.7/tcp/4001"
+	now := time.Now()
+
+	ps.writeMu.Lock()
+	defer ps.writeMu.Unlock()
+
+	// Two congestion events in a row: the cooldown re-arms from the LATEST one
+	// and the failure counter is untouched, so nothing can grow exponentially.
+	ps.notePathCongestedUnderLock(s, now)
+	ps.notePathCongestedUnderLock(s, now.Add(time.Second))
+	b := ps.pathBackoff[key]
+	if b == nil {
+		t.Fatal("congestion did not open a circuit")
+	}
+	if b.failures != 0 {
+		t.Fatalf("congestion bumped the failure counter to %d; want 0", b.failures)
+	}
+	if got := b.until.Sub(now.Add(time.Second)); got != pathBackoffBase {
+		t.Fatalf("congestion cooldown = %v; want exactly %v", got, pathBackoffBase)
+	}
+
+	// A real write failure keeps its own doubling on top: first failure cools
+	// for base, the second for 2x base.
+	t2 := now.Add(3 * time.Second)
+	ps.notePathFailureUnderLock(s, t2)
+	if got := ps.pathBackoff[key].until.Sub(t2); got != pathBackoffBase {
+		t.Fatalf("first real failure cooled for %v; want %v", got, pathBackoffBase)
+	}
+	t3 := now.Add(6 * time.Second)
+	ps.notePathFailureUnderLock(s, t3)
+	if got := ps.pathBackoff[key].until.Sub(t3); got != 2*pathBackoffBase {
+		t.Fatalf("second real failure cooled for %v; want %v", got, 2*pathBackoffBase)
+	}
+
+	// A successful write clears the whole circuit, congestion or not.
+	ps.notePathSuccessUnderLock(s)
+	if _, ok := ps.pathBackoff[key]; ok {
+		t.Fatal("success did not clear the circuit")
+	}
+}

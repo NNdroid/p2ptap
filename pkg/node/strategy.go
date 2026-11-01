@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -1554,7 +1555,17 @@ func (sd *StrategyDispatcher) writeBatchMultipathLocked(targetPeer peer.ID, ps *
 			// Fragments already handed to this broken path cannot be recovered
 			// from it, but they CAN still go out on a surviving path — that is
 			// the whole point of having more than one.
-			ps.notePathFailureUnderLock(b.s, time.Now())
+			//
+			// errWriterQueueFull is congestion, not death: arm the short fixed
+			// circuit instead of the exponential one (see
+			// notePathCongestedUnderLock). The stream is retired either way, so
+			// the "each retry retires at least one stream" termination argument
+			// below is untouched.
+			if errors.Is(res.err, errWriterQueueFull) {
+				ps.notePathCongestedUnderLock(b.s, time.Now())
+			} else {
+				ps.notePathFailureUnderLock(b.s, time.Now())
+			}
 			log.Debug("Multipath batch: path to peer %s failed (%v); its %d fragment(s) will be re-queued on the remaining paths",
 				targetPeer.String(), res.err, len(b.frags))
 			sd.removeStreamUnderLock(ps, b.s)
@@ -1929,13 +1940,16 @@ func (sd *StrategyDispatcher) writeMultipathLocked(ps *PeerStreams, targetPeer p
 		for _, pl := range plans {
 			wait, err := ps.submitMpWriteLocked(pl.s, sd.node, targetPeer, pl.frags, stat)
 			if err != nil {
-				// Queue full: the path is a whole window behind live traffic.
-				// Treat it exactly like a failed write — open the per-path circuit
-				// and retire the stream so the scheduler stops feeding it.
+				// Queue full: the path is a whole window behind live traffic, but
+				// it is ALIVE. Retire the stream as for any failure, yet arm only
+				// the short fixed congestion circuit — feeding it into the
+				// exponential backoff would exile a merely busy path for up to
+				// pathBackoffMax and turn a burst into a long, self-inflicted
+				// capacity outage.
 				if firstErr == nil {
 					firstErr = err
 				}
-				ps.notePathFailureUnderLock(pl.s, time.Now())
+				ps.notePathCongestedUnderLock(pl.s, time.Now())
 				log.Debug("Multipath: writer queue full on a path to peer %s; retiring it and retrying its %d fragment(s) on a remaining path",
 					targetPeer.String(), len(pl.frags))
 				sd.removeStreamUnderLock(ps, pl.s)
