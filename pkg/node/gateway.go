@@ -109,6 +109,15 @@ type GatewayManager struct {
 	// whether to hijack unknown unicast/broadcast traffic, and using an atomic
 	// avoids taking gm.mu on that hot path (see IsExitNodeActive).
 	exitActive atomic.Bool
+
+	// exitChangeSeq is bumped on EVERY Exit Node state transition (SetExitNode
+	// success and clearExitNodeUnlocked). An Exit Node re-apply loop (see
+	// exit_retry.go) snapshots it at start and aborts when it moves, so a manual
+	// operator action — selecting a different peer or clearing the Exit Node —
+	// cancels a pending automatic re-apply instead of resurrecting a choice the
+	// user just overrode. Also lets a later SetExitNode (including the re-apply
+	// itself) invalidate an older retry generation.
+	exitChangeSeq atomic.Uint64
 }
 
 func NewGatewayManager(tapName string) *GatewayManager {
@@ -174,6 +183,14 @@ func (gm *GatewayManager) ActiveExitIP6() string {
 // not have to take gm.mu (contrast ActiveExitPeerID, which still locks).
 func (gm *GatewayManager) IsExitNodeActive() bool {
 	return gm.exitActive.Load()
+}
+
+// ExitChangeSeq returns a monotonically increasing counter that advances on
+// every Exit Node state transition (SetExitNode / ClearExitNode). A pending
+// automatic re-apply loop snapshots it and aborts when it moves, so an
+// operator action can never be overridden by a stale re-apply.
+func (gm *GatewayManager) ExitChangeSeq() uint64 {
+	return gm.exitChangeSeq.Load()
 }
 
 // enableProcessBypass / disableProcessBypass wrap the global WFP manager so the
@@ -542,6 +559,7 @@ func (gm *GatewayManager) SetExitNode(peerID string, exitTapIPv4 string, exitTap
 	}
 
 	gwLog.Info("Successfully activated Exit Node %s (%s) as system default gateway! (v4=%s v6=%s)", peerID, exitTapIPv4, exitTapIPv4, exitTapIPv6)
+	gm.exitChangeSeq.Add(1)
 	return nil
 }
 
@@ -590,6 +608,7 @@ func (gm *GatewayManager) clearExitNodeUnlocked() error {
 	// coincidental host route the host or another application created.
 	gm.teardownBypassRoutesUnlocked()
 	gwLog.Info("Exit Node gateway cleared successfully.")
+	gm.exitChangeSeq.Add(1)
 	return nil
 }
 

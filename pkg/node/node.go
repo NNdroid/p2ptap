@@ -797,6 +797,20 @@ type Node struct {
 	// skip the first-hop origin check. Entries are cleaned up by a janitor
 	// after 5 minutes of inactivity.
 	seenOrigins sync.Map // peer.ID string → seenOriginEntry
+
+	// exitRetryMu guards the Exit Node re-apply bookkeeping below. When the
+	// active Exit Node peer disconnects (DisconnectedF debounce) the node clears
+	// the Exit Node default route to avoid black-holing egress behind a dead
+	// peer, but remembers the peer and its gateway TAP IPs so a background loop
+	// can re-apply the SAME peer automatically once it reconnects. Without this
+	// a single transient transport blip (Android network churn, a brief
+	// connection reset, a relay hop hiccup) permanently killed the Exit Node
+	// until the operator re-selected it by hand — see exit_retry.go.
+	exitRetryMu      sync.Mutex
+	exitRetryDesired peer.ID // peer to re-apply, "" when nothing is pending
+	exitRetryIP4     string  // captured gateway IPv4 TAP IP for the retry
+	exitRetryIP6     string  // captured gateway IPv6 TAP IP for the retry
+	exitRetryGen     uint64  // bumped to invalidate a superseded retry loop
 }
 
 // seenOriginEntry records when an origin was first observed and which peer
@@ -2778,7 +2792,14 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 				if node.isExitNodeActive() {
 					if exitPID := node.Gateway.ActiveExitPeerPID(); exitPID != "" && exitPID == debounceID {
 						log.Info("Exit node peer %s disconnected; tearing down default route", debounceID.String())
+						// Capture the gateway TAP IPs BEFORE ClearExitNode wipes the
+						// bookkeeping, so the re-apply loop can re-install the SAME
+						// peer once it reconnects. A transient disconnect must not
+						// leave the Exit Node dead until the operator re-selects it.
+						exitIP4 := node.Gateway.ActiveExitIP()
+						exitIP6 := node.Gateway.ActiveExitIP6()
 						_ = node.Gateway.ClearExitNode()
+						node.retryExitNodeAfterDisconnect(debounceID, exitIP4, exitIP6)
 					}
 				}
 				// A departed peer has no working path, so it no longer qualifies as
