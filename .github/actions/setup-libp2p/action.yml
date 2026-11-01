@@ -10,4 +10,7 @@ runs:
   steps:
     - name: Fetch upstream go-libp2p and apply the local patch
       shell: bash
-      run: ./scripts/fetch-libp2p.sh
+      # Invoke through bash explicitly: a Windows checkout of this repo has
+      # core.filemode=false, so the executable bit does not survive a re-add of
+      # the script and `./scripts/...` would die with exit 126 on Linux runners.
+      run: bash ./scripts/fetch-libp2p.sh
