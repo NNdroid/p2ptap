@@ -5,7 +5,7 @@ package node
 
 import "net"
 
-func protectSocketOS(fd uintptr, wanIfName string) error {
+func protectSocketOS(fd uintptr, wanIfName, network, address string) error {
 	return nil
 }
 

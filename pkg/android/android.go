@@ -9,6 +9,8 @@
 //
 //	val fd = vpnInterface.fileDescriptor.detachFd()   // from VpnService.Builder
 //	P2PTap.setProtector(protector)                   // implements VpnService.protect(fd)
+//	// or, for network-aware multipath (bind sockets to a specific Network):
+//	P2PTap.setNetworkProtector(protector)            // implements the superset
 //	P2PTap.start(configJson, fd)                     // runs the node; non-blocking
 //	// ... VPN runs ...
 //	val running = P2PTap.isRunning()                 // check status
@@ -192,6 +194,22 @@ type Protector interface {
 	// Protect marks the given socket fd as excluded from the VPN routing so
 	// that traffic on it leaves via the underlying cellular/Wi-Fi interface.
 	Protect(fd int32) bool
+}
+
+// NetworkProtector is the network-aware superset of Protector. In addition to
+// excluding the socket from the VPN, the app receives the dial/listen target
+// (network, e.g. "tcp"; address, e.g. "192.168.1.10:4001") so it can bind the
+// socket to a specific android.net.Network via Network.bindSocket — the
+// precondition for true multipath over Wi-Fi + cellular, since Android only
+// routes an unbound socket over ONE underlying network.
+//
+// Implementations that cannot determine the right network must still fall back
+// to VpnService.protect(fd); returning false makes the dial fail.
+type NetworkProtector interface {
+	// Protect marks the given socket fd as excluded from the VPN routing and,
+	// when the destination can be mapped to an underlying network, binds it to
+	// that network so traffic egresses via it directly.
+	Protect(fd int32, network string, address string) bool
 }
 
 // StateListener is implemented by the Android app to receive high-frequency
@@ -385,8 +403,22 @@ func SetProtector(p Protector) {
 		node.SetAndroidProtectFunc(nil)
 		return
 	}
-	node.SetAndroidProtectFunc(func(fd int) bool {
+	node.SetAndroidProtectFunc(func(fd int, network, address string) bool {
 		return p.Protect(int32(fd))
+	})
+}
+
+// SetNetworkProtector registers a network-aware socket protector. It supersedes
+// SetProtector: whichever setter ran last owns the single callback slot. The
+// app receives the dial target so it can bind the socket to the underlying
+// android.net.Network that reaches it (see the NetworkProtector docs).
+func SetNetworkProtector(p NetworkProtector) {
+	if p == nil {
+		node.SetAndroidProtectFunc(nil)
+		return
+	}
+	node.SetAndroidProtectFunc(func(fd int, network, address string) bool {
+		return p.Protect(int32(fd), network, address)
 	})
 }
 
@@ -1110,6 +1142,13 @@ func NewP2PTap() *P2PTap {
 
 func (a *P2PTap) SetProtector(p Protector) {
 	SetProtector(p)
+}
+
+// SetNetworkProtector registers a network-aware socket protector (see
+// SetNetworkProtector). It supersedes any protector registered via
+// SetProtector, and vice versa — the last registration wins.
+func (a *P2PTap) SetNetworkProtector(p NetworkProtector) {
+	SetNetworkProtector(p)
 }
 
 func (a *P2PTap) SetStateListener(l StateListener) {

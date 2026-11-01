@@ -90,7 +90,7 @@ func getPrimaryPhysicalInterface() (index uint32, name string, err error) {
 // The interface index comes from the startup-cached default egress (see protect.go);
 // it is refreshed on roam by CheckAndUpdatePhysicalGateway calling
 // RefreshDefaultEgressInterface.
-func protectSocketOS(fd uintptr, targetAddress string) error {
+func protectSocketOS(fd uintptr, wanIfName, network, targetAddress string) error {
 	idx, name, err := GetDefaultEgressInterface()
 	if err != nil || idx == 0 {
 		// No usable physical egress: socket-level protection is unavailable.

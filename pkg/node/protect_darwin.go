@@ -33,7 +33,7 @@ func detectDefaultRouteInterface() (uint32, string, error) {
 	return 0, "", net.InvalidAddrError("no IPv4 default route interface found")
 }
 
-func protectSocketOS(fd uintptr, wanIfName string) error {
+func protectSocketOS(fd uintptr, wanIfName, network, address string) error {
 	ifIndex, _, err := GetDefaultEgressInterface()
 	if err != nil || ifIndex == 0 {
 		if wanIfName != "" && wanIfName != "auto" {

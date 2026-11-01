@@ -46,7 +46,7 @@ func detectDefaultRouteInterface() (uint32, string, error) {
 	return 0, "", net.InvalidAddrError("no IPv4 default route found")
 }
 
-func protectSocketOS(fd uintptr, wanIfName string) error {
+func protectSocketOS(fd uintptr, wanIfName, network, address string) error {
 	if wanIfName == "" || wanIfName == "auto" {
 		// No interface name configured: use the cached default egress interface
 		// detected at process startup (before any Exit Node default route

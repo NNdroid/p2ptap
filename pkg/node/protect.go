@@ -194,7 +194,7 @@ func GetSocketControlHook(wanIfName string) func(network, address string, c sysc
 		}
 		var sockErr error
 		err := c.Control(func(fd uintptr) {
-			sockErr = protectSocketOS(fd, resolveProtectIfName(wanIfName, address))
+			sockErr = protectSocketOS(fd, resolveProtectIfName(wanIfName, address), network, address)
 		})
 		if err != nil {
 			return err
@@ -290,7 +290,7 @@ func listenerProtectControl(network, address string, c syscall.RawConn) error {
 	}
 	var sockErr error
 	err := c.Control(func(fd uintptr) {
-		sockErr = protectSocketOS(fd, ifName)
+		sockErr = protectSocketOS(fd, ifName, network, address)
 	})
 	if err != nil {
 		return err
