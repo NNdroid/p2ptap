@@ -464,6 +464,24 @@ func (n *Node) dispatchRelayCtrlInner(s network.Stream, origin peer.ID, proto pr
 		// s.Conn().RemotePeer(), which logicalPeerStream rewrites to the true
 		// origin, so the offer/answer is attributed to the right peer.
 		n.handleWebRTCSignal(wrapped)
+	case MuxControlProtocolID:
+		// A peer reachable only through an OVERLAY relay hop carries its
+		// metadata (TAP IP) over the unified mux control channel
+		// /p2ptap/ctrl/1.0.0, which muxEngine opens through openControlStream
+		// (see getOrOpenLocked) and therefore tunnels through this very
+		// relay-ctrl handler when the peer is overlay-relayed. Without this
+		// case the final hop fell into default: and closed the stream before
+		// the peer's metadata arrived, so a selected Exit Node could never
+		// activate for an overlay-relayed peer and the app black-holed all
+		// egress (0.0.0.0/0 captured by the VPN but nothing forwarded).
+		//
+		// This is the exact symmetric hole that the boot-relay dispatcher
+		// (dispatchBootRelayControlStream) closed in 99a02cd; the overlay
+		// path was left behind. logicalPeerStream rewrites
+		// s.Conn().RemotePeer() to the true origin, so the mux engine keys its
+		// per-peer stream and metadata on the right peer rather than on the
+		// relay hop.
+		n.muxEngine.handleControlStream(wrapped)
 	default:
 		log.Warn("RelayCtrl: no inner handler for proto %s (origin %s); closing", proto, origin)
 	}
