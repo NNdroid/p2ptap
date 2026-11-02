@@ -138,6 +138,14 @@ func (d *TunTAPDevice) Close() error {
 	return nil
 }
 
+// tunReadParkTimeout bounds how long one Read may park on the TUN fd. The park
+// exists so Close and UpdateFd stay reachable: a bare read on the tunnel fd
+// sits in the kernel until a packet arrives, and Go does not reliably wake a
+// pending read when the file is closed underneath it (the reader can stay
+// parked for the life of the process). 2s caps that park and is well below the
+// node's 8s read-loop force-timeout, so an idle link never burns the budget.
+const tunReadParkTimeout = 2 * time.Second
+
 // Read pulls an L3 IP packet from the TUN fd and formats it directly into b
 // as an Ethernet frame for the node's L2 pipeline with ZERO intermediate copy and zero heap allocation.
 // Non-IP packets (e.g. ARP) cannot traverse an L3 tunnel and are skipped.
@@ -154,14 +162,14 @@ func (d *TunTAPDevice) Read(b []byte) (int, error) {
 		return 0, errors.New("tun: device closed")
 	}
 
+	// Arm the park deadline on every pass through the loop below rather than
+	// once for the device's lifetime: an expired deadline wins even over data
+	// that is already waiting (see TestExpiredParkDeadlineFailsFast), so a
+	// stale one would make every read fail until it is pushed forward again.
 	for {
-		// Deadline-bounded park: a bare f.Read on the tunnel fd sits in the
-		// kernel until a packet arrives, and Go does NOT reliably wake a
-		// pending read when Close/UpdateFd closes the file (the fd may keep
-		// the reader parked while the process lives). 2s caps the park so the
-		// closed/fd-swap checks below are reachable and stop never burns the
-		// node's 8s read-loop force-timeout on an idle link.
-		_ = f.SetReadDeadline(time.Now().Add(2 * time.Second))
+		// Deadline-bounded park so the closed/fd-swap checks below stay
+		// reachable on an idle link; see tunReadParkTimeout.
+		_ = f.SetReadDeadline(time.Now().Add(tunReadParkTimeout))
 		// Zero-copy kernel read: read the IP packet directly into b[14:], leaving 14 bytes headroom for L2 Ethernet header
 		n, err := f.Read(b[14:])
 		if err != nil {
