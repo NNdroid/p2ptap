@@ -148,6 +148,23 @@ func newFakeGM(t *testing.T) (*GatewayManager, *fakeRouteBackend) {
 	return gm, fb
 }
 
+// injectFakeRouteBackend swaps gm's real OS routing backend for an in-memory
+// fake. The e2e exit-node tests (e2e_exit_node_*.go) call SetExitNode on a real
+// Node to assert the activation and transit datapath; installing a real default
+// route there is impossible on CI — a non-root macos runner refuses with "must
+// be root", and an ubuntu runner has no TAP device to route via. The routing
+// orchestration itself is already unit-tested against this same fake, so
+// swapping it in here only removes the host-OS dependency, not coverage.
+func injectFakeRouteBackend(gm *GatewayManager) *fakeRouteBackend {
+	fb := &fakeRouteBackend{
+		gw:     "192.168.1.1",
+		gw6:    "fe80::1",
+		onLink: make(map[string]bool),
+	}
+	gm.route = fb
+	return fb
+}
+
 // hostRouteFor returns the next hop of the recorded addHostRouteOS call for
 // endpointIP, plus whether such a call happened at all.
 func (f *fakeRouteBackend) hostRouteFor(endpointIP string) (string, bool) {

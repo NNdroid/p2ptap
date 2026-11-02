@@ -178,6 +178,10 @@ func runExitNodeOverMultipath(t *testing.T, strategy string) {
 	if i := strings.IndexByte(tapV6, '/'); i >= 0 {
 		tapV6 = tapV6[:i]
 	}
+	// CI runs non-root and without a real TAP device, so the exit node cannot
+	// install a host default route; the routing orchestration is unit-tested
+	// separately in gateway_test.go against the same fake.
+	injectFakeRouteBackend(nodeA.Gateway)
 	if err := nodeA.Gateway.SetExitNode(nodeB.Host.ID().String(), tapV4, tapV6, nil); err != nil {
 		t.Fatalf("SetExitNode on A failed: %v", err)
 	}

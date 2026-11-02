@@ -325,6 +325,10 @@ func runExitNodeOverTopology(t *testing.T, topo mpTopology) {
 	}
 	tapV4 := stripCIDR(meta.TapIP)
 	tapV6 := stripCIDR(meta.TapIPv6)
+	// CI runs non-root and without a real TAP device, so the exit node cannot
+	// install a host default route; the routing orchestration is unit-tested
+	// separately in gateway_test.go against the same fake.
+	injectFakeRouteBackend(nodeA.Gateway)
 	if serr := nodeA.Gateway.SetExitNode(bID.String(), tapV4, tapV6, nil); serr != nil {
 		t.Fatalf("%s: SetExitNode failed: %v", topo.name, serr)
 	}
