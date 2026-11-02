@@ -911,8 +911,15 @@ func (n *Node) processTapFrame(payload []byte) bool {
 	}
 	n.IPTracker.ExtractAndRecord(payload, true)
 
+	// dstIP is parsed at most once per frame and shared by the unicast IP
+	// fallback below and both exit-node checks in the broadcast block. Each of
+	// those used to re-derive it from the frame with its own heap allocation.
+	// It is left nil on the MAC-table hit path (which returns before the
+	// broadcast block) so that path pays nothing for it.
+	var dstIP net.IP
 	targetPeer, found := n.MACTable.Lookup(dstMAC)
 	if !found {
+		dstIP = frameDstIP(payload)
 		if log.IsDebug() {
 			log.Debug("TAPFWD resolve: MACTable MISS dstMAC=%s srcMAC=%s", dstMAC.String(), srcMAC.String())
 		}
@@ -920,7 +927,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 		// hasn't sent a frame yet, so we never learned its MAC), resolve the
 		// destination IP directly from the frame (direct TAP IP, advertised LAN subnet,
 		// or runtime IPTracker) and look up the owning mesh peer.
-		if dstIP := extractFrameDstIP(payload); dstIP != nil {
+		if dstIP != nil {
 			pid, mac := n.ResolvePeerIDByIP(dstIP)
 			if len(mac) == 0 {
 				if log.IsDebug() {
@@ -1096,9 +1103,13 @@ func (n *Node) processTapFrame(payload []byte) bool {
 		// to the Exit Node peer (addressed by peer ID, NOT by a learned MAC, so
 		// it works even before the Exit Node peer's MAC has been discovered).
 		if n.isExitNodeActive() {
-			// Check if target IP is a Mesh / LAN Subnet IP vs an external Internet IP:
-			dstIP := extractFrameDstIP(payload)
-			isMeshOrSubnet := n.isMeshLocalIP(dstIP)
+			// Check if target IP is a Mesh / LAN Subnet IP vs an external Internet IP.
+			// isMeshLocalAddress, not isMeshLocalIP: reaching this block means
+			// MACTable AND ResolvePeerIDByIP both already missed, so no peer owns
+			// dstIP - the two peer lookups inside isMeshLocalIP (an arpIndex map
+			// hit plus a full advertised-subnet scan) could only ever miss here.
+			// That matters because this is every frame heading out of the tunnel.
+			isMeshOrSubnet := n.isMeshLocalAddress(dstIP)
 			// Only hijack to Exit Node if it's NOT a mesh/subnet IP (i.e. WAN/Internet traffic)
 			if !isMeshOrSubnet {
 				exitPeerID := n.Gateway.ActiveExitPeerID()
@@ -1133,7 +1144,6 @@ func (n *Node) processTapFrame(payload []byte) bool {
 		// Do NOT flood it to mesh peers. Flooding unroutable external packets wastes bandwidth
 		// and leaks destination metadata across the mesh.
 		if !isBroadcastOrMulticastMAC(dstMAC) {
-			dstIP := extractFrameDstIP(payload)
 			// A frame with no IP at all (an ARP reply, any other L2 frame) is
 			// not "unroutable external" — flooding is its only delivery path,
 			// so it is never suppressed here.
@@ -1311,6 +1321,40 @@ func (n *Node) dispatchUnicastPacked(targetPeer peer.ID, targetPeerStr string, d
 // uses because it has no address yet — so DHCP never completed on a mesh
 // without an Exit Node.
 func (n *Node) isMeshLocalIP(dstIP net.IP) bool {
+	if n.isMeshLocalAddress(dstIP) {
+		return true
+	}
+	if dstIP == nil {
+		return false
+	}
+	// Two-stage peer ownership, mirroring resolveProxyMAC: the O(1) direct-TAP
+	// map first, then the advertised-subnet scan.
+	if ip4 := dstIP.To4(); ip4 != nil {
+		// The IPv6 branch below had this lookup and the IPv4 one did not, so a
+		// peer whose TAP address sits outside our subnet (no TapIP configured,
+		// or a mismatched prefix) was unreachable as a destination whenever its
+		// MAC was unknown or group-addressed.
+		if mac, _ := n.lookupPeerMACByIPv4(ip4); mac != nil {
+			return true
+		}
+		return n.lookupPeerIDByAdvertisedSubnet(ip4) != ""
+	}
+	if mac, _ := n.lookupPeerMACByIPv6(dstIP); mac != nil {
+		return true
+	}
+	return n.lookupPeerIDByAdvertisedSubnet(dstIP) != ""
+}
+
+// isMeshLocalAddress answers the address-class half of isMeshLocalIP: is dstIP
+// something only the LAN / the overlay itself can mean (limited broadcast,
+// link-local, LAN-scoped multicast, or a subnet this node owns)? It deliberately
+// performs NO peer lookups, so it is the right predicate for a caller that has
+// already established that no peer owns the address - it skips an arpIndex map
+// hit and a full advertised-subnet scan per frame.
+//
+// Callers that have not established that MUST use isMeshLocalIP instead;
+// this one returns false for another peer's TAP IP.
+func (n *Node) isMeshLocalAddress(dstIP net.IP) bool {
 	if dstIP == nil {
 		return false
 	}
@@ -1339,14 +1383,7 @@ func (n *Node) isMeshLocalIP(dstIP net.IP) bool {
 		if n.localV4Net != nil && n.localV4Net.Contains(ip4) {
 			return true
 		}
-		// The IPv6 branch below has this lookup and the IPv4 one did not, so a
-		// peer whose TAP address sits outside our subnet (no TapIP configured,
-		// or a mismatched prefix) was unreachable as a destination whenever its
-		// MAC was unknown or group-addressed.
-		if mac, _ := n.lookupPeerMACByIPv4(ip4); mac != nil {
-			return true
-		}
-		return n.lookupPeerIDByAdvertisedSubnet(ip4) != ""
+		return false
 	}
 	if dstIP.IsMulticast() {
 		// ff01::/16 through ff07::/16 are interface/site/org-local multicast and
@@ -1367,10 +1404,7 @@ func (n *Node) isMeshLocalIP(dstIP net.IP) bool {
 	if dstIP.IsLinkLocalUnicast() {
 		return true
 	}
-	if mac, _ := n.lookupPeerMACByIPv6(dstIP); mac != nil {
-		return true
-	}
-	return n.lookupPeerIDByAdvertisedSubnet(dstIP) != ""
+	return false
 }
 
 // icmpv6Offset walks the IPv6 extension-header chain in a frame payload and

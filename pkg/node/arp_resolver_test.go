@@ -131,17 +131,34 @@ func TestARPResolverNilIndexSafe(t *testing.T) {
 
 // benchNode builds a node with sz peers, each advertising one /24 subnet, to
 // model a realistic mesh for the lookup benchmarks.
+//
+// It must carry the same Config a real node has: rebuildARPIndex calls
+// isSubnetPeerAllowed for every advertised subnet, which dereferences the
+// config. A bare &Node{} made every benchmark using this helper panic on a nil
+// config the moment it was actually run with -bench.
 func benchNode(sz int) *Node {
-	n := &Node{}
+	cfg := config.DefaultConfig()
+	cfg.AcceptAdvertisedSubnets = true
+	cfg.AllowedSubnetPeers = []string{"*"}
+	n := &Node{Config: cfg}
+	n.SetConfig(cfg)
 	for i := 0; i < sz; i++ {
-		last := byte(2 + i)
+		// Unique across the whole range: sz=256 used to wrap the last octet
+		// (byte(2+i)) so the upper peers collided with the lower ones.
+		tapV4 := net.IPv4(10, byte(i/250), byte(2+i%250), 1).String() + "/24"
+		tapV6 := "fd00::" + strconv.FormatInt(int64(i+2), 16) + "/64"
+		mac := net.HardwareAddr{0x02, 0x00, byte(i / 256), byte(i % 256), 0x00, 0x01}.String()
+		// A distinct /24 per peer: rebuilding the index dedups by NETWORK, so
+		// 192.168.0.0/24 and 192.168.0.1/24 collapse into one entry and the
+		// benchmark would measure a single subnet no matter what sz says.
+		subnet := "192." + strconv.Itoa(16+i/256) + "." + strconv.Itoa(i%256) + ".0/24"
 		n.storePeerMeta(
-			peer.ID("peer-"+string(rune('A'+i))),
+			peer.ID("peer-"+strconv.Itoa(i)),
 			PeerMeta{
-				TapIP:             net.IPv4(10, 0, 0, last).String() + "/24",
-				TapIPv6:           "fd00::" + string(rune('2'+i)) + "/64",
-				TapMAC:            net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, last}.String(),
-				AdvertisedSubnets: []string{net.IPv4(192, 168, byte(i), 0).String() + "/24"},
+				TapIP:             tapV4,
+				TapIPv6:           tapV6,
+				TapMAC:            mac,
+				AdvertisedSubnets: []string{subnet},
 			},
 		)
 	}

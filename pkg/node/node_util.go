@@ -963,33 +963,47 @@ func (n *Node) lookupPeerTapMAC(pID peer.ID) net.HardwareAddr {
 	return hw
 }
 
-// extractFrameDstIP parses the destination IPv4/IPv6 address from an Ethernet
-// frame payload (the same payload processed by ExtractEthernetMACs).  Returns
-// nil for non-IP frames or runt frames.  Used as a fallback in the TAP egress
-// path to resolve the owning mesh peer when the MAC table has no entry yet.
-func extractFrameDstIP(frame []byte) net.IP {
+// frameDstIP parses the destination IPv4/IPv6/ARP-target address out of an
+// Ethernet frame WITHOUT copying it. The returned slice ALIASES frame, so it is
+// only valid for as long as frame is (on the TAP path: until the read buffer is
+// refilled). Returns nil for non-IP frames or runt frames.
+//
+// This is the hot-path variant. Every consumer in processTapFrame - peer
+// resolution, isMeshLocalAddress and the unicast-flood suppression - only reads
+// the address and never retains it, so aliasing is safe there. The old code
+// called extractFrameDstIP instead, which allocates a fresh 4- or 16-byte slice;
+// with the exit-node path reaching three of those call sites per frame, that was
+// up to three heap allocations per forwarded packet purely to read 4 bytes.
+func frameDstIP(frame []byte) net.IP {
 	if len(frame) < 34 {
 		return nil
 	}
-	etherType := binary.BigEndian.Uint16(frame[12:14])
-	switch etherType {
-	case 0x0800: // IPv4
-		if len(frame) < 34 {
-			return nil
-		}
-		return net.IP(append([]byte(nil), frame[30:34]...))
-	case 0x86DD: // IPv6
+	switch binary.BigEndian.Uint16(frame[12:14]) {
+	case packet.EtherTypeIPv4:
+		return net.IP(frame[30:34])
+	case packet.EtherTypeIPv6:
 		if len(frame) < 54 {
 			return nil
 		}
-		return net.IP(append([]byte(nil), frame[38:54]...))
-	case 0x0806: // ARP
+		return net.IP(frame[38:54])
+	case packet.EtherTypeARP:
 		if len(frame) < 42 {
 			return nil
 		}
-		return net.IP(append([]byte(nil), frame[38:42]...))
+		return net.IP(frame[38:42])
 	}
 	return nil
+}
+
+// extractFrameDstIP is the owning variant of frameDstIP: it returns a copy that
+// stays valid after frame is reused. Keep using this for any caller that stores
+// or returns the address; the TAP hot path must use frameDstIP instead.
+func extractFrameDstIP(frame []byte) net.IP {
+	ip := frameDstIP(frame)
+	if ip == nil {
+		return nil
+	}
+	return net.IP(append([]byte(nil), ip...))
 }
 
 // lookupPeerMACByIPv4 resolves a peer by its own direct TAP IPv4 address (O(1)
