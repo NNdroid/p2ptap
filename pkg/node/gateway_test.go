@@ -5,10 +5,35 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"p2ptap/pkg/config"
 	vswitch "p2ptap/pkg/switch"
 )
+
+// exitPeerA / exitPeerB are syntactically real peer IDs.
+//
+// SetExitNode rejects an identity it cannot decode, because the recorded string
+// and the recorded peer.ID must agree: a string that does not decode left the
+// UI-facing field set and the data-plane field empty, so the exit node reported
+// itself active while nothing matched it. These tests therefore have to pass
+// something a real peer could actually own.
+var (
+	exitPeerA = newTestPeerIDString()
+	exitPeerB = newTestPeerIDString()
+)
+
+func newTestPeerIDString() string {
+	priv, _, err := crypto.GenerateEd25519Key(nil)
+	if err != nil {
+		panic(err)
+	}
+	id, err := peer.IDFromPrivateKey(priv)
+	if err != nil {
+		panic(err)
+	}
+	return id.String()
+}
 
 // fakeRouteBackend is an in-memory implementation of routeBackend used to
 // exercise SetExitNode / ClearExitNode / subnet-route orchestration without
@@ -150,14 +175,14 @@ func (f *fakeRouteBackend) delHostRouteFor(endpointIP string) (string, bool) {
 func TestSetExitNodeActivates(t *testing.T) {
 	gm, fb := newFakeGM(t)
 
-	if err := gm.SetExitNode("peer-A", "10.0.0.2", "", []string{"1.2.3.4"}); err != nil {
+	if err := gm.SetExitNode(exitPeerA, "10.0.0.2", "", []string{"1.2.3.4"}); err != nil {
 		t.Fatalf("SetExitNode returned error: %v", err)
 	}
 
 	if !gm.IsExitNodeActive() {
 		t.Fatal("IsExitNodeActive() should be true after SetExitNode")
 	}
-	if got := gm.ActiveExitPeerID(); got != "peer-A" {
+	if got := gm.ActiveExitPeerID(); got != exitPeerA {
 		t.Fatalf("ActiveExitPeerID = %q, want peer-A", got)
 	}
 	if got := gm.ActiveExitIP(); got != "10.0.0.2" {
@@ -175,6 +200,63 @@ func TestSetExitNodeActivates(t *testing.T) {
 	if fb.addHost[0][0] != "1.2.3.4" {
 		t.Fatalf("bypass host route installed for %q, want 1.2.3.4", fb.addHost[0][0])
 	}
+	// The two recorded views of the identity must agree. They are what the UI
+	// reads and what every data-plane match uses, and letting them diverge is
+	// exactly how an "active" exit node ends up forwarding nothing.
+	pid, err := peer.Decode(exitPeerA)
+	if err != nil {
+		t.Fatalf("decode fixture peer id: %v", err)
+	}
+	if got := gm.ActiveExitPeerPID(); got != pid {
+		t.Fatalf("ActiveExitPeerPID = %q, want %q", got, pid)
+	}
+}
+
+// TestSetExitNodeRejectsUndecodablePeerID: a peerID that is neither a peer ID nor
+// an IP must be refused before any route is installed. Accepting it recorded the
+// raw string as active while activeExitPID stayed empty, so the UI showed the
+// exit node up while the coalescer exclusion and the transit hijack — both of
+// which compare against ActiveExitPeerPID() — never matched it. The tunnel came
+// up and carried nothing, with no error anywhere.
+func TestSetExitNodeRejectsUndecodablePeerID(t *testing.T) {
+	gm, fb := newFakeGM(t)
+
+	err := gm.SetExitNode("not-a-peer-id", "10.0.0.2", "", []string{"1.2.3.4"})
+	if err == nil {
+		t.Fatal("expected an error for a peer ID that cannot be decoded")
+	}
+	if len(fb.addDef) != 0 {
+		t.Fatalf("no default route may be installed for a rejected identity, got %v", fb.addDef)
+	}
+	if len(fb.addHost) != 0 {
+		t.Fatalf("no bypass host route may be installed for a rejected identity, got %v", fb.addHost)
+	}
+	if gm.IsExitNodeActive() {
+		t.Fatal("a rejected identity must not leave the exit node marked active")
+	}
+	if gm.ActiveExitPeerPID() != "" || gm.ActiveExitPeerID() != "" {
+		t.Fatalf("rejected identity was recorded: id=%q pid=%q", gm.ActiveExitPeerID(), gm.ActiveExitPeerPID())
+	}
+}
+
+// TestSetExitNodeBareIPKeepsEmptyPID: activating by address is still accepted —
+// it is the documented "caller passed the TAP IP" form — but it has no peer
+// behind it, so the PID stays empty rather than being filled with a fake one.
+func TestSetExitNodeBareIPKeepsEmptyPID(t *testing.T) {
+	gm, _ := newFakeGM(t)
+
+	if err := gm.SetExitNode("10.0.0.2", "", "", nil); err != nil {
+		t.Fatalf("activate by address: %v", err)
+	}
+	if !gm.IsExitNodeActive() {
+		t.Fatal("activate-by-address should still mark the exit node active")
+	}
+	if gm.ActiveExitPeerPID() != "" {
+		t.Fatalf("an IP is not a peer ID, PID = %q", gm.ActiveExitPeerPID())
+	}
+	if got := gm.ActiveExitPeerID(); got != "10.0.0.2" {
+		t.Fatalf("ActiveExitPeerID = %q, want 10.0.0.2", got)
+	}
 }
 
 // TestClearExitNodeCleansUp verifies that clearing an Exit Node resets the
@@ -182,7 +264,7 @@ func TestSetExitNodeActivates(t *testing.T) {
 // remembered exit IP), disables WFP, and tears down every bypass host route.
 func TestClearExitNodeCleansUp(t *testing.T) {
 	gm, fb := newFakeGM(t)
-	if err := gm.SetExitNode("peer-A", "10.0.0.2", "", []string{"1.2.3.4"}); err != nil {
+	if err := gm.SetExitNode(exitPeerA, "10.0.0.2", "", []string{"1.2.3.4"}); err != nil {
 		t.Fatalf("SetExitNode returned error: %v", err)
 	}
 
@@ -217,10 +299,10 @@ func TestClearExitNodeCleansUp(t *testing.T) {
 func TestSetExitNodeSwitchTearsDownOldBypass(t *testing.T) {
 	gm, fb := newFakeGM(t)
 
-	if err := gm.SetExitNode("peer-A", "10.0.0.2", "", []string{"1.2.3.4"}); err != nil {
+	if err := gm.SetExitNode(exitPeerA, "10.0.0.2", "", []string{"1.2.3.4"}); err != nil {
 		t.Fatalf("first SetExitNode: %v", err)
 	}
-	if err := gm.SetExitNode("peer-B", "10.0.0.3", "", []string{"5.6.7.8"}); err != nil {
+	if err := gm.SetExitNode(exitPeerB, "10.0.0.3", "", []string{"5.6.7.8"}); err != nil {
 		t.Fatalf("second SetExitNode (switch): %v", err)
 	}
 
@@ -260,7 +342,7 @@ func TestSetExitNodeSwitchTearsDownOldBypass(t *testing.T) {
 func TestClearExitNodeClearsFlagEvenIfRouteDeleteFails(t *testing.T) {
 	gm, fb := newFakeGM(t)
 	fb.delDefErr = true
-	if err := gm.SetExitNode("peer-A", "10.0.0.2", "", nil); err != nil {
+	if err := gm.SetExitNode(exitPeerA, "10.0.0.2", "", nil); err != nil {
 		t.Fatalf("SetExitNode: %v", err)
 	}
 
@@ -308,7 +390,7 @@ func TestSetExitNodeSkipsWrongFamilyEndpoints(t *testing.T) {
 	gm, fb := newFakeGM(t)
 
 	endpoints := []string{"1.2.3.4", "2001:db8::10", "2001:db8::11"}
-	if err := gm.SetExitNode("peer-A", "10.0.0.2", "", endpoints); err != nil {
+	if err := gm.SetExitNode(exitPeerA, "10.0.0.2", "", endpoints); err != nil {
 		t.Fatalf("SetExitNode: %v", err)
 	}
 
@@ -337,7 +419,7 @@ func TestSetExitNodeSkipsWrongFamilyEndpoints(t *testing.T) {
 func TestSetExitNodeIPv6ExitSkipsIPv4Endpoints(t *testing.T) {
 	gm, fb := newFakeGM(t)
 
-	if err := gm.SetExitNode("peer-A", "", "fd00::2", []string{"1.2.3.4", "2001:db8::10"}); err != nil {
+	if err := gm.SetExitNode(exitPeerA, "", "fd00::2", []string{"1.2.3.4", "2001:db8::10"}); err != nil {
 		t.Fatalf("SetExitNode: %v", err)
 	}
 
@@ -362,7 +444,7 @@ func TestOnLinkEndpointSkipsBypassRoute(t *testing.T) {
 	gm, fb := newFakeGM(t)
 	fb.onLink["192.168.1.50"] = true
 
-	if err := gm.SetExitNode("peer-A", "10.0.0.2", "", []string{"192.168.1.50", "8.8.8.8"}); err != nil {
+	if err := gm.SetExitNode(exitPeerA, "10.0.0.2", "", []string{"192.168.1.50", "8.8.8.8"}); err != nil {
 		t.Fatalf("SetExitNode: %v", err)
 	}
 
@@ -447,7 +529,7 @@ func TestClearExitNodeRemovesRoutesWithExactNextHop(t *testing.T) {
 	if _, err := gm.AddSubnetRoute("192.168.1.0/24", "10.0.0.2"); err != nil {
 		t.Fatalf("AddSubnetRoute: %v", err)
 	}
-	if err := gm.SetExitNode("peer-A", "10.0.0.2", "", []string{"8.8.8.8", "192.168.1.50", "2001:db8::10"}); err != nil {
+	if err := gm.SetExitNode(exitPeerA, "10.0.0.2", "", []string{"8.8.8.8", "192.168.1.50", "2001:db8::10"}); err != nil {
 		t.Fatalf("SetExitNode: %v", err)
 	}
 
@@ -508,7 +590,7 @@ func TestProtectEndpointDefersUntilExitActive(t *testing.T) {
 		t.Fatal("endpoint should be tracked for retroactive protection")
 	}
 
-	if err := gm.SetExitNode("peer-A", "10.0.0.2", "", nil); err != nil {
+	if err := gm.SetExitNode(exitPeerA, "10.0.0.2", "", nil); err != nil {
 		t.Fatalf("SetExitNode: %v", err)
 	}
 	if gwUsed, ok := fb.hostRouteFor("8.8.8.8"); !ok || gwUsed != "192.168.1.1" {
@@ -525,7 +607,7 @@ func TestProtectEndpointDefersUntilExitActive(t *testing.T) {
 func TestCheckAndUpdatePhysicalGatewayReinstallsEligibleOnly(t *testing.T) {
 	gm, fb := newFakeGM(t)
 
-	if err := gm.SetExitNode("peer-A", "10.0.0.2", "", []string{"8.8.8.8", "2001:db8::10"}); err != nil {
+	if err := gm.SetExitNode(exitPeerA, "10.0.0.2", "", []string{"8.8.8.8", "2001:db8::10"}); err != nil {
 		t.Fatalf("SetExitNode: %v", err)
 	}
 	if gwUsed, _ := fb.hostRouteFor("8.8.8.8"); gwUsed != "192.168.1.1" {
@@ -566,7 +648,7 @@ func TestInstallBypassRouteIsIdempotent(t *testing.T) {
 	if _, err := gm.AddSubnetRoute("192.168.1.0/24", "10.0.0.2"); err != nil {
 		t.Fatalf("AddSubnetRoute: %v", err)
 	}
-	if err := gm.SetExitNode("peer-A", "10.0.0.2", "", []string{"192.168.1.50"}); err != nil {
+	if err := gm.SetExitNode(exitPeerA, "10.0.0.2", "", []string{"192.168.1.50"}); err != nil {
 		t.Fatalf("SetExitNode: %v", err)
 	}
 	// ProtectEndpointsDynamic runs periodically in production.
@@ -598,7 +680,7 @@ func TestWindowsSocketBindingSuppressesHostRoutes(t *testing.T) {
 	}
 	gm.route = fb
 
-	if err := gm.SetExitNode("peer-A", "10.0.0.2", "", []string{"203.0.113.5", "2001:db8::5"}); err != nil {
+	if err := gm.SetExitNode(exitPeerA, "10.0.0.2", "", []string{"203.0.113.5", "2001:db8::5"}); err != nil {
 		t.Fatalf("SetExitNode: %v", err)
 	}
 	if len(fb.addHost) != 0 {

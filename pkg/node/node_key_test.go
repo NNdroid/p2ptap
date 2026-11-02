@@ -4,10 +4,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
+
+	"p2ptap/pkg/tap"
 )
 
 // writeTestNodeKey writes a freshly generated Ed25519 identity key to path with
@@ -189,8 +192,9 @@ func TestLoadOrGenerateNodeKeyRefusesTooPermissive(t *testing.T) {
 	}
 }
 
-// The missing-file path must still generate and persist a key, and a second
-// call must load the same identity rather than minting another.
+// TestLoadOrGenerateNodeKeyGeneratesOnceAndReloads: the missing-file path must
+// still generate and persist a key, and a second call must load the same
+// identity rather than minting another.
 func TestLoadOrGenerateNodeKeyGeneratesOnceAndReloads(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "node.key")
@@ -220,5 +224,72 @@ func TestLoadOrGenerateNodeKeyGeneratesOnceAndReloads(t *testing.T) {
 	}
 	if firstID != secondID {
 		t.Fatalf("second load minted a different identity (%s vs %s); the key file was not re-read", secondID, firstID)
+	}
+}
+
+// unwritableKeyPath returns a key path whose parent is a regular file, so both
+// the directory creation and the temp-file creation underneath it fail on every
+// platform (no reliance on chmod, which does not deny the owner on Windows).
+func unwritableKeyPath(t *testing.T) string {
+	t.Helper()
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0600); err != nil {
+		t.Fatalf("create blocker file: %v", err)
+	}
+	return filepath.Join(blocker, "node.key")
+}
+
+// TestGenerateNodeKeyFileReportsPersistenceFailure pins the contract that makes
+// identity churn impossible: a key that was not written to disk must never be
+// handed back. Returning it with a nil error looked like success to the caller,
+// which then ran under an identity it could not reproduce on the next start.
+func TestGenerateNodeKeyFileReportsPersistenceFailure(t *testing.T) {
+	t.Parallel()
+
+	priv, err := generateNodeKeyFile(unwritableKeyPath(t))
+	if err == nil {
+		t.Fatal("expected an error for an unwritable key path")
+	}
+	if priv != nil {
+		t.Fatal("returned a key that was never persisted; the caller would run an identity it cannot reproduce")
+	}
+}
+
+// TestLoadOrGenerateNodeKeyReportsPersistenceFailure is the same contract one
+// level up, which is the seam NewNodeWithTAP calls.
+func TestLoadOrGenerateNodeKeyReportsPersistenceFailure(t *testing.T) {
+	t.Parallel()
+
+	path := unwritableKeyPath(t)
+	priv, err := loadOrGenerateNodeKey(path)
+	if err == nil {
+		t.Fatalf("expected an error for %s", path)
+	}
+	if priv != nil {
+		t.Fatal("returned an unpersisted key")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("error %q should name the path that failed", err)
+	}
+}
+
+// TestNewNodeWithTAPRefusesUnusableIdentityKey: an identity that cannot be
+// loaded must stop the node from starting. Falling back to an ephemeral key made
+// the failure silent — the app reported a normal start and the mesh peers kept
+// dialling an address that no longer belonged to anyone.
+func TestNewNodeWithTAPRefusesUnusableIdentityKey(t *testing.T) {
+	tapA, pipeA := tap.NewMemTAPPair("tap-identity", "pipe-identity")
+	t.Cleanup(func() { _ = pipeA.Close() })
+
+	cfg := createTestNodeConfig("10.0.0.1/24", "fd00::1/64", "best-path")
+	cfg.NodeKeyFile = unwritableKeyPath(t)
+
+	n, err := NewNodeWithTAP(cfg, tapA, nil)
+	if err == nil {
+		n.Close()
+		t.Fatal("node started with an identity key it could not persist")
+	}
+	if !strings.Contains(err.Error(), "node identity key") {
+		t.Fatalf("error should name the identity key, got: %v", err)
 	}
 }

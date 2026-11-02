@@ -505,6 +505,10 @@ func warnKeyMode(osName string, mode os.FileMode) bool {
 	return osName == "android" && mode&0077 != 0
 }
 
+// generateNodeKeyFile mints a new identity and persists it to keyPath before
+// returning it. The key is only handed back once it is on disk: a caller that
+// receives a key which was not persisted would keep a Peer ID it can never
+// reproduce, which is the one outcome worse than failing to start.
 func generateNodeKeyFile(keyPath string) (crypto.PrivKey, error) {
 	// Generate new Ed25519 keypair
 	priv, _, err := crypto.GenerateEd25519Key(rand.Reader)
@@ -517,26 +521,36 @@ func generateNodeKeyFile(keyPath string) (crypto.PrivKey, error) {
 		return nil, err
 	}
 
-	_ = os.MkdirAll(filepath.Dir(keyPath), 0700)
+	dir := filepath.Dir(keyPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, fmt.Errorf("create node key directory for %s: %w", keyPath, err)
+	}
 
 	// Atomic write: WriteFile truncates on failure, potentially destroying an
 	// existing key. Use CreateTemp → Write → Close → Rename.
-	dir := filepath.Dir(keyPath)
+	//
+	// Every failure below returns an error and a nil key instead of handing back
+	// the freshly generated secret. Returning priv with a nil error made a
+	// persistence failure indistinguishable from success to the caller, which
+	// then used the key, reported a normal start, and had lost it by the next
+	// launch — a new Peer ID on every start. The caller could not even tell:
+	// tryLoadNodeKey answered "no file yet" the next time around, so the node
+	// silently rejoined the mesh as a stranger while every peer's saved address
+	// for it went dead. A node that cannot remember its identity must not start.
 	tmp, err := os.CreateTemp(dir, ".nodekey-*")
 	if err != nil {
-		log.Warn("Failed to save key file to %s: %v", keyPath, err)
-		return priv, nil
+		return nil, fmt.Errorf("create node key file for %s: %w", keyPath, err)
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(keyBytes); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
-		log.Warn("Failed to save key file to %s: %v", keyPath, err)
-		return priv, nil
+		return nil, fmt.Errorf("write node key file %s: %w", keyPath, err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+		// Durability, not identity: the bytes are already in this file and the
+		// rename below still publishes them. Losing them needs an OS-level crash
+		// between here and the rename, so this is worth a warning and no more.
 		log.Warn("Failed to sync key file %s: %v", keyPath, err)
 	}
 	tmp.Close()
@@ -550,11 +564,9 @@ func generateNodeKeyFile(keyPath string) (crypto.PrivKey, error) {
 	}
 	if err := os.Rename(tmpName, keyPath); err != nil {
 		os.Remove(tmpName)
-		log.Warn("Failed to save key file to %s: %v", keyPath, err)
-	} else {
-		log.Info("Generated new persistent identity key: %s", keyPath)
+		return nil, fmt.Errorf("publish node key file %s: %w", keyPath, err)
 	}
-
+	log.Info("Generated new persistent identity key: %s", keyPath)
 	return priv, nil
 }
 

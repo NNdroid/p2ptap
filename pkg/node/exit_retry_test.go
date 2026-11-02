@@ -125,7 +125,13 @@ func TestReapplyExitNodeNoIPs(t *testing.T) {
 // WebUI uses, using a fake route backend so no host routing is touched.
 func TestReapplyExitNodeInstallsRoute(t *testing.T) {
 	n, fb := newRetryTestNode(t)
-	pid := peer.ID("peer-exit")
+	// A real peer ID, not a label: reapplyExitNode hands pid.String() to
+	// Gateway.SetExitNode, which rejects an identity it cannot decode because
+	// the UI-facing string and the data-plane peer.ID must agree.
+	pid, err := peer.Decode(exitPeerA)
+	if err != nil {
+		t.Fatalf("decode fixture peer id: %v", err)
+	}
 
 	if err := n.reapplyExitNode(pid, "10.0.0.2", "fd00::2"); err != nil {
 		t.Fatalf("reapplyExitNode: %v", err)

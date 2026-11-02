@@ -836,6 +836,10 @@ func ApplyHotReload(cfgJSON string) error {
 		}
 	}
 	mergeHotReload(&candidate, cfg, sent)
+	// Same normalisation as parseConfig: a caller that sends the default
+	// relative "node.key" must not look like it changed the absolute path the
+	// running config already carries.
+	candidate.NodeKeyFile = resolveStatePath(candidate.NodeKeyFile)
 	if err := candidate.Validate(); err != nil {
 		// Config.Validate already prefixes its message with "invalid config:".
 		return fmt.Errorf("android: %w", err)
@@ -1281,18 +1285,6 @@ func configureExitNode(n *node.Node, peerID string) {
 	}
 	log.Info("android: exit node %s selected but not active yet; retrying until its peer metadata arrives", target)
 	scheduleExitRetry(n, target)
-}
-
-// exitNodeActive reports whether the gateway is actually routing through peerID.
-//
-// The error from setExitNodeLocked cannot answer this: it returns nil for a
-// no-op, and the gateway accepts a target it has not yet connected to, so a nil
-// error is not evidence that the exit node came up.
-func exitNodeActive(n *node.Node, peerID string) bool {
-	if n == nil || n.Gateway == nil {
-		return false
-	}
-	return n.Gateway.ActiveExitPeerID() == strings.TrimSpace(peerID)
 }
 
 // scheduleExitRetry cancels any pending retry and starts a new one for target.

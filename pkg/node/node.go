@@ -1619,11 +1619,21 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		log.Debug("Loading persistent identity key from: %s", cfg.NodeKeyFile)
 		privKey, err := loadOrGenerateNodeKey(cfg.NodeKeyFile)
 		if err != nil {
-			log.Warn("Failed to load key from %s (%v), fallback to ephemeral key", cfg.NodeKeyFile, err)
-		} else {
-			opts = append(opts, libp2p.Identity(privKey))
-			log.Debug("Persistent identity key loaded successfully")
+			// Fatal, deliberately. The old behaviour logged a warning and let
+			// libp2p mint an ephemeral identity, which meant the node came up
+			// under a different Peer ID every time the key was unreadable or the
+			// path was not writable — its mesh peers kept dialling an address
+			// that belonged to nobody, and nothing in the app said so. An
+			// explicit misconfiguration is much cheaper to diagnose than a mesh
+			// membership that silently changes on every restart.
+			cancel()
+			if ownedTAP {
+				_ = tapDev.Close()
+			}
+			return nil, fmt.Errorf("node identity key %s is unusable: %w (fix the path/permissions, or set node_key_file to \"\" to run with an ephemeral identity on purpose)", cfg.NodeKeyFile, err)
 		}
+		opts = append(opts, libp2p.Identity(privKey))
+		log.Debug("Persistent identity key loaded successfully")
 	}
 
 	// Parse listen addrs according to enabled transport flags.

@@ -458,6 +458,22 @@ func (gm *GatewayManager) SetExitNode(peerID string, exitTapIPv4 string, exitTap
 		}
 	}
 
+	// 1c. Decode the peer identity BEFORE any route is installed. Two parallel
+	//     fields are recorded below — activeExitPeerID (the string the UI reads)
+	//     and activeExitPID (the peer.ID every data-plane match uses) — and a
+	//     peerID that does not decode used to leave the pair disagreeing:
+	//     activeExitPeerID held the raw string while activeExitPID stayed empty,
+	//     so the UI reported the exit node as active while the coalescer
+	//     exclusion and the transit hijack, both of which compare against
+	//     ActiveExitPeerPID(), never matched. The tunnel looked up and carried
+	//     nothing. A bare IP is the one accepted non-peer-ID form here: it is the
+	//     activate-by-address path normalised just above, and it has no PID by
+	//     definition.
+	pPID, decErr := peer.Decode(peerID)
+	if decErr != nil && net.ParseIP(peerID) == nil {
+		return fmt.Errorf("cannot activate exit node: %q is neither a valid peer ID nor an IP address", peerID)
+	}
+
 	// 2. Add default route(s) via TAP exit node IP(s) FIRST. Doing this before
 	//    the bypass host routes means a failure here leaves no partial TAP state
 	//    behind (addDefaultRouteOS rolls back its own routes on error).
@@ -480,7 +496,6 @@ func (gm *GatewayManager) SetExitNode(peerID string, exitTapIPv4 string, exitTap
 		}
 	}
 
-	pPID, _ := peer.Decode(peerID)
 	gm.activeExitPeerID = peerID
 	gm.activeExitPID = pPID
 	gm.activeExitIP = exitTapIPv4

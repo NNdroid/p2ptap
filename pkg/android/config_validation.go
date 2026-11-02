@@ -20,6 +20,15 @@ func parseConfig(cfgJSON string) (*config.Config, error) {
 		// adding the same words here produced "invalid config: invalid config:".
 		return nil, fmt.Errorf("android: %w", err)
 	}
+	// Anchor relative engine paths to the app's private storage BEFORE anything
+	// reads them. The default node_key_file is "node.key", and an app process
+	// forked from zygote runs with the read-only "/" as its working directory,
+	// so an unresolved relative path made identity persistence impossible and
+	// the node rejoined the mesh under a new Peer ID on every start. Resolving
+	// here (not in the loader) keeps it on the same side of the fence as
+	// PlanReload: both the running and the candidate config are normalised the
+	// same way, so a reload of an unchanged file does not look like a change.
+	cfg.NodeKeyFile = resolveStatePath(cfg.NodeKeyFile)
 	if cfg.ExitNode.Enable {
 		return nil, fmt.Errorf("android: exit node server is not supported on this build")
 	}
