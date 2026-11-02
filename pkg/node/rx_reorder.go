@@ -296,9 +296,42 @@ func (q *rxReorderQueue) pushBuffered(epoch, counter uint64, jobs []tapWriteJob)
 		return false
 	}
 
-	// counter < q.next: the counter space already advanced past it (fast-forward
-	// or window reset). The frame is too late to deliver in order — drop it and
-	// return its buffers, matching the dedup far-behind semantics.
+	// counter < q.next: the counter space already advanced past it. That happens
+	// whenever the anchor is derived from the first frame that ARRIVES rather
+	// than the lowest frame still in flight:
+	//
+	//   - the queue was just (re)created — forgetPeerTelemetry drops it on a
+	//     transient purge, so the "first" frame of the burst can be counter 7
+	//     while 5 and 6 are still on the other path;
+	//   - the peer's epoch rotated (re-key), which re-anchors on arrival order.
+	//
+	// The frame is late, NOT a replay: the dedup window above already rejected
+	// anything it had seen. There is no retransmission at this layer, so
+	// dropping it is a permanent hole in the TUN stream, and the inner TCP/IP
+	// stack has to recover it with a retransmit — measured at 1-2 frames lost
+	// per burst on a real two-path link, which is exactly the "multipath loses
+	// traffic" symptom. Delivering it one position out of order is strictly
+	// cheaper: the receive buffer already exists because cross-path arrival is
+	// out of order by construction, and a late frame can no longer be delivered
+	// in order anyway.
+	//
+	// The guard is only against a frame that trails the whole live window, which
+	// is a leftover from a restarted peer (the counter space re-began, so those
+	// bytes are worthless) rather than reordering.
+	if q.next-counter <= uint64(q.maxWindow) {
+		// Guarded: q.peer.String() is a base58 render, and this branch runs on
+		// the packet path whenever a peer reorders across an anchor.
+		if log.IsDebug() {
+			log.Debug("RXREORDER: delivering late frame out of order instead of dropping it: peer=%s counter=%d next=%d",
+				q.peer.String(), counter, q.next)
+		}
+		q.enqueueAllLocked(jobs)
+		return true
+	}
+	if log.IsDebug() {
+		log.Debug("RXREORDER: dropping frame far behind the live window: peer=%s counter=%d next=%d",
+			q.peer.String(), counter, q.next)
+	}
 	q.releaseJobsLocked(jobs)
 	return true
 }

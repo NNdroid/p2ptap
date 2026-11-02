@@ -248,20 +248,59 @@ func TestRxReorderWindowOverflowFastForwards(t *testing.T) {
 	}
 }
 
-func TestRxReorderDropsLateFrameAfterFastForward(t *testing.T) {
+// TestRxReorderDeliversLateFrameAfterFastForward pins the rule that replaced the
+// old drop-on-late behaviour: a frame that trails the anchor by at most the live
+// window is DELIVERED out of order, never dropped.
+//
+// The drop used to be justified as "matching the dedup far-behind semantics",
+// but it costs real traffic on a multi-path link. The anchor is derived from the
+// first frame that ARRIVES, so the moment a peer's epoch rotates (re-key) — or
+// the queue is recreated after a transient purge — the frames still in flight on
+// the other path arrive behind it and were thrown away. Measured on a two-path
+// TCP+QUIC link: 1-2 frames lost per 200-frame burst, i.e. exactly the
+// "multipath loses traffic" symptom. Those frames are late, not replays (dedup
+// already rejected anything it had seen), and this layer has no retransmission,
+// so delivering one position out of order is strictly cheaper than a hole.
+func TestRxReorderDeliversLateFrameAfterFastForward(t *testing.T) {
 	h := newReorderHarness(t, 4, 500*time.Millisecond)
 	p := peer.ID("rx-reorder-late")
-	h.expect(2)
+	h.expect(3)
 
 	h.n.rxReorderFor(p).push(h.seqID(1, 10), []tapWriteJob{{data: frame("f10")}})
 	// 15 is beyond the window: fast-forward, next re-anchors at 16.
 	h.n.rxReorderFor(p).push(h.seqID(1, 15), []tapWriteJob{{data: frame("f15")}})
-	h.waitDelivered()
-	// A frame from before the fast-forward is now too late: dropped, not delivered.
+	// 12 trails the new anchor by 4 — inside the live window, so it is a
+	// reordered frame, not a leftover from a restarted counter space.
 	h.n.rxReorderFor(p).push(h.seqID(1, 12), []tapWriteJob{{data: frame("f12")}})
+	h.waitDelivered()
+
+	got := h.gotFrames()
+	if len(got) != 3 {
+		t.Fatalf("delivered %d frames, want 3 (a late frame must not be dropped): %v", len(got), got)
+	}
+	if got[2] != string(frame("f12")) {
+		t.Fatalf("delivery = %v, want the late frame delivered last", got)
+	}
+}
+
+// TestRxReorderDropsFrameFarBehindWindow is the surviving half of the old
+// contract: a frame that trails the anchor by MORE than the whole live window
+// cannot be reordering — the peer's counter space re-began, so those bytes
+// belong to a dead session and are dropped rather than injected into the TAP.
+func TestRxReorderDropsFrameFarBehindWindow(t *testing.T) {
+	h := newReorderHarness(t, 4, 500*time.Millisecond)
+	p := peer.ID("rx-reorder-far-behind")
+	h.expect(2)
+
+	h.n.rxReorderFor(p).push(h.seqID(1, 10), []tapWriteJob{{data: frame("f10")}})
+	// Fast-forward to 30, then a frame 20 behind the new anchor is way past the
+	// 4-frame window.
+	h.n.rxReorderFor(p).push(h.seqID(1, 30), []tapWriteJob{{data: frame("f30")}})
+	h.waitDelivered()
+	h.n.rxReorderFor(p).push(h.seqID(1, 10), []tapWriteJob{{data: frame("stale")}})
 	time.Sleep(20 * time.Millisecond)
 	if got := h.gotFrames(); len(got) != 2 {
-		t.Fatalf("delivered %d frames, want 2 (late frame must be dropped): %v", len(got), got)
+		t.Fatalf("delivered %d frames, want 2 (a far-behind frame must be dropped): %v", len(got), got)
 	}
 }
 
