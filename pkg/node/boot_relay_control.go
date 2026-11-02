@@ -570,6 +570,15 @@ func (n *Node) dispatchBootRelayControlStream(st *bootRelayCtrlStream) {
 		// without this case it would fall into default: and be closed before
 		// reaching the prober, making ProbeTapForward falsely time out.
 		n.handleTapProbeAck(st)
+	case MuxControlProtocolID:
+		// A relay-only peer reaches us through the boot-relay control tunnel. Its
+		// /p2ptap/ctrl mux channel carries SeqSync/LSA/Meta/Echo for that peer,
+		// but without this case it fell into default: and was closed, so the
+		// peer's metadata (TAP IP) never arrived and a selected Exit Node could
+		// never activate. bootRelayCtrlStream fully implements network.Stream and
+		// Conn().RemotePeer() returns the true origin, so the mux engine can
+		// consume it exactly as it would a direct control stream.
+		n.muxEngine.handleControlStream(st)
 	default:
 		log.Warn("[boot-relay] no control handler for proto %s (origin %s); closing", st.proto, st.remote.ShortString())
 	}
