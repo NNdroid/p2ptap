@@ -582,3 +582,105 @@ func TestE2EMultipathDirectPlusRelayFailover(t *testing.T) {
 	}
 	t.Logf("failover: the relay circuit carried %d frames after the direct path died", relayFrames)
 }
+
+// TestE2EMultipathRelayDualFailover is the relay-only counterpart of
+// TestE2EMultipathDirectPlusRelayFailover. The exit node sits behind a NAT
+// reachable ONLY through two independent circuit-relay paths; when ONE circuit
+// dies — the radio path it rides dropping away — the surviving circuit must
+// carry the whole workload. That is the mobile scenario the client actually
+// runs, and the steady-state relay-dual case in the matrix above does not cover
+// the failover half.
+func TestE2EMultipathRelayDualFailover(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skips relay/NIC-binding multipath e2e in -short mode")
+	}
+	topo := mpTopology{name: "relay-dual-failover", direct: 0, relay: 2, spray: 2}
+	v4 := topologyNICv4(t)
+	nodeA, nodeB, pipeA, pipeB := topologyNodes(t, topo, v4)
+	_, relayed, _ := buildTopologyPaths(t, topo, v4, nodeA, nodeB)
+	prepareTopologyStreams(t, topo, nodeA, nodeB)
+	bID := nodeB.Host.ID()
+
+	// Activate the Exit Node exactly as the Android client does: peer ID only,
+	// TAP IP resolved from peer metadata crossing the relay control tunnel.
+	var meta PeerMeta
+	metaDeadline := time.Now().Add(30 * time.Second)
+	for {
+		if m, ok := nodeA.GetPeerMeta(bID); ok && (m.TapIP != "" || m.TapIPv6 != "") {
+			meta = m
+			break
+		}
+		if time.Now().After(metaDeadline) {
+			t.Fatalf("%s: A never received the exit node's TAP IP", topo.name)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// CI runs non-root and without a real TAP device; the routing orchestration
+	// is unit-tested separately in gateway_test.go against the same fake.
+	injectFakeRouteBackend(nodeA.Gateway)
+	if serr := nodeA.Gateway.SetExitNode(bID.String(), stripCIDR(meta.TapIP), stripCIDR(meta.TapIPv6), nil); serr != nil {
+		t.Fatalf("%s: SetExitNode failed: %v", topo.name, serr)
+	}
+	if !nodeA.isExitNodeActive() {
+		t.Fatalf("%s: exit node did not become active", topo.name)
+	}
+
+	_ = pipeB.ConfigureIP("10.0.0.2/24", "fd00::2/64")
+	_ = pipeA.ConfigureIP("10.0.0.1/24", "fd00::1/64")
+	readerB := newFrameReader(pipeB)
+	t.Cleanup(readerB.Close)
+
+	clientMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
+	broadcast := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	clientIP := net.ParseIP("10.0.0.1")
+	publicIP := net.ParseIP("203.0.113.9")
+	prefix := "EXIT_TOPO_RELAY_FAILOVER_"
+
+	// --- Break ONE of the two relay circuits. ---
+	if len(relayed) < 2 {
+		t.Fatalf("%s: expected 2 relay circuits, got %d", topo.name, len(relayed))
+	}
+	victim, survivor := relayed[0], relayed[1]
+	// Pin the peerstore to the surviving circuit address only: identify seeded
+	// both circuit addresses, and leaving the dead one there would let the
+	// multipath repair loop simply re-dial the circuit this test just destroyed
+	// (both relays are still up; only the circuit CONN through one of them died).
+	nodeA.Host.Peerstore().SetAddrs(bID, []ma.Multiaddr{survivor.RemoteMultiaddr()}, peerstore.PermanentAddrTTL)
+	_ = victim.Close()
+	t.Logf("%s: closed one circuit (conn %s); the surviving circuit (conn %s) must carry the workload",
+		topo.name, victim.ID(), survivor.ID())
+
+	// --- The surviving circuit must now carry the whole workload, intact. ---
+	const frames = 48
+	var want, wires [][]byte
+	for i := 0; i < frames; i++ {
+		tag := []byte(fmt.Sprintf("%s%04d", prefix, i))
+		want = append(want, tag)
+		wires = append(wires, constructICMPv4PacketWithData(
+			clientMAC, broadcast, clientIP, publicIP, 9900+i, 1, append(tag, make([]byte, 180)...)))
+	}
+	coll := newConcurrentPayloadCollector(readerB, want)
+	for i := range wires {
+		if _, werr := pipeA.Write(wires[i]); werr != nil {
+			t.Fatalf("%s: pipeA.Write frame %d failed: %v", topo.name, i, werr)
+		}
+	}
+	if !coll.waitUntil(want, 25*time.Second) {
+		t.Fatalf("%s: after one circuit died only %d/%d frames crossed the surviving circuit; missing=%v",
+			topo.name, countSeen(coll, want), frames, coll.missing(want))
+	}
+	t.Logf("%s: %d/%d frames crossed the surviving circuit after one circuit died", topo.name, frames, frames)
+
+	// Confirm the surviving circuit — not a re-dialed dead one — did the work.
+	if got := len(nodeA.Host.Network().ConnsToPeer(bID)); got != 1 {
+		t.Fatalf("%s: A re-dialed the dead circuit; now %d conn(s) to the exit node", topo.name, got)
+	}
+	var survivorFrames uint64
+	if _, fr, ok := nodeA.pathTxStats(bID, survivor.RemoteMultiaddr().String()); ok {
+		survivorFrames = fr
+	}
+	if survivorFrames == 0 {
+		t.Fatalf("%s: no frame was attributed to the surviving circuit", topo.name)
+	}
+	t.Logf("%s: the surviving circuit carried %d frames after the other died", topo.name, survivorFrames)
+}
