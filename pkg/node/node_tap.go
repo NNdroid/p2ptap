@@ -565,7 +565,21 @@ func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, pack
 	// obfCipherForPeer==nil the seal is skipped below, i.e. PLAINTEXT. Drop
 	// the frame and ask the reconciler to converge the link, exactly like the
 	// unicast gate does (triggerOnDemandConnect is cooldown-bounded).
-	if !n.canEgressToPeer(exitPID) {
+	//
+	// The route is resolved here with overlayRoute (not a bare
+	// getCachedRoutes()[exitPID] read) and gated with canEgressWithRoute, so
+	// this path now makes exactly the same decision as the unicast TAP path.
+	// Reading the raw cached table — which this function alone did — skipped
+	// every validation the helper layer applies: no routeHopUsable check, so a
+	// blacklisted hop or a hop that does not speak the overlay-relay protocol
+	// was accepted; no path-length bound; and no re-verification against the
+	// live transport. An exit peer whose cached next hop had since dropped
+	// therefore sent EVERY frame into a dead relay: the whole tunnel
+	// black-holed while the exit node still reported active, and nothing else
+	// on the node noticed because no other egress path used the unvalidated
+	// copy of the table.
+	route, hasRoute := n.overlayRoute(exitPID, routing.MaxRelayTTL, "")
+	if !n.canEgressWithRoute(exitPID, route, hasRoute) {
 		releaseFrameBuf(packedCopy)
 		n.triggerOnDemandConnect(exitPID)
 		return
@@ -573,8 +587,6 @@ func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, pack
 	if n.Collector != nil {
 		n.Collector.CaptureFrameWithPeers(observer.DirTx, rawPayload, "self", exitPeerID)
 	}
-	routes := n.getCachedRoutes()
-	route, hasRoute := routes[exitPID]
 
 	if hasRoute && !route.IsDirect && route.NextHop != "" && route.NextHop != exitPID && route.NextHop != n.Host.ID() && !n.isBootstrapPeer(route.NextHop) {
 
