@@ -169,9 +169,13 @@ func BenchmarkResolvePeerIDByIP(b *testing.B) {
 	sizes := []int{8, 64, 256}
 	for _, sz := range sizes {
 		n := benchNode(sz)
-		direct := net.ParseIP("10.0.0.5")      // resolves via O(1) v4 map
-		subnet := net.ParseIP("192.168.3.50")  // resolves via O(subnets) scan
-		unknown := net.ParseIP("203.0.113.99") // miss (scans everything)
+		direct := net.ParseIP("10.0.0.5") // resolves via O(1) v4 map
+		// Genuinely inside an advertised subnet (peer 3 announces
+		// 192.16.3.0/24), so this exercises the longest-prefix scan behind the
+		// coverage prefilter. The old probe was 192.168.3.50, which no peer
+		// ever announced - it measured a full-scan MISS, not a hit.
+		subnet := net.ParseIP("192.16.3.50")
+		unknown := net.ParseIP("203.0.113.99") // miss (prefilter rejects in O(log n))
 		b.Run("direct/sz="+strconv.Itoa(sz), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {

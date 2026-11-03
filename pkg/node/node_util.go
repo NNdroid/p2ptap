@@ -52,6 +52,202 @@ type arpIndex struct {
 	v4      map[uint32]arpIndexEntry   // direct TAP IPv4 keyed by uint32
 	v6      map[[16]byte]arpIndexEntry // direct TAP IPv6 keyed by 16-byte address
 	subnets []arpSubnetEntry
+
+	// v4Cover / v6Cover are the union of every advertised subnet, collapsed
+	// into disjoint sorted spans. They carry no peer identity: their only job
+	// is to answer "can ANY peer's LAN contain this address?" in O(log n),
+	// which is the prefilter in front of the longest-prefix scan over subnets.
+	// See mayMatchAdvertisedSubnet.
+	v4Cover []v4Span
+	v6Cover []v6Span
+	// coverExact is false when at least one advertised subnet could not be
+	// expressed as a span (non-contiguous mask, unsupported family). The
+	// prefilter may never claim a miss it cannot prove, so it then defers to
+	// the scan for everything, i.e. it degrades to the old behaviour.
+	coverExact bool
+}
+
+// v4Span is an inclusive IPv4 address range covering one advertised subnet.
+type v4Span struct{ lo, hi uint32 }
+
+// v6Span is an inclusive IPv6 address range covering one advertised subnet.
+type v6Span struct{ lo, hi [16]byte }
+
+// cmpIP16 orders two 16-byte addresses bytewise (big-endian == numeric order).
+func cmpIP16(a, b [16]byte) int {
+	for i := 0; i < 16; i++ {
+		if a[i] != b[i] {
+			if a[i] < b[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// v4SpanOf converts an IPv4 subnet to its inclusive uint32 range.
+func v4SpanOf(netw *net.IPNet) (lo, hi uint32, ok bool) {
+	base := netw.IP.To4()
+	if base == nil {
+		return 0, 0, false
+	}
+	ones, bits := netw.Mask.Size()
+	if bits != 32 || ones < 0 {
+		return 0, 0, false
+	}
+	var mask uint32
+	if ones > 0 {
+		mask = ^uint32(0) << uint(32-ones)
+	}
+	lo = binary.BigEndian.Uint32(base) & mask
+	return lo, lo | ^mask, true
+}
+
+// v6SpanOf converts an IPv6 subnet to its inclusive 16-byte range.
+func v6SpanOf(netw *net.IPNet) (lo, hi [16]byte, ok bool) {
+	if netw.IP.To4() != nil {
+		return lo, hi, false
+	}
+	base := netw.IP.To16()
+	if base == nil {
+		return lo, hi, false
+	}
+	ones, bits := netw.Mask.Size()
+	if bits != 128 || ones < 0 {
+		return lo, hi, false
+	}
+	var mask [16]byte
+	for i := 0; i < 16; i++ {
+		switch {
+		case ones >= (i+1)*8:
+			mask[i] = 0xff
+		case ones <= i*8:
+			mask[i] = 0
+		default:
+			mask[i] = byte(0xff << uint(8-(ones-i*8)))
+		}
+		lo[i] = base[i] & mask[i]
+		hi[i] = lo[i] | ^mask[i]
+	}
+	return lo, hi, true
+}
+
+// buildSubnetCover collapses the advertised subnets into disjoint sorted
+// spans. Merging overlaps is what makes the binary search in
+// mayMatchAdvertisedSubnet sound: after the merge both lo and hi ascend
+// strictly, so "first span whose hi >= x" plus a lo <= x check is exact.
+//
+// CONTRACT: the advertised subnets are either disjoint or nested, so the union
+// is well defined regardless of which peer wins. exact is false when any entry
+// could not be converted; the caller must then keep the prefilter disabled.
+func buildSubnetCover(subnets []arpSubnetEntry) (v4 []v4Span, v6 []v6Span, exact bool) {
+	exact = true
+	for _, s := range subnets {
+		if s.net == nil {
+			exact = false
+			continue
+		}
+		if s.net.IP.To4() != nil {
+			lo, hi, ok := v4SpanOf(s.net)
+			if !ok {
+				exact = false
+				continue
+			}
+			v4 = append(v4, v4Span{lo: lo, hi: hi})
+			continue
+		}
+		lo, hi, ok := v6SpanOf(s.net)
+		if !ok {
+			exact = false
+			continue
+		}
+		v6 = append(v6, v6Span{lo: lo, hi: hi})
+	}
+
+	sort.Slice(v4, func(i, j int) bool { return v4[i].lo < v4[j].lo })
+	if len(v4) > 0 {
+		out := v4[:1]
+		for _, s := range v4[1:] {
+			last := &out[len(out)-1]
+			if s.lo <= last.hi {
+				if s.hi > last.hi {
+					last.hi = s.hi
+				}
+				continue
+			}
+			out = append(out, s)
+		}
+		v4 = out
+	}
+
+	sort.Slice(v6, func(i, j int) bool { return cmpIP16(v6[i].lo, v6[j].lo) < 0 })
+	if len(v6) > 0 {
+		out := v6[:1]
+		for _, s := range v6[1:] {
+			last := &out[len(out)-1]
+			if cmpIP16(s.lo, last.hi) <= 0 {
+				if cmpIP16(s.hi, last.hi) > 0 {
+					last.hi = s.hi
+				}
+				continue
+			}
+			out = append(out, s)
+		}
+		v6 = out
+	}
+	return v4, v6, exact
+}
+
+// mayMatchAdvertisedSubnet reports whether any advertised subnet could
+// possibly contain ip. It is a proof of absence, not a lookup: a false result
+// is authoritative (skip the scan), a true result still needs the exact
+// longest-prefix scan over idx.subnets.
+//
+// This exists because the scan is the one super-linear step left on the packet
+// path: every unroutable WAN destination (i.e. every frame of an Exit Node
+// tunnel) pays O(total advertised subnets) to learn nothing. Measured at 256
+// peers, that was ~1.16µs per frame, paid twice per frame on Android because
+// isMeshLocalIP and ResolvePeerIDByIP each ran their own scan.
+func (idx *arpIndex) mayMatchAdvertisedSubnet(ip net.IP) bool {
+	if !idx.coverExact {
+		return len(idx.subnets) > 0
+	}
+	if v4 := ip.To4(); v4 != nil {
+		n := len(idx.v4Cover)
+		if n == 0 {
+			return false
+		}
+		x := binary.BigEndian.Uint32(v4)
+		// First span whose hi >= x; every span before it ends below x.
+		lo, hi := 0, n
+		for lo < hi {
+			mid := int(uint(lo+hi) >> 1)
+			if idx.v4Cover[mid].hi < x {
+				lo = mid + 1
+			} else {
+				hi = mid
+			}
+		}
+		return lo < n && idx.v4Cover[lo].lo <= x
+	}
+	v6 := ip.To16()
+	if v6 == nil || len(idx.v6Cover) == 0 {
+		return false
+	}
+	var x [16]byte
+	copy(x[:], v6)
+	n := len(idx.v6Cover)
+	lo, hi := 0, n
+	for lo < hi {
+		mid := int(uint(lo+hi) >> 1)
+		if cmpIP16(idx.v6Cover[mid].hi, x) < 0 {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo < n && cmpIP16(idx.v6Cover[lo].lo, x) <= 0
 }
 
 // parseHWMac is a small helper that returns nil (not an error) for empty/!
@@ -272,7 +468,11 @@ func (n *Node) rebuildARPIndex() {
 	conflicts = append(conflicts, subnetConflicts...)
 
 	n.arpIndexMu.Lock()
-	n.arpIndex = &arpIndex{v4: v4, v6: v6, subnets: subnets}
+	v4Cover, v6Cover, coverExact := buildSubnetCover(subnets)
+	n.arpIndex = &arpIndex{
+		v4: v4, v6: v6, subnets: subnets,
+		v4Cover: v4Cover, v6Cover: v6Cover, coverExact: coverExact,
+	}
 	n.arpIndexMu.Unlock()
 
 	// Record + alert (deduplicated) conflicts outside the index lock.
@@ -1065,7 +1265,12 @@ func (n *Node) ResolvePeerIDByIP(ip net.IP) (peer.ID, net.HardwareAddr) {
 			return e.pid, e.mac
 		}
 	}
-	// 2. Advertised LAN subnet match.
+	// 2. Advertised LAN subnet match. The coverage prefilter proves the common
+	// case (a WAN destination owned by nobody) in O(log n) instead of scanning
+	// every advertised subnet.
+	if !idx.mayMatchAdvertisedSubnet(ip) {
+		return "", nil
+	}
 	for _, s := range idx.subnets {
 		if s.net.Contains(ip) {
 			return s.pid, s.mac
@@ -1090,6 +1295,9 @@ func (n *Node) lookupPeerIDByAdvertisedSubnet(ip net.IP) peer.ID {
 	if idx == nil {
 		return ""
 	}
+	if !idx.mayMatchAdvertisedSubnet(ip) {
+		return ""
+	}
 	for _, s := range idx.subnets {
 		if s.net.Contains(ip) {
 			return s.pid
@@ -1106,6 +1314,9 @@ func (n *Node) lookupPeerMACByAdvertisedSubnet(ip net.IP) net.HardwareAddr {
 	idx := n.arpIndex
 	n.arpIndexMu.RUnlock()
 	if idx == nil {
+		return nil
+	}
+	if !idx.mayMatchAdvertisedSubnet(ip) {
 		return nil
 	}
 	for _, s := range idx.subnets {
