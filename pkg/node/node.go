@@ -3048,7 +3048,13 @@ func (n *Node) applyExitNodeNAT(cfg *config.Config) {
 		}
 		return
 	}
-	if err := n.NFTManager.SetupExitNodeNAT(cfg.ExitNode.WANInterface, cfg.TapName, computeExitMSS(cfg.MTU)); err != nil {
+	if err := n.NFTManager.SetupExitNodeNAT(ExitNATParams{
+		WANInterface: cfg.ExitNode.WANInterface,
+		TapName:      cfg.TapName,
+		TapIPv4:      cfg.TapIP,
+		TapIPv6:      cfg.TapIPv6,
+		MSS:          computeExitMSS(cfg.MTU),
+	}); err != nil {
 		log.Error("Exit Node NAT setup failed: %v", err)
 	}
 }
@@ -3062,7 +3068,10 @@ func (n *Node) applySubnetRouterNAT(cfg *config.Config) {
 		return
 	}
 	if len(cfg.AdvertisedSubnets) > 0 {
-		if err := n.NFTManager.SetupSubnetRouterNAT(cfg.TapName); err != nil {
+		// Both TAP networks go in: a subnet router can advertise IPv6 subnets
+		// too, and passing only the IPv4 one made every platform that keys NAT
+		// on a prefix (Windows, macOS) silently drop the IPv6 half.
+		if err := n.NFTManager.SetupSubnetRouterNAT(cfg.TapName, cfg.TapIP, cfg.TapIPv6); err != nil {
 			log.Error("Subnet Router NAT setup failed: %v", err)
 		}
 		return

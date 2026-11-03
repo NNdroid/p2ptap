@@ -48,6 +48,12 @@ func createTestNodeConfig(tapIP, tapIPv6, strategy string) *config.Config {
 	cfg.TapIP = tapIP
 	cfg.TapIPv6 = tapIPv6
 	cfg.NodeKeyFile = ""
+	// Tests never drive the host's NAT backend. Several of them set
+	// ExitNode.Enable to exercise the exit data plane, and on Windows that would
+	// otherwise reach the real WinNat module (New-NetNat needs administrator
+	// rights and mutates this machine's network configuration) and on Linux it
+	// would write /proc/sys. The data plane under test does not depend on it.
+	cfg.ExitNode.NATMasquerade = false
 	return cfg
 }
 

@@ -313,6 +313,9 @@ func TestRewriteRxDstMACDoesNotExitHijackMeshTraffic(t *testing.T) {
 	n.localV6IP = net.ParseIP("fd00:99::1")
 	cfg := config.DefaultConfig()
 	cfg.ExitNode.Enable = true
+	// This test inspects the exit decision on a bare node; it must never reach
+	// the host NAT backend (real WinNat on Windows, /proc/sys on Linux).
+	cfg.ExitNode.NATMasquerade = false
 	ptr := new(atomic.Pointer[config.Config])
 	ptr.Store(cfg)
 	n.configPtr = ptr

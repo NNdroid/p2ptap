@@ -1,11 +1,12 @@
-//go:build !linux || android
-// +build !linux android
+//go:build android || (!linux && !windows && !darwin)
+// +build android !linux,!windows,!darwin
 
 package node
 
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -53,16 +54,33 @@ func (m *NFTManager) EnableIPForwarding() error {
 	return nil
 }
 
-// SetupExitNodeNAT is a no-op on non-Linux platforms.
-// On Windows the user should configure ICS or routing manually.
-// On macOS the user should enable Internet Sharing or configure pf.
-func (m *NFTManager) SetupExitNodeNAT(wanIfName, tapIfName string, mss int) error {
-	return nil
+// SetupExitNodeNAT reports that this platform has no NAT implementation.
+//
+// It used to be a silent no-op, which is worse than a failure: the node came
+// up with exit_node.enable=true, reported itself as a working Exit Node, and
+// forwarded nothing — no error, no log, no indication that the peer offering
+// egress could not possibly deliver it. Returning an error makes
+// applyExitNodeNAT log it and keeps the WebUI honest about a capability that
+// does not exist here.
+//
+// Linux, Windows and macOS each have their own implementation; this file now
+// only covers the remaining platforms (the BSDs, illumos, Android), where there
+// is no NAT backend to drive.
+func (m *NFTManager) SetupExitNodeNAT(p ExitNATParams) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cfg == nil || !m.cfg.Enable || !m.cfg.NATMasquerade {
+		return nil
+	}
+	return natUnsupportedError(runtime.GOOS, "exit-node",
+		"peers using this node as an Exit Node will get no connectivity")
 }
 
-// SetupSubnetRouterNAT is a no-op on non-Linux platforms.
-func (m *NFTManager) SetupSubnetRouterNAT(tapIfName string) error {
-	return nil
+// SetupSubnetRouterNAT reports that this platform has no NAT implementation,
+// for the same reason as SetupExitNodeNAT.
+func (m *NFTManager) SetupSubnetRouterNAT(tapIfName, tapIPv4, tapIPv6 string) error {
+	return natUnsupportedError(runtime.GOOS, "subnet-router",
+		"advertised subnets will not be reachable")
 }
 
 // CleanupExitNodeNAT is a no-op on non-Linux platforms.
