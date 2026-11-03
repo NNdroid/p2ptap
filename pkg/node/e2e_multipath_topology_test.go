@@ -510,6 +510,38 @@ func TestE2EMultipathDirectPlusRelayFailover(t *testing.T) {
 	bID := nodeB.Host.ID()
 	_ = pipeB.ConfigureIP("10.0.0.2/24", "fd00::2/64")
 	_ = pipeA.ConfigureIP("10.0.0.1/24", "fd00::1/64")
+
+	// Activate the Exit Node on A exactly as the Android client does: peer ID
+	// only, TAP IP resolved from peer metadata. The burst below is addressed to
+	// a PUBLIC address, so without an active exit node the core is right to
+	// suppress it from the mesh flood (nothing in the mesh can deliver it — see
+	// TestL3TunnelDoesNotFloodUnroutableWANFrames, which pins that). This test
+	// measured flood delivery before, not relay failover, and only passed
+	// because an L3-shaped frame with a broadcast destination MAC slipped past
+	// the flood guard.
+	var exitMeta PeerMeta
+	exitMetaDeadline := time.Now().Add(30 * time.Second)
+	for {
+		if m, ok := nodeA.GetPeerMeta(bID); ok && (m.TapIP != "" || m.TapIPv6 != "") {
+			exitMeta = m
+			break
+		}
+		if time.Now().After(exitMetaDeadline) {
+			t.Fatalf("%s: A never received the exit node's TAP IP; SetExitNode cannot resolve a gateway", topo.name)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// CI runs non-root and without a real TAP device, so the exit node cannot
+	// install a host default route; the routing orchestration is unit-tested
+	// separately in gateway_test.go against the same fake.
+	injectFakeRouteBackend(nodeA.Gateway)
+	if serr := nodeA.Gateway.SetExitNode(bID.String(), stripCIDR(exitMeta.TapIP), stripCIDR(exitMeta.TapIPv6), nil); serr != nil {
+		t.Fatalf("%s: SetExitNode failed: %v", topo.name, serr)
+	}
+	if !nodeA.isExitNodeActive() {
+		t.Fatalf("%s: exit node did not become active", topo.name)
+	}
+
 	readerB := newFrameReader(pipeB)
 	t.Cleanup(readerB.Close)
 

@@ -1138,9 +1138,17 @@ func (n *Node) processTapFrame(payload []byte) bool {
 					packedCopy = packedCopy[:totalLen]
 					n.Collector.RecordPacketDir(payload, true)
 					n.Collector.RecordTxSeq(exitPeerID, seqID)
-					// Count only UNICAST frames as genuine egress (see above);
-					// broadcast/multicast stay on the LAN and are not egress.
-					if len(payload) >= 6 && payload[0]&1 == 0 {
+					// Count only frames with a known unicast IP destination as
+					// genuine egress. The Ethernet destination is not usable
+					// here: an L3 tunnel (Android TUN, Wintun before the peer's
+					// MAC is learned) always leaves it at broadcast for exactly
+					// this traffic, so the old "dst MAC is unicast" test kept
+					// this counter pinned at zero on the one platform where
+					// every packet egresses through here. Reaching this point
+					// already proves dstIP is non-nil and not a group/broadcast
+					// address (!isMeshLocalAddress above), so presence is the
+					// whole test.
+					if dstIP != nil {
 						n.Collector.RecordGatewayPacket()
 					}
 					log.Debug("Tx Pack exit-transit (no flood): seq=%d origLen=%d packedLen=%d exitPeer=%s", seqID, readN, totalLen, exitPeerID)
@@ -1150,21 +1158,38 @@ func (n *Node) processTapFrame(payload []byte) bool {
 			}
 		}
 
-		// If the frame has a UNICAST destination MAC (not broadcast/multicast), but its
-		// destination IP is an external WAN address (outside mesh subnet & advertised subnets)
-		// and no Exit Node is active:
-		// Do NOT flood it to mesh peers. Flooding unroutable external packets wastes bandwidth
-		// and leaks destination metadata across the mesh.
-		if !isBroadcastOrMulticastMAC(dstMAC) {
-			// A frame with no IP at all (an ARP reply, any other L2 frame) is
-			// not "unroutable external" — flooding is its only delivery path,
-			// so it is never suppressed here.
-			if dstIP != nil && !n.isMeshLocalIP(dstIP) {
-				di := dstIP.String()
-				log.Debug("TAPFWD DROP: unroutable external unicast frame dstIP=%s dstMAC=%s without active exit node, suppressed from mesh flood",
-					di, dstMAC.String())
-				return true
+		// A frame addressed to an external WAN destination (outside this
+		// node's subnet, every peer's advertised subnet, and every LAN-scoped
+		// address class) with no Exit Node to carry it must NOT be flooded to
+		// the mesh: it cannot be delivered by anyone, and fanning it out burns
+		// relay bandwidth while leaking the client's destination metadata to
+		// every peer.
+		//
+		// The decision is made on the IP destination, NOT on the Ethernet
+		// destination MAC. Those are equivalent only on a real L2 TAP: an L3
+		// tunnel (Android TUN, Wintun fallback) has no ARP and therefore no
+		// peer MAC to put in the header, so it synthesises broadcast for every
+		// packet whose destination it cannot resolve — which is precisely the
+		// WAN traffic this guard exists for. Keying the guard on "dst MAC is
+		// unicast" made it a permanent no-op on those platforms: with a
+		// VpnService capturing 0.0.0.0/0 and no Exit Node selected, the whole
+		// of the device's outbound traffic was flooded to the entire mesh.
+		//
+		// isMeshLocalIP is the right predicate and already returns true for
+		// everything that must stay on the mesh: limited broadcast,
+		// LAN-scoped multicast (mDNS/SSDP/LLMNR), link-local, this node's own
+		// subnet, another peer's TAP IP, and any peer-advertised subnet. A
+		// frame with no IP at all (an ARP reply, any other L2 frame) is not
+		// "unroutable external" — flooding is its only delivery path — so it
+		// is never suppressed here.
+		if dstIP != nil && !n.isMeshLocalIP(dstIP) {
+			// Guarded: dstIP.String() allocates, and this fires for every
+			// unroutable packet the OS pushes into a default-route tunnel.
+			if log.IsDebug() {
+				log.Debug("TAPFWD DROP: unroutable external frame dstIP=%s dstMAC=%s without active exit node, suppressed from mesh flood",
+					dstIP.String(), dstMAC.String())
 			}
+			return true
 		}
 
 		// Normal mesh behaviour: flood broadcast / unknown-unicast to all peers
