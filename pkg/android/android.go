@@ -89,10 +89,30 @@ const (
 // attempts: fifteen seconds for thirty minutes. Long enough for a peer that
 // announces itself slowly, short enough that a genuinely offline peer stops
 // being chased within a session.
+//
+// The first few attempts are much faster on purpose. activateExitNode normally
+// fails once or twice for a reason that resolves itself within a second or two —
+// Start() restores a persisted selection before the exit peer's metadata has
+// crossed the overlay, so the very first call always races it. Waiting fifteen
+// seconds for the second attempt meant "I enabled the exit node and the phone
+// had no internet for a quarter of a minute", which reads as a broken feature.
 const (
 	exitNodeRetryEvery = 15 * time.Second
+	exitNodeRetryFast  = 1 * time.Second
+	exitNodeRetryFastN = 5
 	exitNodeRetryMax   = 120
 )
+
+// exitNodeRetryDelay is the wait before a given attempt (1-based). The first
+// exitNodeRetryFastN attempts use the short interval; everything after falls
+// back to the slow one so a peer that is genuinely offline is not dialled every
+// second for half an hour.
+func exitNodeRetryDelay(attempt int) time.Duration {
+	if attempt <= exitNodeRetryFastN {
+		return exitNodeRetryFast
+	}
+	return exitNodeRetryEvery
+}
 
 // InterfaceProvider supplies local network interface IP addresses from Android Java runtime.
 type InterfaceProvider interface {
@@ -536,15 +556,49 @@ func Start(cfgJSON string, tunFd int) error {
 	// retry state is independent of the global lock. Running it after the
 	// RUNNING state keeps a synchronous JNI callback from re-entering while the
 	// lock is held.
+	//
+	// The selection comes from app-private storage, NOT from cfgJSON: the engine
+	// forgets its active exit node on every Stop(), so a restarted app used to
+	// come back with no exit node at all while the UI still showed the peer the
+	// user had picked. A host app that manages the selection itself can still
+	// pass exit_node_peer inside the config JSON; that value wins and is written
+	// through to the same state file.
+	var explicitExitPeer string
 	if cfgJSON != "" {
 		var rawMap map[string]any
 		if err := json.Unmarshal([]byte(cfgJSON), &rawMap); err == nil {
-			if exitPeer, ok := rawMap["exit_node_peer"].(string); ok && strings.TrimSpace(exitPeer) != "" {
-				configureExitNode(n, exitPeer)
+			if exitPeer, ok := rawMap["exit_node_peer"].(string); ok {
+				explicitExitPeer = strings.TrimSpace(exitPeer)
 			}
 		}
 	}
+	applyPersistedExitSelection(n, explicitExitPeer)
 	return nil
+}
+
+// applyPersistedExitSelection activates the Exit Node the user last picked.
+//
+// explicitPeer is the value the host app passed inside the config JSON
+// (exit_node_peer). It wins when present, and is written through to the state
+// file so a later Start() that no longer carries it still recovers the peer.
+//
+// An empty result from both sources is the normal "user never picked an exit
+// node" case and does nothing — it must NOT be an error, because every Start()
+// without an exit node would then fail.
+func applyPersistedExitSelection(n *node.Node, explicitPeer string) {
+	peerID := strings.TrimSpace(explicitPeer)
+	if peerID != "" {
+		if err := saveExitSelection(peerID); err != nil {
+			log.Warn("android: could not persist exit node selection %s: %v", peerID, err)
+		}
+	} else {
+		peerID = loadExitSelection()
+	}
+	if peerID == "" {
+		return
+	}
+	log.Info("android: restoring exit node %s from %s", peerID, exitSelectionFilePath())
+	configureExitNode(n, peerID)
 }
 
 // metricsLoop is the only goroutine that pushes live stats to the Android
@@ -1155,6 +1209,18 @@ func (a *P2PTap) SetNetworkProtector(p NetworkProtector) {
 	SetNetworkProtector(p)
 }
 
+// SetDataDir is the bound form of the package-level SetDataDir. gomobile only
+// exports methods on the bound type, so the package-level function alone is
+// invisible to Kotlin/Java — which silently left the engine without a writable
+// state directory on every build that never called it, forcing the identity key
+// and the persisted Exit Node selection to fall back to /proc/self/cmdline
+// guessing.
+//
+// Call it with context.filesDir.absolutePath before Start.
+func (a *P2PTap) SetDataDir(dir string) {
+	SetDataDir(dir)
+}
+
 func (a *P2PTap) SetStateListener(l StateListener) {
 	SetStateListener(l)
 }
@@ -1230,6 +1296,15 @@ func SetExitNode(peerID, tapIPv4, tapIPv6 string) error {
 // the JNI export never throws on a transient "peer not ready".
 func activateExitNode(peerID, tapIPv4, tapIPv6 string) error {
 	target := strings.TrimSpace(peerID)
+
+	// Record the selection BEFORE touching the engine. The choice belongs to the
+	// user and must survive a "node not running yet" call as well as the next
+	// process start; an empty target clears the record, which is exactly the
+	// deselect semantics. Persisting is best-effort: an unwritable state
+	// directory must never keep the tunnel from coming up.
+	if err := saveExitSelection(target); err != nil {
+		log.Warn("android: could not persist exit node selection %q: %v", target, err)
+	}
 
 	mu.Lock()
 	n := instance
@@ -1345,7 +1420,7 @@ func retryExitNode(ctx context.Context, n *node.Node, peerID string) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(exitNodeRetryEvery):
+		case <-time.After(exitNodeRetryDelay(attempt)):
 		}
 		// The select above can wake on the timer at the same instant Stop() runs.
 		// Re-check the context so a cancelled session returns without touching the
@@ -1466,7 +1541,12 @@ func UpdateTunFd(newTunFd int) error {
 
 // ClearExitNode clears the active exit node gateway and cancels any pending
 // activation retry, so a deselected peer is not re-activated by a stale retry.
+// The persisted selection is removed too: a cleared exit node must stay cleared
+// across the next Start() instead of silently coming back.
 func ClearExitNode() error {
+	if err := saveExitSelection(""); err != nil {
+		log.Warn("android: could not clear the persisted exit node selection: %v", err)
+	}
 	mu.Lock()
 	n := instance
 	if n != nil && n.Gateway != nil {
