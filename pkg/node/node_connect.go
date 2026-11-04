@@ -1863,6 +1863,43 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 	}
 }
 
+// relayAuthRetryCooldown throttles REPEATED full relay-auth attempts to one per
+// interval per boot. Callers fall into two groups: event-driven ones (connect
+// callbacks, the relay health monitor — naturally rare) and the TAP hot path's
+// relayHopsForTarget, which spawns one goroutine PER FRAME while a boot route
+// exists but the boot-relay uplink is down. Single-flight only deduplicates
+// CONCURRENT attempts, so without a cooldown every frame that arrived after a
+// failed attempt immediately started the next full NewStream + PSK handshake —
+// a handshake storm against a dead or PSK-mismatched boot. The uplink is
+// self-healing on its own loop, so this cooldown only gates the redundant
+// nudges: a dead uplink costs at most one attempt per interval.
+const relayAuthRetryCooldown = 15 * time.Second
+
+// tryClaimRelayAuth atomically (a) enforces the single-flight in-progress
+// guard shared by every auth trigger and (b) validates the per-peer retry
+// cooldown, recording this attempt's timestamp. It returns true when the caller
+// owns the auth attempt for pID and must release the claim with
+// releaseRelayAuthClaim.
+func (n *Node) tryClaimRelayAuth(pID peer.ID) bool {
+	n.relayAuthMu.Lock()
+	defer n.relayAuthMu.Unlock()
+	if n.relayAuthInProgress[pID] {
+		return false
+	}
+	if last, ok := n.relayAuthLastAttempt[pID]; ok && time.Since(last) < relayAuthRetryCooldown {
+		return false
+	}
+	n.relayAuthLastAttempt[pID] = time.Now()
+	n.relayAuthInProgress[pID] = true
+	return true
+}
+
+func (n *Node) releaseRelayAuthClaim(pID peer.ID) {
+	n.relayAuthMu.Lock()
+	delete(n.relayAuthInProgress, pID)
+	n.relayAuthMu.Unlock()
+}
+
 // ensureRelayAuth performs the one-time PSK handshake with a bootstrap/relay
 // peer. It is guarded by the shared relayAuthInProgress map so the fan-out
 // goroutines spawned by Start() (one per transport address of the SAME relay
@@ -1871,6 +1908,9 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 // relay connection itself is shared (the swarm dedupes connections per PeerID),
 // so authenticating once is correct. bootstrapKeepAliveLoop and the ConnectedF
 // handler reuse the same guard, so refreshes never collide with this either.
+// The per-peer retry cooldown (tryClaimRelayAuth) additionally bounds the
+// per-frame hot-path nudges to one full handshake attempt per interval when the
+// boot is unreachable or the PSK mismatches.
 //
 // NOTE: p2ptap's actual relay for VPN traffic is its OWN overlay relay
 // (this PSK auth + relay_ctrl.go hop tunneling), which is independent of the
@@ -1882,19 +1922,10 @@ func (n *Node) dialInParallel(ctx context.Context, pi peer.AddrInfo, peerType st
 // libp2p AutoRelay (enabled via EnableAutoRelayWithStaticRelays) remains the
 // only standard-relay client path, and it handles its own reservation silently.
 func (n *Node) ensureRelayAuth(pi peer.AddrInfo) {
-	n.relayAuthMu.Lock()
-	if n.relayAuthInProgress[pi.ID] {
-		n.relayAuthMu.Unlock()
+	if !n.tryClaimRelayAuth(pi.ID) {
 		return
 	}
-	n.relayAuthInProgress[pi.ID] = true
-	n.relayAuthMu.Unlock()
-
-	defer func() {
-		n.relayAuthMu.Lock()
-		delete(n.relayAuthInProgress, pi.ID)
-		n.relayAuthMu.Unlock()
-	}()
+	defer n.releaseRelayAuthClaim(pi.ID)
 
 	if !n.authenticateWithRelay(pi.ID, false) {
 		log.Warn("PSK auth with bootstrap %s failed — relay access and discovery denied, boot-relay uplink NOT opened", pi.ID.ShortString())

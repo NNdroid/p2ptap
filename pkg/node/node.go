@@ -194,7 +194,11 @@ type Node struct {
 	relayLatencyMu       sync.RWMutex
 	relayLatency         map[peer.ID]time.Duration // per-relay-peer RTT cache
 	relayAuthMu          sync.Mutex
-	relayAuthInProgress  map[peer.ID]bool // dedup ConnectedF-triggered relay auth per peer
+	// relayAuthInProgress dedups concurrent relay-auth attempts per peer.
+	relayAuthInProgress map[peer.ID]bool
+	// relayAuthLastAttempt backs the relay-auth retry cooldown (see
+	// tryClaimRelayAuth in node_connect.go). Guarded by relayAuthMu.
+	relayAuthLastAttempt map[peer.ID]time.Time
 	// relayAuthTickets caches the session ticket each boot minted for this node
 	// (peer.ID -> *relayTicketCache). A cached, unexpired ticket lets a reconnect
 	// authenticate with a single short round-trip instead of a full
@@ -2023,53 +2027,54 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	collector.SetSecurity(pskStatus, obfsMode, computeKeyFingerprint(cfg.NodeKeyFile), sniDisplay)
 
 	node := &Node{
-		Host:                h,
-		DHT:                 kdht,
-		Config:              cfg,
-		configPtr:           cfgSnapshot,
-		advertisedNets:      advertisedNetsSlot,
-		TAP:                 tapDev,
-		MACTable:            macTable,
-		Packer:              packer,
-		fragRX:              newFragReassembler(),
-		streamGateData:      newStreamGate(maxStreamsPerPeerData),
-		streamGateRelay:     newStreamGate(maxStreamsPerPeerRelay),
-		streamGateEcho:      newStreamGate(maxStreamsPerPeerEcho),
-		streamGateLSA:       newStreamGate(maxStreamsPerPeerLSA),
-		streamGateMeta:      newStreamGate(maxStreamsPerPeerMeta),
-		relayDiag:           new(RelayDiag),
-		perPeerObf:          *newPeerObfTable(),
-		Dispatcher:          dispatcher,
-		Collector:           collector,
-		IPTracker:           NewIPTrafficTracker(),
-		Router:              routing.NewRouter(h.ID()),
-		Gateway:             NewGatewayManager(cfg.TapName),
-		NFTManager:          NewNFTManager(&cfg.ExitNode),
-		relayLatency:        make(map[peer.ID]time.Duration),
-		relayAuthInProgress: make(map[peer.ID]bool),
-		relayControlHealth:  make(map[peer.ID]relayControlFailureState),
-		peerRTT:             make(map[peer.ID]*peerRTTState),
-		tapICMPEchoPending:  make(map[tapICMPEchoKey]time.Time),
-		directConnected:     make(map[peer.ID]bool),
-		aclStats:            newACLStats(),
-		dispatchCh:          make(chan dispatchTask, 16384), // 16K frames: EPOLLET edge-triggered drain needs larger headroom
-		relayFallbackSem:    make(chan struct{}, 8),         // bounds concurrent relay fallback goroutines
-		tapWriteCh:          make(chan tapWriteJob, 4096),   // pooled overlay->TAP write queue (~8 MiB at 2K/frame)
-		urgentWriteCh:       make(chan []byte, 128),         // urgent TAP-inject queue (diagnostics)
-		urgentDispatchCh:    make(chan dispatchTask, 128),   // urgent SEND queue (symmetric to receive)
-		probeReplyCh:        make(chan []byte, 8),           // TAP-probe echo-reply capture (see probeActive)
-		parsedListenAddrs:   addrs,                          // transport-filtered listen addrs for roam reconciliation
-		probeAckCh:          make(chan uint8, 4),            // TAP-probe peer-side ack (方案 B) + dst-IP flag
-		perPeerLastTx:       make(map[peer.ID]uint64),
-		perPeerLastRx:       make(map[peer.ID]uint64),
-		perPeerTxSpeed:      make(map[peer.ID]uint64),
-		perPeerRxSpeed:      make(map[peer.ID]uint64),
-		ctx:                 ctx,
-		cancel:              cancel,
-		startTime:           time.Now(),
-		nodeName:            nodeName,
-		arpIndex:            &arpIndex{v4: make(map[uint32]arpIndexEntry), v6: make(map[[16]byte]arpIndexEntry)},
-		lsaCache:            make(map[peer.ID]*routing.LinkStatePayload),
+		Host:                 h,
+		DHT:                  kdht,
+		Config:               cfg,
+		configPtr:            cfgSnapshot,
+		advertisedNets:       advertisedNetsSlot,
+		TAP:                  tapDev,
+		MACTable:             macTable,
+		Packer:               packer,
+		fragRX:               newFragReassembler(),
+		streamGateData:       newStreamGate(maxStreamsPerPeerData),
+		streamGateRelay:      newStreamGate(maxStreamsPerPeerRelay),
+		streamGateEcho:       newStreamGate(maxStreamsPerPeerEcho),
+		streamGateLSA:        newStreamGate(maxStreamsPerPeerLSA),
+		streamGateMeta:       newStreamGate(maxStreamsPerPeerMeta),
+		relayDiag:            new(RelayDiag),
+		perPeerObf:           *newPeerObfTable(),
+		Dispatcher:           dispatcher,
+		Collector:            collector,
+		IPTracker:            NewIPTrafficTracker(),
+		Router:               routing.NewRouter(h.ID()),
+		Gateway:              NewGatewayManager(cfg.TapName),
+		NFTManager:           NewNFTManager(&cfg.ExitNode),
+		relayLatency:         make(map[peer.ID]time.Duration),
+		relayAuthInProgress:  make(map[peer.ID]bool),
+		relayAuthLastAttempt: make(map[peer.ID]time.Time),
+		relayControlHealth:   make(map[peer.ID]relayControlFailureState),
+		peerRTT:              make(map[peer.ID]*peerRTTState),
+		tapICMPEchoPending:   make(map[tapICMPEchoKey]time.Time),
+		directConnected:      make(map[peer.ID]bool),
+		aclStats:             newACLStats(),
+		dispatchCh:           make(chan dispatchTask, 16384), // 16K frames: EPOLLET edge-triggered drain needs larger headroom
+		relayFallbackSem:     make(chan struct{}, 8),         // bounds concurrent relay fallback goroutines
+		tapWriteCh:           make(chan tapWriteJob, 4096),   // pooled overlay->TAP write queue (~8 MiB at 2K/frame)
+		urgentWriteCh:        make(chan []byte, 128),         // urgent TAP-inject queue (diagnostics)
+		urgentDispatchCh:     make(chan dispatchTask, 128),   // urgent SEND queue (symmetric to receive)
+		probeReplyCh:         make(chan []byte, 8),           // TAP-probe echo-reply capture (see probeActive)
+		parsedListenAddrs:    addrs,                          // transport-filtered listen addrs for roam reconciliation
+		probeAckCh:           make(chan uint8, 4),            // TAP-probe peer-side ack (方案 B) + dst-IP flag
+		perPeerLastTx:        make(map[peer.ID]uint64),
+		perPeerLastRx:        make(map[peer.ID]uint64),
+		perPeerTxSpeed:       make(map[peer.ID]uint64),
+		perPeerRxSpeed:       make(map[peer.ID]uint64),
+		ctx:                  ctx,
+		cancel:               cancel,
+		startTime:            time.Now(),
+		nodeName:             nodeName,
+		arpIndex:             &arpIndex{v4: make(map[uint32]arpIndexEntry), v6: make(map[[16]byte]arpIndexEntry)},
+		lsaCache:             make(map[peer.ID]*routing.LinkStatePayload),
 	}
 	node.applyReorderConfig(cfg)
 	node.coalescer = newTxCoalescer(node)
@@ -2628,22 +2633,19 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 			// ── Bootstrap peer: PSK auth then peek-map. Stop here. ──────────
 			if node.isBootstrapPeer(pID) {
 				go func() {
-					// Single-flight dedup: ConnectedF fires once per transport.
-					// Hold relayAuthInProgress for the whole span so concurrent
-					// transport-upgrade events don't pile up concurrent auth streams.
-					node.relayAuthMu.Lock()
-					if node.relayAuthInProgress[pID] {
-						node.relayAuthMu.Unlock()
+					// Single-flight dedup + retry cooldown via the shared
+					// relay-auth claim (see tryClaimRelayAuth in
+					// node_connect.go): ConnectedF fires once per transport,
+					// and the TAP hot path may nudge the same boot per frame
+					// while the boot-relay uplink is down, so every trigger
+					// must share one claim + cooldown state.
+					if !node.tryClaimRelayAuth(pID) {
 						return
 					}
-					node.relayAuthInProgress[pID] = true
-					node.relayAuthMu.Unlock()
 
 					authOK := node.authenticateWithRelay(pID, false)
 
-					node.relayAuthMu.Lock()
-					delete(node.relayAuthInProgress, pID)
-					node.relayAuthMu.Unlock()
+					node.releaseRelayAuthClaim(pID)
 
 					if !authOK {
 						// Auth failed: PSK mismatch, no PSK configured, or exchange
