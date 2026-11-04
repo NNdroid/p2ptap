@@ -14,6 +14,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
+	"github.com/libp2p/go-libp2p/p2p/net/swarm"
 	relayclient "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	ma "github.com/multiformats/go-multiaddr"
 
@@ -467,6 +468,17 @@ func topoPathsHaveStreams(n *Node, p peer.ID) bool {
 	return true
 }
 
+// topoTCPListenAddr returns n's resolved non-circuit TCP listen multiaddr, or
+// nil when n has none.
+func topoTCPListenAddr(n *Node) ma.Multiaddr {
+	for _, a := range n.Host.Network().ListenAddresses() {
+		if _, err := a.ValueForProtocol(ma.P_TCP); err == nil && !strings.Contains(a.String(), "/p2p-circuit") {
+			return a
+		}
+	}
+	return nil
+}
+
 // failoverBudget scales a failover test's wait budget for the CI runner.
 // The mechanisms being waited out are fast in absolute terms — a dead stream
 // retires in ~20 ms once its first write fails (conn close resets it), and
@@ -570,10 +582,30 @@ func TestE2EMultipathDirectPlusRelayFailover(t *testing.T) {
 	prefix := "EXIT_TOPO_FAILOVER_"
 
 	// --- Break the direct path. ---
-	// Pin the peerstore to the circuit address only: identify seeded the direct
-	// address, and leaving it there would let the multipath repair loop simply
-	// re-dial the path this test just destroyed.
+	// Make the direct-path death REAL: close B's TCP listener too. Closing
+	// only A's side leaves B directly reachable, and the node's self-healing
+	// will faithfully re-establish the path this test just tried to kill: the
+	// surviving circuit carries identify/peek-map, which re-learn B's listener
+	// address into A's peerstore, and the first failed write triggers
+	// reconnectPeer whose direct race leg dials it successfully. The probe
+	// loop below then never sees a relay-only scheduler set — this race
+	// against the repair is exactly how the test flapped on macos-latest
+	// (runs 41749713895 / 41905041333: the full probe budget expired with 6
+	// stream(s) still scheduled, while the same commit passed on rerun and on
+	// Linux/Windows). A real Wi-Fi/LTE path death removes the ADDRESS, not
+	// just one side's connection; with the listener closed the repair's
+	// direct re-dial fails with connection refused and the circuit becomes
+	// the only path, deterministically on every platform.
 	nodeA.Host.Peerstore().SetAddrs(bID, circuits, peerstore.PermanentAddrTTL)
+	bListener := topoTCPListenAddr(nodeB)
+	if bListener == nil {
+		t.Fatalf("%s: B has no TCP listen address to close", topo.name)
+	}
+	sw, ok := nodeB.Host.Network().(*swarm.Swarm)
+	if !ok {
+		t.Fatalf("%s: host network is not *swarm.Swarm; cannot close the direct listener", topo.name)
+	}
+	sw.ListenClose(bListener)
 	for _, c := range directConns {
 		if c != nil {
 			_ = c.Close()
