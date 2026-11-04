@@ -359,11 +359,14 @@ type extSpec struct {
 func extSpecLen(e extSpec) int {
 	switch e.kind {
 	case 0, 43, 60: // Hop-by-Hop, Routing, Destination Options
-		return (int(e.hlc)&0x0f + 1) * 8
+		// Full 8-bit Hdr Ext Len field (RFC 8200): the historical 4-bit mask
+		// misparsed every options header longer than 128 bytes.
+		return (int(e.hlc) + 1) * 8
 	case 44: // Fragment
 		return 8
 	case 51: // AH
-		return (int(e.hlc)&0x3f + 1) * 4
+		// RFC 4302 §2: PayloadLen counts 4-byte units MINUS 2.
+		return (int(e.hlc) + 2) * 4
 	default:
 		return 8
 	}
@@ -423,10 +426,16 @@ func TestICMPv6OffsetExtensionHeaders(t *testing.T) {
 		{"routing", []extSpec{{43, 0}}, 62},
 		{"destination options 16B", []extSpec{{60, 1}}, 70},
 		{"fragment", []extSpec{{44, 0}}, 62},
-		{"ah", []extSpec{{51, 0}}, 58},
-		{"ah 8B", []extSpec{{51, 1}}, 62},
+		// AH with PayloadLen 0 is 8 bytes per RFC 4302 ((0+2)*4); the old
+		// (x+1)*4 form computed 4 and desynchronised the whole chain.
+		{"ah", []extSpec{{51, 0}}, 62},
+		{"ah 12B", []extSpec{{51, 1}}, 66},
+		// Hdr Ext Len is a full 8-bit field: hlc=16 means a 136-byte header.
+		// The old 4-bit mask computed 8 and read the NS target from the middle
+		// of the options.
+		{"hop-by-hop 136B", []extSpec{{0, 16}}, 190},
 		{"hop-by-hop then destination options", []extSpec{{0, 0}, {60, 0}}, 70},
-		{"fragment then ah", []extSpec{{44, 0}, {51, 0}}, 66},
+		{"fragment then ah", []extSpec{{44, 0}, {51, 0}}, 70},
 	}
 	for _, tc := range cases {
 		f := buildIPv6NS(t, tc.exts)
@@ -478,6 +487,34 @@ func TestICMPv6OffsetRejectsMalformed(t *testing.T) {
 	f[20] = 59
 	if got := icmpv6Offset(f); got != -1 {
 		t.Errorf("next header is ICMPv6 but the frame has no ICMPv6 at 54: got %d, want -1", got)
+	}
+}
+
+// TestICMPv6OffsetChainEndingAtFrameEnd is a regression test for an
+// out-of-bounds panic: a chain whose LAST header consumes every remaining
+// payload byte, followed by a non-ICMPv6 next-header byte, made the old walker
+// read payload[off+1] one byte past the end on the next iteration. The panic
+// was recovered by the TAP read loop, but it restarted the whole loop (and its
+// epoll poller) per malformed frame.
+func TestICMPv6OffsetChainEndingAtFrameEnd(t *testing.T) {
+	// Ethernet + IPv6 + one 8-byte Destination Options header that fills the
+	// frame exactly; its next-header byte (the last byte of the frame) is
+	// another ext header, so the walker needs one more iteration and would have
+	// read past the end.
+	f := buildIPv6NS(t, []extSpec{{60, 0}})[:14+40+8]
+	f[61] = 60 // last byte of the frame: next header = Destination Options
+
+	// Must not panic; the chain cannot reach an ICMPv6 header, so -1.
+	if got := icmpv6Offset(f); got != -1 {
+		t.Errorf("chain ending exactly at the frame end: got %d, want -1", got)
+	}
+
+	// Same shape with the chain ending one byte before the frame end (off+1
+	// readable, but the header length overruns).
+	f2 := buildIPv6NS(t, []extSpec{{60, 0}})[:14+40+9]
+	f2[61] = 60
+	if got := icmpv6Offset(f2); got != -1 {
+		t.Errorf("chain overrun by one byte: got %d, want -1", got)
 	}
 }
 

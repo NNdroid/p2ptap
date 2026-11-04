@@ -52,15 +52,12 @@ func parseIPv6Transport(firstHeader byte, payload []byte) (string, int, bool) {
 				return "any", 0, false
 			}
 		case 0, 43, 60: // Hop-by-Hop, Routing, Destination Options
-			if len(payload) < 8 {
-				return "any", 0, false
-			}
-			hdrEnd := (int(payload[1]) + 1) * 8
-			if len(payload) < hdrEnd {
+			hdrLen, ok := packet.IPv6ExtHeaderLen(next, payload)
+			if !ok || len(payload) < hdrLen {
 				return "any", 0, false
 			}
 			next = payload[0]
-			payload = payload[hdrEnd:]
+			payload = payload[hdrLen:]
 		default:
 			// AH/ESP/other protocol numbers: opaque or unhandled.
 			return "any", 0, false

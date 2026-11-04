@@ -1459,28 +1459,30 @@ func (n *Node) isMeshLocalAddress(dstIP net.IP) bool {
 //
 // Every extension header except ESP carries its own next-header field as the
 // last byte of the header, so the walk only needs each header's byte length.
-// AH is counted in 4-byte units with the 2-byte adjustment from RFC 4302, and
-// ESP is stopped at because its next header lives in an optional trailer.
+// The per-header length arithmetic lives in packet.IPv6ExtHeaderLen so it stays
+// identical to the ACL engine's walker.
+//
+// BOUNDS: each iteration validates the current header's length field AND the
+// next header's two lead bytes against len(payload) before reading either. The
+// previous version read payload[off+1] at the top of the iteration without a
+// bounds check, so a chain that ended exactly at the frame boundary (a header
+// consuming every remaining byte, followed by a non-ICMPv6 next-header byte)
+// read one byte past the end and panicked — recovered by the TAP read loop's
+// recover, but at the cost of restarting the whole loop (and its epoll poller)
+// per malformed frame.
 func icmpv6Offset(payload []byte) int {
-	if len(payload) < 56 || binary.BigEndian.Uint16(payload[12:14]) != packet.EtherTypeIPv6 {
+	if len(payload) < 54 || binary.BigEndian.Uint16(payload[12:14]) != packet.EtherTypeIPv6 {
 		return -1
 	}
 	// 54 = 14-byte Ethernet header + 40-byte IPv6 base header.
 	off := 54
 	nh := int(payload[20])
-	for nh != 58 {
-		var length int
-		switch nh {
-		case 0, 43, 60: // Hop-by-Hop Options, Routing, Destination Options
-			length = (int(payload[off+1])&0x0f + 1) * 8
-		case 44: // Fragment
-			length = 8
-		case 51: // AH
-			length = (int(payload[off+1])&0x3f + 1) * 4
-		default:
+	for nh != packet.IPv6ICMPv6 {
+		if off+2 > len(payload) {
 			return -1
 		}
-		if off+length > len(payload) {
+		length, ok := packet.IPv6ExtHeaderLen(byte(nh), payload[off:])
+		if !ok || off+length > len(payload) {
 			return -1
 		}
 		nh = int(payload[off+length-1])
