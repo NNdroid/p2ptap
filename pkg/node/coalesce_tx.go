@@ -39,10 +39,16 @@ type txCoalescer struct {
 	n   *Node
 	mu  sync.Mutex
 	buf map[peer.ID]*txCoalesceEntry
+	// wake nudges the flusher goroutine to recompute its sleep deadline. The
+	// only transition that needs it is the first frame buffered while the map
+	// was empty: without it, an idle flusher sleeping on a long timer would
+	// hold that frame past its max_delay. Buffered(1) + non-blocking send, so a
+	// burst of appends costs one coalesced wakeup.
+	wake chan struct{}
 }
 
 func newTxCoalescer(n *Node) *txCoalescer {
-	return &txCoalescer{n: n, buf: make(map[peer.ID]*txCoalesceEntry)}
+	return &txCoalescer{n: n, buf: make(map[peer.ID]*txCoalesceEntry), wake: make(chan struct{}, 1)}
 }
 
 // maybeBuffer attempts to buffer a unicast TAP frame for coalescing. It returns
@@ -65,6 +71,7 @@ func (c *txCoalescer) maybeBuffer(targetPeer peer.ID, dstMAC net.HardwareAddr, p
 
 	now := time.Now()
 	c.mu.Lock()
+	wasEmpty := len(c.buf) == 0
 	entry := c.buf[targetPeer]
 	if entry == nil {
 		entry = &txCoalesceEntry{}
@@ -85,6 +92,14 @@ func (c *txCoalescer) maybeBuffer(targetPeer peer.ID, dstMAC net.HardwareAddr, p
 
 	if needFlush {
 		c.flush(targetPeer)
+	} else if wasEmpty {
+		// The map went empty -> non-empty: any pending flusher sleep predates
+		// this entry and may be longer than its max_delay. Wake the flusher so
+		// it recomputes against the new earliest deadline.
+		select {
+		case c.wake <- struct{}{}:
+		default:
+		}
 	}
 	return true
 }
@@ -181,21 +196,82 @@ func releaseCoalesceSubFrames(subFrames [][]byte) {
 	}
 }
 
-// run is the flusher goroutine: every millisecond it flushes entries older than
-// the rule's max_delay_ms (padding them to the band target when still short),
-// and drains everything on shutdown.
+// run is the flusher goroutine. It is fully event-driven: it sleeps until the
+// earliest buffered entry's max_delay deadline (recomputed after every wake and
+// every new-entry wake signal) and flushes everything on shutdown. The previous
+// 1 ms ticker woke 1000 times per second around the clock for a flush that in
+// practice happens at most once per max_delay per peer — constant scheduler and
+// battery cost on the OpenWrt / laptop targets for zero latency benefit.
+//
+// Wake sources:
+//   - the recomputed deadline of the earliest buffered entry (timer),
+//   - maybeBuffer's wake signal when the map transitions empty -> non-empty,
+//   - context cancellation (drains everything and exits).
 func (c *txCoalescer) run(ctx context.Context) {
-	t := time.NewTicker(time.Millisecond)
-	defer t.Stop()
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
 	for {
+		rule, enabled := c.n.Packer.PaddingSnapshot()
+		if rule == nil || !enabled || !rule.Coalesce.On {
+			// Coalescing is off (or the packer is unconfigured): drain whatever
+			// is buffered and sleep until woken. A hot reload back to coalescing
+			// produces a first buffered frame, and the empty -> non-empty wake
+			// signal covers exactly that transition.
+			c.flushAll()
+		} else {
+			now := time.Now()
+			c.mu.Lock()
+			delay, ok := c.earliestDelayLocked(now, time.Duration(rule.Coalesce.MaxDelayMs)*time.Millisecond)
+			c.mu.Unlock()
+			if ok {
+				// Cap the sleep at the current rule delay so a hot reload to a
+				// shorter max_delay takes effect within one period instead of
+				// waiting out a sleep scheduled under the old rule.
+				if d := time.Duration(rule.Coalesce.MaxDelayMs) * time.Millisecond; delay > d {
+					delay = d
+				}
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(delay)
+			}
+			// No buffered entries: leave the timer idle and sleep on wake/ctx.
+			// A later append sends the wake signal.
+		}
+
 		select {
 		case <-ctx.Done():
 			c.flushAll()
 			return
-		case <-t.C:
+		case <-timer.C:
 			c.flushExpired()
+		case <-c.wake:
+			// Recompute the deadline on the next loop iteration.
 		}
 	}
+}
+
+// earliestDelayLocked returns the time remaining until the oldest buffered
+// entry's max_delay deadline. ok is false when the buffer is empty. Caller
+// holds mu.
+func (c *txCoalescer) earliestDelayLocked(now time.Time, maxDelay time.Duration) (time.Duration, bool) {
+	if len(c.buf) == 0 {
+		return 0, false
+	}
+	earliest := now.Add(maxDelay)
+	for _, e := range c.buf {
+		if d := e.firstAt.Add(maxDelay); d.Before(earliest) {
+			earliest = d
+		}
+	}
+	if d := earliest.Sub(now); d > 0 {
+		return d, true
+	}
+	// Already expired: flush immediately on the next timer tick.
+	return 0, true
 }
 
 // flushExpired flushes every entry older than the rule's max_delay_ms. When
