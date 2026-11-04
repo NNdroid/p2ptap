@@ -899,12 +899,13 @@ func (n *Node) handleLSAStream(s network.Stream) {
 		remotePeer := s.Conn().RemotePeer()
 		if lsa.Origin != "" {
 			remoteStr := remotePeer.String()
-			if val, known := n.seenOrigins.Load(lsa.Origin); known {
-				entry := val.(seenOriginEntry)
-				// Known origin: the frame must come from the origin itself
-				// or from the peer that first introduced it. This closes
-				// the TTL-downgrade bypass where an attacker sends
-				// ttl < max claiming a known origin from a different peer.
+			admitted, knownOrigin, introducer := n.admitKnownOrigin(lsa.Origin, remoteStr)
+			if knownOrigin {
+				// Known origin: the frame must come from the origin itself or
+				// from the peer that first introduced it — the origin-or-source
+				// gate in admitKnownOrigin. This closes the TTL-downgrade
+				// bypass where an attacker sends ttl < max claiming a known
+				// origin from a different peer.
 				//
 				// Snapshot frames take the SAME check, not a bypass: lsa.Snapshot
 				// is a sender-written JSON field and proves nothing about where
@@ -913,20 +914,11 @@ func (n *Node) handleLSAStream(s network.Stream) {
 				// already-known origin to itself, after which every legitimate LSA
 				// and relayed frame for that origin via any other carrier was
 				// dropped for the entry's whole 5-minute lifetime.
-				//
-				// entry.source is deliberately never updated here. Re-pointing it
-				// to the origin when a direct frame arrives would revoke the first
-				// carrier, so a loss of the direct path would blackhole every
-				// carrier-carried LSA for that origin until the reaper evicts the
-				// entry (up to 5 minutes). The gate above already admits frames
-				// from the origin itself, so nothing is blocked by keeping the pin.
-				if remoteStr != lsa.Origin && remoteStr != entry.source {
+				if !admitted {
 					log.Debug("LSA from %s claims known origin %s (source=%s) but is not origin or source; dropping",
-						remotePeer.ShortString(), lsa.Origin, entry.source)
+						remotePeer.ShortString(), lsa.Origin, introducer)
 					continue
 				}
-				entry.firstSeen = time.Now()
-				n.seenOrigins.Store(lsa.Origin, entry)
 			} else if lsa.Snapshot && lsa.TTL == routing.DefaultLSATTL {
 				// First sighting via a cached snapshot. The receiver is usually
 				// NOT directly connected to the origin, so the direct+full-TTL
@@ -1360,28 +1352,19 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 		// same base58 as peer.ID.String().
 		srcStr := n.peerIDString(srcPeer)
 		remoteStr := n.peerIDString(remotePeer)
-		if val, known := n.seenOrigins.Load(srcStr); known {
-			entry := val.(seenOriginEntry)
-			// Known origin: the frame must come from the origin itself
-			// or from the peer that first introduced it.
-			//
-			// entry.source is deliberately never updated here: re-pointing it
-			// to the origin on a direct frame would revoke the first carrier
-			// and blackhole every carrier-carried frame for that origin until
-			// the reaper evicts the entry (up to 5 minutes). The gate below
-			// already admits frames from the origin itself.
-			if remoteStr != srcStr && remoteStr != entry.source {
+		admitted, knownOrigin, introducer := n.admitKnownOrigin(srcStr, remoteStr)
+		if knownOrigin {
+			// Known origin: the frame must come from the origin itself or from
+			// the peer that first introduced it — the origin-or-source gate in
+			// admitKnownOrigin. entry.source is deliberately never re-pointed;
+			// see that function's doc comment for the carrier-revocation trap.
+			if !admitted {
 				if log.IsDebug() {
 					log.Debug("Relay frame from %s claims known srcPeer %s (source=%s) but is not origin or source; dropping",
-						remoteStr, srcStr, entry.source)
+						remoteStr, srcStr, introducer)
 				}
 				n.relayDiag.envBad()
 				return
-			}
-			// Throttled refresh: see seenOriginRefreshInterval.
-			if time.Since(entry.firstSeen) >= seenOriginRefreshInterval {
-				entry.firstSeen = time.Now()
-				n.seenOrigins.Store(srcStr, entry)
 			}
 			originVerified = true
 		} else if srcPeer == remotePeer && ttl == routing.MaxRelayTTL {

@@ -836,6 +836,44 @@ type seenOriginEntry struct {
 // Same pattern as macLastSeenInterval in pkg/switch.
 const seenOriginRefreshInterval = time.Second
 
+// admitKnownOrigin validates a LATER sighting of an already-known origin
+// carried by remoteStr, shared by the LSA handler and the relay-frame handler
+// so the two origin gates cannot drift apart. The carrier must be the origin
+// itself or the peer that first introduced it — this is the gate that closes
+// the TTL-downgrade bypass where an attacker re-claims a known origin from a
+// different carrier.
+//
+// known is false when srcStr has never been seen: the caller then applies its
+// own first-sighting policy. admitted is false with known true when the origin
+// is known but this carrier is neither the origin nor its introducer (a hard
+// reject). source is the recorded introducer, for diagnostics.
+//
+// On an admitted sighting the entry's firstSeen is refreshed, throttled to
+// seenOriginRefreshInterval, so a still-active origin is not reaped while
+// frames keep arriving.
+//
+// entry.source is deliberately never updated here. Re-pointing it to the
+// origin when a direct frame arrives would revoke the first carrier, so a loss
+// of the direct path would blackhole every carrier-carried frame for that
+// origin until the reaper evicts the entry (up to 5 minutes). The caller's
+// gate already admits frames from the origin itself, so nothing is blocked by
+// keeping the pin.
+func (n *Node) admitKnownOrigin(srcStr, remoteStr string) (admitted, known bool, source string) {
+	val, ok := n.seenOrigins.Load(srcStr)
+	if !ok {
+		return false, false, ""
+	}
+	entry := val.(seenOriginEntry)
+	if remoteStr != srcStr && remoteStr != entry.source {
+		return false, true, entry.source
+	}
+	if time.Since(entry.firstSeen) >= seenOriginRefreshInterval {
+		entry.firstSeen = time.Now()
+		n.seenOrigins.Store(srcStr, entry)
+	}
+	return true, true, entry.source
+}
+
 func (n *Node) manuallyAuthorizeSubnet(cidr string) {
 	n.manuallyAuthSubnetsMu.Lock()
 	defer n.manuallyAuthSubnetsMu.Unlock()
