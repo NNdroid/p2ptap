@@ -71,7 +71,7 @@ Each node needs its own configuration and identity key. For two nodes to share t
 - Static and bootstrap entries must be complete multiaddrs ending in `/p2p/<PeerID>`, for example `/ip4/192.0.2.1/tcp/4001/p2p/<PeerID>` or `/ip6/2001:db8::1/udp/4001/quic-v1/p2p/<PeerID>`. Bare IPs and peer IDs are rejected. Static peers can also use relay fallback. An explicitly empty bootstrap list is supported for static-only meshes.
 - WebUI saves report pending restart fields against the active startup configuration. Changes to `static_peers` or `transport_strategy` require a restart; the stats continue to report the strategy actually used by the dispatcher. Android saves use the app configuration store, so restarting the VPN loads the saved values.
 - The WebUI overview emphasizes measured upload/download rates. The peer list shows five essential columns and opens full live details, separating local link traffic from peer-reported node totals. Topology, logs and capture tools expand on demand; log and capture streams connect only while their panels are open. Ping, route tracing and connectivity checks share one target input.
-- Make sure both nodes use compatible obfuscation settings.
+- Padding settings may differ between nodes: the wire framing is self-describing, so each side pads (or coalesces, or fragments) per its own rule while the other decodes unchanged — different `enable` flags, padding rules, coalescing knobs, fragment caps and MTUs are all covered by the padding interop tests. The payload encryption algorithm is negotiated per peer at handshake.
 
 Example TAP addresses:
 
