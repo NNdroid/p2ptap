@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -466,6 +467,23 @@ func topoPathsHaveStreams(n *Node, p peer.ID) bool {
 	return true
 }
 
+// failoverBudget scales a failover test's wait budget for the CI runner.
+// The mechanisms being waited out are fast in absolute terms — a dead stream
+// retires in ~20 ms once its first write fails (conn close resets it), and
+// relayed frames cross in milliseconds — so the budget exists to absorb
+// scheduler starvation on shared CI runners, not slowness in the code. We
+// observed macos-latest starve the whole node past the point of retirement
+// (2026-11-04 run 41749713895: the 20 s probe window closed with 6 streams
+// still scheduled; the same commit passed on rerun and locally on Windows),
+// so darwin gets double the budget rather than weakening the assertion for
+// every platform.
+func failoverBudget(d time.Duration) time.Duration {
+	if runtime.GOOS == "darwin" {
+		return 2 * d
+	}
+	return d
+}
+
 // topologyStreamsAreRelayOnly reports whether every stream n still schedules for
 // p rides a relay path. Used by the failover test to tell "the dead direct
 // stream has been retired" apart from "the scheduler will retry it forever".
@@ -565,7 +583,7 @@ func TestE2EMultipathDirectPlusRelayFailover(t *testing.T) {
 	// disposable frames until the scheduler's set is relay-only. Without this
 	// the measured burst would burn a write deadline per frame on a stream that
 	// can never deliver, which reads like a tunnel stall instead of a failover.
-	probeDeadline := time.Now().Add(20 * time.Second)
+	probeDeadline := time.Now().Add(failoverBudget(20 * time.Second))
 	for !topologyStreamsAreRelayOnly(nodeA, bID) {
 		if time.Now().After(probeDeadline) {
 			t.Fatalf("the dead direct stream was never retired from the multipath set (%d stream(s) still scheduled)",
@@ -592,7 +610,7 @@ func TestE2EMultipathDirectPlusRelayFailover(t *testing.T) {
 			t.Fatalf("pipeA.Write frame %d failed: %v", i, werr)
 		}
 	}
-	if !coll.waitUntil(want, 25*time.Second) {
+	if !coll.waitUntil(want, failoverBudget(25*time.Second)) {
 		t.Fatalf("after the direct path died only %d/%d frames crossed the surviving circuit; missing=%v",
 			countSeen(coll, want), frames, coll.missing(want))
 	}
@@ -697,7 +715,7 @@ func TestE2EMultipathRelayDualFailover(t *testing.T) {
 			t.Fatalf("%s: pipeA.Write frame %d failed: %v", topo.name, i, werr)
 		}
 	}
-	if !coll.waitUntil(want, 25*time.Second) {
+	if !coll.waitUntil(want, failoverBudget(25*time.Second)) {
 		t.Fatalf("%s: after one circuit died only %d/%d frames crossed the surviving circuit; missing=%v",
 			topo.name, countSeen(coll, want), frames, coll.missing(want))
 	}
