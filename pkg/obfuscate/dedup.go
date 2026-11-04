@@ -272,6 +272,15 @@ const dedupWindow = maxBehindTolerance
 // eviction horizon must stay equal.
 const maxBehindTolerance = 1024
 
+// MaxOutOfOrderTolerance is the exported form of maxBehindTolerance, for
+// callers that must keep their own out-of-order buffers consistent with the
+// dedup window. The rx reorder buffer clamps its configured window to this:
+// a frame buffered any deeper behind the live arrival order would already
+// have been rejected by the dedup layer (DedupDropFarBehind) before the
+// reorder buffer ever saw it, so a larger configured window is unreachable
+// capacity that only misleads the operator.
+const MaxOutOfOrderTolerance = maxBehindTolerance
+
 // --- internal helpers ---
 
 // setBit marks counter c as seen in the sliding dedup window. The counter is

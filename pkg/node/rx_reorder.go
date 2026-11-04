@@ -103,7 +103,21 @@ type rxReorderQueue struct {
 // make the queue give up on frames that were merely a millisecond late.
 const rxReorderMinReleaseDelay = 25 * time.Millisecond
 
+// clampReorderWindow bounds a configured reorder window to the dedup layer's
+// out-of-order tolerance. A frame buffered deeper behind the live arrival
+// order than obfuscate.MaxOutOfOrderTolerance can never reach this queue: the
+// per-peer dedup window (which runs first) rejects it as DedupDropFarBehind.
+// Honouring a larger configured window would report capacity the datapath can
+// never use.
+func clampReorderWindow(maxWindow int) int {
+	if maxWindow > obfuscate.MaxOutOfOrderTolerance {
+		maxWindow = obfuscate.MaxOutOfOrderTolerance
+	}
+	return maxWindow
+}
+
 func newRxReorderQueue(n *Node, maxWindow int, releaseDelay time.Duration) *rxReorderQueue {
+	maxWindow = clampReorderWindow(maxWindow)
 	if maxWindow < 2 {
 		maxWindow = 2
 	}
@@ -138,6 +152,7 @@ func newRxReorderQueue(n *Node, maxWindow int, releaseDelay time.Duration) *rxRe
 func (q *rxReorderQueue) applyConfig(maxWindow int, releaseDelay time.Duration) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	maxWindow = clampReorderWindow(maxWindow)
 	if maxWindow < 2 {
 		maxWindow = 2
 	}
