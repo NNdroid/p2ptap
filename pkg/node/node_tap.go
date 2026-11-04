@@ -81,6 +81,14 @@ func (n *Node) tapReadLoopPoll(buf []byte) {
 		}
 
 		batchReadCount := 0
+		// Set when the batch ended via ErrReadTimeout: the last Read call
+		// already blocked for the device's full wait interval (Windows waits up
+		// to 1s on the overlapped event), so the extra idle sleep below would
+		// only add latency and one more wakeup per idle cycle. The sleep is
+		// still REQUIRED for the other zero-frame outcomes — a device that
+		// returns (0, nil) repeatedly would otherwise spin the batch loop hot
+		// with no backpressure at all.
+		idleWaited := false
 		for batchIdx := 0; batchIdx < 32; batchIdx++ {
 			readN, err := n.TAP.Read(buf)
 			if err != nil {
@@ -89,6 +97,7 @@ func (n *Node) tapReadLoopPoll(buf []byte) {
 					return
 				}
 				if errors.Is(err, tap.ErrReadTimeout) {
+					idleWaited = true
 					break // No more frames available, exit batch
 				}
 				if errors.Is(err, syscall.EINTR) {
@@ -118,7 +127,7 @@ func (n *Node) tapReadLoopPoll(buf []byte) {
 		}
 
 		// Prevent tight CPU spinning when idle or on read errors/timeouts
-		if batchReadCount == 0 {
+		if batchReadCount == 0 && !idleWaited {
 			if readErrors > 0 {
 				time.Sleep(10 * time.Millisecond)
 			} else {
