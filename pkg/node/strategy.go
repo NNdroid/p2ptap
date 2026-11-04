@@ -931,6 +931,21 @@ func (sd *StrategyDispatcher) encryptAndFragment(targetPeer peer.ID, ps *PeerStr
 		}
 		data = enc
 		innerPooled = true
+	} else if sd.node.pskRequired() {
+		// PSK-required fail-closed (TX, twin of the RX garbage gate): the egress
+		// gate (canEgressToPeer) verified hasNegotiatedCipher before this frame
+		// was dispatched, but the cipher can be gone by the time the worker
+		// sends — a rekey in flight with an exhausted nonce budget
+		// (obfCipherForPeer returns nil while it waits), or a concurrent peer
+		// teardown. The AEAD seal IS the proof of PSK membership, so shipping
+		// the frame unsealed would bypass the policy in the window between the
+		// gate and the wire. The receiver would drop the unopenable bytes as
+		// garbage, but they would still have LEFT this node in
+		// application-plaintext — drop here instead and let the SeqSync
+		// reconciler converge the link.
+		return nil, tapPayloadStat{}, false, fmt.Errorf(
+			"psk-required: no negotiated cipher for peer %s — frame dropped rather than sent unsealed",
+			targetPeer.String())
 	} else if log.IsDebug() {
 		// Guarded: arguments are evaluated at the call site regardless of level,
 		// and this branch runs on EVERY frame in plaintext mode (no negotiated
