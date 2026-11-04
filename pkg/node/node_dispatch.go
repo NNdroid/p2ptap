@@ -349,62 +349,7 @@ func (n *Node) dispatchWorker(id int) {
 					}
 				case 2: // relay — persistent pool per relayHop (eliminates per-frame stream open)
 					for _, t := range tasks {
-						t := t
-						owned := t.owned
-						// relayData may be a pooled buffer (relayRelease != nil)
-						// that the pool hands out as job.data. Exactly one of
-						// onSent / onFail fires per job, so releasing it in both
-						// (whichever runs) frees the pooled buffer exactly once.
-						releaseRelay := t.relayRelease
-						releaseRelayOnce := func() {
-							if releaseRelay != nil {
-								releaseRelay()
-							}
-						}
-						n.relayPool.Submit(t.relayHop, t.relayData,
-							// onSent: track one logical TAP payload at the origin.
-							// Relay envelope and encryption bytes stay in protocol
-							// telemetry rather than the topology payload rate.
-							func() {
-								n.recordPeerTxBytes(t.target, t.origLen)
-								n.Collector.RecordSent(t.origLen)
-								if owned {
-									releaseFrameBuf(t.data)
-								}
-								releaseRelayOnce()
-							},
-							// onFail: non-blocking fallback to direct unicast,
-							// rate-limited by relayFallbackSem so a single
-							// drainAll (up to 128 jobs) cannot spawn 128
-							// concurrent SendToPeer goroutines.
-							func() {
-								defer releaseRelayOnce()
-								if n.peerStalled(t.target) {
-									if owned {
-										releaseFrameBuf(t.data)
-									}
-									return
-								}
-								select {
-								case n.relayFallbackSem <- struct{}{}:
-									go func() {
-										defer func() { <-n.relayFallbackSem }()
-										ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
-										defer cancel()
-										if derr := n.Dispatcher.SendToPeer(ctx, t.target, t.data); derr == nil {
-											n.Collector.RecordSent(t.origLen)
-										}
-										if owned {
-											releaseFrameBuf(t.data)
-										}
-									}()
-								default:
-									if owned {
-										releaseFrameBuf(t.data)
-									}
-								}
-							},
-						)
+						n.submitRelayTask(t)
 					}
 				}
 			}
@@ -517,43 +462,73 @@ func (n *Node) sendDispatchTask(task dispatchTask) {
 			releaseFrameBuf(data)
 		}
 	case 2: // relay
-		owned := task.owned
-		n.relayPool.Submit(task.relayHop, task.relayData,
-			func() {
-				n.recordPeerTxBytes(task.target, task.origLen)
-				n.Collector.RecordSent(task.origLen)
+		n.submitRelayTask(task)
+	}
+}
+
+// submitRelayTask submits one kind:2 dispatch task to the persistent relay
+// pool with the shared onSent/onFail contract. Both the batched dispatch
+// worker and the urgent send path used to carry their own copies of these
+// closures, and the urgent copy forgot to release task.relayRelease on the
+// success path — a pooled relay envelope leaked per relay frame sent through
+// that path (latent: no urgent caller sets kind 2 today, but two copies of an
+// ownership contract is exactly how they drift apart).
+//
+// Ownership: relayData may be a pooled buffer (relayRelease != nil) that the
+// pool hands out as job.data. Exactly one of onSent / onFail fires per job, so
+// releasing it in both (whichever runs) frees the pooled buffer exactly once.
+// task.data is owned when task.owned is set and is released by whichever
+// callback runs after its last possible use.
+func (n *Node) submitRelayTask(task dispatchTask) {
+	owned := task.owned
+	releaseRelayOnce := func() {
+		if task.relayRelease != nil {
+			task.relayRelease()
+		}
+	}
+	n.relayPool.Submit(task.relayHop, task.relayData,
+		// onSent: track one logical TAP payload at the origin. Relay envelope
+		// and encryption bytes stay in protocol telemetry rather than the
+		// topology payload rate.
+		func() {
+			n.recordPeerTxBytes(task.target, task.origLen)
+			n.Collector.RecordSent(task.origLen)
+			if owned {
+				releaseFrameBuf(task.data)
+			}
+			releaseRelayOnce()
+		},
+		// onFail: non-blocking fallback to direct unicast, rate-limited by
+		// relayFallbackSem so a single drainAll (up to 128 jobs) cannot spawn
+		// 128 concurrent SendToPeer goroutines.
+		func() {
+			defer releaseRelayOnce()
+			if n.peerStalled(task.target) {
 				if owned {
 					releaseFrameBuf(task.data)
 				}
-			},
-			func() {
-				if n.peerStalled(task.target) {
+				return
+			}
+			select {
+			case n.relayFallbackSem <- struct{}{}:
+				go func() {
+					defer func() { <-n.relayFallbackSem }()
+					ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
+					defer cancel()
+					if derr := n.Dispatcher.SendToPeer(ctx, task.target, task.data); derr == nil {
+						n.Collector.RecordSent(task.origLen)
+					}
 					if owned {
 						releaseFrameBuf(task.data)
 					}
-					return
+				}()
+			default:
+				if owned {
+					releaseFrameBuf(task.data)
 				}
-				select {
-				case n.relayFallbackSem <- struct{}{}:
-					go func() {
-						defer func() { <-n.relayFallbackSem }()
-						ctx, cancel := context.WithTimeout(n.ctx, 1500*time.Millisecond)
-						defer cancel()
-						if derr := n.Dispatcher.SendToPeer(ctx, task.target, task.data); derr == nil {
-							n.Collector.RecordSent(task.origLen)
-						}
-						if owned {
-							releaseFrameBuf(task.data)
-						}
-					}()
-				default:
-					if owned {
-						releaseFrameBuf(task.data)
-					}
-				}
-			},
-		)
-	}
+			}
+		},
+	)
 }
 
 func (n *Node) macCleanLoop() {

@@ -600,76 +600,17 @@ func (n *Node) dispatchExitTransitFrame(exitPID peer.ID, exitPeerID string, pack
 	if hasRoute && !route.IsDirect && route.NextHop != "" && route.NextHop != exitPID && route.NextHop != n.Host.ID() && !n.isBootstrapPeer(route.NextHop) {
 
 		log.Debug("Tx exit-transit (%s via relay %s): origLen=%d exitPeer=%s", tag, route.NextHop.String(), readN, exitPeerID)
-		// END-TO-END seal for exitPID into a SEPARATE buffer; keep `packedCopy`
-		// as the plaintext framed copy, because it is the direct-fallback payload
-		// handed to SendToPeer, which seals it itself. Sealing it in place and
-		// copying the ciphertext into the fallback would double-encrypt the frame
-		// on the relay onFail path and corrupt it.
-		inner := packedCopy
-		var encScratch []byte
-		if cipher := n.obfCipherForPeer(exitPID); cipher != nil {
-			encScratch = acquireFrameBuf(len(inner) + cipher.Overhead())
-			enc, eerr := n.sealPeerFrameInto(exitPID, cipher, inner, encScratch)
-			if eerr != nil {
-				log.Warn("Tx exit-transit: end-to-end seal for %s failed: %v (frame dropped rather than sent in plaintext)",
-					exitPID.String(), eerr)
-				releaseFrameBuf(encScratch)
-				releaseFrameBuf(packedCopy)
-				return
-			}
-			inner = enc
-		}
-		// Wrap the relay envelope, then HOP-BY-HOP seal it for the relay hop.
-		// IMPORTANT: sealRelayEnvelopeForHop Packs the bare PackRelayFrame output
-		// into a real obfuscate frame FIRST and only then encrypts. Calling
-		// EncryptPayloadRegion directly on the bare envelope (as this code used
-		// to) read frame[11:13] inside the base58 PeerID string, always returned
-		// ErrFrameCorrupted, and — with the old `if eerr==nil` guard — sent the
-		// envelope in plaintext, which the hop silently dropped.
-		//
-		// Pooled like the dispatch path: encScratch and relayScratch are released
-		// after the next stage copies them out; sealedDst becomes relayData,
-		// released exactly once via dispatchTask.relayRelease.
-		relayScratch := acquireFrameBuf(n.relayEnvelopeSize(exitPID, n.Host.ID(), len(inner)))
-		if relayBuf, rerr := n.packRelayFrameInto(relayScratch, exitPID, n.Host.ID(), routing.MaxRelayTTL, inner); rerr != nil {
-			releaseFrameBuf(relayScratch)
-			if encScratch != nil {
-				releaseFrameBuf(encScratch)
-			}
-			// Fall through to the direct dispatch below (packedCopy stays owned).
-		} else {
-			if encScratch != nil {
-				releaseFrameBuf(encScratch)
-			}
-			sealedDst := acquireFrameBuf(n.sealRelayEnvelopeMaxLen(len(relayBuf)))
-			sealed, serr := n.sealRelayEnvelopeForHopInto(route.NextHop, relayBuf, sealedDst)
-			releaseFrameBuf(relayScratch)
-			if serr != nil {
-				releaseFrameBuf(sealedDst)
-				log.Warn("Tx exit-transit: hop seal via %s failed: %v (frame dropped rather than sent in plaintext)",
-					route.NextHop.String(), serr)
-				releaseFrameBuf(packedCopy)
-				return
-			}
-			// Direct-path fallback copy MUST stay the PLAINTEXT packed frame;
-			// SendToPeer applies its own per-peer seal.
-			fallbackCopy := acquireFrameBuf(len(packedCopy))
-			copy(fallbackCopy, packedCopy)
-			n.dispatchNonblocking(dispatchTask{
-				kind:      2,
-				target:    exitPID,
-				relayHop:  route.NextHop,
-				data:      fallbackCopy,
-				relayData: sealed,
-				origLen:   readN,
-				owned:     true,
-				relayRelease: func() {
-					releaseFrameBuf(sealedDst)
-				},
-			})
+		// Shared two-layer seal (see sealAndDispatchRelay): end-to-end seal for
+		// the exit peer, relay envelope, hop-by-hop seal for the relay hop.
+		// The helper consumes packedCopy on success (relay task or direct
+		// fallback — the direct fallback is sealed by SendToPeer itself, and a
+		// PSK network drops it there if the cipher is gone, so the frame can
+		// never leave unsealed). On a failed end-to-end seal it stays owned and
+		// we drop it here.
+		if !n.sealAndDispatchRelay("exit-transit", exitPID, route.NextHop, nil, readN, packedCopy) {
 			releaseFrameBuf(packedCopy)
-			return
 		}
+		return
 	}
 	log.Debug("Tx Pack exit-transit (%s direct): origLen=%d exitPeer=%s", tag, readN, exitPeerID)
 	n.dispatchNonblocking(dispatchTask{
@@ -805,6 +746,125 @@ func (n *Node) processTapFrame(payload []byte) bool {
 		log.Debug("TAP ingress: len=%d %s", readN, describeEthernetFrame(payload))
 	}
 
+	// Layer-2 control frames (ARP requests, IPv6 Neighbor Solicitations) are
+	// answered in place by the proxy; a handled frame never reaches generic
+	// forwarding.
+	if n.proxyL2Control(payload) {
+		return true
+	}
+
+	if n.Interceptor != nil && n.Interceptor.MatchAndHandle(payload, tapInjectionWriter{node: n}) {
+		return true
+	}
+
+	if n.isLocalWebUIVirtualPacket(payload) {
+		var srcIPStr string
+		if len(payload) >= 30 && binary.BigEndian.Uint16(payload[12:14]) == 0x0800 {
+			srcIPStr = net.IP(payload[26:30]).String()
+		}
+		log.Debug("TAPFWD DROP: frame involves local WebUI virtual IP/MAC, dropped from overlay dispatch (srcIP=%s)", srcIPStr)
+		return true
+	}
+
+	dstMAC, srcMAC, okExtract := vswitch.ExtractEthernetMACs(payload)
+	if !okExtract {
+		log.Debug("TAP frame MAC extraction failed (len=%d) from %s", readN, n.TAP.Name())
+		return true
+	}
+	// Learn srcMAC only if it differs from our own configured TapMAC.
+	// The local OS may emit frames with EUI-64 derived synthetic MACs
+	// (e.g. from IPv6 link-local IID) that should NOT pollute the MAC table
+	// as a second "local" entry.
+	if !bytes.Equal(srcMAC, n.localMAC) {
+		n.MACTable.Learn(srcMAC, n.Host.ID())
+	}
+	if len(payload) >= 14 {
+		n.Collector.RecordFrame(payload)
+	}
+	n.IPTracker.ExtractAndRecord(payload, true)
+
+	// dstIP is parsed at most once per frame and shared by the unicast IP
+	// fallback and both exit-node checks in the broadcast block. It is left
+	// nil on the MAC-table hit path (which returns before the broadcast
+	// block) so that path pays nothing for it.
+	var dstIP net.IP
+	targetPeer, found := n.MACTable.Lookup(dstMAC)
+	if !found {
+		targetPeer, dstIP, dstMAC = n.resolveUnicastTargetByIP(dstMAC, srcMAC, payload)
+		found = targetPeer != ""
+	} else if log.IsDebug() {
+		log.Debug("TAPFWD resolve: MACTable HIT dstMAC=%s => targetPeer=%s", dstMAC.String(), targetPeer.String())
+	}
+
+	if found && targetPeer != n.Host.ID() {
+		return n.forwardUnicastToPeer(targetPeer, dstMAC, payload, readN)
+	}
+	if found {
+		// The frame is addressed to our own TAP MAC: either a genuinely local
+		// frame, or one the OS sent because the Exit Node ARP proxy fell back
+		// to the local MAC before the peer's real MAC was learned.
+		return n.handleSelfAddressedFrame(dstMAC, payload, readN)
+	}
+	// Unknown unicast / broadcast: Exit Node hijack when applicable, mesh
+	// flood for LAN-scoped destinations, suppression for unroutable externals.
+	return n.floodBroadcastOrUnknown(dstMAC, dstIP, payload, readN)
+}
+
+// resolveUnicastTargetByIP is the MAC-table-miss fallback: resolve the
+// destination IP directly from the frame (direct TAP IP, advertised LAN
+// subnet, or runtime IPTracker) and look up the owning mesh peer. It returns
+// the resolved target peer ("" when nobody owns the address), the parsed
+// dstIP for the caller's exit-node/suppression checks, and the possibly
+// rewritten dstMAC.
+func (n *Node) resolveUnicastTargetByIP(dstMAC, srcMAC net.HardwareAddr, payload []byte) (peer.ID, net.IP, net.HardwareAddr) {
+	dstIP := frameDstIP(payload)
+	if log.IsDebug() {
+		log.Debug("TAPFWD resolve: MACTable MISS dstMAC=%s srcMAC=%s", dstMAC.String(), srcMAC.String())
+	}
+	if dstIP == nil {
+		log.Debug("TAPFWD resolve: dstIP extraction failed (ethertype=%04x len=%d)", binary.BigEndian.Uint16(payload[12:14]), len(payload))
+		return "", nil, dstMAC
+	}
+	pid, mac := n.ResolvePeerIDByIP(dstIP)
+	if len(mac) == 0 {
+		if log.IsDebug() {
+			log.Debug("TAPFWD resolve: dstIP=%s resolvePeerIDByIP => pid=(empty) mac=(none) [NOT found]", dstIP.String())
+		}
+	} else {
+		if log.IsDebug() {
+			log.Debug("TAPFWD resolve: dstIP=%s resolvePeerIDByIP => pid=%s mac=%s [found]", dstIP.String(), pid.String(), mac.String())
+		}
+	}
+	if pid == "" || pid == n.Host.ID() {
+		return "", dstIP, dstMAC
+	}
+	// Self-learn the peer's tapMAC so that subsequent frames
+	// addressed to this MAC hit the direct path via MACTable.Lookup
+	// instead of re-resolving through the IP fallback (which can
+	// route via relay/boot and cause one-direction stutter).
+	if len(mac) == 6 {
+		n.MACTable.Learn(mac, pid)
+		// If the incoming L3 frame was synthesized with a broadcast MAC (e.g. Wintun initial ping),
+		// or carries a synthetic/differing unicast dstMAC from local OS ARP cache,
+		// learn the incoming dstMAC as well so subsequent frames hit MACTable directly,
+		// and rewrite payload dstMAC to the target peer's genuine unicast MAC so Linux/Windows kernel
+		// accepts and responds to unicast ICMP/TCP/UDP.
+		if len(payload) >= 6 && !bytes.Equal(payload[0:6], mac) {
+			if !isBroadcastOrMulticastMAC(dstMAC) {
+				n.MACTable.Learn(dstMAC, pid)
+			}
+			copy(payload[0:6], mac)
+			dstMAC = mac
+		}
+	}
+	return pid, dstIP, dstMAC
+}
+
+// proxyL2Control answers ARP requests and IPv6 Neighbor Solicitations in place
+// from the node's own addresses, its peers, and the Exit Node. It returns true
+// when the frame was consumed (a reply was written or the request must not
+// flood); false passes the frame on to generic forwarding.
+func (n *Node) proxyL2Control(payload []byte) bool {
 	// ARP proxy handling. Require opcode == Request(1) AND protocol ==
 	// IPv4 so we don't mis-read the target IP field of an ARP carrying a
 	// different protocol (e.g. ARP for IPv6 / non-Ethernet HW types), which
@@ -820,7 +880,10 @@ func (n *Node) processTapFrame(payload []byte) bool {
 			log.Debug("TAP ARP request: senderIP=%s senderMAC=%s targetIP=%s", senderIP, senderMAC, targetIP)
 		}
 
-		isDAD := senderIP == nil || senderIP.IsUnspecified() || (n.localV4IP != nil && senderIP.Equal(n.localV4IP))
+		// Duplicate-address detection: an ARP probe carries an unspecified
+		// sender IP (the slice itself is never nil, so the historical nil test
+		// was dead code), or re-announces our own address.
+		isDAD := senderIP.IsUnspecified() || (n.localV4IP != nil && senderIP.Equal(n.localV4IP))
 		res := n.resolveProxyMAC(targetIP, n.lookupPeerMACByIPv4, n.lookupPeerMACByAdvertisedSubnet,
 			func(ip net.IP) bool {
 				if isDAD && n.localV4IP != nil && ip.Equal(n.localV4IP) {
@@ -868,7 +931,7 @@ func (n *Node) processTapFrame(payload []byte) bool {
 			log.Debug("TAP NDP solicitation: senderIP=%s senderMAC=%s targetIP=%s", senderIPv6, senderMAC, targetIPv6)
 		}
 
-		isV6DAD := senderIPv6 == nil || senderIPv6.IsUnspecified() || (n.localV6IP != nil && senderIPv6.Equal(n.localV6IP))
+		isV6DAD := senderIPv6.IsUnspecified() || (n.localV6IP != nil && senderIPv6.Equal(n.localV6IP))
 		res := n.resolveProxyMAC(targetIPv6, n.lookupPeerMACByIPv6, n.lookupPeerMACByAdvertisedSubnet,
 			func(ip net.IP) bool {
 				if isV6DAD && n.localV6IP != nil && ip.Equal(n.localV6IP) {
@@ -901,329 +964,350 @@ func (n *Node) processTapFrame(payload []byte) bool {
 			return true
 		}
 	}
+	return false
+}
 
-	if n.Interceptor != nil && n.Interceptor.MatchAndHandle(payload, tapInjectionWriter{node: n}) {
-		return true
-	}
+// forwardUnicastToPeer is the MAC-table-hit unicast forward: egress gate,
+// outbound ACL, coalescing gate, then pack and dispatch (direct or relayed).
+func (n *Node) forwardUnicastToPeer(targetPeer peer.ID, dstMAC net.HardwareAddr, payload []byte, readN int) bool {
+	// Passively timestamp the user's genuine OS ICMP request at the TAP
+	// boundary. The matching reply is observed on the inbound overlay path,
+	// so WebUI RTT includes the same queueing that terminal ping sees.
+	n.observeTapICMPEchoRequest(targetPeer, payload, time.Now())
+	// Resolve the route up-front. For a RELAYED destination the final peer is
+	// by definition never directly connected, so the "is the link usable" gate
+	// below must check the RELAY HOP's readiness (route.NextHop), not the
+	// final destination's. Gating on targetPeer's readiness previously dropped
+	// every relay-only frame here — before it ever reached the relay branch —
+	// blackholing all multi-hop / overlay-relay traffic (e.g. A -> relay ->
+	// C could never deliver).
+	route, hasRoute := n.overlayRoute(targetPeer, routing.MaxRelayTTL, "")
 
-	if n.isLocalWebUIVirtualPacket(payload) {
-		var srcIPStr string
-		if len(payload) >= 30 && binary.BigEndian.Uint16(payload[12:14]) == 0x0800 {
-			srcIPStr = net.IP(payload[26:30]).String()
-		}
-		log.Debug("TAPFWD DROP: frame involves local WebUI virtual IP/MAC, dropped from overlay dispatch (srcIP=%s)", srcIPStr)
-		return true
-	}
-
-	dstMAC, srcMAC, okExtract := vswitch.ExtractEthernetMACs(payload)
-	if !okExtract {
-		log.Debug("TAP frame MAC extraction failed (len=%d) from %s", readN, n.TAP.Name())
-		return true
-	}
-	// Learn srcMAC only if it differs from our own configured TapMAC.
-	// The local OS may emit frames with EUI-64 derived synthetic MACs
-	// (e.g. from IPv6 link-local IID) that should NOT pollute the MAC table
-	// as a second "local" entry.
-	if !bytes.Equal(srcMAC, n.localMAC) {
-		n.MACTable.Learn(srcMAC, n.Host.ID())
-	}
-	if len(payload) >= 14 {
-		n.Collector.RecordFrame(payload)
-	}
-	n.IPTracker.ExtractAndRecord(payload, true)
-
-	// dstIP is parsed at most once per frame and shared by the unicast IP
-	// fallback below and both exit-node checks in the broadcast block. Each of
-	// those used to re-derive it from the frame with its own heap allocation.
-	// It is left nil on the MAC-table hit path (which returns before the
-	// broadcast block) so that path pays nothing for it.
-	var dstIP net.IP
-	targetPeer, found := n.MACTable.Lookup(dstMAC)
-	if !found {
-		dstIP = frameDstIP(payload)
+	// Relay-aware usability gate (shared helper): for a relayed destination
+	// the final peer is never directly connected, so canEgressToPeer gates
+	// on the RELAY HOP's readiness rather than the destination's. Gating on
+	// the destination's readiness previously dropped every relay-only frame
+	// here — before it ever reached the relay branch — blackholing all
+	// multi-hop / overlay-relay traffic (e.g. A -> relay -> C could never
+	// deliver).
+	if !n.canEgressWithRoute(targetPeer, route, hasRoute) {
+		// Count it: without this, a dead boot or a stale route table made this
+		// node drop its own TAP traffic with every RelayDiag counter flat,
+		// because UplinkGone only fires downstream at the boot relay, which a
+		// frame refused here never reaches.
+		n.relayDiag.egressGate()
+		hop := n.relayHopForTarget(targetPeer)
+		bootUplink := hop != "" && n.isBootstrapPeer(hop) && n.hasBootRelayUplink(hop)
 		if log.IsDebug() {
-			log.Debug("TAPFWD resolve: MACTable MISS dstMAC=%s srcMAC=%s", dstMAC.String(), srcMAC.String())
+			log.Debug("TAPFWD DROP: canEgressToPeer=false for targetPeer=%s (isPeerReady=%v cipherPresent=%v relayHop=%s bootUplink=%v)",
+				targetPeer.String(),
+				n.isPeerReady(targetPeer),
+				n.obfCipherForPeer(targetPeer) != nil,
+				hop.String(),
+				bootUplink)
 		}
-		// Fallback: when the MAC table has no entry for dstMAC (e.g. the peer
-		// hasn't sent a frame yet, so we never learned its MAC), resolve the
-		// destination IP directly from the frame (direct TAP IP, advertised LAN subnet,
-		// or runtime IPTracker) and look up the owning mesh peer.
-		if dstIP != nil {
-			pid, mac := n.ResolvePeerIDByIP(dstIP)
-			if len(mac) == 0 {
-				if log.IsDebug() {
-					log.Debug("TAPFWD resolve: dstIP=%s resolvePeerIDByIP => pid=(empty) mac=(none) [NOT found]", dstIP.String())
-				}
-			} else {
-				if log.IsDebug() {
-					log.Debug("TAPFWD resolve: dstIP=%s resolvePeerIDByIP => pid=%s mac=%s [found]", dstIP.String(), pid.String(), mac.String())
-				}
-			}
-			if pid != "" && pid != n.Host.ID() {
-				targetPeer = pid
-				found = true
-				// Self-learn the peer's tapMAC so that subsequent frames
-				// addressed to this MAC hit the direct path via MACTable.Lookup
-				// instead of re-resolving through the IP fallback (which can
-				// route via relay/boot and cause one-direction stutter).
-				if len(mac) == 6 {
-					n.MACTable.Learn(mac, pid)
-					// If the incoming L3 frame was synthesized with a broadcast MAC (e.g. Wintun initial ping),
-					// or carries a synthetic/differing unicast dstMAC from local OS ARP cache,
-					// learn the incoming dstMAC as well so subsequent frames hit MACTable directly,
-					// and rewrite payload dstMAC to the target peer's genuine unicast MAC so Linux/Windows kernel
-					// accepts and responds to unicast ICMP/TCP/UDP.
-					if len(payload) >= 6 && !bytes.Equal(payload[0:6], mac) {
-						if !isBroadcastOrMulticastMAC(dstMAC) {
-							n.MACTable.Learn(dstMAC, pid)
-						}
-						copy(payload[0:6], mac)
-						dstMAC = mac
-					}
-				}
-			}
-		} else {
-			log.Debug("TAPFWD resolve: dstIP extraction failed (ethertype=%04x len=%d)", binary.BigEndian.Uint16(payload[12:14]), len(payload))
-		}
-	} else {
-		if log.IsDebug() {
-			log.Debug("TAPFWD resolve: MACTable HIT dstMAC=%s => targetPeer=%s", dstMAC.String(), targetPeer.String())
+		n.triggerOnDemandConnect(targetPeer)
+		return true
+	}
+
+	// PERF: render the base58 once and reuse it for every bookkeeping call
+	// and log below (peer.ID.String() is ~930ns / 2 allocs apiece).
+	targetPeerStr := n.peerIDString(targetPeer)
+
+	// Outbound ACL: check the frame against configured rules before sending.
+	// This was missing entirely — only inbound (isTx=false) was enforced,
+	// making every operator-configured outbound deny rule dead code.
+	if !n.checkACL(payload, targetPeerStr, true) {
+		return true
+	}
+
+	// Packet coalescing gate: merge short unicast frames to the same peer
+	// into one obfuscate frame so the padding rule has nothing to pad (the
+	// buffer reaches the band target naturally). Frames bound for the active
+	// Exit Node peer (latency-sensitive egress) and any frame when coalescing
+	// is off go out through the normal path below. maybeBuffer returns true
+	// only when it consumed the frame (buffered or flushed immediately).
+	if n.coalescer != nil && n.coalescer.maybeBuffer(targetPeer, dstMAC, payload) {
+		return true
+	}
+
+	seqID := n.nextTxSeqID(targetPeer)
+	// Pack DIRECTLY into the pooled buffer (same pattern as the broadcast
+	// fan-out): the old Pack-into-shared-outBuf + copy round-trip cost a
+	// full-frame memcpy on every unicast TAP frame. `payload` (the read
+	// buffer) is only read here, and the pooled buffer is owned by the
+	// dispatch task until it is released after transmission.
+	packedCopy := acquireFrameBuf(n.Packer.MaxPackedLen(readN))
+	totalLen, perr := n.Packer.Pack(seqID, payload, packedCopy)
+	if perr != nil {
+		releaseFrameBuf(packedCopy)
+		log.Debug("Frame pack error: %v", perr)
+		return true
+	}
+	packedCopy = packedCopy[:totalLen]
+	n.dispatchUnicastPacked(targetPeer, targetPeerStr, dstMAC, route, hasRoute, seqID, packedCopy, payload, readN)
+	return true
+}
+
+// handleSelfAddressedFrame processes a frame whose dstMAC resolved to this
+// node's own peer ID. This happens when the local OS ARPed for the Exit Node
+// peer's IP (e.g. the default-route gateway) and the Exit Node ARP proxy fell
+// back to the local MAC because the peer's real MAC was not yet learned.
+// Delivering such a frame "to ourselves" would just drop it, blackholing the
+// entire Exit Node tunnel, so it is redirected to the Exit Node peer by peer
+// ID when one is active.
+func (n *Node) handleSelfAddressedFrame(dstMAC net.HardwareAddr, payload []byte, readN int) bool {
+	log.Debug("TAPFWD: dstMAC=%s resolved to SELF (targetPeer==local); checking exit-node redirect (exitNodeActive=%v)", dstMAC.String(), n.isExitNodeActive())
+	if n.isExitNodeActive() {
+		// Count only UNICAST frames as genuine egress; broadcast/multicast
+		// (ARP/DHCP/mDNS) are local L2 and must not inflate the gateway
+		// counter (they are already binned by RecordPacketDir).
+		countGateway := len(payload) >= 6 && payload[0]&1 == 0
+		if n.packAndDispatchExitTransit(payload, readN, "local-MAC redirect", countGateway) {
+			return true
 		}
 	}
-	if found && targetPeer != n.Host.ID() {
-		// Passively timestamp the user's genuine OS ICMP request at the TAP
-		// boundary. The matching reply is observed on the inbound overlay path,
-		// so WebUI RTT includes the same queueing that terminal ping sees.
-		n.observeTapICMPEchoRequest(targetPeer, payload, time.Now())
-		// Resolve the route up-front. For a RELAYED destination the final peer is
-		// by definition never directly connected, so the "is the link usable" gate
-		// below must check the RELAY HOP's readiness (route.NextHop), not the
-		// final destination's. Gating on targetPeer's readiness previously dropped
-		// every relay-only frame here — before it ever reached the relay branch —
-		// blackholing all multi-hop / overlay-relay traffic (e.g. A -> relay ->
-		// C could never deliver).
-		route, hasRoute := n.overlayRoute(targetPeer, routing.MaxRelayTTL, "")
+	// Genuinely local frame — nothing to forward.
+	log.Debug("TAPFWD DROP: genuinely-local frame dstMAC=%s (exitNodeActive=%v, exitPeerID=%s) — nothing to forward",
+		dstMAC.String(), n.isExitNodeActive(), n.Gateway.ActiveExitPeerID())
+	return true
+}
 
-		// Relay-aware usability gate (shared helper): for a relayed destination
-		// the final peer is never directly connected, so canEgressToPeer gates
-		// on the RELAY HOP's readiness rather than the destination's. Gating on
-		// the destination's readiness previously dropped every relay-only frame
-		// here — before it ever reached the relay branch — blackholing all
-		// multi-hop / overlay-relay traffic (e.g. A -> relay -> C could never
-		// deliver).
-		if !n.canEgressWithRoute(targetPeer, route, hasRoute) {
-			// Count it: without this, a dead boot or a stale route table made this
-			// node drop its own TAP traffic with every RelayDiag counter flat,
-			// because UplinkGone only fires downstream at the boot relay, which a
-			// frame refused here never reaches.
-			n.relayDiag.egressGate()
-			hop := n.relayHopForTarget(targetPeer)
-			bootUplink := hop != "" && n.isBootstrapPeer(hop) && n.hasBootRelayUplink(hop)
-			if log.IsDebug() {
-				log.Debug("TAPFWD DROP: canEgressToPeer=false for targetPeer=%s (isPeerReady=%v cipherPresent=%v relayHop=%s bootUplink=%v)",
-					targetPeer.String(),
-					n.isPeerReady(targetPeer),
-					n.obfCipherForPeer(targetPeer) != nil,
-					hop.String(),
-					bootUplink)
-			}
-			n.triggerOnDemandConnect(targetPeer)
-			return true
-		}
-
-		// PERF: render the base58 once and reuse it for every bookkeeping call
-		// and log below (peer.ID.String() is ~930ns / 2 allocs apiece).
-		targetPeerStr := n.peerIDString(targetPeer)
-
-		// Outbound ACL: check the frame against configured rules before sending.
-		// This was missing entirely — only inbound (isTx=false) was enforced,
-		// making every operator-configured outbound deny rule dead code.
-		if !n.checkACL(payload, targetPeerStr, true) {
-			return true
-		}
-
-		// Packet coalescing gate: merge short unicast frames to the same peer
-		// into one obfuscate frame so the padding rule has nothing to pad (the
-		// buffer reaches the band target naturally). Frames bound for the active
-		// Exit Node peer (latency-sensitive egress) and any frame when coalescing
-		// is off go out through the normal path below. maybeBuffer returns true
-		// only when it consumed the frame (buffered or flushed immediately).
-		if n.coalescer != nil && n.coalescer.maybeBuffer(targetPeer, dstMAC, payload) {
-			return true
-		}
-
-		seqID := n.nextTxSeqID(targetPeer)
-		// Pack DIRECTLY into the pooled buffer (same pattern as the broadcast
-		// fan-out): the old Pack-into-shared-outBuf + copy round-trip cost a
-		// full-frame memcpy on every unicast TAP frame. `payload` (the read
-		// buffer) is only read here, and the pooled buffer is owned by the
-		// dispatch task until it is released after transmission.
-		packedCopy := acquireFrameBuf(n.Packer.MaxPackedLen(readN))
-		totalLen, perr := n.Packer.Pack(seqID, payload, packedCopy)
-		if perr != nil {
-			releaseFrameBuf(packedCopy)
-			log.Debug("Frame pack error: %v", perr)
-			return true
-		}
-		packedCopy = packedCopy[:totalLen]
-		n.dispatchUnicastPacked(targetPeer, targetPeerStr, dstMAC, route, hasRoute, seqID, packedCopy, payload, readN)
+// packAndDispatchExitTransit is the shared tail of the two Exit Node egress
+// sites (the self-addressed redirect above and the broadcast no-flood hijack
+// below): pack the raw TAP payload for the active Exit Node peer and hand it
+// to dispatchExitTransitFrame. The gateway-counter PREDICATE is decided by the
+// caller (the two sites classify genuine egress differently) but the count is
+// taken here, after a successful pack, so a pack failure does not inflate it.
+// The function returns false only when no Exit Node peer is configured; every
+// other outcome consumes the frame.
+func (n *Node) packAndDispatchExitTransit(payload []byte, readN int, tag string, countGateway bool) bool {
+	exitPeerID := n.Gateway.ActiveExitPeerID()
+	exitPID := n.Gateway.ActiveExitPeerPID()
+	if exitPeerID == "" || exitPeerID == n.Host.ID().String() {
+		return false
+	}
+	seqID := n.nextTxSeqID(exitPID)
+	packedCopy := acquireFrameBuf(n.Packer.MaxPackedLen(readN))
+	totalLen, perr := n.Packer.Pack(seqID, payload, packedCopy)
+	if perr != nil {
+		releaseFrameBuf(packedCopy)
+		log.Debug("Frame pack error: %v", perr)
 		return true
-	} else if !found {
-		// Unknown unicast / broadcast — fall through to the broadcast handling
-		// block below, which performs the Exit Node redirect when applicable.
-	} else {
-		// found && targetPeer == n.Host.ID(): the frame is addressed to our own
-		// TAP MAC. This happens when the local OS ARPed for the Exit Node peer's
-		// IP (e.g. the default-route gateway) and the Exit Node ARP proxy fell
-		// back to the local MAC because the peer's real MAC was not yet learned.
-		// Delivering such a frame "to ourselves" would just drop it, blackholing
-		// the entire Exit Node tunnel. Redirect it to the Exit Node peer by peer
-		// ID so the tunnel comes up even before the peer's MAC is discovered.
-		log.Debug("TAPFWD: dstMAC=%s resolved to SELF (targetPeer==local); checking exit-node redirect (exitNodeActive=%v)", dstMAC.String(), n.isExitNodeActive())
-		if n.isExitNodeActive() {
-			exitPeerID := n.Gateway.ActiveExitPeerID()
-			exitPID := n.Gateway.ActiveExitPeerPID()
-			if exitPeerID != "" && exitPeerID != n.Host.ID().String() {
-				seqID := n.nextTxSeqID(exitPID)
-				packedCopy := acquireFrameBuf(n.Packer.MaxPackedLen(readN))
-				totalLen, perr := n.Packer.Pack(seqID, payload, packedCopy)
-				if perr != nil {
-					releaseFrameBuf(packedCopy)
-					log.Debug("Frame pack error: %v", perr)
-					return true
-				}
-				packedCopy = packedCopy[:totalLen]
-				n.Collector.RecordPacketDir(payload, true)
-				n.Collector.RecordTxSeq(exitPeerID, seqID)
-				// Count only UNICAST frames as genuine egress; broadcast/multicast
-				// (ARP/DHCP/mDNS) are local L2 and must not inflate the gateway
-				// counter (they are already binned by RecordPacketDir).
-				if len(payload) >= 6 && payload[0]&1 == 0 {
-					n.Collector.RecordGatewayPacket()
-				}
-				log.Debug("Tx Pack exit-transit (local-MAC redirect): seq=%d origLen=%d packedLen=%d exitPeer=%s", seqID, readN, totalLen, exitPeerID)
-				n.dispatchExitTransitFrame(exitPID, exitPeerID, packedCopy, payload, readN, "local-MAC redirect")
+	}
+	packedCopy = packedCopy[:totalLen]
+	n.Collector.RecordPacketDir(payload, true)
+	n.Collector.RecordTxSeq(exitPeerID, seqID)
+	if countGateway {
+		n.Collector.RecordGatewayPacket()
+	}
+	log.Debug("Tx Pack exit-transit (%s): seq=%d origLen=%d packedLen=%d exitPeer=%s", tag, seqID, readN, totalLen, exitPeerID)
+	n.dispatchExitTransitFrame(exitPID, exitPeerID, packedCopy, payload, readN, tag)
+	return true
+}
+
+// floodBroadcastOrUnknown handles the frames nobody owns: it hijacks
+// WAN-destined traffic to the active Exit Node, suppresses unroutable
+// externals from the mesh, and floods genuine LAN-scoped broadcast / unknown
+// unicast to every peer.
+func (n *Node) floodBroadcastOrUnknown(dstMAC net.HardwareAddr, dstIP net.IP, payload []byte, readN int) bool {
+	// Exit Node special case — minimise broadcast:
+	// When an Exit Node tunnel is active, the only sane destination for an
+	// unknown/unicast-broadcast frame from the local OS is the Exit Node
+	// peer (the OS is ARPing for a public IP it routed into the TAP, or
+	// emitting transit traffic whose next-hop MAC it has not learned yet).
+	// Flooding such frames to EVERY peer would leak the client's traffic to
+	// the whole mesh and is exactly what we must avoid. So we send it ONLY
+	// to the Exit Node peer (addressed by peer ID, NOT by a learned MAC, so
+	// it works even before the Exit Node peer's MAC has been discovered).
+	if n.isExitNodeActive() {
+		// Check if target IP is a Mesh / LAN Subnet IP vs an external Internet IP.
+		// isMeshLocalAddress, not isMeshLocalIP: reaching this block means
+		// MACTable AND ResolvePeerIDByIP both already missed, so no peer owns
+		// dstIP - the two peer lookups inside isMeshLocalIP (an arpIndex map
+		// hit plus a full advertised-subnet scan) could only ever miss here.
+		// That matters because this is every frame heading out of the tunnel.
+		isMeshOrSubnet := n.isMeshLocalAddress(dstIP)
+		// Only hijack to Exit Node if it's NOT a mesh/subnet IP (i.e. WAN/Internet traffic)
+		if !isMeshOrSubnet {
+			// Count only frames with a known unicast IP destination as
+			// genuine egress. The Ethernet destination is not usable
+			// here: an L3 tunnel (Android TUN, Wintun before the peer's
+			// MAC is learned) always leaves it at broadcast for exactly
+			// this traffic, so the old "dst MAC is unicast" test kept
+			// this counter pinned at zero on the one platform where
+			// every packet egresses through here. Reaching this point
+			// already proves dstIP is non-nil and not a group/broadcast
+			// address (!isMeshLocalAddress above), so presence is the
+			// whole test.
+			if n.packAndDispatchExitTransit(payload, readN, "no flood", dstIP != nil) {
 				return true
 			}
 		}
-		// Genuinely local frame — nothing to forward.
-		log.Debug("TAPFWD DROP: genuinely-local frame dstMAC=%s (exitNodeActive=%v, exitPeerID=%s) — nothing to forward",
-			dstMAC.String(), n.isExitNodeActive(), n.Gateway.ActiveExitPeerID())
+	}
+
+	// A frame addressed to an external WAN destination (outside this
+	// node's subnet, every peer's advertised subnet, and every LAN-scoped
+	// address class) with no Exit Node to carry it must NOT be flooded to
+	// the mesh: it cannot be delivered by anyone, and fanning it out burns
+	// relay bandwidth while leaking the client's destination metadata to
+	// every peer.
+	//
+	// The decision is made on the IP destination, NOT on the Ethernet
+	// destination MAC. Those are equivalent only on a real L2 TAP: an L3
+	// tunnel (Android TUN, Wintun fallback) has no ARP and therefore no
+	// peer MAC to put in the header, so it synthesises broadcast for every
+	// packet whose destination it cannot resolve — which is precisely the
+	// WAN traffic this guard exists for. Keying the guard on "dst MAC is
+	// unicast" made it a permanent no-op on those platforms: with a
+	// VpnService capturing 0.0.0.0/0 and no Exit Node selected, the whole
+	// of the device's outbound traffic was flooded to the entire mesh.
+	//
+	// isMeshLocalIP is the right predicate and already returns true for
+	// everything that must stay on the mesh: limited broadcast,
+	// LAN-scoped multicast (mDNS/SSDP/LLMNR), link-local, this node's own
+	// subnet, another peer's TAP IP, and any peer-advertised subnet. A
+	// frame with no IP at all (an ARP reply, any other L2 frame) is not
+	// "unroutable external" — flooding is its only delivery path — so it
+	// is never suppressed here.
+	if dstIP != nil && !n.isMeshLocalIP(dstIP) {
+		// Guarded: dstIP.String() allocates, and this fires for every
+		// unroutable packet the OS pushes into a default-route tunnel.
+		if log.IsDebug() {
+			log.Debug("TAPFWD DROP: unroutable external frame dstIP=%s dstMAC=%s without active exit node, suppressed from mesh flood",
+				dstIP.String(), dstMAC.String())
+		}
 		return true
 	}
 
-	// From here we handle broadcast / unknown-unicast frames.
-	{
-		// Exit Node special case — minimise broadcast:
-		// When an Exit Node tunnel is active, the only sane destination for an
-		// unknown/unicast-broadcast frame from the local OS is the Exit Node
-		// peer (the OS is ARPing for a public IP it routed into the TAP, or
-		// emitting transit traffic whose next-hop MAC it has not learned yet).
-		// Flooding such frames to EVERY peer would leak the client's traffic to
-		// the whole mesh and is exactly what we must avoid. So we send it ONLY
-		// to the Exit Node peer (addressed by peer ID, NOT by a learned MAC, so
-		// it works even before the Exit Node peer's MAC has been discovered).
-		if n.isExitNodeActive() {
-			// Check if target IP is a Mesh / LAN Subnet IP vs an external Internet IP.
-			// isMeshLocalAddress, not isMeshLocalIP: reaching this block means
-			// MACTable AND ResolvePeerIDByIP both already missed, so no peer owns
-			// dstIP - the two peer lookups inside isMeshLocalIP (an arpIndex map
-			// hit plus a full advertised-subnet scan) could only ever miss here.
-			// That matters because this is every frame heading out of the tunnel.
-			isMeshOrSubnet := n.isMeshLocalAddress(dstIP)
-			// Only hijack to Exit Node if it's NOT a mesh/subnet IP (i.e. WAN/Internet traffic)
-			if !isMeshOrSubnet {
-				exitPeerID := n.Gateway.ActiveExitPeerID()
-				exitPID := n.Gateway.ActiveExitPeerPID()
-				if exitPeerID != "" && exitPeerID != n.Host.ID().String() {
-					seqID := n.nextTxSeqID(exitPID)
-					packedCopy := acquireFrameBuf(n.Packer.MaxPackedLen(readN))
-					totalLen, perr := n.Packer.Pack(seqID, payload, packedCopy)
-					if perr != nil {
-						releaseFrameBuf(packedCopy)
-						log.Debug("Frame pack error: %v", perr)
-						return true
-					}
-					packedCopy = packedCopy[:totalLen]
-					n.Collector.RecordPacketDir(payload, true)
-					n.Collector.RecordTxSeq(exitPeerID, seqID)
-					// Count only frames with a known unicast IP destination as
-					// genuine egress. The Ethernet destination is not usable
-					// here: an L3 tunnel (Android TUN, Wintun before the peer's
-					// MAC is learned) always leaves it at broadcast for exactly
-					// this traffic, so the old "dst MAC is unicast" test kept
-					// this counter pinned at zero on the one platform where
-					// every packet egresses through here. Reaching this point
-					// already proves dstIP is non-nil and not a group/broadcast
-					// address (!isMeshLocalAddress above), so presence is the
-					// whole test.
-					if dstIP != nil {
-						n.Collector.RecordGatewayPacket()
-					}
-					log.Debug("Tx Pack exit-transit (no flood): seq=%d origLen=%d packedLen=%d exitPeer=%s", seqID, readN, totalLen, exitPeerID)
-					n.dispatchExitTransitFrame(exitPID, exitPeerID, packedCopy, payload, readN, "no flood")
-					return true
-				}
-			}
-		}
+	// Normal mesh behaviour: flood broadcast / unknown-unicast to all peers
+	// so L2 discovery (ARP/NDP for peer-advertised subnets, service
+	// discovery) works across the whole overlay.
+	n.Collector.RecordPacketDir(payload, true)
+	if n.Collector != nil {
+		n.Collector.CaptureFrameWithPeers(observer.DirTx, payload, "self", "broadcast")
+	}
+	// NOTE: the frame is NOT Packed here. BroadcastToAllPeers Packs it
+	// PER-PEER (each peer gets its OWN anti-replay epoch baked into the
+	// SeqID), so a reconnect of one peer never disturbs another. We hand the
+	// raw TAP payload to the dispatcher; copy it first so the async fan-out
+	// never races with the next TAP read. The per-peer Tx seq is recorded
+	// inside the fan-out.
+	bcastPayload := acquireFrameBuf(len(payload))
+	copy(bcastPayload, payload)
+	log.Debug("Tx broadcast: origLen=%d", readN)
+	n.dispatchNonblocking(dispatchTask{
+		kind:    1,
+		data:    bcastPayload,
+		origLen: readN,
+		owned:   true,
+	})
+	return true
+}
 
-		// A frame addressed to an external WAN destination (outside this
-		// node's subnet, every peer's advertised subnet, and every LAN-scoped
-		// address class) with no Exit Node to carry it must NOT be flooded to
-		// the mesh: it cannot be delivered by anyone, and fanning it out burns
-		// relay bandwidth while leaking the client's destination metadata to
-		// every peer.
-		//
-		// The decision is made on the IP destination, NOT on the Ethernet
-		// destination MAC. Those are equivalent only on a real L2 TAP: an L3
-		// tunnel (Android TUN, Wintun fallback) has no ARP and therefore no
-		// peer MAC to put in the header, so it synthesises broadcast for every
-		// packet whose destination it cannot resolve — which is precisely the
-		// WAN traffic this guard exists for. Keying the guard on "dst MAC is
-		// unicast" made it a permanent no-op on those platforms: with a
-		// VpnService capturing 0.0.0.0/0 and no Exit Node selected, the whole
-		// of the device's outbound traffic was flooded to the entire mesh.
-		//
-		// isMeshLocalIP is the right predicate and already returns true for
-		// everything that must stay on the mesh: limited broadcast,
-		// LAN-scoped multicast (mDNS/SSDP/LLMNR), link-local, this node's own
-		// subnet, another peer's TAP IP, and any peer-advertised subnet. A
-		// frame with no IP at all (an ARP reply, any other L2 frame) is not
-		// "unroutable external" — flooding is its only delivery path — so it
-		// is never suppressed here.
-		if dstIP != nil && !n.isMeshLocalIP(dstIP) {
-			// Guarded: dstIP.String() allocates, and this fires for every
-			// unroutable packet the OS pushes into a default-route tunnel.
-			if log.IsDebug() {
-				log.Debug("TAPFWD DROP: unroutable external frame dstIP=%s dstMAC=%s without active exit node, suppressed from mesh flood",
-					dstIP.String(), dstMAC.String())
-			}
-			return true
+// sealAndDispatchRelay is the single two-layer relay seal shared by the TAP
+// unicast path and the exit-node transit path: it seals the packed plaintext
+// frame END-TO-END for target (so the relay hop cannot read it), wraps it in a
+// relay envelope addressed to target, hop-seals the envelope for nextHop, and
+// dispatches the result as a kind:2 relay task.
+//
+// OWNERSHIP: on success (return true) the helper consumes packedCopy — either
+// transferred into the relay task as its direct fallback, or dispatched as a
+// kind:0 fallback when an envelope stage failed. On a failed end-to-end seal it
+// returns false with packedCopy still owned: the caller must release it and
+// drop the frame. The fallback copy is the PLAINTEXT packed frame by design —
+// SendToPeer applies its own per-peer seal, and handing it a pre-sealed copy
+// double-encrypted the frame on the fallback path (the destination, which opens
+// exactly once, dropped every such frame).
+//
+// dstMAC rides the fallback task for handleUnicastFailure's MAC-forget on
+// "no addresses" errors; the exit-node transit path passes nil so a failed
+// tunnel egress is never flooded to the mesh.
+//
+// tag prefixes the log lines ("overlay relay", "exit-transit") so the operator
+// can still tell the two call sites apart in a shared-code-path failure.
+//
+// Behaviour note: the exit-transit path previously DROPPED the frame when the
+// hop-by-hop seal failed while the unicast path fell back to a direct dispatch.
+// That asymmetry was accidental — the same function's own pack-failure path
+// already fell back to a direct dispatch, and the fallback is sealed (or
+// dropped, PSK networks) by SendToPeer, so the unified helper always falls
+// back. A hop whose seal broke now degrades to the direct path instead of
+// black-holing the frame while a usable direct link existed.
+func (n *Node) sealAndDispatchRelay(tag string, target, nextHop peer.ID, dstMAC net.HardwareAddr, readN int, packedCopy []byte) bool {
+	// END-TO-END seal for target into a SEPARATE pooled scratch; never seal
+	// packedCopy in place — it is the direct-fallback payload handed to
+	// SendToPeer, which seals it itself. Sealing it in place and copying the
+	// ciphertext into the fallback would double-encrypt the frame on the
+	// relay onFail path and corrupt it.
+	inner := packedCopy
+	var encScratch []byte
+	if cipher := n.obfCipherForPeer(target); cipher != nil {
+		encScratch = acquireFrameBuf(len(inner) + cipher.Overhead())
+		enc, eerr := n.sealPeerFrameInto(target, cipher, inner, encScratch)
+		if eerr != nil {
+			log.Warn("Tx %s: end-to-end seal for %s failed: %v (frame dropped rather than sent in plaintext)",
+				tag, target.String(), eerr)
+			releaseFrameBuf(encScratch)
+			return false
 		}
-
-		// Normal mesh behaviour: flood broadcast / unknown-unicast to all peers
-		// so L2 discovery (ARP/NDP for peer-advertised subnets, service
-		// discovery) works across the whole overlay.
-		n.Collector.RecordPacketDir(payload, true)
-		if n.Collector != nil {
-			n.Collector.CaptureFrameWithPeers(observer.DirTx, payload, "self", "broadcast")
-		}
-		// NOTE: the frame is NOT Packed here. BroadcastToAllPeers Packs it
-		// PER-PEER (each peer gets its OWN anti-replay epoch baked into the
-		// SeqID), so a reconnect of one peer never disturbs another. We hand the
-		// raw TAP payload to the dispatcher; copy it first so the async fan-out
-		// never races with the next TAP read. The per-peer Tx seq is recorded
-		// inside the fan-out.
-		bcastPayload := acquireFrameBuf(len(payload))
-		copy(bcastPayload, payload)
-		log.Debug("Tx broadcast: origLen=%d", readN)
+		inner = enc
+	}
+	// Wrap the relay envelope, then HOP-BY-HOP seal it for the relay hop.
+	// sealRelayEnvelopeForHopInto Packs the bare PackRelayFrame output into a
+	// real obfuscate frame FIRST and only then encrypts. Calling
+	// EncryptPayloadRegion directly on the bare envelope (as this code used to)
+	// read frame[11:13] inside the base58 PeerID string, always returned
+	// ErrFrameCorrupted, and — with the old `if eerr==nil` guard — sent the
+	// envelope in plaintext, which the hop silently dropped.
+	relayScratch := acquireFrameBuf(n.relayEnvelopeSize(target, n.Host.ID(), len(inner)))
+	relayBuf, rerr := n.packRelayFrameInto(relayScratch, target, n.Host.ID(), routing.MaxRelayTTL, inner)
+	if encScratch != nil {
+		releaseFrameBuf(encScratch) // contents copied into relayScratch
+	}
+	if rerr != nil {
+		releaseFrameBuf(relayScratch)
+		log.Warn("Tx %s: pack envelope for %s failed: %v; dispatching plaintext packed fallback",
+			tag, target.String(), rerr)
 		n.dispatchNonblocking(dispatchTask{
-			kind:    1,
-			data:    bcastPayload,
+			kind:    0,
+			target:  target,
+			dstMAC:  dstMAC,
+			data:    packedCopy,
 			origLen: readN,
 			owned:   true,
 		})
+		return true
 	}
+	sealedDst := acquireFrameBuf(n.sealRelayEnvelopeMaxLen(len(relayBuf)))
+	sealed, serr := n.sealRelayEnvelopeForHopInto(nextHop, relayBuf, sealedDst)
+	releaseFrameBuf(relayScratch) // contents copied into sealedDst / pack scratch
+	if serr != nil {
+		releaseFrameBuf(sealedDst)
+		log.Warn("Tx %s: hop seal via %s failed: %v; dispatching plaintext packed fallback",
+			tag, nextHop.String(), serr)
+		n.dispatchNonblocking(dispatchTask{
+			kind:    0,
+			target:  target,
+			dstMAC:  dstMAC,
+			data:    packedCopy,
+			origLen: readN,
+			owned:   true,
+		})
+		return true
+	}
+	n.dispatchNonblocking(dispatchTask{
+		kind:      2,
+		target:    target,
+		relayHop:  nextHop,
+		data:      packedCopy,
+		relayData: sealed,
+		origLen:   readN,
+		owned:     true,
+		relayRelease: func() {
+			releaseFrameBuf(sealedDst)
+		},
+	})
 	return true
 }
 
@@ -1253,96 +1337,11 @@ func (n *Node) dispatchUnicastPacked(targetPeer peer.ID, targetPeerStr string, d
 			log.Debug("Tx overlay relay: seq=%d len=%d dst=%s via nextHop=%s (totalRTT=%dms vs directRTT=%dms)",
 				seqID, readN, targetPeer.String(), route.NextHop.String(), route.TotalRTTMs, route.DirectRTTMs)
 		}
-		// Direct-path fallback copy MUST remain the PLAINTEXT packed frame.
-		// dispatchWorker's relay onFail handler hands task.data to SendToPeer,
-		// which applies its OWN per-peer seal. Copying an already-sealed frame
-		// here made that fallback double-encrypt it, and the destination — which
-		// opens exactly once — dropped every such frame. Taking the copy BEFORE
-		// any sealing keeps the two paths independent and correct.
-		fallbackCopy := acquireFrameBuf(totalLen)
-		copy(fallbackCopy, packedCopy)
-
-		// END-TO-END seal: the inner payload is encrypted for targetPeer so the
-		// relay cannot read it; only the final destination can open it. The
-		// result goes into a pooled scratch (`encScratch`), never back into
-		// packedCopy: overwriting the pooled slice with a heap allocation leaked
-		// the pooled buffer and then fed the unrelated allocation to
-		// releaseFrameBuf, corrupting the frame pool's size assumptions.
-		inner := packedCopy
-		var encScratch []byte
-		if cipher := n.obfCipherForPeer(targetPeer); cipher != nil {
-			encScratch = acquireFrameBuf(len(inner) + cipher.Overhead())
-			enc, eerr := n.sealPeerFrameInto(targetPeer, cipher, inner, encScratch)
-			if eerr != nil {
-				log.Warn("Tx overlay relay: end-to-end seal for %s failed: %v (frame dropped rather than sent in plaintext)",
-					targetPeer.String(), eerr)
-				releaseFrameBuf(encScratch)
-				releaseFrameBuf(packedCopy)
-				releaseFrameBuf(fallbackCopy)
-				return
-			}
-			inner = enc
+		// The helper consumes packedCopy on success (fallback or relay task);
+		// on a failed end-to-end seal it stays owned and the frame is dropped.
+		if !n.sealAndDispatchRelay("overlay relay", targetPeer, route.NextHop, dstMAC, readN, packedCopy) {
+			releaseFrameBuf(packedCopy)
 		}
-		// HOP-BY-HOP: wrap the relay envelope in an obfuscate frame and seal it
-		// for the relay hop, so only that hop can read the routing header. The
-		// inner payload stays end-to-end encrypted for targetPeer and is never
-		// readable by the relay.
-		//
-		// Every buffer here is pooled: encScratch and relayScratch are released
-		// once the next stage has copied their bytes out, and sealedDst becomes
-		// relayData — released exactly once by the relay pool's onSent/onFail
-		// via dispatchTask.relayRelease. The old path allocated all three per
-		// frame (sealPeerFrame / packRelayFrame / sealRelayEnvelopeForHop).
-		relayScratch := acquireFrameBuf(n.relayEnvelopeSize(targetPeer, n.Host.ID(), len(inner)))
-		relayBuf, rerr := n.packRelayFrameInto(relayScratch, targetPeer, n.Host.ID(), routing.MaxRelayTTL, inner)
-		if encScratch != nil {
-			releaseFrameBuf(encScratch) // contents copied into relayScratch
-		}
-		if rerr != nil {
-			releaseFrameBuf(relayScratch)
-			log.Warn("Tx overlay relay: pack envelope for %s failed: %v; dispatching plaintext packed fallback", targetPeer.String(), rerr)
-			n.dispatchNonblocking(dispatchTask{
-				kind:    0,
-				target:  targetPeer,
-				dstMAC:  dstMAC,
-				data:    fallbackCopy,
-				origLen: readN,
-				owned:   true,
-			})
-		} else {
-			sealedDst := acquireFrameBuf(n.sealRelayEnvelopeMaxLen(len(relayBuf)))
-			sealed, serr := n.sealRelayEnvelopeForHopInto(route.NextHop, relayBuf, sealedDst)
-			releaseFrameBuf(relayScratch) // contents copied into sealedDst / pack scratch
-			if serr != nil {
-				releaseFrameBuf(sealedDst)
-				log.Warn("Tx overlay relay: hop seal via %s failed: %v; dispatching plaintext packed fallback", route.NextHop.String(), serr)
-				n.dispatchNonblocking(dispatchTask{
-					kind:    0,
-					target:  targetPeer,
-					dstMAC:  dstMAC,
-					data:    fallbackCopy,
-					origLen: readN,
-					owned:   true,
-				})
-			} else {
-				n.dispatchNonblocking(dispatchTask{
-					kind:      2,
-					target:    targetPeer,
-					relayHop:  route.NextHop,
-					data:      fallbackCopy,
-					relayData: sealed,
-					origLen:   readN,
-					owned:     true,
-					relayRelease: func() {
-						releaseFrameBuf(sealedDst)
-					},
-				})
-			}
-		}
-		// packedCopy is still the ORIGINAL pooled slice (the seals above wrote
-		// to `inner`), and its contents now live in fallbackCopy and the relay
-		// envelope. Releasing it here is therefore safe and leak-free.
-		releaseFrameBuf(packedCopy)
 		return
 	}
 	n.dispatchNonblocking(dispatchTask{
