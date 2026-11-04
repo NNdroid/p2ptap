@@ -392,9 +392,11 @@ func (n *Node) fragmentFrameStriped(packed []byte, frag *fragReassembler, target
 // Two constraints are combined:
 //  1. Baseline redundancy: fecParityPercent% of the data shards, at least one
 //     (a group with no parity could not recover anything) — the historical value.
-//  2. Survivability: the DWRR spreads ~(dataParts+parity)/paths shards per path,
-//     so a path carrying more than `parity` shards kills the frame when it dies
-//     (lost shards > parity, unrecoverable). Requiring
+//  2. Survivability: the stripe's shards spread UNIFORMLY over the paths (the
+//     callers round-robin striped frames — planFragsOnPaths and
+//     writeBatchMultipathLocked — precisely so this bound holds; a weighted
+//     pick would concentrate shards on fast paths and void it), so a dead path
+//     costs ~(dataParts+parity)/paths shards. Requiring
 //     ceil((dataParts+parity)/paths) <= parity simplifies exactly to
 //     parity >= dataParts/(paths-1), i.e. ceil(dataParts/(paths-1)).
 func fecParityFor(dataParts, paths int) int {

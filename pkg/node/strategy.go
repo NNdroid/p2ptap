@@ -1513,12 +1513,15 @@ func (sd *StrategyDispatcher) writePackedBatchLocked(targetPeer peer.ID, ps *Pee
 // is re-acquired before return).
 //
 // The assignment unit is the FRAGMENT, not the frame. A frame that fits one
-// fragment (every ordinary <=MTU packet) still lands on exactly one path, so the
-// common case is unchanged and the receiver's reorder window is not disturbed.
-// A large frame that was striped into several shards (fragmentFrameForPaths) is
-// spread across the paths instead of being pinned to one link while the others
-// idle; the receive-side reassembler is path-agnostic (keyed by peer+origin
-// sequence), so cross-path shards land in the same group.
+// fragment (every ordinary <=MTU packet) still lands on exactly one path via the
+// weighted DWRR pick, so the common case is unchanged and the receiver's reorder
+// window is not disturbed. A large frame that was striped into several shards
+// (fragmentFrameForPaths) is spread EVENLY (round-robin) across the paths — the
+// uniform spread is what fecParityFor's parity sizing assumes, and a weighted
+// spread would void the one-path-death guarantee (see planFragsOnPaths) —
+// instead of being pinned to one link while the others idle; the receive-side
+// reassembler is path-agnostic (keyed by peer+origin sequence), so cross-path
+// shards land in the same group.
 func (sd *StrategyDispatcher) writeBatchMultipathLocked(targetPeer peer.ID, ps *PeerStreams, streams []network.Stream, frames []batchFrame) error {
 	if len(frames) == 0 {
 		return nil
@@ -1543,13 +1546,24 @@ func (sd *StrategyDispatcher) writeBatchMultipathLocked(targetPeer peer.ID, ps *
 	owner := make([]*mpBucket, len(frames)) // bucket holding frame i's first fragment
 	fragTotal := make([]int, len(frames))
 	now := time.Now()
+	// Striped frames spread round-robin over the eligible paths so the FEC
+	// parity bound (uniform spread) holds; single-fragment frames keep the
+	// weighted DWRR pick. See planFragsOnPaths for why weighted spreading of a
+	// stripe voids the one-path-death guarantee the parity was sized for.
+	stripeEligible := ps.stripeEligiblePaths(streams, now)
 	for fi := range frames {
-		for _, frag := range frames[fi].frags {
-			idx := ps.pickMultipathStreamIndex(streams, now)
-			if idx < 0 {
-				idx = 0
+		frags := frames[fi].frags
+		for j, frag := range frags {
+			var s network.Stream
+			if len(frags) == 1 {
+				idx := ps.pickMultipathStreamIndex(streams, now)
+				if idx < 0 || idx >= len(streams) {
+					idx = 0
+				}
+				s = streams[idx]
+			} else {
+				s = stripeEligible[j%len(stripeEligible)]
 			}
-			s := streams[idx]
 			b := byStream[s]
 			if b == nil {
 				b = &mpBucket{s: s, counts: make(map[int]int, len(frames))}
@@ -2068,14 +2082,44 @@ type mpFragPlan struct {
 	frags [][]byte
 }
 
-// planFragsOnPaths splits a logical frame's fragments across the available paths
-// with the same DWRR the scheduler uses, ONE FRAGMENT AT A TIME.
+// stripeEligiblePaths returns the paths a multi-fragment (striped) frame's
+// shards may ride, in round-robin order: every non-cooling path, or the full
+// set when EVERY path is cooling (a degraded path still beats dropping the
+// frame, mirroring pickMultipathStreamIndex's fallback). Caller holds
+// ps.writeMu.
+func (ps *PeerStreams) stripeEligiblePaths(streams []network.Stream, now time.Time) []network.Stream {
+	if len(ps.pathBackoff) == 0 {
+		return streams
+	}
+	filtered := make([]network.Stream, 0, len(streams))
+	for _, s := range streams {
+		if !ps.pathCoolingLocked(s, now) {
+			filtered = append(filtered, s)
+		}
+	}
+	if len(filtered) == 0 {
+		return streams
+	}
+	return filtered
+}
+
+// planFragsOnPaths splits a logical frame's fragments across the available
+// paths.
 //
-// A single-fragment frame (everything that fits one transport write) therefore
-// still goes to exactly one path — the scheduler's choice, unchanged. Only a
-// striped frame (see fragmentFrameForPaths) is spread across paths, and its
-// shards meet again in the receiver's reassembler, which is keyed by
-// peer/epoch/origin-sequence and is therefore path-agnostic.
+// A SINGLE-fragment frame — every ordinary <=MTU packet — goes to the path the
+// DWRR scheduler picks, unchanged. A MULTI-fragment frame is a stripe: its
+// shards spread EVENLY (round-robin) over the eligible paths, one fragment at
+// a time, because fecParityFor sizes the Reed-Solomon parity for a uniform
+// spread (a dead path then costs ~total/paths shards, which the parity
+// rebuilds). Handing the pick to the weighted DWRR instead would concentrate
+// shards on fast paths — with a 20:1 capacity split ~95% of the frame lands on
+// the fastest path, and that path dying AFTER its writes completed (shards
+// already in flight, no sender-side re-planning) can strand more shards than
+// the parity can rebuild, voiding the one-path-death guarantee the parity was
+// sized for. Round-robin serves plain (non-FEC) multi-fragment frames the same
+// way: a lost path then takes a bounded share of the frame instead of possibly
+// all of it. The shards meet again in the receiver's reassembler, which is
+// keyed by peer/epoch/origin-sequence and is therefore path-agnostic.
 func (ps *PeerStreams) planFragsOnPaths(streams []network.Stream, frags [][]byte) []mpFragPlan {
 	if len(streams) == 0 || len(frags) == 0 {
 		return nil
@@ -2084,14 +2128,18 @@ func (ps *PeerStreams) planFragsOnPaths(streams []network.Stream, frags [][]byte
 		return []mpFragPlan{{s: streams[0], frags: frags}}
 	}
 	now := time.Now()
-	plans := make([]mpFragPlan, 0, len(streams))
-	pos := make(map[network.Stream]int, len(streams))
-	for _, f := range frags {
+	if len(frags) == 1 {
 		idx := ps.pickMultipathStreamIndex(streams, now)
 		if idx < 0 || idx >= len(streams) {
 			idx = 0
 		}
-		s := streams[idx]
+		return []mpFragPlan{{s: streams[idx], frags: frags}}
+	}
+	eligible := ps.stripeEligiblePaths(streams, now)
+	plans := make([]mpFragPlan, 0, len(eligible))
+	pos := make(map[network.Stream]int, len(eligible))
+	for i, f := range frags {
+		s := eligible[i%len(eligible)]
 		if p, ok := pos[s]; ok {
 			plans[p].frags = append(plans[p].frags, f)
 			continue
