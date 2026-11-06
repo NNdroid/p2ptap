@@ -1,6 +1,9 @@
 package node
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -50,6 +53,67 @@ func TestPeerStallBreaker(t *testing.T) {
 	n.markPeerStalled(pid)
 	if !n.peerStalled(pid) {
 		t.Fatalf("peer could not be re-stalled after recovery")
+	}
+}
+
+// TestPeerStallBreakerDoesNotReArm is the regression guard for the
+// "multipath peer stays online but ping never comes back" blackhole: several
+// dispatch workers can all time out in the same instant. Re-arming the window
+// on each of them let the breaker expire NEVER, so every frame for that peer
+// was dropped and no send ever reached the stream-repair path again.
+func TestPeerStallBreakerDoesNotReArm(t *testing.T) {
+	n := &Node{}
+	pid := newTestPeerID(t)
+
+	// Back-date the first stall to 2s ago (still inside the 3s window) so any
+	// re-arm would be visible as a timestamp change.
+	first := time.Now().Add(-2 * time.Second)
+	n.peerStall.Store(pid, first)
+	for i := 0; i < 8; i++ { // simulate NumCPU workers timing out together
+		n.markPeerStalled(pid)
+	}
+	got, _ := n.peerStall.Load(pid)
+	if !got.(time.Time).Equal(first) {
+		t.Fatalf("stall window was re-armed (%v -> %v): breaker can never expire under sustained timeouts",
+			first, got.(time.Time))
+	}
+	if !n.peerStalled(pid) {
+		t.Fatalf("peer unstalled while still inside the original window")
+	}
+
+	// The window is anchored to the FIRST timeout, so it must clear on that
+	// deadline — no matter how many later timeouts arrived.
+	n.peerStall.Store(pid, time.Now().Add(-peerStallCooldown-time.Millisecond))
+	if n.peerStalled(pid) {
+		t.Fatalf("breaker did not expire at the original deadline")
+	}
+}
+
+// TestTimeoutSendErrorDoesNotTriggerReconnect guards the WAN-timeout root
+// cause: a slow-link write timeout must NOT escalate to reconnectPeer, which
+// closes every transport connection, clears readiness and forces a full ECDH
+// re-handshake on BOTH ends. That teardown is what turned one transient
+// timeout into a permanent data-plane blackhole on cross-WAN multipath links.
+func TestTimeoutSendErrorDoesNotTriggerReconnect(t *testing.T) {
+	n := &Node{} // nil Dispatcher: any escalation would panic here
+	pid := newTestPeerID(t)
+
+	timeoutErrs := []error{
+		context.DeadlineExceeded,
+		timeoutReadError{},
+		fmt.Errorf("send batch: %w", context.DeadlineExceeded),
+	}
+	for _, err := range timeoutErrs {
+		if !isTimeoutErr(err) {
+			t.Fatalf("timeout error %v not classified as slow-link", err)
+		}
+		n.handleUnicastFailure(pid, nil, err)
+	}
+	if n.lastReconnectTime != nil {
+		t.Fatalf("write timeout escalated to a full peer reconnect: %v", n.lastReconnectTime)
+	}
+	if isTimeoutErr(errors.New("stream reset")) || isTimeoutErr(nil) {
+		t.Fatalf("non-timeout errors must still escalate to reconnect")
 	}
 }
 

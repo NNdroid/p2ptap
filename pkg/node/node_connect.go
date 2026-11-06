@@ -974,7 +974,34 @@ func (n *Node) handleUnicastFailure(pid peer.ID, dstMAC net.HardwareAddr, err er
 				pid.String(), dstMAC.String())
 		}
 	}
+	// A write TIMEOUT means the link is slow, not dead: the stream-retirement +
+	// retry-with-fresh-stream logic (which gets a generous cold-start deadline)
+	// already recovers from transient congestion. Escalating to reconnectPeer
+	// on a mere timeout tears down every connection (ClosePeer) and forces a
+	// full re-handshake — on a cross-WAN link where writes occasionally exceed
+	// the deadline this creates a self-sustaining teardown/reconnect loop that
+	// blackholes the data plane while the ping-pong keepalive (a separate
+	// plaintext echo) keeps reporting the peer as online. Genuinely dead links
+	// are detected by pingPongProbePeer (2 consecutive failures) which calls
+	// reconnectPeer on its own terms.
+	if isTimeoutErr(err) {
+		return
+	}
 	n.triggerThrottledReconnect(pid)
+}
+
+// isTimeoutErr reports whether err (or any error it wraps) is a write/read
+// timeout or a context deadline — the "slow link" class of failures that must
+// NOT trigger a full peer teardown. Mirrors the check in notePeerSendError.
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded)
 }
 
 // triggerThrottledReconnect triggers peer reconnection on send failures with a 5-second cooldown

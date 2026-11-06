@@ -84,13 +84,22 @@ func (n *Node) notePeerSendError(pid peer.ID, err error) {
 }
 
 // markPeerStalled records that pid's egress just timed out. Logging is
-// edge-triggered: a peer already inside its cooldown window is re-armed
+// edge-triggered: a peer already inside its cooldown window is ignored
 // silently so a persistently wedged link cannot spam the log once per frame.
+//
+// The cooldown MUST NOT be re-armed on repeat timeouts. dispatchWorkerCount is
+// NumCPU, so several workers can pass the peerStalled check in the same instant,
+// all time out, and all land here. Re-arming (the old behaviour) let each such
+// wave push the deadline out again — under sustained traffic the breaker then
+// never expired, dropped EVERY frame for the peer, and no send ever reached the
+// stream-repair / reconnect path again. That is the "peer stays online but ping
+// never comes back" blackhole. Keeping the FIRST timestamp gives a hard bound:
+// the window always expires peerStallCooldown after the first timeout, so at
+// least one probe write (and, if it fails, a fresh window) is guaranteed.
 func (n *Node) markPeerStalled(pid peer.ID) {
 	if v, ok := n.peerStall.Load(pid); ok {
 		if t, _ := v.(time.Time); time.Since(t) < peerStallCooldown {
-			n.peerStall.Store(pid, time.Now()) // re-arm the window, stay quiet
-			return
+			return // inside the window: stay quiet, do NOT extend it
 		}
 	}
 	n.peerStall.Store(pid, time.Now())

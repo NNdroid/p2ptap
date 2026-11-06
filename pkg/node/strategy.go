@@ -560,8 +560,16 @@ func (sd *StrategyDispatcher) openStream(parentCtx context.Context, targetPeer p
 	sd.peersMu.RUnlock()
 	if exists && ps != nil {
 		streams := ps.GetAllStreams()
-		if len(streams) > 0 {
-			return ps, streams[0], nil
+		for _, s := range streams {
+			// Liveness check: a stream whose underlying connection has closed
+			// (remote hang-up, transport flap) is still in the map until its
+			// read-loop defer calls UnregisterStream. Returning it here made
+			// retryWithFreshStream retry on the SAME dead stream, fail again,
+			// and escalate to a full reconnectPeer teardown for what was only
+			// one path's transient break.
+			if s != nil && s.Conn() != nil && !s.Conn().IsClosed() {
+				return ps, s, nil
+			}
 		}
 	}
 	if sd.h == nil {
@@ -1724,9 +1732,15 @@ func (sd *StrategyDispatcher) writeBatchMultipathLocked(targetPeer peer.ID, ps *
 // service time, with a cold-start value that a healthy link clears easily and a
 // hard cap that keeps the old worst case.
 const (
-	writeDeadlineWindow        = 2500 * time.Millisecond
-	writeDeadlineColdStart     = 600 * time.Millisecond
-	writeDeadlineMinWindow     = 150 * time.Millisecond
+	writeDeadlineWindow    = 2500 * time.Millisecond
+	writeDeadlineColdStart = 600 * time.Millisecond
+	// writeDeadlineMinWindow is the floor for a measured deadline. A yamux
+	// write that must wait for a flow-control window update costs one RTT;
+	// on a cross-WAN link (150-400 ms) the old 150 ms floor fired before the
+	// window update could arrive, producing spurious timeouts that cascaded
+	// into peer-stall + reconnect loops. 500 ms covers the common WAN RTT
+	// range with margin while still detecting a genuinely wedged link quickly.
+	writeDeadlineMinWindow     = 500 * time.Millisecond
 	writeDeadlineServiceFactor = 8
 	// writeDeadlineColdStartNanosPerByte scales the cold-start window with the
 	// batch size so a genuinely slow link doesn't blow the deadline mid-write.
