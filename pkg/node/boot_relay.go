@@ -813,7 +813,10 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 		}
 	}
 	// Keep the same epoch/replay contract as the direct receive path.
-	if dup, reason := peerDedup.IsDuplicateReason(seqID); dup {
+	// PERF: single-critical-section form — one dedup mutex acquisition for the
+	// verdict AND the diagnostics (see DedupVerdict / handleDirectFrame).
+	verdict := peerDedup.IsDuplicateReasonEx(seqID)
+	if verdict.Dup {
 		n.Collector.RecordDedup()
 		// PERF: cached base58 — this is on every relayed frame (see peer_idstr.go).
 		n.Collector.RecordPeerDedup(n.peerIDString(srcPeer))
@@ -821,14 +824,14 @@ func (n *Node) deliverRelayedFrameToTAP(tapPayload []byte, srcPeer, viaPeer peer
 		// Same classification as the direct path: only SameSeq is benign. The
 		// relay path runs the SAME dedup window, so it sees the same desync and
 		// must be able to heal it there too.
-		if reason != obfuscate.DedupDropSameSeq {
+		if verdict.Reason != obfuscate.DedupDropSameSeq {
 			n.recordPeerDedupDesync(srcPeer, true)
 			n.maybeResyncOnDedupDesync(srcPeer)
 		}
 		return
 	}
 	n.recordPeerDedupDesync(srcPeer, false)
-	n.Collector.RecordRxSeq(n.peerIDString(srcPeer), seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
+	n.Collector.RecordRxSeq(n.peerIDString(srcPeer), seqID, verdict.MaxSeq, peerDedup.ReplayDrops(), peerDedup.WindowResets(), verdict.WinUtil)
 
 	// Split coalesced batches before per-frame processing (see
 	// deliverDirectSubFrame for the rationale): all sub-frames share seqID, so

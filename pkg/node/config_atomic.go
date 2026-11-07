@@ -208,6 +208,11 @@ func (n *Node) applyHotReload(cfg *config.Config) {
 	if n.Packer != nil {
 		n.applyObfuscationConfig(cfg)
 	}
+	// Packet-classification sampling factor is hot-reloadable: the samplers
+	// are plain atomics, so the next frame after this line uses the new rate.
+	if s, ok := n.Collector.(interface{ SetPacketSampleEvery(int) }); ok {
+		s.SetPacketSampleEvery(cfg.StatsSampleEvery)
+	}
 	// Node info (name, exit-node flag, advertised subnets, obfuscation) may have
 	// changed -> re-announce over the peek-map channel.
 	go n.publishPeekMapSelf()

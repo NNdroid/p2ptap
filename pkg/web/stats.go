@@ -179,6 +179,51 @@ type StatsCollector struct {
 
 	// Pcap is the raw-TAP-packet capture buffer surfaced in the WebUI.
 	Pcap *PacketCapture
+
+	// frameSample / dirSample / protoSample downsample the per-frame packet
+	// CLASSIFICATION counters (protocol histogram, direction split) in
+	// throughput mode (config stats_sample_every). Each family owns its own
+	// sampler so independently sampled histograms stay unbiased relative to
+	// each other — a shared counter would phase-couple the call sites and,
+	// with an even N, systematically starve one of two interleaved paths.
+	// Byte/packet rate accounting (RecordSent/RecordRecv/peer bytes) is never
+	// sampled: those numbers must stay exact.
+	frameSample packetSampler
+	dirSample   packetSampler
+	protoSample packetSampler
+}
+
+// packetSampler downsamples one family of per-frame classification counters.
+type packetSampler struct {
+	every atomic.Uint64 // 0/1 = record every call
+	n     atomic.Uint64
+}
+
+func (s *packetSampler) set(every int) {
+	if every < 1 {
+		every = 1
+	}
+	s.every.Store(uint64(every))
+}
+
+// pass reports whether THIS call should record: every Nth call. The default
+// (N=1) short-circuits to true, so unsampled deployments keep the exact
+// historical behaviour.
+func (s *packetSampler) pass() bool {
+	every := s.every.Load()
+	if every <= 1 {
+		return true
+	}
+	return s.n.Add(1)%every == 0
+}
+
+// SetPacketSampleEvery configures the classification sampling factor
+// (1 = record every frame, N = every Nth). Wired from config
+// stats_sample_every at node start and on hot reload.
+func (s *StatsCollector) SetPacketSampleEvery(every int) {
+	s.frameSample.set(every)
+	s.dirSample.set(every)
+	s.protoSample.set(every)
 }
 
 func (s *StatsCollector) SetNodeInfo(nodeName, peerID, tapIP, tapIPv6, strategy string) {
@@ -493,6 +538,12 @@ func (s *StatsCollector) RecordRecv(bytes int) {
 // RecordPacketDir classifies an Ethernet frame as unicast, multicast, or broadcast
 // and increments the appropriate directional counter.
 func (s *StatsCollector) RecordPacketDir(payload []byte, isTx bool) {
+	// Throughput mode: this is a per-frame classification call whose counters
+	// are dashboard shares, so a 1-in-N sample estimates them fine. Gated
+	// BEFORE the parse — the gate is the whole point.
+	if !s.dirSample.pass() {
+		return
+	}
 	if len(payload) < 14 {
 		return
 	}
@@ -588,6 +639,10 @@ func (s *StatsCollector) getPeerSeq(peerID string) *PeerSeqState {
 }
 
 func (s *StatsCollector) RecordProtocol(ethType uint16) {
+	// Throughput mode: sampled classification histogram (see RecordPacketDir).
+	if !s.protoSample.pass() {
+		return
+	}
 	switch ethType {
 	case packet.EtherTypeIPv4: // IPv4
 		atomic.AddUint64(&s.ipv4Pkts, 1)
@@ -630,6 +685,10 @@ func (s *StatsCollector) CaptureFrameWithPeers(dir observer.FrameDirection, fram
 }
 
 func (s *StatsCollector) RecordFrame(frame []byte) {
+	// Throughput mode: see RecordPacketDir — sampled classification histogram.
+	if !s.frameSample.pass() {
+		return
+	}
 	if len(frame) < 14 {
 		atomic.AddUint64(&s.otherPkts, 1)
 		return

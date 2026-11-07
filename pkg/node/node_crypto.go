@@ -107,6 +107,26 @@ func (n *Node) sealPeerFrameInto(p peer.ID, cipher obfuscate.ObfCipher, data, ds
 	return enc, nil
 }
 
+// sealPeerFrameInPlace seals an already-Packed frame into its OWN backing
+// array (see obfuscate.SealFrameInPlace) and accounts the frame against the
+// peer's proactive re-key budget exactly like sealPeerFrameInto. The caller
+// must own the buffer exclusively and keep releasing it exactly once — the
+// sealed result aliases it.
+//
+// ok is false (frame untouched, nothing accounted) when the backing array
+// cannot take the AEAD tag; the caller falls back to the copying
+// sealPeerFrameInto path. cipher must be non-nil.
+func (n *Node) sealPeerFrameInPlace(p peer.ID, cipher obfuscate.ObfCipher, frame []byte) (sealed []byte, ok bool) {
+	enc, inplace := obfuscate.SealFrameInPlace(frame, cipher)
+	if !inplace {
+		return nil, false
+	}
+	if po := n.peerObf(p); po != nil {
+		po.framesSinceRekey.Add(1)
+	}
+	return enc, true
+}
+
 func (n *Node) obfCipherForPeer(p peer.ID) obfuscate.ObfCipher {
 	po := n.peerObf(p)
 	if po == nil || !po.negotiated {

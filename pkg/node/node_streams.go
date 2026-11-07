@@ -438,7 +438,14 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 	}
 	// Only SeqSync may change an established epoch. A delayed data frame
 	// from an older session must not reset the current replay window.
-	if dup, reason := peerDedup.IsDuplicateReason(seqID); dup {
+	//
+	// PERF: single-critical-section form — the verdict AND the window
+	// diagnostics below come out of ONE dedup mutex acquisition. The previous
+	// IsDuplicateReason + MaxSeq + WindowUtilization sequence re-entered the
+	// same per-peer critical section twice per frame, which serialized the
+	// receive pipeline across multipath's concurrent stream readers.
+	verdict := peerDedup.IsDuplicateReasonEx(seqID)
+	if verdict.Dup {
 		n.Collector.RecordDedup()
 		n.Collector.RecordPeerDedup(peerStr)
 		log.Debug("Duplicate frame seq=%d from peer %s", seqID, peerStr)
@@ -449,7 +456,7 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 		// recovery at all: the frame was perfectly well formed and opened
 		// cleanly, so every other subsystem read the link as healthy and
 		// nobody ever healed it.
-		if reason != obfuscate.DedupDropSameSeq {
+		if verdict.Reason != obfuscate.DedupDropSameSeq {
 			n.recordPeerDedupDesync(remotePeer, true)
 			n.maybeResyncOnDedupDesync(remotePeer)
 		}
@@ -458,7 +465,7 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 	// Accepted by the dedup window: reset the peer's desync window so a
 	// healed link cannot keep re-firing the resync forever.
 	n.recordPeerDedupDesync(remotePeer, false)
-	n.Collector.RecordRxSeq(peerStr, seqID, peerDedup.MaxSeq(), peerDedup.ReplayDrops(), peerDedup.WindowResets(), peerDedup.WindowUtilization())
+	n.Collector.RecordRxSeq(peerStr, seqID, verdict.MaxSeq, peerDedup.ReplayDrops(), peerDedup.WindowResets(), verdict.WinUtil)
 
 	// Split coalesced batches before per-frame processing. Every sub-frame of a
 	// batch shares this frame's seqID, so the dedup window above ran once on the

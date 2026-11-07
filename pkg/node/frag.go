@@ -184,7 +184,14 @@ func (f *fragReassembler) nextOrigSeq() uint32 {
 // spurious key resyncs.
 func (n *Node) emitFragPart(targetPeer peer.ID, hdr, chunk []byte) ([]byte, bool) {
 	payloadLen := len(hdr) + len(chunk)
-	outBuf := acquireFrameBuf(n.Packer.MaxPackedLen(payloadLen))
+	// Reserve the AEAD tag headroom up front: the caller (encryptAndFragment)
+	// seals every emitted fragment with the per-peer cipher, and with this
+	// slack the seal runs IN PLACE in this buffer (obfuscate.SealFrameInPlace)
+	// instead of paying one more full-frame copy plus a second pooled buffer
+	// per fragment. When no cipher is negotiated the slack is unused pool
+	// capacity. Note MaxPackedLen's bound is what Pack can emit; the tag rides
+	// in the reserved capacity beyond it.
+	outBuf := acquireFrameBuf(n.Packer.MaxPackedLen(payloadLen) + obfuscate.AEADTagSize)
 	fragPayload := outBuf[obfuscate.HeaderLen : obfuscate.HeaderLen+payloadLen]
 	copy(fragPayload, hdr)
 	copy(fragPayload[len(hdr):], chunk)

@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"p2ptap/cmd/internal/runtimectl"
 	"p2ptap/pkg/bootweb"
 	"p2ptap/pkg/logger"
 	"p2ptap/pkg/maddrutil"
@@ -2111,6 +2112,11 @@ func runBootRelayMeshUplink(ctx context.Context, h host.Host, rr *relayRouter, i
 }
 
 func main() {
+	// Same GC defaults as the node daemon (see cmd/internal/runtimectl): the
+	// boot relay forwards mesh traffic through pooled buffers, so a lazy
+	// collector with a soft memory cap raises relay throughput too.
+	runtimectl.ApplyGCTuning(log.Info)
+
 	if exePath, err := os.Executable(); err == nil {
 		_ = os.Chdir(filepath.Dir(exePath))
 	}

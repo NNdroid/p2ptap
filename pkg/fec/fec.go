@@ -91,27 +91,56 @@ func gfPow(b byte, e int) byte {
 // MaxShards is the largest total shard count GF(2^8) supports.
 const MaxShards = 255
 
+// mulTable256 is the 256-entry multiplication table for one GF(2^8) constant:
+// table[b] == gfMul(c, b). The per-byte inner loops below run one indexed
+// lookup + XOR per byte instead of the log+exp double lookup, which measures
+// roughly twice as fast on the striped-frame encode path (16 KiB shard × k
+// coefficients per parity shard).
+type mulTable256 [256]byte
+
+func newMulTable(c byte) *mulTable256 {
+	if c == 0 {
+		return &mulTable256{}
+	}
+	var t mulTable256
+	la := int(gfLog[c])
+	for b := 1; b < 256; b++ {
+		t[b] = gfExp[la+int(gfLog[b])]
+	}
+	return &t
+}
+
+// codec is one cached (k, r) encoder: the systematic generator matrix plus
+// the multiplication tables of its parity rows. The tables make Encode's
+// inner loop a single lookup; they are built once per (k, r) because the
+// tunnel stripes use a handful of shapes.
+type codec struct {
+	g [][]byte
+	// parityTables[j][i] is the table for coefficient g[k+j][i] (parity row j,
+	// data shard i). nil coefficients carry a zero table (never selected).
+	parityTables [][]*mulTable256
+}
+
 // generator codecs are tiny (k ≤ 8 for the tunnel's stripe size) and depend only
-// on (k, r), so they are built once and shared. The matrices are read-only after
-// publication.
+// on (k, r), so they are built once and shared. The matrices and tables are
+// read-only after publication.
 var (
 	codecMu    sync.RWMutex
-	codecCache = map[codecKey][][]byte{}
+	codecCache = map[codecKey]*codec{}
 )
 
 type codecKey struct{ k, r int }
 
-// generatorMatrix returns G = F · F_top^-1 (see the package comment).
-func generatorMatrix(k, r int) ([][]byte, error) {
+func codecFor(k, r int) (*codec, error) {
 	if k <= 0 || r < 0 || k+r > MaxShards {
 		return nil, ErrTooManyShards
 	}
 	key := codecKey{k: k, r: r}
 	codecMu.RLock()
-	g, ok := codecCache[key]
+	c, ok := codecCache[key]
 	codecMu.RUnlock()
 	if ok {
-		return g, nil
+		return c, nil
 	}
 
 	n := k + r
@@ -144,25 +173,45 @@ func generatorMatrix(k, r int) ([][]byte, error) {
 		}
 		out[j] = row
 	}
+	// Parity-row multiplication tables, built once with the matrix.
+	tables := make([][]*mulTable256, r)
+	for j := 0; j < r; j++ {
+		rowTables := make([]*mulTable256, k)
+		for i := 0; i < k; i++ {
+			rowTables[i] = newMulTable(out[k+j][i])
+		}
+		tables[j] = rowTables
+	}
+	c = &codec{g: out, parityTables: tables}
 
 	codecMu.Lock()
 	if cached, exists := codecCache[key]; exists {
-		out = cached
+		c = cached
 	} else {
-		codecCache[key] = out
+		codecCache[key] = c
 	}
 	codecMu.Unlock()
-	return out, nil
+	return c, nil
+}
+
+// generatorMatrix returns G = F · F_top^-1 (see the package comment).
+func generatorMatrix(k, r int) ([][]byte, error) {
+	c, err := codecFor(k, r)
+	if err != nil {
+		return nil, err
+	}
+	return c.g, nil
 }
 
 // Encode returns r parity shards for data. Every data shard must have the same
 // length; the parity shards have that same length.
 func Encode(data [][]byte, r int) ([][]byte, error) {
 	k := len(data)
-	g, err := generatorMatrix(k, r)
+	c, err := codecFor(k, r)
 	if err != nil {
 		return nil, err
 	}
+	g := c.g
 	size := len(data[0])
 	for _, d := range data {
 		if len(d) != size {
@@ -171,16 +220,16 @@ func Encode(data [][]byte, r int) ([][]byte, error) {
 	}
 	out := make([][]byte, r)
 	for j := 0; j < r; j++ {
-		row := g[k+j]
 		shard := make([]byte, size)
 		for i := 0; i < k; i++ {
-			c := row[i]
-			if c == 0 {
+			ci := g[k+j][i]
+			if ci == 0 {
 				continue
 			}
 			src := data[i]
+			tbl := c.parityTables[j][i]
 			for p := 0; p < size; p++ {
-				shard[p] ^= gfMul(c, src[p])
+				shard[p] ^= tbl[src[p]]
 			}
 		}
 		out[j] = shard
@@ -200,10 +249,11 @@ func Reconstruct(parts [][]byte, k, r int) error {
 	if k <= 0 || r < 0 || k+r > MaxShards || len(parts) != k+r {
 		return ErrInvalidLayout
 	}
-	g, err := generatorMatrix(k, r)
+	c, err := codecFor(k, r)
 	if err != nil {
 		return err
 	}
+	g := c.g
 	available := make([]int, 0, k+r)
 	size := 0
 	for i, p := range parts {
@@ -256,8 +306,11 @@ func Reconstruct(parts [][]byte, k, r int) error {
 					continue
 				}
 				src := parts[idx]
+				// Transient table: k of them per missing shard, only on the
+				// loss path — still cheaper than k×size log+exp lookups.
+				tbl := newMulTable(c)
 				for p := 0; p < len(src); p++ {
-					out[p] ^= gfMul(c, src[p])
+					out[p] ^= tbl[src[p]]
 				}
 			}
 			parts[t] = out
@@ -269,15 +322,16 @@ func Reconstruct(parts [][]byte, k, r int) error {
 			continue
 		}
 		row := g[t]
+		shardTables := c.parityTables[t-k]
 		out := make([]byte, size)
 		for i := 0; i < k; i++ {
-			c := row[i]
-			if c == 0 {
+			if row[i] == 0 {
 				continue
 			}
 			src := parts[i]
+			tbl := shardTables[i]
 			for p := 0; p < len(src); p++ {
-				out[p] ^= gfMul(c, src[p])
+				out[p] ^= tbl[src[p]]
 			}
 		}
 		parts[t] = out

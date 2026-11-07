@@ -755,8 +755,26 @@ func (n *Node) sealRelayEnvelopeForHopInto(hop peer.ID, envelope []byte, dst []b
 		return dst[:totalLen], nil
 	}
 
+	// FUSED fast path: Pack straight into dst, then seal the packed frame IN
+	// PLACE. The contract sizes dst to sealRelayEnvelopeMaxLen
+	// (= MaxPackedLen + AEADTagSize), so the tag always fits and the old
+	// outBuf pack-scratch round trip — one full-frame copy plus one pool cycle
+	// per relayed frame — disappears. A mis-sized dst or an unexpected
+	// Pack/overflow failure falls through to the original two-buffer path
+	// below, so the degraded behaviour is byte-identical to the pre-fusion one.
+	if need := maxPacked + cipher.Overhead(); cap(dst) >= need {
+		buf := dst[:cap(dst)]
+		if totalLen, perr := n.Packer.Pack(seqID, envelope, buf); perr == nil {
+			if sealed, inplace := n.sealPeerFrameInPlace(hop, cipher, buf[:totalLen]); inplace {
+				return sealed, nil
+			}
+		}
+	}
+
 	// outBuf is Pack scratch only: EncryptPayloadRegionInto allocates the sealed
-	// result into dst, so outBuf is never handed out and can go back to the pool.
+	// result into dst, so outBuf is never handed out and can go back to the pool. Previously it was a fresh ~1.5KB allocation per hop that was
+	// discarded immediately after the seal, the second of the two heap allocs a
+	// forwarded frame paid per hop.
 	outBuf := acquireFrameBuf(maxPacked)
 	defer releaseFrameBuf(outBuf)
 	totalLen, err := n.Packer.Pack(seqID, envelope, outBuf)

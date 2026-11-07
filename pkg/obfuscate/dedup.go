@@ -155,6 +155,56 @@ func (d *Deduplicator) IsDuplicateReason(seqID uint64) (bool, DedupDropReason) {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.checkLocked(seqID)
+}
+
+// DedupVerdict is the combined result of one dedup check plus the window
+// diagnostics the per-frame receive path records alongside it.
+//
+// It exists so the RX hot path takes the per-peer dedup mutex ONCE per frame.
+// The previous shape — IsDuplicateReason(seqID) followed by MaxSeq() and
+// WindowUtilization() for the WebUI telemetry — re-entered the same critical
+// section twice more per frame. Under multipath several stream-reader
+// goroutines for one peer contend on that single mutex, so every extra
+// critical section directly serialized the receive pipeline.
+type DedupVerdict struct {
+	// Dup reports whether the frame must be dropped; Reason classifies it.
+	Dup    bool
+	Reason DedupDropReason
+	// MaxSeq is the highest structured SeqID seen for this peer, read inside
+	// the same critical section as the accept/drop decision (post-advance on
+	// the accept path, matching what MaxSeq() would have returned after).
+	MaxSeq uint64
+	// WinUtil is the live-window fill ratio at check time (0..1), the value
+	// WindowUtilization() would have returned.
+	WinUtil float64
+}
+
+// IsDuplicateReasonEx is the single-critical-section form of IsDuplicateReason
+// plus the MaxSeq/WindowUtilization diagnostics the caller would otherwise
+// have to fetch with two more locked calls. Use it on the per-frame receive
+// paths; the plain form remains for control-path callers that need no
+// diagnostics.
+func (d *Deduplicator) IsDuplicateReasonEx(seqID uint64) DedupVerdict {
+	if seqID == 0 || !IsStructuredSeq(seqID) {
+		// Unstructured / raw frames: never dedup (handled upstream).
+		return DedupVerdict{}
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	dup, reason := d.checkLocked(seqID)
+	return DedupVerdict{
+		Dup:     dup,
+		Reason:  reason,
+		MaxSeq:  d.maxSeq,
+		WinUtil: float64(d.seenCount) / float64(dedupWindow),
+	}
+}
+
+// checkLocked runs the dedup decision. Caller MUST hold d.mu; every early
+// return inside this function corresponds to one of the classified outcomes.
+func (d *Deduplicator) checkLocked(seqID uint64) (bool, DedupDropReason) {
 
 	// --- Anti-replay via per-connection epoch ---
 	// Plaintext peers can send before their first SeqSync. Adopt the FIRST

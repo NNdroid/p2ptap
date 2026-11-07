@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,11 +41,87 @@ type muxEngine struct {
 	// the relayCtrlInflight pattern.
 	inflightStreams atomic.Int64
 
-	// inflightDataFrames bounds the per-frame goroutine fan-out on the data
-	// channel. Each forked handler runs the full decrypt → dedup → ACL → MAC
-	// learn → TAP pipeline, so an unbounded fork rate is an unbounded CPU
-	// budget handed to any connected peer.
+	// inflightDataFrames bounds the number of accepted-but-unfinished data
+	// frames (queued + running). Each forked handler runs the full
+	// decrypt → dedup → ACL → MAC learn → TAP pipeline, so an unbounded fork
+	// rate is an unbounded CPU budget handed to any connected peer.
 	inflightDataFrames atomic.Int64
+
+	// dataJobs + dataPoolOnce are the bounded worker pool that replaced the
+	// per-frame `go handleDataMuxX(...)` fan-out. A goroutine per frame cost a
+	// fresh stack + scheduler entry per frame and could spike to
+	// muxInflightDataFramesMax concurrent handlers; the pool keeps the same
+	// inflight budget with muxDataFrameWorkerCount reusable goroutines and a
+	// bounded FIFO queue. Handlers are self-contained (own recover, own
+	// inflight decrement) and never write to the stream, so they are safe to
+	// run on pooled workers.
+	dataJobs     chan muxDataJob
+	dataPoolOnce sync.Once
+}
+
+// muxDataFrameWorkerCount sizes the data-frame pool. The pipeline is mostly
+// CPU work (AEAD open, parse, bookkeeping) with brief channel sends, so 2x
+// NumCPU covers it; clamped for very large and very small hosts.
+func muxDataFrameWorkerCount() int {
+	c := runtime.NumCPU() * 2
+	if c < 4 {
+		c = 4
+	}
+	if c > 32 {
+		c = 32
+	}
+	return c
+}
+
+// muxDataFrameQueueDepth bounds the pool's pending-job queue. Combined with
+// the workers this is the practical accepted-frame ceiling (~depth + workers),
+// well under muxInflightDataFramesMax which remains the accounting limit the
+// submitter checks first. A full queue drops the frame — the same fate a
+// frame suffered at the old fan-out cap, minus the goroutine spike.
+const muxDataFrameQueueDepth = 256
+
+// muxDataJob is one accepted data-channel frame awaiting a pool worker.
+type muxDataJob struct {
+	kind  byte
+	s     network.Stream
+	from  peer.ID
+	frame []byte
+}
+
+// submitDataFrame queues one job, spawning the pool on first use. Returns
+// false when the queue is full (caller drops the frame and releases its
+// inflight slot).
+func (e *muxEngine) submitDataFrame(job muxDataJob) bool {
+	e.dataPoolOnce.Do(func() {
+		e.dataJobs = make(chan muxDataJob, muxDataFrameQueueDepth)
+		for i := 0; i < muxDataFrameWorkerCount(); i++ {
+			go e.runDataWorker()
+		}
+	})
+	select {
+	case e.dataJobs <- job:
+		return true
+	default:
+		return false
+	}
+}
+
+// runDataWorker drains the data-job queue. The workers live for the engine's
+// lifetime; each job's handler decrements the inflight counter exactly once.
+func (e *muxEngine) runDataWorker() {
+	for job := range e.dataJobs {
+		inflight := &e.inflightDataFrames
+		switch job.kind {
+		case mux.KindVTP:
+			e.node.handleDataMuxVTP(job.s, job.from, job.frame, inflight)
+		case mux.KindRelay:
+			e.node.handleDataMuxRelay(job.s, job.from, job.frame, inflight)
+		case mux.KindBootRelay:
+			e.node.handleDataMuxBootRelay(job.s, job.from, job.frame, inflight)
+		default:
+			inflight.Add(-1)
+		}
+	}
 }
 
 // muxInflightStreamsMax caps concurrent inbound mux streams per node. Well
@@ -445,12 +522,21 @@ func (e *muxEngine) handleDataStream(s network.Stream) {
 		}
 
 		switch kind {
-		case mux.KindVTP:
-			go e.node.handleDataMuxVTP(s, from, append([]byte(nil), payload...), &e.inflightDataFrames)
-		case mux.KindRelay:
-			go e.node.handleDataMuxRelay(s, from, append([]byte(nil), payload...), &e.inflightDataFrames)
-		case mux.KindBootRelay:
-			go e.node.handleDataMuxBootRelay(s, from, append([]byte(nil), payload...), &e.inflightDataFrames)
+		case mux.KindVTP, mux.KindRelay, mux.KindBootRelay:
+			// Copy the payload out of the reader's scratch buffer and hand it
+			// to the bounded worker pool (replaces the per-frame goroutine:
+			// see the dataJobs field comment). The copy is unchanged — the
+			// scratch is reused by the next ReadDataFrame.
+			frame := append([]byte(nil), payload...)
+			if !e.submitDataFrame(muxDataJob{kind: kind, s: s, from: from, frame: frame}) {
+				// Queue full: release the inflight slot the gate above took,
+				// same drop contract as the old fan-out cap.
+				e.inflightDataFrames.Add(-1)
+				if log.IsDebug() {
+					log.Debug("mux data: worker pool queue full (%d); dropping %d-byte frame from %s",
+						muxDataFrameQueueDepth, len(frame), from.ShortString())
+				}
+			}
 		default:
 			e.inflightDataFrames.Add(-1)
 			log.Warn("mux data: unknown kind %d from %s", kind, from.ShortString())

@@ -745,6 +745,78 @@ func DecryptPayloadRegion(frame []byte, cipher ObfCipher) ([]byte, error) {
 	return DecryptPayloadRegionInto(nil, frame, cipher)
 }
 
+// SealFrameInPlace seals an already-Packed obfuscate frame using its OWN
+// backing array: the ciphertext overwrites the plaintext payload region and
+// the AEAD tag lands in the buffer's spare capacity, so the sealed frame is
+// byte-for-byte identical to EncryptPayloadRegion's output at one full-frame
+// memcpy less.
+//
+// The reuse is the pattern crypto/cipher documents for AEAD.Seal — Seal writes
+// ciphertext[k] to the same address it reads plaintext[k] from, and the tag
+// goes after. The caller MUST therefore own the buffer exclusively: every
+// other reader of `frame` would observe the mutated bytes. The returned slice
+// aliases frame's array (len = sealed length), so the caller keeps exactly one
+// buffer to release.
+//
+// The trailing padding needs one extra step the copying path does not: the tag
+// is written at [HeaderLen+pLen, HeaderLen+pLen+Overhead), which overlaps the
+// first Overhead padding bytes. The padding is therefore memmoved into its
+// post-tag position BEFORE the seal, into the reserved capacity — the AAD was
+// captured from the pristine padding first, so the bytes the receiver hashes
+// are the same ones this side authenticated.
+//
+// ok is false — with the frame left UNTOUCHED — when the backing array cannot
+// hold the tag (cap-len < Overhead, e.g. an exact-fit heap allocation), the
+// frame is too short for the header, or the sealed length would overflow the
+// 16-bit PayloadLen field. Callers must fall back to the copying
+// EncryptPayloadRegion path in that case.
+func SealFrameInPlace(frame []byte, cipher ObfCipher) (sealed []byte, ok bool) {
+	if cipher == nil || cipher.Algo() == ObfAlgoNone {
+		// Nothing to seal: the frame already IS its sealed form.
+		return frame, true
+	}
+	if len(frame) < HeaderLen {
+		return nil, false
+	}
+	pLen := int(binary.BigEndian.Uint16(frame[11:13]))
+	if HeaderLen+pLen > len(frame) {
+		return nil, false
+	}
+	if cap(frame)-len(frame) < cipher.Overhead() {
+		return nil, false
+	}
+	if pLen+cipher.Overhead() > math.MaxUint16 {
+		// Refuse BEFORE any mutation so the caller's fallback path sees the
+		// pristine frame (EncryptPayloadRegion checks this only after sealing).
+		return nil, false
+	}
+	// AAD and nonce are derived from the frame BEFORE any byte is mutated:
+	// the AAD covers the immutable header fields plus the trailing padding.
+	nonce := obfNonceFromHeader(frame)
+	aad := obfAADFromFrame(frame, pLen)
+
+	// Relocate the trailing padding to its post-tag position first (a forward
+	// memmove into the reserved capacity). The 16 stale bytes it leaves behind
+	// at [HeaderLen+pLen, +Overhead) are exactly the region the tag then
+	// overwrites.
+	padStart := HeaderLen + pLen
+	if padLen := len(frame) - padStart; padLen > 0 {
+		// dst begins Overhead bytes AFTER src: a forward memmove into the
+		// reserved capacity (copy() is overlap-safe in this direction).
+		copy(frame[padStart+cipher.Overhead():len(frame)+cipher.Overhead()], frame[padStart:])
+	}
+
+	// dst ends exactly where the plaintext begins, so the AEAD writes
+	// ciphertext[k] over plaintext[k] (the documented storage-reuse pattern)
+	// and appends the tag into the reserved capacity.
+	out := cipher.SealTo(frame[:HeaderLen], nonce[:], aad, frame[HeaderLen:padStart])
+	ctLen := len(out) - HeaderLen
+	binary.BigEndian.PutUint16(out[11:13], uint16(ctLen))
+	// The padding already sits at [HeaderLen+ctLen, len(frame)+Overhead): the
+	// sealed frame is the original length plus the tag.
+	return frame[:len(frame)+cipher.Overhead()], true
+}
+
 // DecryptPayloadRegionInto is DecryptPayloadRegion with a caller-supplied
 // destination: the plaintext frame is appended into dst[:0] (dst may be nil,
 // in which case the behaviour is identical to DecryptPayloadRegion). The

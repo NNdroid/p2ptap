@@ -14,6 +14,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/crypto"
 
 	"p2ptap/cmd/internal/bootstrap"
+	"p2ptap/cmd/internal/runtimectl"
 	"p2ptap/pkg/config"
 	"p2ptap/pkg/logger"
 	"p2ptap/pkg/node"
@@ -21,6 +22,12 @@ import (
 )
 
 func main() {
+	// Runtime GC defaults before any service mode forks a goroutine: the frame
+	// pools + libp2p host keep a large, flat live heap, so a lazy collector
+	// with a soft memory cap materially raises throughput (see the runtimectl
+	// package comment). Explicit GOGC/GOMEMLIMIT env values always win.
+	runtimectl.ApplyGCTuning(logger.New("Runtime").Info)
+
 	// Anti-debugging: detect and silently exit if a debugger is attached.
 	// Placed before checkAndRunService() to cover all execution modes
 	// (foreground, Windows service, genconf, version).

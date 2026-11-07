@@ -2063,6 +2063,13 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 		sniDisplay = "*." + strings.Trim(cfg.Transports.TLSSNISuffix, ".") + " (per-peer)"
 	}
 	collector.SetSecurity(pskStatus, obfsMode, computeKeyFingerprint(cfg.NodeKeyFile), sniDisplay)
+	// Throughput mode: downsample the per-frame packet-classification
+	// bookkeeping from the start (1 = exact, the historical default). The
+	// concrete collector is the WebUI StatsCollector; the assertion keeps the
+	// node decoupled from the web package (same shape as applyHotReload).
+	if sc, ok := collector.(interface{ SetPacketSampleEvery(int) }); ok {
+		sc.SetPacketSampleEvery(cfg.StatsSampleEvery)
+	}
 
 	node := &Node{
 		Host:                 h,

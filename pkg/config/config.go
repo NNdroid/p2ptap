@@ -272,7 +272,16 @@ type Config struct {
 	// raise it (up to 5000) if a session mixes paths whose RTTs differ by more
 	// than that, at the cost of head-of-line delay when a frame is genuinely lost.
 	RxReorderDelayMs int `json:"rx_reorder_delay_ms"`
-	NodeName                string            `json:"node_name"`          // e.g. "my-node" or empty for os.Hostname()
+	// StatsSampleEvery downsamples the per-frame packet-classification
+	// bookkeeping (protocol histogram, direction counters) to 1-in-N frames.
+	// Byte/packet rate accounting (Tx/Rx speeds, per-peer bytes) is ALWAYS
+	// exact; only the classification histograms sampled here are estimates.
+	// 1 (default) records every frame — the historical behaviour. Values > 1
+	// are the throughput mode: at six-figure frame rates the classification
+	// calls are a measurable share of the per-frame CPU, and a 1-in-64
+	// histogram is statistically indistinguishable on the dashboard.
+	StatsSampleEvery        int               `json:"stats_sample_every"`
+	NodeName                string            `json:"node_name"` // e.g. "my-node" or empty for os.Hostname()
 	TapName                 string            `json:"tap_name"`
 	TapIP                   string            `json:"tap_ip"`        // e.g. "10.0.0.1/24"
 	TapIPv6                 string            `json:"tap_ipv6"`      // e.g. "fd00::1/64"
@@ -450,6 +459,9 @@ func DefaultConfig() *Config {
 		// under multipath.
 		RxReorderWindow: 1024,
 		RxReorderDelayMs: 300,
+		// Record every frame's classification by default (historical
+		// behaviour); throughput deployments raise this to 16-64.
+		StatsSampleEvery: 1,
 		NodeName:          hostName,
 		TapName:           "p2ptap0",
 		TapIP:             "10.0.0.1/24",
@@ -711,6 +723,14 @@ func (c *Config) Validate() error {
 	}
 	if c.RxReorderDelayMs > 5000 {
 		c.RxReorderDelayMs = 5000
+	}
+
+	// --- Packet-classification sampling (throughput mode) ---
+	if c.StatsSampleEvery <= 0 {
+		c.StatsSampleEvery = 1
+	}
+	if c.StatsSampleEvery > 1000000 {
+		c.StatsSampleEvery = 1000000
 	}
 
 	// --- Log level ---
@@ -1404,6 +1424,7 @@ func UpdateConfigFileDelta(configPath string, incoming *Config) error {
 	rawMap["transport_strategy"] = incoming.TransportStrategy
 	rawMap["psk"] = incoming.PSK
 	rawMap["log_level"] = incoming.LogLevel
+	rawMap["stats_sample_every"] = incoming.StatsSampleEvery
 	rawMap["bootstrap_peers"] = incoming.BootstrapPeers
 	rawMap["static_peers"] = incoming.StaticPeers
 	rawMap["enable_mdns"] = incoming.EnableMDNS
