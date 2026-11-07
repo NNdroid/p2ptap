@@ -3,7 +3,7 @@
   "openwrt_version": "25.12.6",
   "target": "armsr",
   "subtarget": "armv7",
-  "source_commit": "910c0fc3d6699753d8ed45b06a9c85dd37839371",
-  "source_version": "v1.0.20261023.180-910c0fc",
+  "source_commit": "c7d51610c79c47d6e5ea7cc62c63e46b6dc6b01c",
+  "source_version": "v1.0.20261107.297-c7d5161",
   "package_count": 5
 }

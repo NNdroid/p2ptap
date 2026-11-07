@@ -53,7 +53,7 @@ generate_json_config() {
 	config_get web_port global webui_port 5857
 	config_get web_auth_token global webui_auth_token ""
 
-	local obfs_enable obfs_mode obfs_algo obfs_fixed obfs_block obfs_jitter obfs_min obfs_max obfs_auto_interval obfs_auto_threshold obfs_allow_switch
+	local obfs_enable obfs_mode obfs_algo obfs_fixed obfs_block obfs_jitter obfs_min obfs_max obfs_auto_intervalobfs_allow_switch
 	config_get_bool obfs_enable global obfuscation_enable 0
 	config_get obfs_mode global obfuscation_mode "fixed"
 	config_get obfs_algo global obfuscation_algorithm "auto"
@@ -63,7 +63,6 @@ generate_json_config() {
 	config_get obfs_min global min_size 128
 	config_get obfs_max global max_size 1500
 	config_get obfs_auto_interval global auto_detect_interval 30
-	config_get obfs_auto_threshold global auto_threshold_bytes 1048576
 	config_get_bool obfs_allow_switch global allow_mode_switch 0
 
 	local exit_enable exit_nat exit_wan
@@ -125,8 +124,6 @@ generate_json_config() {
 	json_add_int max_size "$obfs_max"
 	case "$obfs_auto_interval" in ''|*[!0-9]*) logger -t p2ptap "Invalid numeric option: auto_detect_interval"; return 1 ;; esac
 	json_add_int auto_detect_interval "$obfs_auto_interval"
-	case "$obfs_auto_threshold" in ''|*[!0-9]*) logger -t p2ptap "Invalid numeric option: auto_threshold_bytes"; return 1 ;; esac
-	json_add_int auto_threshold_bytes "$obfs_auto_threshold"
 	json_add_boolean allow_mode_switch "$obfs_allow_switch"
 	json_close_object
 	json_add_object exit_node
