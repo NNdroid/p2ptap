@@ -36,3 +36,9 @@ docs/
 # Keeping the 760-file upstream copy out of history avoids re-uploading the whole
 # library on every one-line patch bump.
 /pkg/go-libp2p/
+
+# Local manual relay harness (boot + two node binaries + configs/logs), used to
+# reproduce the boot-relay / circuit-relay TAP transit symptoms by hand. It is
+# superseded by the in-process e2e_boot_relay_tap_transit_test.go and must never
+# be committed.
+/.relaytest/
