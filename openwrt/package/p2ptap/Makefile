@@ -34,6 +34,22 @@ include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
 GO_PKG_TARGET_VARS += CGO_ENABLED=0
 GO_PKG_DEFAULT_LDFLAGS:=
 
+# pkg/go-libp2p is intentionally NOT versioned (see patches/go-libp2p/README.md):
+# go.mod wires the patched fork in with
+#   replace github.com/libp2p/go-libp2p v0.50.0 => ./pkg/go-libp2p
+# so a source tree fetched via PKG_SOURCE_PROTO=git cannot ever carry it —
+# materialising it in the CI workspace does not help the SDK, which re-fetches
+# the source itself. Prepare therefore materialises the pinned upstream tag plus
+# the local patch inside $(PKG_BUILD_DIR), exactly like the Go CI's
+# setup-libp2p composite action. The tree already contains the fetch script and
+# the patch; the step needs git + network on the build host, which the source
+# download itself already requires. Idempotent: an already-materialised tree
+# (local SDK build) short-circuits with "already present".
+define Build/Prepare
+	$(call Build/Prepare/Default)
+	bash scripts/fetch-libp2p.sh
+endef
+
 define Package/p2ptap
   SECTION:=net
   CATEGORY:=Network

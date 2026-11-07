@@ -44,6 +44,8 @@ OPENWRT_TARGET=x86 OPENWRT_SUBTARGET=64 VERSION=v1.0.20261001 bash scripts/build
 
 脚本从官方下载 25.12.6 SDK 并检查 SHA256，安装 feeds，构建 APK。项目需要 Go 1.27，包显式依赖 SDK packages feed 的 `golang1.27/host`。源码固定到当前提交，WebUI 嵌入资源会完整保留。
 
+`pkg/go-libp2p` 不入库（见 `patches/go-libp2p/README.md`），包的 `Build/Prepare` 阶段会自动执行 `scripts/fetch-libp2p.sh`，物化固定的上游版本加本地补丁；已物化的目录会自动跳过。该步骤要求构建主机能访问 GitHub（与源码下载本身的前提一致）。
+
 ## 源码 feed
 
 SDK / Buildroot `feeds.conf.default`：
