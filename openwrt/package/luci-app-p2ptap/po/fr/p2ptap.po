@@ -235,21 +235,9 @@ msgstr "Protocole de transport nouvelle génération basé sur HTTP/3 QUIC."
 msgid "启用 TCP 复用协议"
 msgstr "Activer le multiplexage TCP"
 
-#: luasrc/model/cbi/p2ptap.lua:139
-msgid "启用 TCP Brutal 拥塞控制"
-msgstr "Activer le contrôle de congestion TCP Brutal"
-
 #: luasrc/model/cbi/p2ptap.lua:141
 msgid "高吞吐场景的激进 TCP 拥塞算法。需内核支持。"
 msgstr "Algorithme de congestion TCP agressif pour les scénarios à haut débit. Nécessite le support du noyau."
-
-#: luasrc/model/cbi/p2ptap.lua:143
-msgid "TCP Brutal 速率上限"
-msgstr "Limite de débit TCP Brutal"
-
-#: luasrc/model/cbi/p2ptap.lua:145
-msgid "例如 100Mbps / 1Gbps。启用 TCP Brutal 后生效。"
-msgstr "Exemple : 100Mbps / 1Gbps. Prend effet lorsque TCP Brutal est activé."
 
 #: luasrc/model/cbi/p2ptap.lua:151
 msgid "流量混淆与数据填充"
@@ -259,78 +247,6 @@ msgstr "Obscurcissement du trafic et remplissage"
 msgid "启用二层数据包流量混淆"
 msgstr "Activer l'obscurcissement des paquets de niveau 2"
 
-#: luasrc/model/cbi/p2ptap.lua:157
-msgid "混淆填充模式 (Mode)"
-msgstr "Mode de remplissage d'obscurcissement (Mode)"
-
-#: luasrc/model/cbi/p2ptap.lua:158
-msgid "固定对齐 (Fixed Padding)"
-msgstr "Remplissage fixe (Fixed Padding)"
-
-#: luasrc/model/cbi/p2ptap.lua:159
-msgid "分块对齐 (Block Padding)"
-msgstr "Remplissage par blocs (Block Padding)"
-
-#: luasrc/model/cbi/p2ptap.lua:160
-msgid "随机填充 (Random Padding)"
-msgstr "Remplissage aléatoire (Random Padding)"
-
-#: luasrc/model/cbi/p2ptap.lua:161
-msgid "动态自适应 (Dynamic)"
-msgstr "Dynamique (Dynamic)"
-
-#: luasrc/model/cbi/p2ptap.lua:162
-msgid "全自动 (Auto - 智能检测)"
-msgstr "Auto — Détection intelligente"
-
-#: luasrc/model/cbi/p2ptap.lua:166
-msgid "固定填充包长 (Fixed Size)"
-msgstr "Taille fixe (Fixed Size)"
-
-#: luasrc/model/cbi/p2ptap.lua:169
-msgid "所有数据包对齐到的目标字节长度。仅 fixed 模式。"
-msgstr "Longueur cible en octets à laquelle tous les paquets sont alignés. Mode fixed uniquement."
-
-#: luasrc/model/cbi/p2ptap.lua:172
-msgid "分块填充对齐粒度 (Block Size)"
-msgstr "Taille de bloc (Block Size)"
-
-#: luasrc/model/cbi/p2ptap.lua:175
-msgid "数据包按此字节数向上对齐。仅 block 模式。"
-msgstr "Les paquets sont rembourrés au multiple supérieur de cette valeur. Mode block uniquement."
-
-#: luasrc/model/cbi/p2ptap.lua:178
-msgid "随机抖动范围 (Jitter Range, ±N bytes)"
-msgstr "Plage de gigue (±N octets)"
-
-#: luasrc/model/cbi/p2ptap.lua:181
-msgid "在填充基础上附加 ±N 字节随机抖动。0 = 关闭抖动。"
-msgstr "Gigue aléatoire supplémentaire de ±N octets en plus du remplissage. 0 = désactiver la gigue."
-
-#: luasrc/model/cbi/p2ptap.lua:184
-msgid "最小帧尺寸 (Min Size)"
-msgstr "Taille minimale (Min Size)"
-
-#: luasrc/model/cbi/p2ptap.lua:187
-msgid "dynamic 模式下的最小帧尺寸。"
-msgstr "Taille de trame minimale en mode dynamic."
-
-#: luasrc/model/cbi/p2ptap.lua:190
-msgid "最大帧尺寸 (Max Size)"
-msgstr "Taille maximale (Max Size)"
-
-#: luasrc/model/cbi/p2ptap.lua:193
-msgid "dynamic 模式下的最大帧尺寸。"
-msgstr "Taille de trame maximale en mode dynamic."
-
-#: luasrc/model/cbi/p2ptap.lua:197
-msgid "自动检测间隔 (Auto Detect Interval, 秒)"
-msgstr "Intervalle de détection automatique (secondes)"
-
-#: luasrc/model/cbi/p2ptap.lua:200
-msgid "Auto 模式下重新评估混淆策略的间隔秒数。"
-msgstr "Intervalle en secondes pour réévaluer la stratégie d'obscurcissement en mode Auto."
-
 #: luasrc/model/cbi/p2ptap.lua:203
 msgid "自动切换阈值 (Auto Threshold Bytes)"
 msgstr "Seuil automatique (octets)"
@@ -338,14 +254,6 @@ msgstr "Seuil automatique (octets)"
 #: luasrc/model/cbi/p2ptap.lua:206
 msgid "Auto 模式下累计传输超过此字节数后触发重评估。默认 1MB。"
 msgstr "En mode Auto, déclenche la réévaluation après que le transfert cumulé dépasse ce nombre d'octets. Par défaut : 1 Mo."
-
-#: luasrc/model/cbi/p2ptap.lua:209
-msgid "允许自动切换模式 (Allow Mode Switch)"
-msgstr "Autoriser le changement de mode (Allow Mode Switch)"
-
-#: luasrc/model/cbi/p2ptap.lua:211
-msgid "Auto 模式下允许引擎自动切换混淆策略。启用后可能产生短暂抖动。"
-msgstr "En mode Auto, permet au moteur de changer automatiquement de stratégie d'obscurcissement. Peut causer une brève gigue lorsqu'activé."
 
 #: luasrc/model/cbi/p2ptap.lua:217
 msgid "出口网关 (Exit Node)"
@@ -418,3 +326,154 @@ msgstr "Arrêté"
 #: luasrc/view/p2ptap/status.htm:15
 msgid "正在获取运行状态..."
 msgstr "Récupération de l'état de fonctionnement..."
+
+
+msgid "多径调度 (Multipath - 跨路径重排/抗丢包)"
+msgstr "Ordonnancement multipath (réordonnancement/anti-perte entre chemins)"
+
+msgid "multipath 下接收端开启重排缓冲，可结合 rx_reorder_window / rx_reorder_delay_ms 调优。"
+msgstr "En mode multipath, le récepteur active une mémoire tampon de réordonnancement, réglable via rx_reorder_window / rx_reorder_delay_ms."
+
+msgid "统计采样率 (Stats Sample Every)"
+msgstr "Échantillonnage des statistiques (Stats Sample Every)"
+
+msgid "每 N 帧记录一次报文分类统计。1 = 全量记录 (默认)。高吞吐部署可提升至 16-64 降低 CPU。字节/包速率统计始终精确。"
+msgstr "Enregistrer les statistiques de classification de paquets toutes les N trames. 1 = tout enregistrer (défaut). Les déploiements à haut débit peuvent monter à 16-64 pour réduire le CPU. Les statistiques de débit octets/paquets sont toujours exactes."
+
+msgid "强制私有可达性 (Force Private Reachability)"
+msgstr "Forcer la visibilité privée (Force Private Reachability)"
+
+msgid "强制 libp2p 主机宣告为私有 (仅中继可达)。默认关闭: 通过 AutoNAT 自动检测，公网节点仍宣告直连地址。仅当 AutoNAT 在您的网络中不可靠时启用。"
+msgstr "Forcer l'hôte libp2p à s'annoncer privé (relais uniquement). Désactivé par défaut : la visibilité est auto-détectée via AutoNAT, les nœuds publics annoncent donc toujours leurs adresses directes. Activer uniquement si AutoNAT est peu fiable sur votre réseau."
+
+msgid "启用 WebRTC 信令穿透 (WebRTC Signaling)"
+msgstr "Activer la traversée par signalisation WebRTC (WebRTC Signaling)"
+
+msgid "中继专用对端无法直连时，通过控制通道交换真实 SDP 并运行完整 ICE (STUN/TURN)，可穿越一层或两层 NAT。独立于 webrtc-direct (LITE 无法穿 NAT)。需重启生效。"
+msgstr "Lorsqu'un pair relais uniquement n'est pas joignable directement, échanger un vrai SDP via le canal de contrôle et exécuter un agent ICE complet (STUN/TURN) pour traverser un ou deux NAT. Distinct de webrtc-direct (LITE ne traverse pas le NAT). Nécessite un redémarrage."
+
+msgid "TLS SNI 服务器名 (TLS Server Name)"
+msgstr "Nom de serveur TLS SNI (TLS Server Name)"
+
+msgid "留空表示不发送 SNI"
+msgstr "Laisser vide pour ne pas envoyer de SNI"
+
+msgid "出站握手 (TLS-over-TCP 与 QUIC) 的 server_name (SNI)。设置后使网格流量更接近普通 HTTP/3。不影响认证。"
+msgstr "Le server_name (SNI) des poignées de main sortantes (TLS-over-TCP et QUIC). Le définir rend le trafic maillé semblable à du HTTP/3 ordinaire. N'affecte pas l'authentification."
+
+msgid "按 Peer 派生 SNI 后缀 (TLS SNI Suffix)"
+msgstr "Suffixe SNI dérivé par pair (TLS SNI Suffix)"
+
+msgid "例如 vpn.example.com"
+msgstr "ex. vpn.example.com"
+
+msgid "出站 SNI 变为 '<peer 标签>.<后缀>'，使每个链路呈现稳定且不同的 SNI，避免所有节点发送相同 SNI 的全局关联特征。优先于 tls_server_name。需重启生效。"
+msgstr "Le SNI sortant devient '<étiquette pair>.<suffixe>', offrant à chaque lien un SNI distinct et stable, évitant l'indice de corrélation globale de tous les nœuds envoyant le même SNI. Prioritaire sur tls_server_name. Nécessite un redémarrage."
+
+msgid "禁用 Circuit Relay 标准中继"
+msgstr "Désactiver Circuit Relay"
+
+msgid "仅关闭 libp2p circuit-relay 与 AutoRelay，保留 DCUtR 打洞。"
+msgstr "Désactiver uniquement circuit-relay et AutoRelay de libp2p, en conservant la traversée DCUtR."
+
+msgid "禁用 DCUtR 打洞"
+msgstr "Désactiver la traversée DCUtR"
+
+msgid "仅关闭 DCUtR 打洞，保留 Circuit Relay 与 AutoRelay。"
+msgstr "Désactiver uniquement la traversée DCUtR, en conservant Circuit Relay et AutoRelay."
+
+msgid "禁用全部中继与打洞 (诊断)"
+msgstr "Désactiver tout le relais et la traversée (Diagnostic)"
+
+msgid "一次性关闭 Circuit Relay + AutoRelay + DCUtR，仅依赖直连或 p2ptap 专有骨干中继。不影响 p2ptap 自身 overlay 中继。"
+msgstr "Désactiver d'un coup Circuit Relay + AutoRelay + DCUtR, en s'appuyant uniquement sur les connexions directes ou le relais dorsal p2ptap. N'affecte pas le relais overlay p2ptap."
+
+msgid "overlay 中继帧使用 multihash 头"
+msgstr "Utiliser l'en-tête multihash pour les trames de relais overlay"
+
+msgid "以紧凑 0x03 头发送 p2ptap overlay 中继帧 (Peer ID 用原始 multihash 而非 base58 CID)。默认关闭: 仅当整个传输路径上所有 overlay 中继与 boot 中继都已升级时启用，否则中间 v2 节点会丢弃帧。读取端始终兼容两种头。"
+msgstr "Envoyer les trames de relais overlay p2ptap avec l'en-tête compact 0x03 (Peer IDs en octets multihash bruts au lieu de CID base58). Désactivé par défaut : activer uniquement lorsque tous les relais overlay et boot du chemin sont mis à niveau, sinon les nœuds v2 intermédiaires suppriment la trame. Les lecteurs acceptent toujours les deux en-têtes."
+
+msgid "STUN 服务器 (WebRTC ICE)"
+msgstr "Serveurs STUN (ICE WebRTC)"
+
+msgid "WebRTC ICE 候选收集的 STUN 服务器 Multiaddr。提供 server-reflexive 候选，显著提升 WebRTC 打洞成功率。留空则仅依赖 host 候选。"
+msgstr "Multiadresses de serveurs STUN pour la collecte de candidats ICE WebRTC. Fournissent des candidats server-reflexive, améliorant nettement le succès de la traversée WebRTC. Laisser vide pour ne dépendre que des candidats host."
+
+msgid "TURN 服务器 (WebRTC 中继回退)"
+msgstr "Serveurs TURN (repli relais WebRTC)"
+
+msgid "TURN 中继回退 URL。必须携带凭据，否则 WebRTC 会整体中止。留空为正确默认: 走 STUN + 打洞，TURN 仅作回退。"
+msgstr "URLs de repli relais TURN. Les identifiants sont obligatoires, sinon WebRTC s'interrompt entièrement. Laisser vide pour le défaut correct : STUN + traversée, TURN uniquement en repli."
+
+msgid "接收端重排缓冲 (Rx Reorder Window)"
+msgstr "Fenêtre de réordonnancement Rx (Rx Reorder Window)"
+
+msgid "multipath 策略下的接收端重排缓冲帧数上限。匹配去重容忍度 (1024)。"
+msgstr "Nombre maximal de trames dans la mémoire tampon de réordonnancement côté réception en mode multipath. Correspond à la tolérance de déduplication (1024)."
+
+msgid "重排队头超时 (Rx Reorder Delay, ms)"
+msgstr "Délai de réordonnancement Rx (ms)"
+
+msgid "multipath 下队头阻塞的强制释放超时毫秒数。默认 300ms 覆盖 LAN+WAN 直连路径的延迟差；混合 RTT 差更大的路径可调高。"
+msgstr "Délai de libération forcée du blocage de tête (ms) en multipath. 300ms par défaut couvre l'étalement de latence d'une paire de chemins directs LAN+WAN ; augmenter pour des chemins avec de plus grandes différences de RTT."
+
+msgid "填充规则 (Padding Rules)"
+msgstr "Règles de remplissage (Padding Rules)"
+
+msgid "每行一条填充带规则，语法: '<floor> -> <target_min>[-<target_max>]'。可选一行 'coalesce on|off [max_delay_ms=N] [max_bytes=N] [max_frames=N]' 控制包聚合。留空使用默认规则 '0 -> 400-600' (小于 400 字节填充到 400-600 随机长度，400 以上原样发送，并启用聚合)。带区间按 floor 升序。"
+msgstr "Une bande de remplissage par ligne, syntaxe : '<floor> -> <target_min>[-<target_max>]'. Une ligne facultative 'coalesce on|off [max_delay_ms=N] [max_bytes=N] [max_frames=N]' contrôle la coalescence des paquets. Laisser vide pour la règle par défaut '0 -> 400-600' (les charges utiles < 400 octets sont remplies à 400-600 aléatoire, 400+ envoyées telles quelles, coalescence activée). Les bandes sont triées par floor croissant."
+
+msgid "分片上限 (Max Frag Size)"
+msgstr "Taille max de fragment (Max Frag Size)"
+
+msgid "TAP 帧分片层的单分片内层大小上限 (字节)。0 = 由节点根据 MTU 与混淆开销自动推导。范围 256-1400。"
+msgstr "Plafond de la taille interne par fragment (octets) de la couche de fragmentation des trames TAP. 0 = dérivée automatiquement par le nœud depuis le MTU et le surcoût d'obscurcissement. Plage 256-1400."
+
+msgid "严格密钥协商 (Strict Key Negotiation)"
+msgstr "Négociation de clé stricte (Strict Key Negotiation)"
+
+msgid "强制每对 Peer 用一次性 ECDH(P256) 临时密钥派生独立密钥 (前向保密)。关闭则允许在重同步时退回到长寿命节点密钥。"
+msgstr "Forcer chaque paire de pairs à dériver son propre chiffrement depuis une clé éphémère ECDH(P256) à usage unique (secret de transmission). Désactivé autorise le repli sur la clé de nœud longue durée lors d'une resynchronisation."
+
+msgid "强制认证密钥交换 (Require Auth Key Exchange)"
+msgstr "Exiger l'échange de clé authentifié (Require Auth Key Exchange)"
+
+msgid "对每个 Peer 强制身份签名的密钥交换，防止中继跳替换密钥的降级攻击。开启后与未升级的旧节点不建立加密连接；仅在全部节点均已升级的舰队上启用。"
+msgstr "Exiger un échange de clé signé par identité de chaque pair, empêchant un saut de relais de transit de substituer sa propre clé. Une fois activé, les liens chiffrés ne s'établissent pas avec les pairs hérités non mis à niveau ; activer uniquement sur des flottes où tous les pairs sont mis à niveau."
+
+msgid "访问控制 (ACL)"
+msgstr "Contrôle d'accès (ACL)"
+
+msgid "启用访问控制 (Enable ACL)"
+msgstr "Activer le contrôle d'accès (ACL)"
+
+msgid "启用后按默认动作 + 规则列表过滤网格流量。默认关闭 (网格完全开放)。"
+msgstr "Une fois activé, le trafic maillé est filtré par l'action par défaut plus la liste de règles. Désactivé par défaut (maillage totalement ouvert)."
+
+msgid "默认动作 (Default Action)"
+msgstr "Action par défaut (Default Action)"
+
+msgid "允许 (Allow)"
+msgstr "Autoriser (Allow)"
+
+msgid "拒绝 (Deny)"
+msgstr "Refuser (Deny)"
+
+msgid "详细 ACL 规则"
+msgstr "Règles ACL détaillées"
+
+msgid "细粒度规则 (每条的 rule_id / action / direction / peer_id / ip_cidr / protocol / port / comment) 请通过配置文件手动编辑: /etc/config/p2ptap 或生成的 /tmp/etc/p2ptap.json 的 acl.rules 数组。"
+msgstr "Les règles fines (par règle : rule_id / action / direction / peer_id / ip_cidr / protocol / port / comment) doivent être modifiées manuellement dans le fichier de configuration : le tableau acl.rules dans /etc/config/p2ptap ou le /tmp/etc/p2ptap.json généré."
+
+msgid "抓包采样率 (Pcap Sample Every)"
+msgstr "Échantillonnage de capture (Pcap Sample Every)"
+
+msgid "实时抓包视图每 N 帧采样 1 帧。1 = 全量。值越大 CPU 越低但抓包越粗。"
+msgstr "La vue de capture en direct échantillonne 1 trame sur N. 1 = tout. Plus élevé = CPU plus faible mais capture plus grossière."
+
+msgid "抓包速率上限 (Pcap Max Rate, 帧/秒)"
+msgstr "Taux max de capture (Pcap Max Rate, trames/s)"
+
+msgid "限制每秒捕获的帧数 (0 = 不限)。作为 PcapSampleEvery 之上的二级安全网。"
+msgstr "Plafonne les trames capturées par seconde (0 = illimité). Un filet de sécurité secondaire au-dessus de PcapSampleEvery."
