@@ -47,7 +47,11 @@ GO_PKG_DEFAULT_LDFLAGS:=
 # (local SDK build) short-circuits with "already present".
 define Build/Prepare
 	$(call Build/Prepare/Default)
-	bash scripts/fetch-libp2p.sh
+	# Build/Prepare commands run from the package directory, not
+	# $(PKG_BUILD_DIR); the script anchors on its own location, so an absolute
+	# path materialises into the right tree. Invoke via bash: the archive's
+	# exec bit is not reliable across checkouts.
+	bash $(PKG_BUILD_DIR)/scripts/fetch-libp2p.sh
 endef
 
 define Package/p2ptap
