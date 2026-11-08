@@ -235,21 +235,9 @@ msgstr "New-generation transport protocol based on HTTP/3 QUIC."
 msgid "启用 TCP 复用协议"
 msgstr "Enable TCP Multiplexing"
 
-#: luasrc/model/cbi/p2ptap.lua:139
-msgid "启用 TCP Brutal 拥塞控制"
-msgstr "Enable TCP Brutal Congestion Control"
-
 #: luasrc/model/cbi/p2ptap.lua:141
 msgid "高吞吐场景的激进 TCP 拥塞算法。需内核支持。"
 msgstr "Aggressive TCP congestion algorithm for high-throughput scenarios. Requires kernel support."
-
-#: luasrc/model/cbi/p2ptap.lua:143
-msgid "TCP Brutal 速率上限"
-msgstr "TCP Brutal Rate Limit"
-
-#: luasrc/model/cbi/p2ptap.lua:145
-msgid "例如 100Mbps / 1Gbps。启用 TCP Brutal 后生效。"
-msgstr "Example: 100Mbps / 1Gbps. Takes effect when TCP Brutal is enabled."
 
 #: luasrc/model/cbi/p2ptap.lua:151
 msgid "流量混淆与数据填充"
@@ -259,78 +247,6 @@ msgstr "Traffic Obfuscation & Padding"
 msgid "启用二层数据包流量混淆"
 msgstr "Enable Layer-2 Packet Obfuscation"
 
-#: luasrc/model/cbi/p2ptap.lua:157
-msgid "混淆填充模式 (Mode)"
-msgstr "Obfuscation Padding Mode"
-
-#: luasrc/model/cbi/p2ptap.lua:158
-msgid "固定对齐 (Fixed Padding)"
-msgstr "Fixed Padding"
-
-#: luasrc/model/cbi/p2ptap.lua:159
-msgid "分块对齐 (Block Padding)"
-msgstr "Block Padding"
-
-#: luasrc/model/cbi/p2ptap.lua:160
-msgid "随机填充 (Random Padding)"
-msgstr "Random Padding"
-
-#: luasrc/model/cbi/p2ptap.lua:161
-msgid "动态自适应 (Dynamic)"
-msgstr "Dynamic"
-
-#: luasrc/model/cbi/p2ptap.lua:162
-msgid "全自动 (Auto - 智能检测)"
-msgstr "Auto — Intelligent Detection"
-
-#: luasrc/model/cbi/p2ptap.lua:166
-msgid "固定填充包长 (Fixed Size)"
-msgstr "Fixed Size"
-
-#: luasrc/model/cbi/p2ptap.lua:169
-msgid "所有数据包对齐到的目标字节长度。仅 fixed 模式。"
-msgstr "Target byte length to which all packets are aligned. Fixed mode only."
-
-#: luasrc/model/cbi/p2ptap.lua:172
-msgid "分块填充对齐粒度 (Block Size)"
-msgstr "Block Size"
-
-#: luasrc/model/cbi/p2ptap.lua:175
-msgid "数据包按此字节数向上对齐。仅 block 模式。"
-msgstr "Packets are padded up to the nearest multiple of this value. Block mode only."
-
-#: luasrc/model/cbi/p2ptap.lua:178
-msgid "随机抖动范围 (Jitter Range, ±N bytes)"
-msgstr "Jitter Range (±N bytes)"
-
-#: luasrc/model/cbi/p2ptap.lua:181
-msgid "在填充基础上附加 ±N 字节随机抖动。0 = 关闭抖动。"
-msgstr "Extra random ±N bytes of jitter on top of padding. 0 = disable jitter."
-
-#: luasrc/model/cbi/p2ptap.lua:184
-msgid "最小帧尺寸 (Min Size)"
-msgstr "Min Size"
-
-#: luasrc/model/cbi/p2ptap.lua:187
-msgid "dynamic 模式下的最小帧尺寸。"
-msgstr "Minimum frame size in dynamic mode."
-
-#: luasrc/model/cbi/p2ptap.lua:190
-msgid "最大帧尺寸 (Max Size)"
-msgstr "Max Size"
-
-#: luasrc/model/cbi/p2ptap.lua:193
-msgid "dynamic 模式下的最大帧尺寸。"
-msgstr "Maximum frame size in dynamic mode."
-
-#: luasrc/model/cbi/p2ptap.lua:197
-msgid "自动检测间隔 (Auto Detect Interval, 秒)"
-msgstr "Auto Detect Interval (seconds)"
-
-#: luasrc/model/cbi/p2ptap.lua:200
-msgid "Auto 模式下重新评估混淆策略的间隔秒数。"
-msgstr "Interval in seconds to re-evaluate obfuscation strategy in Auto mode."
-
 #: luasrc/model/cbi/p2ptap.lua:203
 msgid "自动切换阈值 (Auto Threshold Bytes)"
 msgstr "Auto Threshold (Bytes)"
@@ -338,14 +254,6 @@ msgstr "Auto Threshold (Bytes)"
 #: luasrc/model/cbi/p2ptap.lua:206
 msgid "Auto 模式下累计传输超过此字节数后触发重评估。默认 1MB。"
 msgstr "In Auto mode, trigger re-evaluation after cumulative transfer exceeds this byte count. Default: 1 MB."
-
-#: luasrc/model/cbi/p2ptap.lua:209
-msgid "允许自动切换模式 (Allow Mode Switch)"
-msgstr "Allow Mode Switch"
-
-#: luasrc/model/cbi/p2ptap.lua:211
-msgid "Auto 模式下允许引擎自动切换混淆策略。启用后可能产生短暂抖动。"
-msgstr "In Auto mode, allow the engine to switch obfuscation strategies automatically. May cause brief jitter when enabled."
 
 #: luasrc/model/cbi/p2ptap.lua:217
 msgid "出口网关 (Exit Node)"
@@ -459,14 +367,6 @@ msgstr "Allowed Subnet Peer IDs Whitelist"
 msgid "填写允许向本机推送子网路由的 Peer ID 列表。填写 '*' 表示信任并允许所有合法节点。"
 msgstr "List of Peer IDs allowed to advertise subnets to this router. Use '*' to allow all authenticated peers."
 
-#: luasrc/model/cbi/p2ptap.lua:144
-msgid "禁用 Circuit Relay v2 标准中继"
-msgstr "Disable Circuit Relay v2"
-
-#: luasrc/model/cbi/p2ptap.lua:146
-msgid "仅作故障排查用途。启用后将关闭 libp2p 默认中继与 DCUtR 打洞，仅依赖直连或 p2ptap 专有骨干中继。"
-msgstr "Diagnostic flag. Turns off libp2p circuit relay and DCUtR punching, relying solely on direct paths or p2ptap boot relay."
-
 #: luasrc/model/cbi/p2ptap.lua:150
 msgid "载荷加密算法 (Algorithm)"
 msgstr "Payload Encryption Algorithm"
@@ -523,3 +423,152 @@ msgstr "Open Full WebUI Dashboard (Topology / Live Monitor)"
 msgid "Peer ID 已复制到剪贴板！"
 msgstr "Peer ID copied to clipboard!"
 
+msgid "多径调度 (Multipath - 跨路径重排/抗丢包)"
+msgstr "Multipath Scheduling (reordering/anti-loss across paths)"
+
+msgid "multipath 下接收端开启重排缓冲，可结合 rx_reorder_window / rx_reorder_delay_ms 调优。"
+msgstr "Under multipath, the receiver enables a reorder buffer, tunable via rx_reorder_window / rx_reorder_delay_ms."
+
+msgid "统计采样率 (Stats Sample Every)"
+msgstr "Stats Sample Every"
+
+msgid "每 N 帧记录一次报文分类统计。1 = 全量记录 (默认)。高吞吐部署可提升至 16-64 降低 CPU。字节/包速率统计始终精确。"
+msgstr "Record packet-classification stats every N frames. 1 = record all (default). High-throughput deployments can raise to 16-64 to lower CPU. Byte/packet rate stats are always exact."
+
+msgid "强制私有可达性 (Force Private Reachability)"
+msgstr "Force Private Reachability"
+
+msgid "强制 libp2p 主机宣告为私有 (仅中继可达)。默认关闭: 通过 AutoNAT 自动检测，公网节点仍宣告直连地址。仅当 AutoNAT 在您的网络中不可靠时启用。"
+msgstr "Force the libp2p host to advertise as private (relay-only). Default off: reachability is auto-detected via AutoNAT, so public nodes still advertise direct addresses. Enable only when AutoNAT is unreliable in your network."
+
+msgid "启用 WebRTC 信令穿透 (WebRTC Signaling)"
+msgstr "Enable WebRTC Signaling Hole-Punching"
+
+msgid "中继专用对端无法直连时，通过控制通道交换真实 SDP 并运行完整 ICE (STUN/TURN)，可穿越一层或两层 NAT。独立于 webrtc-direct (LITE 无法穿 NAT)。需重启生效。"
+msgstr "When a relay-only peer cannot be reached directly, exchange real SDP over the control channel and run a full ICE agent (STUN/TURN) to traverse one or two NATs. Separate from webrtc-direct (LITE cannot cross NAT). Requires restart."
+
+msgid "TLS SNI 服务器名 (TLS Server Name)"
+msgstr "TLS SNI Server Name"
+
+msgid "留空表示不发送 SNI"
+msgstr "Leave empty to send no SNI"
+
+msgid "出站握手 (TLS-over-TCP 与 QUIC) 的 server_name (SNI)。设置后使网格流量更接近普通 HTTP/3。不影响认证。"
+msgstr "The server_name (SNI) on outgoing handshakes (TLS-over-TCP and QUIC). Setting it makes mesh traffic resemble ordinary HTTP/3. Does not affect authentication."
+
+msgid "按 Peer 派生 SNI 后缀 (TLS SNI Suffix)"
+msgstr "Per-Peer Derived SNI Suffix (TLS SNI Suffix)"
+
+msgid "例如 vpn.example.com"
+msgstr "e.g. vpn.example.com"
+
+msgid "出站 SNI 变为 '<peer 标签>.<后缀>'，使每个链路呈现稳定且不同的 SNI，避免所有节点发送相同 SNI 的全局关联特征。优先于 tls_server_name。需重启生效。"
+msgstr "The outgoing SNI becomes '<peer label>.<suffix>', giving every link a distinct, stable SNI and avoiding the global-correlation tell of all nodes sending the same SNI. Takes precedence over tls_server_name. Requires restart."
+
+msgid "禁用 Circuit Relay 标准中继"
+msgstr "Disable Circuit Relay"
+
+msgid "仅关闭 libp2p circuit-relay 与 AutoRelay，保留 DCUtR 打洞。"
+msgstr "Turn off only libp2p circuit-relay and AutoRelay, keeping DCUtR hole-punching on."
+
+msgid "禁用 DCUtR 打洞"
+msgstr "Disable DCUtR Hole-Punching"
+
+msgid "仅关闭 DCUtR 打洞，保留 Circuit Relay 与 AutoRelay。"
+msgstr "Turn off only DCUtR hole-punching, keeping Circuit Relay and AutoRelay on."
+
+msgid "禁用全部中继与打洞 (诊断)"
+msgstr "Disable All Relaying and Hole-Punching (Diagnostic)"
+
+msgid "一次性关闭 Circuit Relay + AutoRelay + DCUtR，仅依赖直连或 p2ptap 专有骨干中继。不影响 p2ptap 自身 overlay 中继。"
+msgstr "Turn off Circuit Relay + AutoRelay + DCUtR in one go, relying only on direct connections or p2ptap's own backbone relay. Does not affect p2ptap's overlay relay."
+
+msgid "overlay 中继帧使用 multihash 头"
+msgstr "Use Multihash Header for Overlay Relay Frames"
+
+msgid "以紧凑 0x03 头发送 p2ptap overlay 中继帧 (Peer ID 用原始 multihash 而非 base58 CID)。默认关闭: 仅当整个传输路径上所有 overlay 中继与 boot 中继都已升级时启用，否则中间 v2 节点会丢弃帧。读取端始终兼容两种头。"
+msgstr "Send p2ptap overlay relay frames with the compact 0x03 header (Peer IDs as raw multihash bytes instead of base58 CID). Off by default: enable only when every overlay relay and boot relay on the transit path is upgraded, or intermediate v2 nodes drop the frame. Readers always accept both headers."
+
+msgid "STUN 服务器 (WebRTC ICE)"
+msgstr "STUN Servers (WebRTC ICE)"
+
+msgid "WebRTC ICE 候选收集的 STUN 服务器 Multiaddr。提供 server-reflexive 候选，显著提升 WebRTC 打洞成功率。留空则仅依赖 host 候选。"
+msgstr "STUN server multiaddrs for WebRTC ICE candidate gathering. Provide server-reflexive candidates, significantly improving WebRTC hole-punching success. Leave empty to rely on host candidates only."
+
+msgid "TURN 服务器 (WebRTC 中继回退)"
+msgstr "TURN Servers (WebRTC Relay Fallback)"
+
+msgid "TURN 中继回退 URL。必须携带凭据，否则 WebRTC 会整体中止。留空为正确默认: 走 STUN + 打洞，TURN 仅作回退。"
+msgstr "TURN relay fallback URLs. Credentials are required, otherwise WebRTC aborts entirely. Leave empty for the correct default: STUN + hole punching, TURN only as fallback."
+
+msgid "接收端重排缓冲 (Rx Reorder Window)"
+msgstr "Rx Reorder Window"
+
+msgid "multipath 策略下的接收端重排缓冲帧数上限。匹配去重容忍度 (1024)。"
+msgstr "Max frames in the receive-side reorder buffer under the multipath strategy. Matches the dedup tolerance (1024)."
+
+msgid "重排队头超时 (Rx Reorder Delay, ms)"
+msgstr "Rx Reorder Delay (ms)"
+
+msgid "multipath 下队头阻塞的强制释放超时毫秒数。默认 300ms 覆盖 LAN+WAN 直连路径的延迟差；混合 RTT 差更大的路径可调高。"
+msgstr "Head-of-line force-release timeout (ms) under multipath. Default 300ms covers the latency spread of a LAN+WAN direct path pair; raise it for paths with larger RTT differences."
+
+msgid "填充规则 (Padding Rules)"
+msgstr "Padding Rules"
+
+msgid "每行一条填充带规则，语法: '<floor> -> <target_min>[-<target_max>]'。可选一行 'coalesce on|off [max_delay_ms=N] [max_bytes=N] [max_frames=N]' 控制包聚合。留空使用默认规则 '0 -> 400-600' (小于 400 字节填充到 400-600 随机长度，400 以上原样发送，并启用聚合)。带区间按 floor 升序。"
+msgstr "One padding band per line, syntax: '<floor> -> <target_min>[-<target_max>]'. An optional 'coalesce on|off [max_delay_ms=N] [max_bytes=N] [max_frames=N]' line controls packet coalescing. Leave empty for the default rule '0 -> 400-600' (payloads under 400 bytes pad to a random 400-600, 400+ sent naturally, with coalescing on). Bands are ordered by floor ascending."
+
+msgid "分片上限 (Max Frag Size)"
+msgstr "Max Frag Size"
+
+msgid "TAP 帧分片层的单分片内层大小上限 (字节)。0 = 由节点根据 MTU 与混淆开销自动推导。范围 256-1400。"
+msgstr "Cap on the per-fragment inner size (bytes) of the TAP-frame fragmentation layer. 0 = auto-derived by the node from MTU and obfuscation overhead. Range 256-1400."
+
+msgid "严格密钥协商 (Strict Key Negotiation)"
+msgstr "Strict Key Negotiation"
+
+msgid "强制每对 Peer 用一次性 ECDH(P256) 临时密钥派生独立密钥 (前向保密)。关闭则允许在重同步时退回到长寿命节点密钥。"
+msgstr "Force each peer pair to derive its own cipher from a one-shot ECDH(P256) ephemeral key (forward secrecy). Off allows falling back to the long-lived node key on a re-sync."
+
+msgid "强制认证密钥交换 (Require Auth Key Exchange)"
+msgstr "Require Auth Key Exchange"
+
+msgid "对每个 Peer 强制身份签名的密钥交换，防止中继跳替换密钥的降级攻击。开启后与未升级的旧节点不建立加密连接；仅在全部节点均已升级的舰队上启用。"
+msgstr "Require an identity-signed key exchange from every peer, preventing a transit relay hop from substituting its own key. When on, encrypted links are not established with un-upgraded legacy peers; enable only on fleets where every peer is upgraded."
+
+msgid "访问控制 (ACL)"
+msgstr "Access Control (ACL)"
+
+msgid "启用访问控制 (Enable ACL)"
+msgstr "Enable ACL"
+
+msgid "启用后按默认动作 + 规则列表过滤网格流量。默认关闭 (网格完全开放)。"
+msgstr "When on, mesh traffic is filtered by the default action plus the rules list. Off by default (mesh fully open)."
+
+msgid "默认动作 (Default Action)"
+msgstr "Default Action"
+
+msgid "允许 (Allow)"
+msgstr "Allow"
+
+msgid "拒绝 (Deny)"
+msgstr "Deny"
+
+msgid "详细 ACL 规则"
+msgstr "Detailed ACL Rules"
+
+msgid "细粒度规则 (每条的 rule_id / action / direction / peer_id / ip_cidr / protocol / port / comment) 请通过配置文件手动编辑: /etc/config/p2ptap 或生成的 /tmp/etc/p2ptap.json 的 acl.rules 数组。"
+msgstr "Fine-grained rules (per-rule rule_id / action / direction / peer_id / ip_cidr / protocol / port / comment) must be edited manually in the config file: the acl.rules array in /etc/config/p2ptap or the generated /tmp/etc/p2ptap.json."
+
+msgid "抓包采样率 (Pcap Sample Every)"
+msgstr "Pcap Sample Every"
+
+msgid "实时抓包视图每 N 帧采样 1 帧。1 = 全量。值越大 CPU 越低但抓包越粗。"
+msgstr "The live packet view samples 1 of every N frames. 1 = all. Higher = lower CPU but coarser capture."
+
+msgid "抓包速率上限 (Pcap Max Rate, 帧/秒)"
+msgstr "Pcap Max Rate (frames/sec)"
+
+msgid "限制每秒捕获的帧数 (0 = 不限)。作为 PcapSampleEvery 之上的二级安全网。"
+msgstr "Caps captured frames per second (0 = unlimited). A secondary safety net on top of PcapSampleEvery."
