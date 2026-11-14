@@ -485,8 +485,8 @@ type Node struct {
 	// updates — including ARP/NDP floods and relay-carried traffic. A peer whose
 	// unicast return path was dead but that trickled one broadcast frame per
 	// window stayed immune to reconnect forever. Same CoW shape as peerLastRx.
-	peerLastUnicastRx   atomic.Pointer[map[peer.ID]*atomic.Int64]
-	peerUnicastRxMu     sync.Mutex // structural (CoW) changes only; never taken per frame
+	peerLastUnicastRx atomic.Pointer[map[peer.ID]*atomic.Int64]
+	peerUnicastRxMu   sync.Mutex // structural (CoW) changes only; never taken per frame
 	// ppInFlight guards against probing the same peer twice concurrently. The
 	// keepalive tick no longer blocks on all probes finishing (a slow batch used
 	// to stretch the next detection interval by up to a full probe budget), so

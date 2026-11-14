@@ -236,12 +236,22 @@ type repairTestHost struct {
 func (h *repairTestHost) Network() network.Network { return &repairTestNet{} }
 
 func TestScheduleStreamRepairSkipsBareDispatcher(t *testing.T) {
+	// armed reads the single-flight set the way production does — under
+	// repairMu. The repair goroutine concurrently deletes its entry after the
+	// coalescing delay, so an unlocked len() would be a data race the detector
+	// flags (it did, in CI) even though the map access itself is tiny.
+	armed := func(sd *StrategyDispatcher) int {
+		sd.repairMu.Lock()
+		defer sd.repairMu.Unlock()
+		return len(sd.repairInFlight)
+	}
+
 	// A bare dispatcher (no node back-reference) — strategy-layer unit tests
 	// build these against stub hosts whose embedded nil host.Host panics on
 	// Network(). The repair trigger must opt out instead of dereferencing it.
 	sd := NewStrategyDispatcher(&strategyReplacementHost{}, "fallback")
 	sd.scheduleStreamRepair(peer.ID("bare"))
-	if len(sd.repairInFlight) != 0 {
+	if armed(sd) != 0 {
 		t.Fatal("bare dispatcher must not arm a repair")
 	}
 
@@ -252,7 +262,7 @@ func TestScheduleStreamRepairSkipsBareDispatcher(t *testing.T) {
 	sd = NewStrategyDispatcher(&repairTestHost{}, "fallback")
 	sd.SetNode(&Node{})
 	sd.scheduleStreamRepair(peer.ID("nilctx"))
-	if len(sd.repairInFlight) == 0 {
+	if armed(sd) == 0 {
 		t.Fatal("dispatcher with a node must arm the repair")
 	}
 	sd.ClearPathBreakers(peer.ID("nilctx")) // nil-safe read path while armed
