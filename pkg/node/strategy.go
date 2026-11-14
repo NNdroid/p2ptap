@@ -94,6 +94,11 @@ type PeerStreams struct {
 	// every rebuild and walk straight back into the same dead path. Protected by
 	// writeMu.
 	pathBackoff map[string]*pathBackoff
+	// node is the owning node, set when the StrategyDispatcher back-reference
+	// is installed (SetNode). It gives the scheduler access to per-path
+	// telemetry for return-path (blackhole) demotion; nil in bare tests, where
+	// every telemetry lookup must degrade to "no signal".
+	node *Node
 }
 
 type peerStreamsSnapshot struct {
@@ -441,6 +446,76 @@ type StrategyDispatcher struct {
 	// peers, otherwise ARP/NDP requests never reach them and unicast frames
 	// (e.g. pings) stay unresolved.
 	knownPeersFn func() []peer.ID
+	// repairMu guards repairInFlight, the single-flight set behind
+	// scheduleStreamRepair. Keepalive-tick repair runs on its own goroutines;
+	// this set only debounces the failure-driven trigger below.
+	repairMu       sync.Mutex
+	repairInFlight map[peer.ID]bool
+}
+
+// streamRepairDelay coalesces a retirement burst before repairing: one striped
+// frame can retire several paths in a single send call, and repairing on the
+// first retirement alone would race the rest. It is short on purpose — the old
+// repair cadence was the next 10s keepalive tick (multipath only), which left a
+// two-path peer degraded for a full probe interval after one transient failure.
+const streamRepairDelay = 500 * time.Millisecond
+
+// scheduleStreamRepair re-opens the peer's data streams shortly after a write
+// failure retired one. EnsureStreamsOnAllConns is idempotent and cheap when
+// nothing is missing, so the only hazards are storming it per retired stream
+// (single-flight below) and repairing while the burst is still in flight (the
+// coalescing delay). Non-multipath modes get the same repair: their lazy open
+// path reuses a surviving stream and never re-opens a lost one on a live
+// connection, which used to strand a peer on one path for the whole session.
+// Multipath additionally re-dials transports the write failure closed, with its
+// own per-peer dial gating in repairMultipathPaths.
+//
+// The node back-reference is required: production dispatchers always have one
+// (SetNode runs during Node construction, before any send), and the node
+// supplies the shutdown ctx the repair goroutine honours. Bare dispatchers —
+// strategy-layer unit tests against stub hosts — skip the repair, since they
+// have neither a real host topology nor a shutdown signal.
+func (sd *StrategyDispatcher) scheduleStreamRepair(target peer.ID) {
+	if sd == nil || sd.h == nil || sd.node == nil || target == "" {
+		return
+	}
+	sd.repairMu.Lock()
+	if sd.repairInFlight[target] {
+		sd.repairMu.Unlock()
+		return
+	}
+	if sd.repairInFlight == nil {
+		sd.repairInFlight = make(map[peer.ID]bool)
+	}
+	sd.repairInFlight[target] = true
+	sd.repairMu.Unlock()
+
+	go func() {
+		timer := time.NewTimer(streamRepairDelay)
+		defer timer.Stop()
+		// sd.node.ctx is always set in production (NewNodeWithTAP wires it
+		// before Start); the nil check only protects bare-&Node{} test fakes.
+		var shutdown <-chan struct{}
+		if sd.node.ctx != nil {
+			shutdown = sd.node.ctx.Done()
+		}
+		select {
+		case <-timer.C:
+		case <-shutdown:
+			sd.repairMu.Lock()
+			delete(sd.repairInFlight, target)
+			sd.repairMu.Unlock()
+			return
+		}
+		sd.repairMu.Lock()
+		delete(sd.repairInFlight, target)
+		sd.repairMu.Unlock()
+
+		sd.EnsureStreamsOnAllConns(target)
+		if sd.Mode() == "multipath" {
+			sd.node.repairMultipathPaths(target)
+		}
+	}()
 }
 
 // SetKnownPeersProvider installs a callback that returns every known VPN peer
@@ -493,6 +568,18 @@ func (sd *StrategyDispatcher) GetPeerStreams(pID peer.ID) *PeerStreams {
 	return sd.peerMap[pID]
 }
 
+// ClearPathBreakers drops every per-path cooldown for target (see
+// PeerStreams.ClearPathBreakers). Safe on a nil dispatcher or an unknown peer —
+// keepalive probes run against peers the strategy layer may never have seen.
+func (sd *StrategyDispatcher) ClearPathBreakers(target peer.ID) {
+	if sd == nil || target == "" {
+		return
+	}
+	if ps := sd.GetPeerStreams(target); ps != nil {
+		ps.ClearPathBreakers()
+	}
+}
+
 func (sd *StrategyDispatcher) GetOrCreatePeerStreams(pID peer.ID) *PeerStreams {
 	sd.peersMu.Lock()
 	defer sd.peersMu.Unlock()
@@ -500,6 +587,7 @@ func (sd *StrategyDispatcher) GetOrCreatePeerStreams(pID peer.ID) *PeerStreams {
 	ps, exists := sd.peerMap[pID]
 	if !exists {
 		ps = NewPeerStreams(pID)
+		ps.node = sd.node
 		sd.peerMap[pID] = ps
 	}
 	return ps
@@ -1103,6 +1191,13 @@ func (sd *StrategyDispatcher) removeStreamUnderLock(ps *PeerStreams, s network.S
 	// A failed write may have sent a partial length prefix or body. Never
 	// reuse that stream for another frame, and release its blocked reader.
 	_ = s.Reset()
+	// Every caller of removeStreamUnderLock is a write-failure retirement, so
+	// this is the single hook for "a path just died, get the stream back".
+	// Without it the re-open waited for the next keepalive tick (multipath) or
+	// never happened at all (other modes), leaving the peer degraded for up to
+	// a full probe interval after one transient failure. Async: the caller may
+	// hold ps.writeMu and repair takes its own locks.
+	sd.scheduleStreamRepair(ps.peerID)
 }
 
 // writeOverStreams tries each currently-registered stream in order; the first
@@ -1717,10 +1812,14 @@ func (sd *StrategyDispatcher) writeBatchMultipathLocked(targetPeer peer.ID, ps *
 			//
 			// errWriterQueueFull is congestion, not death: arm the short fixed
 			// circuit instead of the exponential one (see
-			// notePathCongestedUnderLock). The stream is retired either way, so
-			// the "each retry retires at least one stream" termination argument
-			// below is untouched.
-			if errors.Is(res.err, errWriterQueueFull) {
+			// notePathCongestedUnderLock). errWriterStopped belongs to the same
+			// class: it is what stopMpWriterLocked fails the QUEUED tasks of a
+			// stream another sender just retired for congestion — treating it as
+			// a hard failure fed the exponential breaker for an event whose real
+			// cause had already armed only the fixed one, so a single congestion
+			// burst escalated a healthy path into a pathBackoffMax exile through
+			// other senders' stranded tasks.
+			if errors.Is(res.err, errWriterQueueFull) || errors.Is(res.err, errWriterStopped) {
 				ps.notePathCongestedUnderLock(b.s, time.Now())
 			} else {
 				ps.notePathFailureUnderLock(b.s, time.Now())
@@ -2138,11 +2237,20 @@ func (sd *StrategyDispatcher) writeMultipathLocked(ps *PeerStreams, targetPeer p
 					if firstErr == nil {
 						firstErr = results[i].err
 					}
-					// Open the circuit for this PATH (not just this stream) before
-					// retiring it: the replacement stream will be the same physical
-					// path, and the scheduler must keep avoiding it until the
-					// cooldown expires.
-					ps.notePathFailureUnderLock(st.s, time.Now())
+					// errWriterStopped is congestion-class, exactly as in the
+					// batch writer: the stream was retired under another sender
+					// and its queued tasks were drained with errWriterStopped.
+					// Arming the exponential breaker here would double-count one
+					// congestion event and escalate the cooldown.
+					if errors.Is(results[i].err, errWriterQueueFull) || errors.Is(results[i].err, errWriterStopped) {
+						ps.notePathCongestedUnderLock(st.s, time.Now())
+					} else {
+						// Open the circuit for this PATH (not just this stream) before
+						// retiring it: the replacement stream will be the same physical
+						// path, and the scheduler must keep avoiding it until the
+						// cooldown expires.
+						ps.notePathFailureUnderLock(st.s, time.Now())
+					}
 					log.Debug("Multipath: path to peer %s failed (%v); retiring it and retrying its fragments on a remaining path",
 						targetPeer.String(), results[i].err)
 					sd.removeStreamUnderLock(ps, st.s)

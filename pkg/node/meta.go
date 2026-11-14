@@ -1259,7 +1259,7 @@ func (n *Node) considerDiscoveredPeer(pID peer.ID) {
 	}
 	if len(addrs) > 0 {
 		log.Debug("Peek-map proactively dialing discovered peer %s (%d addrs)", pID.ShortString(), len(addrs))
-		_ = n.dialInParallel(n.ctx, peer.AddrInfo{ID: pID, Addrs: addrs}, "discovered")
+		go n.dialDiscoveredWithRetry(peer.AddrInfo{ID: pID, Addrs: addrs}, "discovered")
 	}
 }
 

@@ -50,11 +50,7 @@ func (n *Node) discoveryLoop() {
 			// Check if already connected; if not, initiate CONCURRENT connection with parallel race
 			if n.Host.Network().Connectedness(p.ID) == network.NotConnected {
 				log.Debug("DHT discovered new peer %s with addrs %v, connecting...", p.ID.String(), p.Addrs)
-				go func(pi peer.AddrInfo) {
-					if err := n.dialInParallel(n.ctx, pi, "discovered"); err != nil {
-						log.Debug("All connection methods to discovered peer %s failed: %v", pi.ID.String(), err)
-					}
-				}(p)
+				go n.dialDiscoveredWithRetry(p, "discovered")
 			}
 		}
 	}

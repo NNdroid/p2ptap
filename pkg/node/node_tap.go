@@ -418,7 +418,10 @@ func (n *Node) recordRelayedTapDelivery(srcPeer peer.ID, payload []byte, pathKey
 	if pathKey != "" {
 		n.recordPeerRxBytesOnPath(srcPeer, pathKey, len(payload))
 	}
-	n.resetPingPongFailCountForPeer(srcPeer)
+	// Unicast-scoped echo-failure reset (see resetPingPongFailCountForPeer):
+	// a relay-carried broadcast flood must not keep a broken unicast return
+	// path immune to reconnect.
+	n.resetPingPongFailCountForPeer(srcPeer, len(payload) >= 6 && !isBroadcastOrMulticastMAC(net.HardwareAddr(payload[0:6])))
 	if n.Collector != nil {
 		n.Collector.RecordRecv(len(payload))
 		n.Collector.RecordPacketDir(payload, false)

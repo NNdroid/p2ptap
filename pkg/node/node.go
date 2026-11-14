@@ -479,6 +479,32 @@ type Node struct {
 	peerRxTransport   atomic.Pointer[map[peer.ID]*rxTransportInfo]
 	peerRxTransportMu sync.Mutex // structural (CoW) changes only; never taken per frame
 
+	// peerLastUnicastRx records the last time we received a UNICAST data frame
+	// (dstMAC not broadcast/multicast) from a peer. The ping-pong reconnect
+	// quiet window previously consulted peerLastRx, which ANY inbound frame
+	// updates — including ARP/NDP floods and relay-carried traffic. A peer whose
+	// unicast return path was dead but that trickled one broadcast frame per
+	// window stayed immune to reconnect forever. Same CoW shape as peerLastRx.
+	peerLastUnicastRx   atomic.Pointer[map[peer.ID]*atomic.Int64]
+	peerUnicastRxMu     sync.Mutex // structural (CoW) changes only; never taken per frame
+	// ppInFlight guards against probing the same peer twice concurrently. The
+	// keepalive tick no longer blocks on all probes finishing (a slow batch used
+	// to stretch the next detection interval by up to a full probe budget), so
+	// a straggler from tick N can still be running when tick N+1 fires; a second
+	// concurrent probe would double-count echo failures for one dead peer.
+	ppInFlightMu sync.Mutex
+	ppInFlight   map[peer.ID]bool
+	// dialFailAddrs records the direct multiaddrs (rendered strings) that the
+	// most recent failed dial to a peer actually attempted, with timestamps.
+	// Every dialInParallel call refreshed the peerstore TTL of its input
+	// addresses to 1h, so a stale address kept being dialled — first, inside
+	// every 15s budget — for up to an hour after it stopped working. Marked on
+	// a fully-failed dial, honoured by filtering for dialAddrFailTTL, cleared on
+	// success and whenever fresh addresses are learned. Guarded by
+	// dialFailAddrsMu.
+	dialFailAddrs   map[peer.ID]map[string]time.Time
+	dialFailAddrsMu sync.Mutex
+
 	// peerStall records peers whose last stream write hit the write deadline,
 	// so dispatch workers can skip them briefly instead of blocking. See
 	// markPeerStalled in node_dispatch.go for why this protects global
@@ -1264,12 +1290,10 @@ func (m *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	log.Info("mDNS discovered local LAN peer %s, connecting...", pi.ID.String())
 	go func(info peer.AddrInfo) {
 		if n := m.node.Load(); n != nil {
-			// Use dialInParallel to get relay fallback, backoff, and coalescing.
-			if err := n.dialInParallel(n.ctx, info, "mdns"); err != nil {
-				log.Debug("mDNS connect to peer %s failed: %v", info.ID.String(), err)
-			} else {
-				log.Info("mDNS connected to peer %s successfully", info.ID.String())
-			}
+			// dialDiscoveredWithRetry (dialInParallel underneath, for relay
+			// fallback / backoff / coalescing): one failed attempt used to leave
+			// a LAN peer undisconnected-but-unreachable until the next trigger.
+			n.dialDiscoveredWithRetry(info, "mdns")
 			return
 		}
 		// Fallback: raw Host.Connect if node not yet initialized (startup race).
@@ -2147,6 +2171,11 @@ func NewNodeWithTAP(cfg *config.Config, overrideTAP tap.TAPDevice, collector obs
 	node.lsaPool = newLSAStreamPool(node, LSAProtocolID)
 	node.metaPool = newLSAStreamPool(node, meta.MetaProtocolID)
 	node.echoPool = newLSAStreamPool(node, EchoProtocolID)
+	// Echo streams must open within the declared probe budget. The shared pool
+	// default (15s) let a cold open to a black-holed peer pin one keepalive
+	// probe slot for 15s; pingPongStreamTimeout bounds it to the probe's own
+	// stream-creation budget instead.
+	node.echoPool.openTimeout = pingPongStreamTimeout
 	node.muxEngine = newMuxEngine(node)
 	dispatcher.SetNode(node)
 

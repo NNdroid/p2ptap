@@ -86,6 +86,70 @@ func (n *Node) peerRxWithin(p peer.ID, d time.Duration) bool {
 	return time.Since(last) <= d
 }
 
+// notePeerUnicastRx records that we just received a UNICAST data frame from p
+// (dstMAC not broadcast/multicast). It is the signal the ping-pong reconnect
+// quiet window trusts: peerLastRx is updated by ANY inbound frame — including
+// ARP/NDP floods and relay-carried trickles — so a peer whose unicast return
+// path was dead stayed immune to reconnect as long as one broadcast frame
+// arrived per window. Same CoW shape as notePeerRx (per-peer atomic, no global
+// lock on the per-frame path).
+func (n *Node) notePeerUnicastRx(p peer.ID) {
+	if m := n.peerLastUnicastRx.Load(); m != nil {
+		if v, ok := (*m)[p]; ok {
+			v.Store(time.Now().UnixNano())
+			return
+		}
+	}
+	n.peerUnicastRxMu.Lock()
+	defer n.peerUnicastRxMu.Unlock()
+	now := time.Now().UnixNano()
+	if m := n.peerLastUnicastRx.Load(); m != nil {
+		if v, ok := (*m)[p]; ok {
+			v.Store(now)
+			return
+		}
+	}
+	var next map[peer.ID]*atomic.Int64
+	if m := n.peerLastUnicastRx.Load(); m != nil {
+		next = make(map[peer.ID]*atomic.Int64, len(*m)+1)
+		for k, v := range *m {
+			next[k] = v
+		}
+	} else {
+		next = make(map[peer.ID]*atomic.Int64, 1)
+	}
+	v := &atomic.Int64{}
+	v.Store(now)
+	next[p] = v
+	n.peerLastUnicastRx.Store(&next)
+}
+
+// peerUnicastRxWithin reports whether we received a unicast data frame from p
+// within the last d. This is the quiet-window signal for the ping-pong probe.
+//
+// Fallback: a peer that has NEVER sent us a unicast frame keeps the legacy
+// any-frame semantics. Peers that only exchange control-plane traffic (LSA/meta
+// sync, no TAP data at all) never produce a unicast data frame, so requiring
+// one would reconnect healthy signalling-only peers on every echo hiccup. Once
+// at least one unicast frame has been seen, unicast is the ONLY signal that
+// counts — broadcast floods no longer keep a broken unicast return path
+// immune to reconnect.
+func (n *Node) peerUnicastRxWithin(p peer.ID, d time.Duration) bool {
+	m := n.peerLastUnicastRx.Load()
+	if m == nil {
+		return n.peerRxWithin(p, d)
+	}
+	v, ok := (*m)[p]
+	if !ok {
+		return n.peerRxWithin(p, d)
+	}
+	ns := v.Load()
+	if ns == 0 {
+		return n.peerRxWithin(p, d)
+	}
+	return time.Since(time.Unix(0, ns)) <= d
+}
+
 // tapProbeOutcome is the cached result of the most recent end-to-end TAP
 // forwarding probe toward a peer, exposed to the WebUI so the operator can see
 // the peer's TAP up/down state without re-running a manual probe.

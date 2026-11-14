@@ -41,7 +41,17 @@ type lsaStreamPool struct {
 	streams  map[peer.ID]network.Stream
 	writeMu  map[peer.ID]*sync.Mutex
 	protocol protocol.ID // which control protocol this pool serves
+	// openTimeout bounds a cold stream open. Zero falls back to
+	// lsaPoolDefaultOpenTimeout; the echo pool overrides it with the probe's
+	// own pingPongStreamTimeout so a black-holed peer cannot pin a keepalive
+	// probe slot for the full default budget.
+	openTimeout time.Duration
 }
+
+// lsaPoolDefaultOpenTimeout is the cold-open budget for control streams. It
+// used to be a hardcoded 15s inside openLocked; naming it makes the per-pool
+// override contract explicit.
+const lsaPoolDefaultOpenTimeout = 15 * time.Second
 
 func newLSAStreamPool(n *Node, proto protocol.ID) *lsaStreamPool {
 	return &lsaStreamPool{
@@ -152,7 +162,11 @@ func (p *lsaStreamPool) openLocked(target peer.ID) network.Stream {
 	// Use n.ctx so the stream open is cancelled when the node shuts down.
 	// context.Background() kept streams open long after Node.Close() returned,
 	// leaking goroutines and racing with Invalidate on the dead stream.
-	ctx, cancel := context.WithTimeout(p.node.ctx, 15*time.Second)
+	openTimeout := p.openTimeout
+	if openTimeout <= 0 {
+		openTimeout = lsaPoolDefaultOpenTimeout
+	}
+	ctx, cancel := context.WithTimeout(p.node.ctx, openTimeout)
 	defer cancel()
 	s, err := p.node.openControlStream(ctx, target, p.protocol)
 	if err != nil {

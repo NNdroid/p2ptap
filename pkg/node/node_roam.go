@@ -278,6 +278,13 @@ func (n *Node) reconnectAllDisconnectedPeers() {
 		return
 	}
 
+	// A network change invalidates every dial-failure mark: addresses that
+	// failed on the old NIC may work on the new one, and the marks must not
+	// suppress exactly the endpoints the roam is trying to relearn with.
+	n.dialFailAddrsMu.Lock()
+	n.dialFailAddrs = make(map[peer.ID]map[string]time.Time)
+	n.dialFailAddrsMu.Unlock()
+
 	// 1. Reconnect Bootstrap / Relay peers
 	for _, bStr := range n.Config.BootstrapPeers {
 		ma, err := multiaddr.NewMultiaddr(bStr)

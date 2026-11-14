@@ -597,8 +597,10 @@ func (n *Node) deliverDirectSubFrame(remotePeer peer.ID, seqID uint64, payload [
 
 	// Data is actively flowing — reset ping-pong fail count for this peer.
 	// Prevents spurious reconnects when yamux flow control delays echo streams
-	// but the application-level connection is healthy.
-	n.resetPingPongFailCountForPeer(remotePeer)
+	// but the application-level connection is healthy. Only UNICAST frames
+	// count: broadcast floods must not keep a broken unicast return path below
+	// the escalation threshold (see resetPingPongFailCountForPeer).
+	n.resetPingPongFailCountForPeer(remotePeer, okExtract && !isBroadcastOrMulticastMAC(dstMAC))
 
 	if n.Interceptor != nil && n.Interceptor.MatchAndHandle(payload, tapInjectionWriter{node: n}) {
 		log.Debug("Frame intercepted by userspace WebUI interceptor from peer %s", remotePeer.String())

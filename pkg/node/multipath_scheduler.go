@@ -165,6 +165,23 @@ func (ps *PeerStreams) notePathSuccessUnderLock(s network.Stream) {
 	}
 }
 
+// ClearPathBreakers drops every per-path cooldown for this peer. Called from
+// the ping-pong keepalive on a successful end-to-end echo: a completed round
+// trip proves the peer is reachable, so a breaker armed by a transient write
+// failure must not keep exiling a now-healthy path. The old reset condition —
+// a successful WRITE on the path — could never fire while the path was cooling,
+// making the exponential cooldown self-sustaining even after the link recovered.
+// A path that is genuinely still dead re-arms its breaker on the next write
+// failure, so the worst case is one write deadline of extra latency, not a
+// pathBackoffMax exile.
+func (ps *PeerStreams) ClearPathBreakers() {
+	ps.writeMu.Lock()
+	if len(ps.pathBackoff) > 0 {
+		ps.pathBackoff = nil
+	}
+	ps.writeMu.Unlock()
+}
+
 // pathCoolingLocked reports whether the path carrying s is inside its
 // post-failure cooldown. Caller holds ps.writeMu.
 func (ps *PeerStreams) pathCoolingLocked(s network.Stream, now time.Time) bool {
@@ -178,13 +195,28 @@ func (ps *PeerStreams) pathCoolingLocked(s network.Stream, now time.Time) bool {
 // mpWeightFor returns the DWRR weight (bytes/sec capacity) for a single stream.
 // A usable measured write quality wins; otherwise the topology-score nominal is
 // used. The result is always positive.
+//
+// On top of capacity, a path whose RETURN side looks dead (actively written,
+// nothing received back for pathReturnStaleFor — see pathReturnStale) is
+// demoted: local write service time cannot see a relay that accepts bytes and
+// forwards nothing, so without this signal a blackhole path kept its full DWRR
+// share indefinitely and only the peer-level echo probe would eventually react.
 func (ps *PeerStreams) mpWeightFor(s network.Stream, now time.Time) float64 {
+	w := 0.0
 	if q := ps.qualityFor(s); q.usable(now) {
 		if bps := 1e9 / q.nanosPerByte; bps > 0 {
-			return bps
+			w = bps
 		}
 	}
-	return mpNominalBps(scoreStreamTransport(s, ps.peerID))
+	if w <= 0 {
+		w = mpNominalBps(scoreStreamTransport(s, ps.peerID))
+	}
+	if ps.node != nil {
+		if k := ps.pathKeyForLocked(s); k != "" && ps.node.pathReturnStale(ps.peerID, k, now) {
+			w /= pathReturnDemotion
+		}
+	}
+	return w
 }
 
 // pickMultipathStreamIndex returns the index of the stream that should carry

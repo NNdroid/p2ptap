@@ -43,12 +43,63 @@ func (n *Node) relayPathKeyFor(viaPeer peer.ID) string {
 type pathRxCounters struct {
 	bytes  atomic.Uint64
 	frames atomic.Uint64
+	// last is the unix-nano time of the most recent frame attributed to this
+	// path (0 = never). One atomic store per frame on the RX hot path; read by
+	// pathReturnStale for blackhole demotion.
+	last atomic.Int64
 }
 
 // pathTxCounters is the per-path outbound TAP-payload accounting.
 type pathTxCounters struct {
 	bytes  atomic.Uint64
 	frames atomic.Uint64
+	// last is the unix-nano time of the most recent successful write on this
+	// path (0 = never). See pathRxCounters.last.
+	last atomic.Int64
+}
+
+// pathReturnStaleFor is how long a path must have received nothing back while
+// we are actively writing to it before the scheduler treats it as a suspected
+// one-way blackhole. Wide enough to ride out ACK asymmetry and bursty return
+// traffic; short enough to demote inside one keepalive interval.
+const pathReturnStaleFor = 15 * time.Second
+
+// pathReturnDemotion divides the DWRR weight of a path whose return side looks
+// dead. Demote, don't retire: the write side still "succeeds" locally, so the
+// only proof of a blackhole is the missing return traffic, and a path that
+// starts returning again earns its share back on the next weight read.
+const pathReturnDemotion = 4.0
+
+// pathReturnStale reports whether (p, path) looks like a one-way blackhole:
+// we have successfully written TAP payload to it within pathReturnStaleFor
+// (the path is actively used) but nothing has come back ON IT for at least as
+// long. The write-quality signal is local service time — it cannot see a relay
+// that accepts bytes and forwards nothing — so the return side is the only
+// delivery proof the sender has. An actively-written path with zero return
+// traffic loses most of its scheduler share, shifting traffic to sibling
+// paths that ARE being acknowledged; a path that resumes returning earns its
+// weight back on the next read.
+func (n *Node) pathReturnStale(p peer.ID, path string, now time.Time) bool {
+	txv, ok := n.pathTx.Load(pathKey{peer: p, path: path})
+	if !ok {
+		return false
+	}
+	txLast := txv.(*pathTxCounters).last.Load()
+	if txLast == 0 || now.Sub(time.Unix(0, txLast)) > pathReturnStaleFor {
+		// Not actively written: the path carries nothing to judge. A dormant
+		// path must keep its nominal weight so it is still there when traffic
+		// comes back.
+		return false
+	}
+	rxv, ok := n.pathRx.Load(pathKey{peer: p, path: path})
+	if !ok {
+		return true
+	}
+	rxLast := rxv.(*pathRxCounters).last.Load()
+	if rxLast == 0 {
+		return true
+	}
+	return now.Sub(time.Unix(0, rxLast)) >= pathReturnStaleFor
 }
 
 // recordPeerRxBytesOnPath attributes nBytes of accepted TAP payload to the path
@@ -69,6 +120,7 @@ func (n *Node) recordPeerRxBytesOnPath(p peer.ID, path string, nBytes int) {
 	c := v.(*pathRxCounters)
 	c.bytes.Add(uint64(nBytes))
 	c.frames.Add(1)
+	c.last.Store(time.Now().UnixNano())
 }
 
 // pathRxStats returns the accumulated (bytes, frames) received on one path.
@@ -104,6 +156,7 @@ func (n *Node) recordPeerTxBytesOnPath(p peer.ID, path string, nBytes, nFrames i
 	c := v.(*pathTxCounters)
 	c.bytes.Add(uint64(nBytes))
 	c.frames.Add(uint64(nFrames))
+	c.last.Store(time.Now().UnixNano())
 }
 
 // pathTxStats returns the accumulated (bytes, frames) sent on one path.

@@ -80,7 +80,7 @@ func BenchmarkPingPongFailReset(b *testing.B) {
 	n.pingPongFailCounterFor(p).Store(1) // non-zero so the reset path is exercised
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		n.resetPingPongFailCountForPeer(p)
+		n.resetPingPongFailCountForPeer(p, true)
 	}
 }
 
