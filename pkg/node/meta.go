@@ -281,7 +281,13 @@ func (n *Node) syncMetadataToPeer(targetPeer peer.ID) {
 			return
 		}
 		if attempt < maxAttempts {
-			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+			// Ctx-aware sleep: a shutdown must not pin a fan-out slot for the
+			// remaining backoff of a dead peer.
+			select {
+			case <-n.ctx.Done():
+				return
+			case <-time.After(time.Duration(attempt) * 2 * time.Second):
+			}
 			continue
 		}
 		if n.isRelayOnlyPeer(targetPeer) {
@@ -683,8 +689,20 @@ func (n *Node) broadcastMetadata() {
 
 	for _, pID := range peers {
 		targetPeer := pID
-		sem <- struct{}{}
 		go func() {
+			// Acquire the slot INSIDE the goroutine. Acquiring it in this
+			// dispatch loop blocked the whole fan-out behind the 8-slot
+			// semaphore, so one batch of dead peers — each costing up to ~40s
+			// of mux timeouts + meta-pool opens + retry sleeps — stalled the
+			// 15s sync cadence for every HEALTHY peer behind them. The loop
+			// now returns immediately, the timer resets on cadence, and dead
+			// peers drain in the background; the per-peer metaPool mutex
+			// serializes any overlap between rounds.
+			select {
+			case sem <- struct{}{}:
+			case <-n.ctx.Done():
+				return
+			}
 			defer func() { <-sem }()
 			n.syncMetadataToPeer(targetPeer)
 		}()

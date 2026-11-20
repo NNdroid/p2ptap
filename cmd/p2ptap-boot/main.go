@@ -4478,7 +4478,78 @@ func runMeshUplink(ctx context.Context, h host.Host, hub *peekMapHub, info peer.
 	}
 }
 
+// bootEchoOpenTimeout bounds a cold echo-stream open for the keepalive pool —
+// the same budget the old per-probe NewStream used.
+const bootEchoOpenTimeout = 5 * time.Second
+
+// bootEchoEntry is one peer's persistent keepalive stream. mu serializes
+// probes on the stream: a slow probe from tick N must not interleave with
+// tick N+1's (30s cadence vs a <=8s worst-case probe makes overlap rare, but
+// a wedged stream makes it possible).
+type bootEchoEntry struct {
+	s  network.Stream
+	mu sync.Mutex
+}
+
+// bootEchoPool caches one persistent echo stream per connected peer. The old
+// keepalive opened a FRESH NewStream per peer per tick — a full mux-substream
+// negotiation + teardown per client per 30s, so a boot carrying C clients
+// churned C stream lifecycles per tick purely for keepalive. A stream that
+// fails is dropped so the next tick opens fresh; entries for disconnected
+// peers are pruned against the current peer set every tick.
+type bootEchoPool struct {
+	mu      sync.Mutex
+	streams map[peer.ID]*bootEchoEntry
+}
+
+// prune closes and forgets the streams of peers that are no longer connected.
+func (p *bootEchoPool) prune(current map[peer.ID]struct{}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for pid, e := range p.streams {
+		if _, ok := current[pid]; ok {
+			continue
+		}
+		delete(p.streams, pid)
+		go e.s.Close() // Close may block on a dying conn; never hold the pool lock
+	}
+}
+
+// withStream runs fn on the peer's cached echo stream, opening one on first
+// use. A failed probe closes the stream so the next tick starts fresh — the
+// same one-attempt-per-tick contract the per-probe NewStream version had.
+func (p *bootEchoPool) withStream(ctx context.Context, h host.Host, pid peer.ID, fn func(s network.Stream) error) error {
+	p.mu.Lock()
+	e := p.streams[pid]
+	if e == nil {
+		openCtx, cancel := context.WithTimeout(ctx, bootEchoOpenTimeout)
+		s, err := h.NewStream(openCtx, pid, echoProtocolID)
+		cancel()
+		if err != nil {
+			p.mu.Unlock()
+			return err
+		}
+		e = &bootEchoEntry{s: s}
+		p.streams[pid] = e
+	}
+	p.mu.Unlock()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := fn(e.s); err != nil {
+		p.mu.Lock()
+		if cur := p.streams[pid]; cur == e {
+			delete(p.streams, pid)
+		}
+		p.mu.Unlock()
+		_ = e.s.Close()
+		return err
+	}
+	return nil
+}
+
 func relayKeepaliveLoop(ctx context.Context, h host.Host, interval time.Duration) {
+	pool := &bootEchoPool{streams: make(map[peer.ID]*bootEchoEntry)}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -4486,40 +4557,46 @@ func relayKeepaliveLoop(ctx context.Context, h host.Host, interval time.Duration
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for _, p := range h.Network().Peers() {
+			peers := h.Network().Peers()
+			current := make(map[peer.ID]struct{}, len(peers))
+			for _, p := range peers {
+				if p != h.ID() {
+					current[p] = struct{}{}
+				}
+			}
+			pool.prune(current)
+			for _, p := range peers {
 				if p == h.ID() {
 					continue
 				}
 				go func(p peer.ID) {
-					pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-					defer cancel()
-					s, err := h.NewStream(pingCtx, p, echoProtocolID)
+					start := time.Now()
+					err := pool.withStream(ctx, h, p, func(s network.Stream) error {
+						// The p2ptap client's echo handler (handleEcho) reads a
+						// length-prefixed frame ([4-byte BE length][payload]) — see
+						// pkg/node/framing.go. Send a properly framed PING so the
+						// client can parse and echo it back; a bare s.Write("PING")
+						// makes the client read those 4 bytes as a 1.3 GB length and
+						// log "frame too large: 1346981447 > 64". The relay's own
+						// echo handler stays io.Copy(s, s), which reflects the framed
+						// bytes verbatim and works for either direction.
+						if err := writeFrame(s, []byte("PING")); err != nil {
+							return err
+						}
+						_ = s.SetReadDeadline(time.Now().Add(3 * time.Second))
+						buf := make([]byte, 16)
+						if _, err := readFrame(s, buf); err != nil {
+							return err
+						}
+						return nil
+					})
 					if err != nil {
 						// Peer not reachable on its current connection; it will
 						// reconnect from its side if it still wants relay access.
+						log.Debug("[keepalive] echo ping to %s failed: %v", p.ShortString(), err)
 						return
 					}
-					defer s.Close()
-					// The p2ptap client's echo handler (handleEcho) reads a
-					// length-prefixed frame ([4-byte BE length][payload]) — see
-					// pkg/node/framing.go. Send a properly framed PING so the
-					// client can parse and echo it back; a bare s.Write("PING")
-					// makes the client read those 4 bytes as a 1.3 GB length and
-					// log "frame too large: 1346981447 > 64". The relay's own
-					// echo handler stays io.Copy(s, s), which reflects the framed
-					// bytes verbatim and works for either direction.
-					start := time.Now()
-					if err := writeFrame(s, []byte("PING")); err != nil {
-						return
-					}
-					_ = s.SetReadDeadline(time.Now().Add(3 * time.Second))
-					buf := make([]byte, 16)
-					if _, err := readFrame(s, buf); err != nil {
-						log.Debug("[keepalive] echo ping to %s returned no reply: %v", p.ShortString(), err)
-						return
-					}
-					rtt := time.Since(start)
-					h.Peerstore().RecordLatency(p, rtt)
+					h.Peerstore().RecordLatency(p, time.Since(start))
 				}(p)
 			}
 		}

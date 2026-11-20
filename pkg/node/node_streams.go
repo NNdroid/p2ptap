@@ -1655,9 +1655,12 @@ func (n *Node) handleEcho(s network.Stream) {
 	buf := make([]byte, obfuscate.MaxFrameSize)
 	for {
 		// Echo is a request/response protocol: the peer sends a probe, we
-		// reply immediately. A 30s deadline detects a dead peer (echo probes
-		// are sent every few seconds, so 30s is very generous).
-		_ = s.SetReadDeadline(time.Now().Add(30 * time.Second))
+		// reply immediately. The deadline must comfortably exceed the SLOWEST
+		// echo cadence that reuses a persistent stream: the boot-side
+		// keepalive loop probes every 30s on ONE cached stream, so a 30s
+		// deadline raced the next probe exactly and dropped the stream every
+		// worst-case tick. 90s still detects a dead peer within a few probes.
+		_ = s.SetReadDeadline(time.Now().Add(90 * time.Second))
 		rn, err := ReadFrame(s, buf)
 		if err != nil {
 			if err != io.EOF {
