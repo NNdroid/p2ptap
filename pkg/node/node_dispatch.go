@@ -804,7 +804,49 @@ func (n *Node) sealRelayEnvelopeForHopInto(hop peer.ID, envelope []byte, dst []b
 // Returns nil (no usable hop) when the target is directly connected, and nudges
 // a boot uplink to re-open exactly when the single-hop path would have. The
 // returned slice is freshly allocated each call and safe for the caller to own.
+// relayHopsCacheTTL bounds the relayHopsForTarget memo: the hop-set computation
+// walks every libp2p connection and the peerstore, and for a relay-only peer it
+// ran per frame. Consumers tolerate the staleness (sendToPeerViaRelayHops
+// fast-fails a dead hop via Submit gating and moves to the next one), and the
+// ensureRelayAuth nudges inside the computation self-throttle to once per TTL.
+const relayHopsCacheTTL = 2 * time.Second
+
+type relayHopsEntry struct {
+	hops []peer.ID
+	at   time.Time
+}
+
+// relayHopsForTarget returns the memoized eligible relay-hop set for target.
+// The returned slice is SHARED between callers — treat it as read-only; the
+// only consumer (sendToPeerViaRelayHops) iterates without mutating.
 func (n *Node) relayHopsForTarget(targetPeer peer.ID) []peer.ID {
+	now := time.Now()
+	n.relayHopsMu.Lock()
+	if e, ok := n.relayHopsCache[targetPeer]; ok && now.Sub(e.at) < relayHopsCacheTTL {
+		n.relayHopsMu.Unlock()
+		return e.hops
+	}
+	n.relayHopsMu.Unlock()
+
+	hops := n.relayHopsForTargetUncached(targetPeer)
+
+	n.relayHopsMu.Lock()
+	if n.relayHopsCache == nil {
+		n.relayHopsCache = make(map[peer.ID]relayHopsEntry)
+	}
+	if len(n.relayHopsCache) > 512 {
+		for k, e := range n.relayHopsCache {
+			if now.Sub(e.at) >= relayHopsCacheTTL {
+				delete(n.relayHopsCache, k)
+			}
+		}
+	}
+	n.relayHopsCache[targetPeer] = relayHopsEntry{hops: hops, at: now}
+	n.relayHopsMu.Unlock()
+	return hops
+}
+
+func (n *Node) relayHopsForTargetUncached(targetPeer peer.ID) []peer.ID {
 	// A directly-connected target is routed directly; never return it (or self)
 	// as a relay hop, which would wrap its own frames in a relay envelope.
 	if n.isDirectlyConnected(targetPeer) {
@@ -944,9 +986,20 @@ func (n *Node) supportsOverlayRelay(p peer.ID) bool {
 	if n.Host == nil {
 		return false
 	}
+	// CONFIRMED answers are cached: SupportsProtocols took the peerstore lock
+	// and allocated a protocol slice per call, and this sits on the per-frame
+	// hop scan. Unconfirmed (identify still in flight) results are NOT cached
+	// — a hop whose protocol set is merely unknown re-asks on the next frame.
+	// Entries are dropped in removePeerObf, so a reconnected peer re-identifies.
+	if v, ok := n.overlayRelayCapable.Load(p); ok {
+		return v.(*atomic.Bool).Load()
+	}
 	supported, err := n.Host.Peerstore().SupportsProtocols(p, OverlayRelayProtocolID)
 	if err != nil {
 		return true // unknown yet — let the relay pool try, it backs off on failure
 	}
+	flag := new(atomic.Bool)
+	flag.Store(len(supported) > 0)
+	n.overlayRelayCapable.Store(p, flag)
 	return len(supported) > 0
 }

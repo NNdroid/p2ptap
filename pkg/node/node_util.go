@@ -1400,12 +1400,12 @@ func (n *Node) learnPeerAddressFromFrame(srcPeer peer.ID, srcMAC net.HardwareAdd
 				m = val.(PeerMeta)
 			}
 			changed := false
-			// PERF: hoisted once. Every String() below was computed 2-4 times per
-			// frame, and TapIP was re-split into a []string, all ahead of the
-			// steady-state early returns — about 1.5-2µs and 4-6 allocs per frame
-			// with nothing to show for it.
-			srcIPStr := srcIP.String()
-			srcMACStr := srcMAC.String()
+			// PERF: hoisted once AND routed through the ip_tracker hash-indexed
+			// caches — the original code re-rendered these 2-4 times per frame;
+			// plain net.IP.String()/HardwareAddr.String() here was still two
+			// fresh renders per mesh-local frame even on the no-op path.
+			srcIPStr := ipv4ToString(srcIP)
+			srcMACStr := macToString(srcMAC)
 			if m.TapIP == "" {
 				// Anti-spoof: before writing a fresh TapIP on the first frame,
 				// verify the claimed srcIP is not already owned by another peer.
@@ -1464,9 +1464,10 @@ func (n *Node) learnPeerAddressFromFrame(srcPeer peer.ID, srcMAC net.HardwareAdd
 				m = val.(PeerMeta)
 			}
 			changed := false
-			// PERF: hoisted once, same as the IPv4 twin above.
-			srcIPStr := srcIP.String()
-			srcMACStr := srcMAC.String()
+			// PERF: hoisted once, same as the IPv4 twin above (hash-indexed
+			// caches, zero-alloc steady state).
+			srcIPStr := ipv6ToString(srcIP)
+			srcMACStr := macToString(srcMAC)
 			if m.TapIPv6 == "" {
 				// Anti-spoof: before writing a fresh TapIPv6 on the first frame,
 				// verify the claimed srcIP is not already owned by another peer.

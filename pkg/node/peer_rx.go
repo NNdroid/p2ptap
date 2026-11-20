@@ -74,6 +74,40 @@ func (n *Node) lastRxFrom(p peer.ID) time.Time {
 	return time.Unix(0, ns)
 }
 
+// notePeerRxKinds records one inbound frame from p in BOTH liveness trackers
+// with a single clock read: the any-frame tracker (notePeerRx, general
+// consumers) and — for unicast frames — the unicast tracker
+// (notePeerUnicastRx, the echo-failure/quiet-window signal). The two
+// previously took separate time.Now() reads plus separate map lookups per
+// unicast frame; merged, one clock read covers both.
+func (n *Node) notePeerRxKinds(p peer.ID, unicast bool) {
+	now := time.Now().UnixNano()
+	fastAny := false
+	if m := n.peerLastRx.Load(); m != nil {
+		if v, ok := (*m)[p]; ok {
+			v.Store(now)
+			fastAny = true
+		}
+	}
+	if fastAny && !unicast {
+		return
+	}
+	if fastAny && unicast {
+		if um := n.peerLastUnicastRx.Load(); um != nil {
+			if uv, ok := (*um)[p]; ok {
+				uv.Store(now)
+				return
+			}
+		}
+	}
+	// Slow path (first sight on either tracker): reuse the canonical helpers,
+	// which take the CoW publish locks with double-checked fast paths.
+	n.notePeerRx(p)
+	if unicast {
+		n.notePeerUnicastRx(p)
+	}
+}
+
 // peerRxWithin reports whether we received an inbound frame from p within the
 // last d. Called by the ping-pong probe after an echo timeout: if true, the
 // outbound path clearly works (p is sending us frames), so the failed echo must

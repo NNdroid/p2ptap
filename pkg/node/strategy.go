@@ -94,6 +94,25 @@ type PeerStreams struct {
 	// every rebuild and walk straight back into the same dead path. Protected by
 	// writeMu.
 	pathBackoff map[string]*pathBackoff
+	// pathStaleCache memoizes the per-stream return-path blackhole verdict (see
+	// pathStaleMemoLocked): the signal has 15s granularity and re-evaluating it
+	// per pick cost two boxed sync.Map loads per stream per frame under
+	// writeMu. Pruned with mpDeficit and deleted in removeStreamUnderLock.
+	// Guarded by writeMu.
+	pathStaleCache map[network.Stream]pathStaleVerdict
+	// streamScores caches scoreStreamTransport per stream (immutable per
+	// connection) so the unmeasured-path weight fallback stops re-walking the
+	// remote multiaddr per stream per frame. Same prune sites as pathStaleCache.
+	streamScores map[network.Stream]int
+	// mpQualScratch is the one-shot per-pick quality snapshot buffer (see
+	// pickMultipathStreamIndex): one qualityMu acquisition per pick instead of
+	// one per stream. Guarded by writeMu.
+	mpQualScratch []streamWriteQuality
+	// mpFilteredScratch / mpFilteredIdx are the backoff-filter scratch slices
+	// reused per pick so a cooling path does not allocate two fresh slices per
+	// frame. Guarded by writeMu.
+	mpFilteredScratch []network.Stream
+	mpFilteredIdx     []int
 	// node is the owning node, set when the StrategyDispatcher back-reference
 	// is installed (SetNode). It gives the scheduler access to per-path
 	// telemetry for return-path (blackhole) demotion; nil in bare tests, where
@@ -507,14 +526,20 @@ func (sd *StrategyDispatcher) scheduleStreamRepair(target peer.ID) {
 			sd.repairMu.Unlock()
 			return
 		}
-		sd.repairMu.Lock()
-		delete(sd.repairInFlight, target)
-		sd.repairMu.Unlock()
-
+		// Single-flight spans the whole repair EXECUTION, not just the
+		// coalescing window: deleting the mark before running the repair let a
+		// write failure during the repair arm a second parallel repair, so a
+		// black-holed-but-connected peer churned one stream open per deadline
+		// indefinitely. The mark is released only after the repair settles; a
+		// failure during the repair then re-arms a fresh one, which is the
+		// intended retry cadence.
 		sd.EnsureStreamsOnAllConns(target)
 		if sd.Mode() == "multipath" {
 			sd.node.repairMultipathPaths(target)
 		}
+		sd.repairMu.Lock()
+		delete(sd.repairInFlight, target)
+		sd.repairMu.Unlock()
 	}()
 }
 
@@ -1181,6 +1206,8 @@ func (sd *StrategyDispatcher) removeStreamUnderLock(ps *PeerStreams, s network.S
 	// cleared here — it is keyed by path and must outlive the stream so the
 	// scheduler keeps avoiding a path that was just re-opened.
 	delete(ps.pathKeys, s)
+	delete(ps.pathStaleCache, s)
+	delete(ps.streamScores, s)
 	if ps.preferredStream == s {
 		ps.preferredStream = nil
 	}
@@ -1426,7 +1453,7 @@ func (sd *StrategyDispatcher) sendToPeerViaOverlayRelay(targetPeer, relayHop pee
 	if !n.relayPool.Submit(relayHop, relayBuf,
 		func() {
 			n.recordPeerTxBytes(targetPeer, stat.bytes)
-			n.recordPeerTxBytesOnPath(targetPeer, "overlay-relay://"+relayHop.String(), stat.bytes, stat.frames)
+			n.recordPeerTxBytesOnPath(targetPeer, n.relayPathKeys.get(n, relayHop, false), stat.bytes, stat.frames)
 			if n.protoTracker != nil {
 				n.protoTracker.RelayData.RecordTx(1, uint64(len(relayBuf)))
 			}

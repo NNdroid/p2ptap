@@ -352,6 +352,10 @@ func (n *Node) updateWebCollectorState() {
 	// Use one routing-table view for the whole WebUI snapshot so different peer
 	// rows cannot reflect different route generations.
 	routes := n.getCachedRoutes()
+	// One attributed-path index for the whole snapshot: the per-peer
+	// buildPathMetrics used to Range both telemetry maps PER PEER — O(peers²)
+	// map visits per tick.
+	attributedPaths := n.attributedPathsIndex()
 	for _, pID := range allActivePeers {
 		sig := n.deriveConnSignals(pID)
 		addr := "unknown"
@@ -765,7 +769,7 @@ func (n *Node) updateWebCollectorState() {
 			Transport:         transport,
 			TransportScore:    transportScore,
 			TransportPriority: transportPriority,
-			Paths:             n.buildPathMetrics(pID),
+			Paths:             n.buildPathMetrics(pID, attributedPaths[pID]),
 			RTTMs:             rtt.rttMs,
 			RTTMeasured:       rtt.rttMeasured,
 			RTTSource:         rtt.source,

@@ -360,11 +360,16 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 		n.maybeResyncOnDecryptFail(remotePeer)
 		return
 	}
-	// Valid p2ptap frame (encrypted or plaintext). Recording success here
-	// resets the recent-error window so a plaintext peer never sticks in
-	// "Decrypt Fail", and self-heals readiness for plaintext-capable peers.
-	n.recordPeerRxDecrypt(remotePeer, true)
-	n.maybeMarkReadyOnDecrypt(remotePeer, true)
+	// Valid p2ptap frame. For DECRYPTED frames decryptPeerFrame already
+	// recorded success internally — repeating it here was pure duplicate
+	// bookkeeping. Plaintext frames (no negotiated cipher, decOK == false)
+	// still need the record: it resets the recent-error window so a plaintext
+	// peer never sticks in "Decrypt Fail", and self-heals readiness for
+	// plaintext-capable peers.
+	if !decOK {
+		n.recordPeerRxDecrypt(remotePeer, true)
+		n.maybeMarkReadyOnDecrypt(remotePeer, true)
+	}
 
 	// Unpack now hard-fails on a bad magic, so any frame that reaches here
 	// is a valid p2ptap overlay frame. Still enforce the magic check as a
@@ -492,6 +497,10 @@ func (n *Node) handleDirectFrame(remotePeer peer.ID, frameData []byte, decScratc
 // so all sub-frames share one reorder counter and are released together.
 func (n *Node) deliverDirectSubFrame(remotePeer peer.ID, seqID uint64, payload []byte, pathKey string, collect *[]tapWriteJob) {
 	peerStr := n.peerIDString(remotePeer)
+	// One clock read per frame, shared by every per-frame bookkeeping consumer
+	// below (path telemetry last-seen, ICMP echo RTT). The receive pipeline
+	// previously spent 4 clock reads per unicast frame — one per tracker.
+	now := time.Now()
 	// ACL Firewall Filtering check
 	if !n.checkACL(payload, peerStr, false) {
 		log.Debug("🛡️ ACL Firewall blocked Rx frame seq=%d from peer %s", seqID, peerStr)
@@ -502,6 +511,11 @@ func (n *Node) deliverDirectSubFrame(remotePeer peer.ID, seqID uint64, payload [
 	}
 
 	dstMAC, srcMAC, okExtract := vswitch.ExtractEthernetMACs(payload)
+	// The effective peer TapMAC is looked up ONCE per frame: it feeds the MAC
+	// normalization below AND the pcap capture fix-up further down, and the old
+	// second lookup repeated the RLock + 6-byte copy (or the metadata ParseMAC
+	// fallback) for identical results.
+	var peerTapMAC net.HardwareAddr
 	// CORRECTNESS: a runt frame cannot carry trustworthy L2 addressing, so
 	// it must not feed MAC learning or the observed-MAC table.
 	//
@@ -536,6 +550,7 @@ func (n *Node) deliverDirectSubFrame(remotePeer peer.ID, seqID uint64, payload [
 		// the SrcMAC fix-up below for pcap display.
 		if realMAC := n.lookupPeerTapMAC(remotePeer); realMAC != nil {
 			srcMAC = realMAC
+			peerTapMAC = realMAC
 		}
 		n.MACTable.Learn(srcMAC, remotePeer)
 
@@ -568,7 +583,7 @@ func (n *Node) deliverDirectSubFrame(remotePeer peer.ID, seqID uint64, payload [
 	// from the stream. Recording here also counts a fragmented frame exactly
 	// once, after reassembly, decryption, deduplication, and ACL validation.
 	n.recordPeerRxBytes(remotePeer, len(payload))
-	n.recordPeerRxBytesOnPath(remotePeer, pathKey, len(payload))
+	n.recordPeerRxBytesOnPathAt(remotePeer, pathKey, len(payload), now)
 	n.Collector.RecordRecv(len(payload))
 	n.Collector.RecordPacketDir(payload, false)
 	if n.Collector != nil {
@@ -581,14 +596,14 @@ func (n *Node) deliverDirectSubFrame(remotePeer peer.ID, seqID uint64, payload [
 		// TapMAC from peer metadata so the pcap table shows a consistent,
 		// address-book MAC.
 		capturePayload := payload // avoid copying for the common case
-		if okExtract {
-			if realMAC := n.lookupPeerTapMAC(remotePeer); realMAC != nil {
-				frameSrc := net.HardwareAddr(payload[6:12])
-				if frameSrc.String() != realMAC.String() {
-					capturePayload = make([]byte, len(payload))
-					copy(capturePayload, payload)
-					copy(capturePayload[6:12], realMAC)
-				}
+		if okExtract && peerTapMAC != nil {
+			// bytes.Equal on the 6 in-payload bytes: the old String() vs
+			// String() comparison rendered two MAC strings per frame purely to
+			// test inequality.
+			if !bytes.Equal(payload[6:12], peerTapMAC) {
+				capturePayload = make([]byte, len(payload))
+				copy(capturePayload, payload)
+				copy(capturePayload[6:12], peerTapMAC)
 			}
 		}
 		n.Collector.RecordFrame(capturePayload)
@@ -622,7 +637,7 @@ func (n *Node) deliverDirectSubFrame(remotePeer peer.ID, seqID uint64, payload [
 	// test. The OS also receives the reply (a harmless stray, since no local
 	// socket originated the request).
 	n.maybeDeliverProbeReply(payload)
-	n.observeTapICMPEchoReply(remotePeer, payload, time.Now())
+	n.observeTapICMPEchoReply(remotePeer, payload, now)
 
 	// Peer-side probe ack. Probe frames remain synchronous so the ack still
 	// means the native TAP write has completed, while ordinary bulk traffic
@@ -1445,8 +1460,9 @@ func (n *Node) handleRelayFrame(remotePeer peer.ID, data []byte, relayDecScratch
 				return
 			}
 			*relayInnerScratch = dec
-			n.recordPeerRxDecrypt(srcPeer, true)
-			n.maybeMarkReadyOnDecrypt(srcPeer, true)
+			// Success bookkeeping happens once, inside deliverRelayedFrameToTAP
+			// — recording here as well double-counted every decrypted relayed
+			// frame (2 sync.Map loads + 4 atomics of pure duplication).
 			innerPayload = dec
 		}
 
@@ -2385,7 +2401,10 @@ func (n *Node) isFrameFromPeerSelf(p peer.ID, frame []byte) bool {
 
 	etherType := uint16(frame[12])<<8 | uint16(frame[13])
 	if etherType == 0x0800 && len(frame) >= 34 { // IPv4
-		srcIP := net.IP(frame[26:30]).String()
+		// PERF: ipv4ToString is the hash-indexed atomic cache from ip_tracker.go
+		// — net.IP.String() here was one fresh render per frame on the packet
+		// path; the cache hit path is a load, a compare and no allocation.
+		srcIP := ipv4ToString(frame[26:30])
 		if peerTapIP != "" && srcIP == peerTapIP {
 			return true
 		}
@@ -2393,7 +2412,7 @@ func (n *Node) isFrameFromPeerSelf(p peer.ID, frame []byte) bool {
 			return false
 		}
 	} else if etherType == 0x86dd && len(frame) >= 54 { // IPv6
-		srcIP := net.IP(frame[22:38]).String()
+		srcIP := ipv6ToString(frame[22:38])
 		if peerTapIPv6 != "" && srcIP == peerTapIPv6 {
 			return true
 		}
@@ -2401,7 +2420,7 @@ func (n *Node) isFrameFromPeerSelf(p peer.ID, frame []byte) bool {
 			return false
 		}
 	} else if etherType == 0x0806 && len(frame) >= 42 { // ARP
-		arpSenderIP := net.IP(frame[28:32]).String()
+		arpSenderIP := ipv4ToString(frame[28:32])
 		if peerTapIP != "" && arpSenderIP == peerTapIP {
 			return true
 		}

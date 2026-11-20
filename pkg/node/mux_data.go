@@ -61,7 +61,7 @@ func releaseMuxDecScratch(b []byte) {
 // RecordRx is counted HERE and not in handleDirectFrame: the legacy stream
 // handler (handleStream) owns that counter for its own path, and folding the
 // count into handleDirectFrame would double-count a frame once per transport.
-func (n *Node) handleDataMuxVTP(s network.Stream, from peer.ID, payload []byte, inflight *atomic.Int64) {
+func (n *Node) handleDataMuxVTP(s network.Stream, from peer.ID, payload []byte, label, path string, inflight *atomic.Int64) {
 	defer func() {
 		// Return the fan-out slot no matter how the handler exits, and contain
 		// a panic to this one frame: without recover a fault in the RX pipeline
@@ -76,11 +76,12 @@ func (n *Node) handleDataMuxVTP(s network.Stream, from peer.ID, payload []byte, 
 		n.protoTracker.Data.RecordRx(1, uint64(len(payload)))
 	}
 	// Return-path liveness, mirroring handleStream: an inbound frame from `from`
-	// proves its return path is alive.
-	n.notePeerRxTransport(from, transportLabelForConn(s.Conn()), "")
+	// proves its return path is alive. label/path arrive pre-computed from the
+	// read loop (see muxDataJob) — they are immutable per connection.
+	n.notePeerRxTransport(from, label, "")
 	decScratch := acquireMuxDecScratch()
 	defer releaseMuxDecScratch(decScratch)
-	n.handleDirectFrame(from, payload, &decScratch, s.Conn().RemoteMultiaddr().String())
+	n.handleDirectFrame(from, payload, &decScratch, path)
 }
 
 // handleDataMuxRelay handles an overlay-relay frame arriving on the mux data

@@ -157,13 +157,27 @@ const (
 // relay leg that hit its permission cooldown — the peer stayed unreachable
 // until the NEXT 20s discovery tick re-listed it, which is the main reason
 // "sometimes it connects, sometimes it doesn't". Three attempts spaced a few
+// dialWaveLimiter caps how many discovered-peer retry WAVES run concurrently.
+// Each wave holds a dialLimiter slot per attempt for up to the HolePunchTimeout
+// budget, so an unbounded wave (a DHT round surfacing 100 dead peers) would
+// claim 3× the slots for 3× the wall time and delay every other dial type
+// behind it. 8 concurrent waves keep the burst draining while leaving dial
+// slots for reconnect/bootstrap/rediscovery dials.
+var dialWaveLimiter = make(chan struct{}, 8)
+
 // seconds apart absorb that transient window. dialInParallel itself coalesces
 // concurrent dials and the global dialLimiter caps fan-out, so the retry wave
 // cannot turn into a dial storm; each attempt re-checks Connectedness so a
-// winner exits immediately.
+// winner exits immediately. dialWaveLimiter bounds how many waves run at once.
 func (n *Node) dialDiscoveredWithRetry(pi peer.AddrInfo, peerType string) {
 	const attempts = 3
 	delays := []time.Duration{0, 3 * time.Second, 8 * time.Second}
+	select {
+	case dialWaveLimiter <- struct{}{}:
+		defer func() { <-dialWaveLimiter }()
+	case <-n.ctx.Done():
+		return
+	}
 	var lastErr error
 	for i, d := range delays {
 		if d > 0 {
@@ -1264,15 +1278,14 @@ func (n *Node) deletePingPongFailCount(pid peer.ID) {
 // state costs no writes at all. Missing entry == zero failures, so no creation.
 func (n *Node) resetPingPongFailCountForPeer(pid peer.ID, unicast bool) {
 	if unicast {
-		n.notePeerUnicastRx(pid)
 		if c := n.pingPongFailCounter(pid); c != nil && c.Load() != 0 {
 			c.Store(0)
 		}
 	}
 	// Any inbound data from pid still advances the general liveness tracker
-	// (WebUI, other consumers) — only the echo-failure bookkeeping above is
-	// unicast-scoped.
-	n.notePeerRx(pid)
+	// (WebUI, other consumers) — only the echo-failure reset above is
+	// unicast-scoped. One clock read covers both trackers (notePeerRxKinds).
+	n.notePeerRxKinds(pid, unicast)
 }
 
 // assertBootRelayUplinkHealth surfaces the "Connected but egress dead" failure

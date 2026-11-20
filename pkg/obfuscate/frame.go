@@ -564,7 +564,9 @@ func UnpackWith(frame []byte, cipher ObfCipher) (seqID uint64, payload []byte, e
 			log.Debug("UnpackWith: DECRYPT branch seqID=%d obfType=%s algo=%s nonce=%s ctLen=%d",
 				seqID, AlgoName(obfType), AlgoName(cipher.Algo()), NonceHex(frame), len(raw))
 		}
-		opened, oerr := cipher.OpenTo(make([]byte, 0, len(raw)), nonce[:], obfAADFromFrame(frame, pLen), raw)
+		aad, aadRelease := obfAADFromFramePooled(frame, pLen)
+		opened, oerr := cipher.OpenTo(make([]byte, 0, len(raw)), nonce[:], aad, raw)
+		aadRelease()
 		if oerr != nil {
 			// AEAD authentication failed under the supplied key. We deliberately
 			// do NOT log the raw stdlib "message authentication failed" string:
@@ -680,6 +682,52 @@ func obfAADFromFrame(frame []byte, payloadLen int) []byte {
 	return aad
 }
 
+// aadBufPool recycles the small AAD binding buffers. obfAADFromFrame allocated
+// one per AEAD operation on BOTH the seal and open paths — one heap alloc per
+// frame that the 8a65b73 scratch work missed. Every caller consumes the AAD
+// synchronously inside the single AEAD call (crypto/cipher GCM does not retain
+// it), so borrow/put around that call is safe. Buffers that grew beyond the
+// normal bound (absurd padding) are dropped instead of pooled.
+var aadBufPool = sync.Pool{
+	New: func() any { b := make([]byte, 0, 128); return &b },
+}
+
+// obfAADFromFramePooled is obfAADFromFrame with the buffer borrowed from
+// aadBufPool. The returned release func returns the buffer (reset) to the pool
+// and MUST be called exactly once, after the AEAD operation using the AAD has
+// completed.
+func obfAADFromFramePooled(frame []byte, payloadLen int) (aad []byte, release func()) {
+	bp := aadBufPool.Get().(*[]byte)
+	aad = obfAADFromFrameInto((*bp)[:0], frame, payloadLen)
+	return aad, func() {
+		if cap(aad) <= 4096 {
+			*bp = aad[:0]
+			aadBufPool.Put(bp)
+		}
+	}
+}
+
+// obfAADFromFrameInto appends the AAD binding into dst (append semantics, like
+// the rest of the frame assembly helpers). Returns nil for malformed frames,
+// matching obfAADFromFrame.
+func obfAADFromFrameInto(dst []byte, frame []byte, payloadLen int) []byte {
+	if len(frame) < HeaderLen {
+		return nil
+	}
+	padStart := HeaderLen + payloadLen
+	if padStart > len(frame) {
+		padStart = len(frame)
+	}
+	aadLen := 11 + (HeaderLen - 13) + (len(frame) - padStart)
+	if aadLen <= 0 {
+		return nil
+	}
+	dst = append(dst, frame[0:11]...)
+	dst = append(dst, frame[13:HeaderLen]...)
+	dst = append(dst, frame[padStart:]...)
+	return dst
+}
+
 // EncryptPayloadRegion encrypts the payload portion of an already-Packed frame
 // using the given cipher, returning a NEW frame slice whose PayloadLen field is
 // updated to the ciphertext length (which includes the AEAD tag). The trailing
@@ -721,7 +769,9 @@ func EncryptPayloadRegionInto(dst, frame []byte, cipher ObfCipher) ([]byte, erro
 		dst = make([]byte, 0, len(frame)+cipher.Overhead())
 	}
 	out := append(dst[:0], frame[:hLen]...)
-	out = cipher.SealTo(out, nonce[:], obfAADFromFrame(frame, pLen), frame[hLen:hLen+pLen])
+	aad, aadRelease := obfAADFromFramePooled(frame, pLen)
+	out = cipher.SealTo(out, nonce[:], aad, frame[hLen:hLen+pLen])
+	aadRelease()
 	ctLen := len(out) - hLen
 	if ctLen > math.MaxUint16 {
 		return nil, ErrFrameCorrupted
@@ -793,7 +843,8 @@ func SealFrameInPlace(frame []byte, cipher ObfCipher) (sealed []byte, ok bool) {
 	// AAD and nonce are derived from the frame BEFORE any byte is mutated:
 	// the AAD covers the immutable header fields plus the trailing padding.
 	nonce := obfNonceFromHeader(frame)
-	aad := obfAADFromFrame(frame, pLen)
+	aad, aadRelease := obfAADFromFramePooled(frame, pLen)
+	defer aadRelease()
 
 	// Relocate the trailing padding to its post-tag position first (a forward
 	// memmove into the reserved capacity). The 16 stale bytes it leaves behind
@@ -860,8 +911,10 @@ func DecryptPayloadRegionInto(dst, frame []byte, cipher ObfCipher) ([]byte, erro
 		dst = make([]byte, 0, capacity)
 	}
 	out := append(dst[:0], frame[:hLen]...)
+	aad, aadRelease := obfAADFromFramePooled(frame, pLen)
 	var err error
-	out, err = cipher.OpenTo(out, nonce[:], obfAADFromFrame(frame, pLen), frame[hLen:hLen+pLen])
+	out, err = cipher.OpenTo(out, nonce[:], aad, frame[hLen:hLen+pLen])
+	aadRelease()
 	if err != nil {
 		// AEAD authentication failed under the CURRENT rx key. This is EXPECTED
 		// during a key rotation or when a straggler from a prior connection

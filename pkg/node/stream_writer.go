@@ -97,6 +97,15 @@ func (ps *PeerStreams) writerFor(s network.Stream) *streamWriter {
 }
 
 // submitMpWriteLocked hands one wire batch to s's writer without blocking on
+// mpResultChanPool recycles the one-shot result channels: every submitted batch
+// allocated make(chan mpWriteResult, 1) plus a wait closure. Exactly one result
+// is sent per task (writer goroutine or the stop-drain), and exactly one
+// receiver waits for it, so the channel can go straight back to the pool after
+// the wait is consumed.
+var mpResultChanPool = sync.Pool{
+	New: func() any { return make(chan mpWriteResult, 1) },
+}
+
 // queue capacity. Caller holds ps.writeMu. On success it returns a wait func
 // that delivers the write result; the caller MUST drop writeMu before calling
 // it and re-acquire afterwards.
@@ -107,12 +116,17 @@ func (ps *PeerStreams) submitMpWriteLocked(s network.Stream, node *Node, target 
 		stat:   stat,
 		node:   node,
 		target: target,
-		result: make(chan mpWriteResult, 1),
+		result: mpResultChanPool.Get().(chan mpWriteResult),
 	}
 	select {
 	case w.q <- t:
-		return func() mpWriteResult { return <-t.result }, nil
+		return func() mpWriteResult {
+			r := <-t.result
+			mpResultChanPool.Put(t.result)
+			return r
+		}, nil
 	default:
+		mpResultChanPool.Put(t.result)
 		return nil, errWriterQueueFull
 	}
 }
@@ -152,7 +166,7 @@ func (ps *PeerStreams) runMpWriter(s network.Stream, w *streamWriter) {
 					if pathKey == "" {
 						pathKey = s.Conn().RemoteMultiaddr().String()
 					}
-					t.node.recordPeerTxBytesOnPath(t.target, pathKey, t.stat.bytes, t.stat.frames)
+					t.node.recordPeerTxBytesOnPathAt(t.target, pathKey, t.stat.bytes, t.stat.frames, completed)
 				}
 			}
 			t.result <- mpWriteResult{err: err, wireBytes: wireBytes}

@@ -258,12 +258,20 @@ func TestBcastDedupRingEvictsAtCapacity(t *testing.T) {
 	r := &bcastDedupRing{}
 	a := peer.ID("peerA")
 
+	ringTotal := func(r *bcastDedupRing) int {
+		total := 0
+		for i := range r.shards {
+			total += len(r.shards[i].entries)
+		}
+		return total
+	}
+
 	for i := 0; i < bcastDedupMaxEntries; i++ {
 		if r.isDuplicate(a, uint64(i+1)) {
 			t.Fatalf("first insert of hash %d unexpectedly treated as a duplicate", i+1)
 		}
 	}
-	if got := len(r.entries); got != bcastDedupMaxEntries {
+	if got := ringTotal(r); got != bcastDedupMaxEntries {
 		t.Fatalf("ring should hold %d entries, got %d", bcastDedupMaxEntries, got)
 	}
 
@@ -272,7 +280,7 @@ func TestBcastDedupRingEvictsAtCapacity(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		r.isDuplicate(a, uint64(bcastDedupMaxEntries+i+1))
 	}
-	if got := len(r.entries); got > bcastDedupMaxEntries {
+	if got := ringTotal(r); got > bcastDedupMaxEntries {
 		t.Fatalf("ring grew past its cap: %d entries (cap %d)", got, bcastDedupMaxEntries)
 	}
 

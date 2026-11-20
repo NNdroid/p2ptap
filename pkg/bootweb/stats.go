@@ -391,14 +391,35 @@ func gcPauseAvgMs(m *runtime.MemStats) float64 {
 	return float64(total) / float64(count) / 1e6
 }
 
+// bootMemStatsCache caches the process heap snapshot for CollectDashboard.
+// runtime.ReadMemStats effectively walks every live heap object; a boot
+// carrying hundreds of relay clients has a large heap, and EVERY dashboard
+// poll used to pay a full walk. The values are display-only, so a 2s freshness
+// window (the same cadence the client WebUI uses for its cached snapshot)
+// changes nothing an operator can notice.
+var (
+	bootMemStatsMu    sync.Mutex
+	bootMemStatsCache runtime.MemStats
+	bootMemStatsAt    time.Time
+)
+
+func bootSampleMemStats() runtime.MemStats {
+	bootMemStatsMu.Lock()
+	defer bootMemStatsMu.Unlock()
+	if bootMemStatsAt.IsZero() || time.Since(bootMemStatsAt) >= 2*time.Second {
+		runtime.ReadMemStats(&bootMemStatsCache)
+		bootMemStatsAt = time.Now()
+	}
+	return bootMemStatsCache
+}
+
 // CollectDashboard aggregates all live data into a BootDashboardDTO.
 func CollectDashboard(p BootDataProvider) BootDashboardDTO {
 	h := p.GetHost()
 	now := time.Now()
 	uptime := int64(now.Sub(p.GetStartTime()).Seconds())
 
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
+	m := bootSampleMemStats()
 
 	listenAddrs := make([]string, 0)
 	if h != nil {

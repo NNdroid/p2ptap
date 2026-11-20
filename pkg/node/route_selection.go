@@ -1,14 +1,75 @@
 package node
 
 import (
+	"time"
+
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"p2ptap/pkg/routing"
 )
 
+// routeMemoTTL bounds the overlayRoute fallback memo. The graph recompute it
+// caches is a per-frame cost for a degraded peer — exactly when capacity is
+// scarcest — so remembering the outcome (including "no route") for a couple of
+// seconds is the whole point; the liveness half of the verdict is NOT cached
+// (see overlayRoute).
+const routeMemoTTL = 2 * time.Second
+
+type routeMemoKey struct {
+	target   peer.ID
+	previous peer.ID
+	budget   int
+}
+
+type routeMemoEntry struct {
+	route routing.RouteInfo
+	ok    bool
+	at    time.Time
+}
+
+// routeMemoLookup returns the memoized fallback outcome for key, or fresh=false
+// when absent/expired. Opportunistically drops expired entries once the map
+// grows past a small cap so a churning target set cannot grow it unboundedly.
+func (n *Node) routeMemoLookup(target, previous peer.ID, budget int, now time.Time) (routeMemoEntry, bool) {
+	k := routeMemoKey{target: target, previous: previous, budget: budget}
+	n.routeMemoMu.Lock()
+	defer n.routeMemoMu.Unlock()
+	e, ok := n.routeFallbackMemo[k]
+	if !ok {
+		return routeMemoEntry{}, false
+	}
+	if now.Sub(e.at) >= routeMemoTTL {
+		delete(n.routeFallbackMemo, k)
+		return routeMemoEntry{}, false
+	}
+	return e, true
+}
+
+func (n *Node) routeMemoStore(target, previous peer.ID, budget int, route routing.RouteInfo, ok bool, now time.Time) {
+	k := routeMemoKey{target: target, previous: previous, budget: budget}
+	n.routeMemoMu.Lock()
+	defer n.routeMemoMu.Unlock()
+	if n.routeFallbackMemo == nil {
+		n.routeFallbackMemo = make(map[routeMemoKey]routeMemoEntry)
+	}
+	if len(n.routeFallbackMemo) > 512 {
+		for mk, me := range n.routeFallbackMemo {
+			if now.Sub(me.at) >= routeMemoTTL {
+				delete(n.routeFallbackMemo, mk)
+			}
+		}
+	}
+	n.routeFallbackMemo[k] = routeMemoEntry{route: route, ok: ok, at: now}
+}
+
 // overlayRoute returns the same eligible next hop used by both readiness
 // checks and forwarding. Exceptional cases search for a feasible alternative
-// instead of blindly sending to a blacklisted or unsupported cached hop.
+// instead of blindly sending to a blacklisted or unsupported cached hop — and
+// that search is memoized briefly (see routeMemoTTL): a relay-only peer whose
+// hop is momentarily unusable used to pay a graph search PER FRAME. Only the
+// graph walk is memoized; usable()'s liveness checks (Connectedness,
+// blacklists, uplink state) are re-evaluated on every read, so a hop that dies
+// inside the TTL window is still rejected at read time.
 func (n *Node) overlayRoute(target peer.ID, budget int, previous peer.ID) (routing.RouteInfo, bool) {
 	if n.Router == nil {
 		return routing.RouteInfo{}, false
@@ -18,6 +79,10 @@ func (n *Node) overlayRoute(target peer.ID, budget int, previous peer.ID) (routi
 	}
 	if route, ok := n.getCachedRoutes()[target]; ok && usable(route) {
 		return route, true
+	}
+	now := time.Now()
+	if m, fresh := n.routeMemoLookup(target, previous, budget, now); fresh {
+		return m.route, m.ok && usable(m.route)
 	}
 	excluded := make(map[peer.ID]bool)
 	if previous != "" {
@@ -29,6 +94,7 @@ func (n *Node) overlayRoute(target peer.ID, budget int, previous peer.ID) (routi
 		}
 	}
 	route, ok := n.Router.ComputeRoutesWithinBudget(budget, excluded)[target]
+	n.routeMemoStore(target, previous, budget, route, ok, now)
 	return route, ok && usable(route)
 }
 

@@ -328,7 +328,12 @@ func (n *Node) sendRekeyRequest(p peer.ID) {
 func (n *Node) obfDecryptCipherForPeer(p peer.ID) obfuscate.ObfCipher {
 	po := n.peerObf(p)
 	if po == nil || !po.negotiated {
-		log.Debug("Rx: NO negotiated cipher for %s — frame will be treated as PLAINTEXT", p.String())
+		// PERF: per-frame RX path. In plaintext deployments (PSK unset) EVERY
+		// frame lands here, and the base58 render is ~930ns + 2 allocs — keep
+		// guarded like the twin below.
+		if log.IsDebug() {
+			log.Debug("Rx: NO negotiated cipher for %s — frame will be treated as PLAINTEXT", p.String())
+		}
 		return nil
 	}
 	// PERF: see the IsDebug() note in obfCipherForPeer — this is the RX twin on
@@ -351,7 +356,10 @@ func (n *Node) obfDecryptCipherForPeer(p peer.ID) obfuscate.ObfCipher {
 func (n *Node) decryptPeerFrame(scratch []byte, data []byte, remotePeer peer.ID) (out []byte, decrypted bool, garbage bool) {
 	cipher := n.obfDecryptCipherForPeer(remotePeer)
 	if cipher == nil {
-		log.Debug("Rx: decrypt skipped for %s (no cipher); assuming frame is plaintext", remotePeer.String())
+		// PERF: per-frame RX path in plaintext deployments — keep guarded.
+		if log.IsDebug() {
+			log.Debug("Rx: decrypt skipped for %s (no cipher); assuming frame is plaintext", remotePeer.String())
+		}
 		return data, false, false
 	}
 	dec, derr := obfuscate.DecryptPayloadRegionInto(scratch[:0], data, cipher)

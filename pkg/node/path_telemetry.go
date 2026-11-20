@@ -29,14 +29,64 @@ type pathKey struct {
 	path string
 }
 
+// relayPathKeyCacheEntry is the CoW-cache key for a synthetic relay path key:
+// the hop plus which kind of relay it is.
+type relayPathKeyCacheEntry struct {
+	via  peer.ID
+	boot bool
+}
+
+// relayPathKeyCache caches the synthetic per-path key per hop. The base58
+// render inside peer.ID.String() costs ~930ns and 2 allocations, and the key is
+// rebuilt once per RELAYED frame on transit nodes (boot-relay downlink alone
+// renders it up to three times per frame). Peer IDs are immutable, so entries
+// never go stale and need no invalidation; the map grows with the number of
+// distinct relay hops ever seen, which is bounded in practice.
+// Same CoW shape as peerIDStrings: lock-free reads, mutex only on first sight.
+type relayPathKeyCache struct {
+	mu sync.Mutex
+	m  atomic.Pointer[map[relayPathKeyCacheEntry]string]
+}
+
+func (c *relayPathKeyCache) get(n *Node, via peer.ID, boot bool) string {
+	k := relayPathKeyCacheEntry{via: via, boot: boot}
+	if m := c.m.Load(); m != nil {
+		if s, ok := (*m)[k]; ok {
+			return s
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if m := c.m.Load(); m != nil {
+		if s, ok := (*m)[k]; ok {
+			return s
+		}
+	}
+	var s string
+	if boot {
+		s = "boot-relay://" + via.String()
+	} else {
+		s = "overlay-relay://" + via.String()
+	}
+	var next map[relayPathKeyCacheEntry]string
+	if m := c.m.Load(); m != nil {
+		next = make(map[relayPathKeyCacheEntry]string, len(*m)+1)
+		for ek, ev := range *m {
+			next[ek] = ev
+		}
+	} else {
+		next = make(map[relayPathKeyCacheEntry]string, 1)
+	}
+	next[k] = s
+	c.m.Store(&next)
+	return s
+}
+
 // relayPathKeyFor returns the synthetic per-path key for a frame carried by
 // viaPeer, distinguishing an overlay relay from a boot (backbone) relay so the
 // per-path table can label and aggregate each kind correctly.
 func (n *Node) relayPathKeyFor(viaPeer peer.ID) string {
-	if n.isBootstrapPeer(viaPeer) {
-		return "boot-relay://" + viaPeer.String()
-	}
-	return "overlay-relay://" + viaPeer.String()
+	return n.relayPathKeys.get(n, viaPeer, n.isBootstrapPeer(viaPeer))
 }
 
 // pathRxCounters is the per-path inbound TAP-payload accounting.
@@ -109,6 +159,13 @@ func (n *Node) pathReturnStale(p peer.ID, path string, now time.Time) bool {
 // keep it symmetric with recordPeerRxBytes so the per-path sums can be compared
 // to the per-peer total.
 func (n *Node) recordPeerRxBytesOnPath(p peer.ID, path string, nBytes int) {
+	n.recordPeerRxBytesOnPathAt(p, path, nBytes, time.Now())
+}
+
+// recordPeerRxBytesOnPathAt is the At-variant for hot paths that already hold a
+// frame timestamp: the receive pipeline used to spend one extra time.Now() per
+// frame here on top of its other bookkeeping clocks.
+func (n *Node) recordPeerRxBytesOnPathAt(p peer.ID, path string, nBytes int, now time.Time) {
 	if nBytes <= 0 || path == "" {
 		return
 	}
@@ -120,7 +177,7 @@ func (n *Node) recordPeerRxBytesOnPath(p peer.ID, path string, nBytes int) {
 	c := v.(*pathRxCounters)
 	c.bytes.Add(uint64(nBytes))
 	c.frames.Add(1)
-	c.last.Store(time.Now().UnixNano())
+	c.last.Store(now.UnixNano())
 }
 
 // pathRxStats returns the accumulated (bytes, frames) received on one path.
@@ -142,6 +199,12 @@ func (n *Node) pathRxStats(p peer.ID, path string) (bytes, frames uint64, ok boo
 // "boot-relay://<hop>" for relayed frames) so the two directions line up.
 // nFrames is the number of TAP payloads carried (sub-frames for a batch).
 func (n *Node) recordPeerTxBytesOnPath(p peer.ID, path string, nBytes, nFrames int) {
+	n.recordPeerTxBytesOnPathAt(p, path, nBytes, nFrames, time.Now())
+}
+
+// recordPeerTxBytesOnPathAt is the At-variant for writers that already hold the
+// completion timestamp (the multipath writer's `completed` clock read).
+func (n *Node) recordPeerTxBytesOnPathAt(p peer.ID, path string, nBytes, nFrames int, now time.Time) {
 	if nBytes <= 0 || path == "" {
 		return
 	}
@@ -156,7 +219,7 @@ func (n *Node) recordPeerTxBytesOnPath(p peer.ID, path string, nBytes, nFrames i
 	c := v.(*pathTxCounters)
 	c.bytes.Add(uint64(nBytes))
 	c.frames.Add(uint64(nFrames))
-	c.last.Store(time.Now().UnixNano())
+	c.last.Store(now.UnixNano())
 }
 
 // pathTxStats returns the accumulated (bytes, frames) sent on one path.
@@ -217,14 +280,42 @@ func transportPriorityLabel(score int) string {
 	}
 }
 
+// attributedPathsIndex builds the peer → attributed-path view in ONE pass over
+// the pathRx/pathTx maps. The per-peer buildPathMetrics calls used to Range
+// BOTH maps PER PEER — O(peers²) map visits per 10s stats tick (with closure
+// allocation per entry): P=200 peers × K=3 paths cost ~240k no-op Range visits
+// per tick. The index is built once per tick and shared by every peer row.
+func (n *Node) attributedPathsIndex() map[peer.ID][]string {
+	idx := make(map[peer.ID][]string)
+	seen := make(map[pathKey]struct{})
+	collect := func(m *sync.Map) {
+		m.Range(func(k, _ any) bool {
+			pk, ok := k.(pathKey)
+			if !ok || pk.path == "" {
+				return true
+			}
+			if _, dup := seen[pk]; dup {
+				return true
+			}
+			seen[pk] = struct{}{}
+			idx[pk.peer] = append(idx[pk.peer], pk.path)
+			return true
+		})
+	}
+	collect(&n.pathRx)
+	collect(&n.pathTx)
+	return idx
+}
+
 // buildPathMetrics returns the per-path breakdown for one peer. Every path is
 // enumerated that either (a) is a currently-registered application stream
 // (direct + circuit-relay — exactly the paths the multipath scheduler
-// distributes over) or (b) has a recorded TX/RX attribution, which covers an
-// overlay/boot relay path and any stream replaced by a reconnect. Active marks
-// the live-stream subset; the cumulative counters are keyed by path, so a path
+// distributes over) or (b) has a recorded TX/RX attribution (attributed —
+// prebuilt per stats tick by attributedPathsIndex), which covers an overlay/boot
+// relay path and any stream replaced by a reconnect. Active marks the
+// live-stream subset; the cumulative counters are keyed by path, so a path
 // keeps its totals across stream churn on the same link.
-func (n *Node) buildPathMetrics(pID peer.ID) []observer.PathMetricDTO {
+func (n *Node) buildPathMetrics(pID peer.ID, attributed []string) []observer.PathMetricDTO {
 	if n.Dispatcher == nil {
 		return nil
 	}
@@ -249,8 +340,8 @@ func (n *Node) buildPathMetrics(pID peer.ID) []observer.PathMetricDTO {
 	}
 
 	// Union of live-stream paths and every path with recorded attribution.
-	paths := make([]string, 0, len(streams)+2)
-	seen := make(map[string]bool, len(streams)+2)
+	paths := make([]string, 0, len(streams)+len(attributed))
+	seen := make(map[string]bool, len(streams)+len(attributed))
 	for _, s := range streams {
 		if s == nil || s.Conn() == nil {
 			continue
@@ -261,19 +352,12 @@ func (n *Node) buildPathMetrics(pID peer.ID) []observer.PathMetricDTO {
 			paths = append(paths, path)
 		}
 	}
-	collectAttributed := func(m *sync.Map) {
-		m.Range(func(k, _ any) bool {
-			pk, ok := k.(pathKey)
-			if !ok || pk.peer != pID || pk.path == "" || seen[pk.path] {
-				return true
-			}
-			seen[pk.path] = true
-			paths = append(paths, pk.path)
-			return true
-		})
+	for _, p := range attributed {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
 	}
-	collectAttributed(&n.pathRx)
-	collectAttributed(&n.pathTx)
 	if len(paths) == 0 {
 		return nil
 	}

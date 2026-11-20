@@ -25,10 +25,14 @@ var cipherBufPool = sync.Pool{
 	},
 }
 
+// sealedBufSize is the 64KB wire-frame size class (MaxSealedFrameSize), shared
+// by AcquireSealedBuf and the top acquireFrameBuf class.
+const sealedBufSize = 65552
+
 // sealedBufPool reuses full-sized wire frame buffers up to MaxSealedFrameSize.
 var sealedBufPool = sync.Pool{
 	New: func() any {
-		return new([65552]byte)
+		return new([sealedBufSize]byte)
 	},
 }
 
@@ -40,6 +44,11 @@ func acquireFrameBuf(size int) []byte {
 		return frameBufPool.Get().(*[2048]byte)[:size]
 	} else if size <= 9216 {
 		return jumboFrameBufPool.Get().(*[9216]byte)[:size]
+	} else if size <= sealedBufSize {
+		// 64KB class: coalesced batch payloads and jumbo inner seals used to
+		// fall through to make() here — a fresh heap buffer per flush on busy
+		// links — while sealedBufPool already existed for exactly this size.
+		return sealedBufPool.Get().(*[sealedBufSize]byte)[:size]
 	}
 	return make([]byte, size)
 }
@@ -52,6 +61,8 @@ func releaseFrameBuf(b []byte) {
 		jumboFrameBufPool.Put((*[9216]byte)(b[:9216]))
 	} else if cap(b) == 2048 {
 		frameBufPool.Put((*[2048]byte)(b[:2048]))
+	} else if cap(b) == sealedBufSize {
+		sealedBufPool.Put((*[sealedBufSize]byte)(b[:sealedBufSize]))
 	}
 }
 

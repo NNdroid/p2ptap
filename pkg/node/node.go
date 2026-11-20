@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"hash/fnv"
 	"net"
 	"os"
 	"runtime"
@@ -650,6 +649,30 @@ type Node struct {
 	// the same path string, so a link keeps its cumulative counters across stream
 	// reconnects (a stream object is ephemeral; a path is not).
 	pathTx sync.Map
+	// relayPathKeys caches the synthetic "overlay-relay://<id>" /
+	// "boot-relay://<id>" path keys per hop — see relayPathKeyCache in
+	// path_telemetry.go. The base58 render used to run once per relayed frame.
+	relayPathKeys relayPathKeyCache
+	// overlayRelayCapable caches the CONFIRMED SupportsProtocols answer per
+	// peer (see supportsOverlayRelay): the peerstore lock + protocol-slice
+	// allocation used to run inside the per-frame hop scan. Cleared in
+	// removePeerObf so a reconnected peer re-identifies.
+	overlayRelayCapable sync.Map
+	// relayHopsCache memoizes relayHopsForTarget per target for
+	// relayHopsCacheTTL: the full computation walks every libp2p connection
+	// plus the peerstore per frame for relay-only peers. Consumer-side Submit
+	// gating (blacklist / stream-dead fast-fail with hop failover) tolerates
+	// the staleness; the ensureRelayAuth nudges inside the computation run at
+	// most once per TTL instead of per frame. Guarded by relayHopsMu.
+	relayHopsMu    sync.Mutex
+	relayHopsCache map[peer.ID]relayHopsEntry
+	// routeFallbackMemo memoizes the overlayRoute graph-recompute fallback
+	// (INCLUDING misses) per (target, previous, budget) for routeMemoTTL — a
+	// degraded peer used to pay a per-frame graph search. The memo stores the
+	// raw computed route; liveness (usable()) is re-evaluated on every read.
+	// Guarded by routeMemoMu.
+	routeMemoMu       sync.Mutex
+	routeFallbackMemo map[routeMemoKey]routeMemoEntry
 
 	// lastPeerSpeedCalc records the timestamp of the previous per-peer speed
 	// snapshot (taken inside updateWebCollectorState, which runs on a 10s ticker).
@@ -1195,9 +1218,20 @@ type bcastDedupEntry struct {
 	peer peer.ID
 }
 
-type bcastDedupRing struct {
+// bcastDedupShards splits the broadcast dedup ring: one global mutex made every
+// stream-reader goroutine's broadcast frame serialise behind the same lock, and
+// the at-capacity eviction scan walked up to bcastDedupMaxEntries entries per
+// insert. Sharding by hash divides both by the shard count while keeping the
+// SAME total entry budget and identical per-hash semantics.
+const bcastDedupShards = 8
+
+type bcastDedupShard struct {
 	mu      sync.Mutex
 	entries map[uint64]bcastDedupEntry
+}
+
+type bcastDedupRing struct {
+	shards [bcastDedupShards]bcastDedupShard
 }
 
 // isDuplicate reports whether content hash h should be suppressed for a frame
@@ -1213,55 +1247,67 @@ func (r *bcastDedupRing) isDuplicate(from peer.ID, h uint64) bool {
 	if h == 0 {
 		return false
 	}
+	s := &r.shards[h&(bcastDedupShards-1)]
+	shardCap := bcastDedupMaxEntries / bcastDedupShards
 	now := time.Now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.entries == nil {
-		r.entries = make(map[uint64]bcastDedupEntry, 256)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.entries == nil {
+		s.entries = make(map[uint64]bcastDedupEntry, shardCap/2)
 	}
-	if e, ok := r.entries[h]; ok && now.Sub(e.at) < bcastDedupTTL {
+	if e, ok := s.entries[h]; ok && now.Sub(e.at) < bcastDedupTTL {
 		if e.peer == from {
 			// Same source retransmitting. Refresh so its next attempt is not
 			// rejected as a duplicate of itself either.
-			r.entries[h] = bcastDedupEntry{at: now, peer: from}
+			s.entries[h] = bcastDedupEntry{at: now, peer: from}
 			return false
 		}
 		return true
 	}
 	// Evict on EVERY insert at capacity, not only when the map first overflows.
 	// A sustained flood of unique-content broadcasts (DHCPDISCOVERs with distinct
-	// client IDs, mDNS) pins the ring at bcastDedupMaxEntries where nothing has
-	// expired yet, so every new hash is a miss and the ring silently stops
-	// filtering at exactly the moment it is most needed.
-	if len(r.entries) >= bcastDedupMaxEntries {
-		for k, e := range r.entries {
+	// client IDs, mDNS) pins the shard at shardCap where nothing has expired
+	// yet, so every new hash is a miss and the ring silently stops filtering at
+	// exactly the moment it is most needed.
+	if len(s.entries) >= shardCap {
+		for k, e := range s.entries {
 			if now.Sub(e.at) >= bcastDedupTTL {
-				delete(r.entries, k)
+				delete(s.entries, k)
 			}
 		}
-		if len(r.entries) >= bcastDedupMaxEntries {
+		if len(s.entries) >= shardCap {
 			// Nothing is expirable, so the traffic is genuinely unique-content and
 			// no ring could deduplicate it anyway. Drop the oldest half to keep
 			// accepting new hashes instead of holding a frozen set forever.
-			evict := len(r.entries) - bcastDedupMaxEntries/2
-			for k := range r.entries {
+			evict := len(s.entries) - shardCap/2
+			for k := range s.entries {
 				if evict <= 0 {
 					break
 				}
-				delete(r.entries, k)
+				delete(s.entries, k)
 				evict--
 			}
 		}
 	}
-	r.entries[h] = bcastDedupEntry{at: now, peer: from}
+	s.entries[h] = bcastDedupEntry{at: now, peer: from}
 	return false
 }
 
 // fnvHash64 returns a FNV-1a 64-bit hash of data (fast, good distribution).
+// Inlined: hash/fnv.New64a() boxes the hasher behind an interface and allocates
+// on EVERY broadcast frame; the arithmetic here is identical to the stdlib
+// FNV-1a-64 and allocates nothing.
 func fnvHash64(data []byte) uint64 {
-	h := fnv.New64a()
-	h.Write(data)
-	return h.Sum64()
+	const (
+		fnvOffset64 uint64 = 14695981039346656037
+		fnvPrime64  uint64 = 1099511628211
+	)
+	h := fnvOffset64
+	for _, b := range data {
+		h ^= uint64(b)
+		h *= fnvPrime64
+	}
+	return h
 }
 
 // isBroadcastOrMulticastMAC returns true if mac is a group address
@@ -3663,6 +3709,58 @@ func (n *Node) removePeerObf(p peer.ID) {
 	delete(n.perPeerRxSpeed, p)
 	n.perPeerBytesMu.Unlock()
 	bootSkippedOnce.Delete(p)
+
+	// Churn cleanup (perf-review round): per-peer maps written on the frame /
+	// keepalive paths that previously survived this chokepoint, growing with
+	// every distinct peer ID ever seen. The CoW ones additionally copied the
+	// whole map per new peer ON the receive path, so growth also slowed every
+	// new peer's first frame. All entries are re-created lazily on the next
+	// interaction with the peer.
+	n.peerRxMu.Lock()
+	if m := n.peerLastUnicastRx.Load(); m != nil {
+		if _, ok := (*m)[p]; ok {
+			next := make(map[peer.ID]*atomic.Int64, len(*m))
+			for k, v := range *m {
+				if k != p {
+					next[k] = v
+				}
+			}
+			n.peerLastUnicastRx.Store(&next)
+		}
+	}
+	n.peerRxMu.Unlock()
+	n.peerRxTransportMu.Lock()
+	if m := n.peerRxTransport.Load(); m != nil {
+		if _, ok := (*m)[p]; ok {
+			next := make(map[peer.ID]*rxTransportInfo, len(*m))
+			for k, v := range *m {
+				if k != p {
+					next[k] = v
+				}
+			}
+			n.peerRxTransport.Store(&next)
+		}
+	}
+	n.peerRxTransportMu.Unlock()
+	n.overlayRelayCapable.Delete(p)
+	n.relayCtrlSyncAt.Delete(p)
+	n.relayHopsMu.Lock()
+	delete(n.relayHopsCache, p)
+	n.relayHopsMu.Unlock()
+	n.relayAuthMu.Lock()
+	delete(n.relayAuthLastAttempt, p)
+	n.relayAuthMu.Unlock()
+	n.relayOnlyMu.Lock()
+	delete(n.relayUpgradeLastDirect, p)
+	n.relayOnlyMu.Unlock()
+	n.mpRepairMu.Lock()
+	delete(n.mpRepairNext, p)
+	n.mpRepairMu.Unlock()
+	// A peer that departs after failed dials kept its string-keyed
+	// dial-failure marks forever.
+	n.dialFailAddrsMu.Lock()
+	delete(n.dialFailAddrs, p)
+	n.dialFailAddrsMu.Unlock()
 }
 
 // ObfFingerprint returns a short fingerprint of the most recent ephemeral ECDH

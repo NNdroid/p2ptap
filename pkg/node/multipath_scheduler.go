@@ -201,22 +201,73 @@ func (ps *PeerStreams) pathCoolingLocked(s network.Stream, now time.Time) bool {
 // demoted: local write service time cannot see a relay that accepts bytes and
 // forwards nothing, so without this signal a blackhole path kept its full DWRR
 // share indefinitely and only the peer-level echo probe would eventually react.
+//
+// Caller holds ps.writeMu. q must come from the pick's one-shot quality
+// snapshot (see pickMultipathStreamIndex); the direct wrapper below is for
+// callers outside the pick loop (tests, single-stream paths).
 func (ps *PeerStreams) mpWeightFor(s network.Stream, now time.Time) float64 {
+	return ps.mpWeightForQ(s, now, ps.qualityFor(s))
+}
+
+func (ps *PeerStreams) mpWeightForQ(s network.Stream, now time.Time, q streamWriteQuality) float64 {
 	w := 0.0
-	if q := ps.qualityFor(s); q.usable(now) {
+	if q.usable(now) {
 		if bps := 1e9 / q.nanosPerByte; bps > 0 {
 			w = bps
 		}
 	}
 	if w <= 0 {
-		w = mpNominalBps(scoreStreamTransport(s, ps.peerID))
+		w = mpNominalBps(ps.streamScoreCached(s))
 	}
 	if ps.node != nil {
-		if k := ps.pathKeyForLocked(s); k != "" && ps.node.pathReturnStale(ps.peerID, k, now) {
+		if k := ps.pathKeyForLocked(s); k != "" && ps.pathStaleMemoLocked(s, k, now) {
 			w /= pathReturnDemotion
 		}
 	}
 	return w
+}
+
+// pathStaleMemoTTL bounds how long a memoized return-path verdict stays valid.
+// The underlying signal has pathReturnStaleFor (15s) granularity, so a 2s
+// memo cannot delay a demotion meaningfully — but it removes the two boxed
+// sync.Map loads per stream per frame that the uncached verdict cost, all
+// inside ps.writeMu.
+const pathStaleMemoTTL = 2 * time.Second
+
+type pathStaleVerdict struct {
+	stale bool
+	at    time.Time
+}
+
+// pathStaleMemoLocked returns the cached blackhole verdict for s, refreshing it
+// from node.pathReturnStale at most once per pathStaleMemoTTL. Caller holds
+// ps.writeMu.
+func (ps *PeerStreams) pathStaleMemoLocked(s network.Stream, key string, now time.Time) bool {
+	if v, ok := ps.pathStaleCache[s]; ok && now.Sub(v.at) < pathStaleMemoTTL {
+		return v.stale
+	}
+	stale := ps.node.pathReturnStale(ps.peerID, key, now)
+	if ps.pathStaleCache == nil {
+		ps.pathStaleCache = make(map[network.Stream]pathStaleVerdict, 4)
+	}
+	ps.pathStaleCache[s] = pathStaleVerdict{stale: stale, at: now}
+	return stale
+}
+
+// streamScoreCached caches scoreStreamTransport for a stream. The score is
+// immutable per connection (it classifies the remote multiaddr), but the
+// unmeasured-path fallback used to re-run the multiaddr protocol walk per
+// stream per frame during warm-up and on idle paths. Caller holds ps.writeMu.
+func (ps *PeerStreams) streamScoreCached(s network.Stream) int {
+	if v, ok := ps.streamScores[s]; ok {
+		return v
+	}
+	v := scoreStreamTransport(s, ps.peerID)
+	if ps.streamScores == nil {
+		ps.streamScores = make(map[network.Stream]int, 4)
+	}
+	ps.streamScores[s] = v
+	return v
 }
 
 // pickMultipathStreamIndex returns the index of the stream that should carry
@@ -235,17 +286,21 @@ func (ps *PeerStreams) pickMultipathStreamIndex(streams []network.Stream, now ti
 	// Route around paths that are inside their post-failure cooldown (see
 	// pathBackoff). If EVERY path is cooling we keep the full set: a degraded
 	// link still beats dropping the frame, and the cooldowns expire on their own.
+	// The filter slices are scratch-reused: a cooling path must not cost two
+	// fresh allocations per frame.
 	active := streams
 	var origIdx []int
 	if len(ps.pathBackoff) > 0 {
-		filtered := make([]network.Stream, 0, len(streams))
-		idx := make([]int, 0, len(streams))
+		filtered := ps.mpFilteredScratch[:0]
+		idx := ps.mpFilteredIdx[:0]
 		for i, s := range streams {
 			if !ps.pathCoolingLocked(s, now) {
 				filtered = append(filtered, s)
 				idx = append(idx, i)
 			}
 		}
+		ps.mpFilteredScratch = filtered
+		ps.mpFilteredIdx = idx
 		if len(filtered) > 0 && len(filtered) < len(streams) {
 			active, origIdx = filtered, idx
 		}
@@ -260,6 +315,7 @@ func (ps *PeerStreams) pickMultipathStreamIndex(streams []network.Stream, now ti
 	// Prune deficit entries for streams retired from this peer's topology. This
 	// only has to happen when the topology actually changed: scanning the whole
 	// map against every candidate on EVERY frame is O(n²) on the packet path.
+	// The memoized stale verdicts and stream scores share the same sweep.
 	if snap := ps.snapshot.Load(); snap != nil && snap != ps.mpPruneSnapshot {
 		ps.mpPruneSnapshot = snap
 		for s := range ps.mpDeficit {
@@ -272,9 +328,25 @@ func (ps *PeerStreams) pickMultipathStreamIndex(streams []network.Stream, now ti
 			}
 			if !present {
 				delete(ps.mpDeficit, s)
+				delete(ps.pathStaleCache, s)
+				delete(ps.streamScores, s)
 			}
 		}
 	}
+
+	// One qualityMu acquisition per pick instead of one per stream: the same
+	// lock is taken by every writer goroutine's recordStreamWrite, so the old
+	// per-stream acquisition serialised the pick against them once per path per
+	// frame, all while holding ps.writeMu. The snapshot is stable for the rest
+	// of the pick (writeQuality only changes on completed writes, which take
+	// the same lock).
+	ps.qualityMu.Lock()
+	qual := ps.mpQualScratch[:0]
+	for _, s := range active {
+		qual = append(qual, ps.writeQuality[s])
+	}
+	ps.mpQualScratch = qual
+	ps.qualityMu.Unlock()
 
 	// Reuse the scratch weight slice: one allocation per frame is pure GC
 	// pressure at wire rate.
@@ -286,7 +358,7 @@ func (ps *PeerStreams) pickMultipathStreamIndex(streams []network.Stream, now ti
 	weights := ps.mpWeights
 	var maxW float64
 	for i, s := range active {
-		w := ps.mpWeightFor(s, now)
+		w := ps.mpWeightForQ(s, now, qual[i])
 		weights[i] = w
 		if w > maxW {
 			maxW = w

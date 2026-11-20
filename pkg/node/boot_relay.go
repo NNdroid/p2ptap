@@ -497,6 +497,15 @@ func (n *Node) handleBootRelayDownlink(s network.Stream, boot peer.ID) {
 //
 // data must belong exclusively to the calling goroutine: for the uplink it is
 // the per-stream read buffer, for the mux path it is a private per-frame copy.
+// bootRelayDecScratchPool recycles the boot-relay downlink decrypt scratch: one
+// pooled plaintext-frame buffer per in-flight envelope instead of a fresh
+// allocation per frame. Package-level because handleBootRelayFrame is reached
+// from both the per-conn uplink read loop and the mux worker pool, and bare
+// test Nodes must get a working pool without construction wiring.
+var bootRelayDecScratchPool = sync.Pool{
+	New: func() any { b := make([]byte, 0, 9600); return &b },
+}
+
 func (n *Node) handleBootRelayFrame(boot peer.ID, data []byte) {
 	// Boot-relay downlink bytes count toward the BootRelay channel (folded
 	// into the unified Datapath card's "Relayed" split).
@@ -552,13 +561,25 @@ func (n *Node) handleBootRelayFrame(boot peer.ID, data []byte) {
 	// each already carrying its own obfuscate frame + per-peer seal, so they are
 	// joined by (srcPeer, origSeq, reasmChannelRelay, epoch) before the single
 	// TAP payload is delivered.
+	// bootDecScratchPool recycles the per-frame downlink decrypt scratch. The
+	// old DecryptPayloadRegion call allocated the plaintext frame fresh for
+	// every boot-relay envelope; the overlay-relay twin avoids this with a
+	// per-loop scratch (relayInnerScratch), but handleBootRelayFrame is reached
+	// from BOTH the per-conn uplink read loop and the mux worker pool, so the
+	// scratch is pooled (package-level, see bootRelayDecScratchPool) instead of
+	// per-loop. Ownership: the borrowed buffer stays referenced by `payload`
+	// until the frame is delivered (every delivery path copies into pooled TAP
+	// buffers), and is returned via defer at this invocation's exit — a
+	// fragment-pending recursion borrows its own.
 	var deliverSealed func(sealed []byte)
 	deliverSealed = func(sealed []byte) {
 		payload := sealed
 		// Decrypt the inner payload with the cipher negotiated for srcPeer.
 		if cipher := n.obfDecryptCipherForPeer(srcPeer); cipher != nil {
-			dec, derr := obfuscate.DecryptPayloadRegion(payload, cipher)
+			sbp := bootRelayDecScratchPool.Get().(*[]byte)
+			dec, derr := obfuscate.DecryptPayloadRegionInto((*sbp)[:0], payload, cipher)
 			if derr != nil {
+				bootRelayDecScratchPool.Put(sbp)
 				log.Debug("[boot-relay] downlink decrypt error from origin %s (via %s): %v",
 					srcPeer.String(), boot.String(), derr)
 				n.relayDiag.finalDecFail()
@@ -572,8 +593,13 @@ func (n *Node) handleBootRelayFrame(boot peer.ID, data []byte) {
 				n.maybeResyncOnDecryptFail(srcPeer)
 				return
 			}
-			n.recordPeerRxDecrypt(srcPeer, true)
-			n.maybeMarkReadyOnDecrypt(srcPeer, true)
+			// Rebase the scratch on any growth and return it when this frame's
+			// delivery settles (the delivery paths all copy; nothing retains the
+			// plaintext past this invocation). Success bookkeeping happens once,
+			// inside deliverRelayedFrameToTAP — recording here as well double-
+			// counted every decrypted boot-relay frame.
+			*sbp = dec[:0]
+			defer bootRelayDecScratchPool.Put(sbp)
 			payload = dec
 		}
 		seqID, unpacked, uerr := obfuscate.Unpack(payload)

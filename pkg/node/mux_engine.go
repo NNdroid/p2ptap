@@ -81,11 +81,16 @@ func muxDataFrameWorkerCount() int {
 const muxDataFrameQueueDepth = 256
 
 // muxDataJob is one accepted data-channel frame awaiting a pool worker.
+// label/path are the connection's transport label and RemoteMultiaddr render,
+// computed ONCE per stream in the read loop: the old per-frame render re-walked
+// the multiaddr for a value that is immutable per connection.
 type muxDataJob struct {
 	kind  byte
 	s     network.Stream
 	from  peer.ID
 	frame []byte
+	label string
+	path  string
 }
 
 // submitDataFrame queues one job, spawning the pool on first use. Returns
@@ -113,7 +118,7 @@ func (e *muxEngine) runDataWorker() {
 		inflight := &e.inflightDataFrames
 		switch job.kind {
 		case mux.KindVTP:
-			e.node.handleDataMuxVTP(job.s, job.from, job.frame, inflight)
+			e.node.handleDataMuxVTP(job.s, job.from, job.frame, job.label, job.path, inflight)
 		case mux.KindRelay:
 			e.node.handleDataMuxRelay(job.s, job.from, job.frame, inflight)
 		case mux.KindBootRelay:
@@ -502,6 +507,14 @@ func (e *muxEngine) handleDataStream(s network.Stream) {
 	// WriteDataFrame bound on the other side of the link from drifting apart.
 	buf := make([]byte, mux.MaxDataFramePayload+mux.DataHeaderLen)
 
+	// Immutable per connection, used by every frame this stream yields: render
+	// once here (reader goroutine) instead of once per frame on the worker pool.
+	connLabel := transportLabelForConn(s.Conn())
+	connPath := ""
+	if c := s.Conn(); c != nil && c.RemoteMultiaddr() != nil {
+		connPath = c.RemoteMultiaddr().String()
+	}
+
 	for {
 		kind, payload, err := mux.ReadDataFrame(s, buf)
 		if err != nil {
@@ -528,7 +541,7 @@ func (e *muxEngine) handleDataStream(s network.Stream) {
 			// see the dataJobs field comment). The copy is unchanged — the
 			// scratch is reused by the next ReadDataFrame.
 			frame := append([]byte(nil), payload...)
-			if !e.submitDataFrame(muxDataJob{kind: kind, s: s, from: from, frame: frame}) {
+			if !e.submitDataFrame(muxDataJob{kind: kind, s: s, from: from, frame: frame, label: connLabel, path: connPath}) {
 				// Queue full: release the inflight slot the gate above took,
 				// same drop contract as the old fan-out cap.
 				e.inflightDataFrames.Add(-1)
